@@ -113,7 +113,7 @@ class KeyboardViewController: UIInputViewController {
                 }
                 self.state = .recording
             } catch let error as AudioRecorder.AudioRecorderError {
-                self.state = .error(error.localizedDescription ?? "Could not start recording")
+                self.state = .error(error.localizedDescription)
             } catch {
                 self.state = .error("Could not start recording")
             }
@@ -156,13 +156,7 @@ class KeyboardViewController: UIInputViewController {
                 }
 
                 // 4. Insert transcribed text into the text field.
-                guard let proxy = self.textDocumentProxy else {
-                    // Keyboard dismissed — clean up silently.
-                    self.cleanupPendingAudio()
-                    await self.audioRecorder.cleanup()
-                    self.state = .idle
-                    return
-                }
+                let proxy = self.textDocumentProxy
 
                 proxy.insertText(transcript + " ")
                 self.cleanupPendingAudio()
@@ -173,7 +167,7 @@ class KeyboardViewController: UIInputViewController {
                 // WhisperError provides user-friendly localized descriptions.
                 self.cleanupPendingAudio()
                 await self.audioRecorder.cleanup()
-                self.state = .error(error.localizedDescription ?? "Transcription failed")
+                self.state = .error(error.localizedDescription)
 
             } catch {
                 self.cleanupPendingAudio()
