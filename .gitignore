@@ -1,0 +1,24 @@
+# XcodeGen generates the .xcodeproj; never commit it
+*.xcodeproj
+*.xcworkspace
+
+# Xcode user state
+xcuserdata/
+
+# Build artifacts
+DerivedData/
+build/
+.build/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# macOS
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Swift Package Manager (if used later)
+.swiftpm/
+Package.resolved
