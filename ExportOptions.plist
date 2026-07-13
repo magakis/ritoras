@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ExportOptions.plist — for xcodebuild -exportArchive (APPROACH A).
+
+  UNUSED in the current CI workflow. We use APPROACH B (manual Payload/ zip)
+  instead because it is more reliable for unsigned/ad-hoc builds where no
+  Apple Developer certificate is available in CI.
+
+  Free Apple IDs have no portal access — they cannot create provisioning
+  profiles or distribution certificates. The 7-day signature that iOS requires
+  for sideloaded apps is minted ON-DEVICE by SideStore at install time.
+  Therefore CI produces an unsigned .ipa and SideStore signs it on-device.
+
+  Keeping this file as documentation and in case a future signing setup
+  (zsign, apple-codesign, or $99/year Apple Developer Program) enables
+  full CI-based code signing.
+
+  Values for free/ad-hoc CI:
+    method: development     (development signing — no distribution cert needed)
+    signingStyle: manual    (specify cert explicitly)
+    signingCertificate: "-" (ad-hoc / "Sign to Run Locally")
+-->
+<plist version="1.0">
+<dict>
+	<key>method</key>
+	<string>development</string>
+	<key>signingStyle</key>
+	<string>manual</string>
+	<key>signingCertificate</key>
+	<string>-</string>
+	<key>teamID</key>
+	<string></string>
+	<key>provisioningProfiles</key>
+	<dict/>
+</dict>
+</plist>

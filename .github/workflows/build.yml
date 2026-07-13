@@ -32,7 +32,28 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             SYMROOT=build
 
-      - name: Upload build artifact
+      - name: Package .ipa (unsigned — on-device signing by SideStore)
+        run: |
+          mkdir -p Payload
+          cp -r build/Debug-iphoneos/Ritoras.app Payload/
+          zip -r Ritoras.ipa Payload/
+
+      - name: Verify .ipa contains keyboard extension
+        run: |
+          if unzip -l Ritoras.ipa | grep -q "PlugIns/RitorasKeyboard"; then
+            echo "✅ Keyboard extension embedded in .ipa"
+          else
+            echo "❌ Keyboard extension NOT found in .ipa — build is broken (extension not embedded)"
+            exit 1
+          fi
+
+      - name: Upload .ipa artifact (sideloadable)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ritoras.ipa
+          path: Ritoras.ipa
+
+      - name: Upload .app artifact (debugging)
         uses: actions/upload-artifact@v4
         with:
           name: Ritoras.app
