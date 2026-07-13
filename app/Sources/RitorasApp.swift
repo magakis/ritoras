@@ -2,22 +2,20 @@ import SwiftUI
 
 @main
 struct RitorasApp: App {
+    @StateObject private var settings = AppSettings.shared
+    @AppStorage("onboardingCompleted") private var onboardingCompleted = false
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            if onboardingCompleted {
+                NavigationStack {
+                    SettingsView()
+                }
+                .environmentObject(settings)
+            } else {
+                OnboardingView(onboardingCompleted: $onboardingCompleted)
+                    .environmentObject(settings)
+            }
         }
-    }
-}
-
-struct ContentView: View {
-    var body: some View {
-        VStack(spacing: 16) {
-            Text("Ritoras")
-                .font(.largeTitle)
-                .fontWeight(.bold)
-            Text("Settings will go here")
-                .foregroundColor(.secondary)
-        }
-        .padding()
     }
 }
