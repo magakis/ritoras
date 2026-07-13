@@ -31,5 +31,10 @@
 	</dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Ritoras needs microphone access to transcribe your speech to text.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 </dict>
 </plist>
