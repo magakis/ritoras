@@ -47,8 +47,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 TextField("Server URL", text: $settings.baseUrl)
                     .textContentType(.URL)
-                    .autocapitalization(.none)
-                    .disableAutocorrection(true)
+                    .textInputAutocapitalization(.never)
                     .keyboardType(.URL)
                 Text("Use HTTPS via Tailscale (*.ts.net) to avoid ATS issues. Plain HTTP over 100.x Tailscale IP requires NSAllowsArbitraryLoads.")
                     .font(.caption)
@@ -65,8 +64,7 @@ struct SettingsView: View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
                 TextField("Model", text: $settings.model)
-                    .autocapitalization(.none)
-                    .disableAutocorrection(true)
+                    .textInputAutocapitalization(.never)
                 Text("e.g. whisper-1, base, large-v3 — depends on your server.")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -82,8 +80,7 @@ struct SettingsView: View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
                 SecureField("API Key", text: $settings.apiKey)
-                    .autocapitalization(.none)
-                    .disableAutocorrection(true)
+                    .textInputAutocapitalization(.never)
                 Text("Leave empty if your server doesn't require authentication.")
                     .font(.caption)
                     .foregroundColor(.secondary)
@@ -116,8 +113,7 @@ struct SettingsView: View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
                 TextField("Language", text: $settings.language)
-                    .autocapitalization(.none)
-                    .disableAutocorrection(true)
+                    .textInputAutocapitalization(.never)
                 Text("ISO 639-1 code (e.g. en, fr, es). Leave empty for auto-detect.")
                     .font(.caption)
                     .foregroundColor(.secondary)
