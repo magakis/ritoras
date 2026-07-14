@@ -32,6 +32,20 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             SYMROOT=build
 
+      - name: Verify keyboard Info.plist contains NSExtension
+        run: |
+          echo "=== Keyboard extension Info.plist ==="
+          cat build/Debug-iphoneos/Ritoras.app/PlugIns/RitorasKeyboard.appex/Info.plist || true
+          echo "=== Checking for NSExtension ==="
+          if plutil -extract NSExtension xml1 -o - build/Debug-iphoneos/Ritoras.app/PlugIns/RitorasKeyboard.appex/Info.plist 2>/dev/null; then
+            echo "✅ NSExtension dictionary found in keyboard extension"
+          else
+            echo "❌ NSExtension dictionary MISSING from keyboard extension — Info.plist was overwritten"
+            echo "Full Info.plist content:"
+            cat build/Debug-iphoneos/Ritoras.app/PlugIns/RitorasKeyboard.appex/Info.plist
+            exit 1
+          fi
+
       - name: Package .ipa (unsigned — on-device signing by SideStore)
         run: |
           mkdir -p Payload
