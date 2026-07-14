@@ -9,6 +9,7 @@ settings:
     SWIFT_VERSION: "5.9"
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: ""
+    GENERATE_INFOPLIST_FILE: NO
 
 targets:
   Ritoras:
