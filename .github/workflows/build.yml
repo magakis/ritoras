@@ -32,17 +32,43 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             SYMROOT=build
 
-      - name: Verify keyboard Info.plist contains NSExtension
+      - name: Verify keyboard Info.plist
         run: |
+          PLIST="build/Debug-iphoneos/Ritoras.app/PlugIns/RitorasKeyboard.appex/Info.plist"
           echo "=== Keyboard extension Info.plist ==="
-          cat build/Debug-iphoneos/Ritoras.app/PlugIns/RitorasKeyboard.appex/Info.plist || true
-          echo "=== Checking for NSExtension ==="
-          if plutil -extract NSExtension xml1 -o - build/Debug-iphoneos/Ritoras.app/PlugIns/RitorasKeyboard.appex/Info.plist 2>/dev/null; then
-            echo "✅ NSExtension dictionary found in keyboard extension"
+          plutil -p "$PLIST"
+          echo "=== Key checks ==="
+          FAIL=0
+          # Check NSExtension exists
+          if plutil -extract NSExtension xml1 -o - "$PLIST" &>/dev/null; then
+            echo "✅ NSExtension dictionary found"
           else
-            echo "❌ NSExtension dictionary MISSING from keyboard extension — Info.plist was overwritten"
-            echo "Full Info.plist content:"
-            cat build/Debug-iphoneos/Ritoras.app/PlugIns/RitorasKeyboard.appex/Info.plist
+            echo "❌ NSExtension dictionary MISSING"
+            FAIL=1
+          fi
+          # Check RequestsOpenAccess is true
+          if plutil -extract NSExtension.RequestsOpenAccess raw -o - "$PLIST" 2>/dev/null | grep -q "true"; then
+            echo "✅ RequestsOpenAccess = true"
+          else
+            echo "❌ RequestsOpenAccess missing or not true"
+            FAIL=1
+          fi
+          # Check NSExtensionPrincipalClass is set
+          PRINCIPAL=$(plutil -extract NSExtension.NSExtensionPrincipalClass raw -o - "$PLIST" 2>/dev/null)
+          if [ -n "$PRINCIPAL" ] && [ "$PRINCIPAL" != "\$(PRODUCT_MODULE_NAME).KeyboardViewController" ]; then
+            echo "✅ NSExtensionPrincipalClass = $PRINCIPAL"
+          else
+            echo "❌ NSExtensionPrincipalClass missing or unresolved: $PRINCIPAL"
+            FAIL=1
+          fi
+          # Check CFBundleDisplayName
+          if plutil -extract CFBundleDisplayName raw -o - "$PLIST" 2>/dev/null | grep -q .; then
+            echo "✅ CFBundleDisplayName present"
+          else
+            echo "❌ CFBundleDisplayName MISSING"
+            FAIL=1
+          fi
+          if [ $FAIL -eq 1 ]; then
             exit 1
           fi
 

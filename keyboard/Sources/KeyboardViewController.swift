@@ -70,7 +70,7 @@ class KeyboardViewController: UIInputViewController {
 
         // Target height close to system keyboard (~300pt)
         let heightConstraint = view.heightAnchor.constraint(equalToConstant: 300)
-        heightConstraint.priority = .required
+        heightConstraint.priority = .defaultHigh
         heightConstraint.isActive = true
     }
 
@@ -189,13 +189,9 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Full-Access Alert
 
     private func showFullAccessAlert() {
-        let alert = UIAlertController(
-            title: "Full Access Required",
-            message: "Please enable Full Access in:\nSettings → General → Keyboard → Ritoras → Allow Full Access",
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: "OK", style: .default))
-        present(alert, animated: true)
+        // Keyboard extensions CANNOT present UIAlertController — it crashes.
+        // Show the message as an error state in the keyboard view instead.
+        state = .error("Full Access required. Enable in Settings → General → Keyboard → Ritoras → Allow Full Access, then tap here.")
     }
 }
 
