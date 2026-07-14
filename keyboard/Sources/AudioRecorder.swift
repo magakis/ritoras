@@ -55,7 +55,7 @@ actor AudioRecorder {
         // 1. Check permission — do NOT call requestRecordPermission() from the keyboard!
         // That would show a system dialog and dismiss the keyboard.
         // The container app is responsible for requesting permission.
-        let permission = AVAudioApplication.shared.recordPermission
+        let permission = AVAudioSession.sharedInstance().recordPermission
         switch permission {
         case .granted:
             break // Proceed with recording

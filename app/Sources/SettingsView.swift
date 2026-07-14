@@ -132,14 +132,13 @@ struct SettingsView: View {
             HStack {
                 Text("Microphone")
                 Spacer()
-                Text(AVAudioApplication.shared.recordPermission == .granted ? "Granted" : "Not granted")
-                    .foregroundColor(AVAudioApplication.shared.recordPermission == .granted ? .green : .red)
+                let granted = AVAudioSession.sharedInstance().recordPermission == .granted
+                Text(granted ? "Granted" : "Not granted")
+                    .foregroundColor(granted ? .green : .red)
             }
-            if AVAudioApplication.shared.recordPermission != .granted {
+            if AVAudioSession.sharedInstance().recordPermission != .granted {
                 Button("Grant Microphone Access") {
-                    Task {
-                        _ = await AVAudioApplication.requestRecordPermission()
-                    }
+                    AVAudioSession.sharedInstance().requestRecordPermission { _ in }
                 }
             }
         } header: {

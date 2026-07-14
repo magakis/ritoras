@@ -23,8 +23,8 @@ struct RitorasApp: App {
         // Request microphone permission from the container app.
         // The keyboard extension CANNOT show this dialog without being dismissed.
         // By granting here, the keyboard can record without any dialog.
-        if AVAudioApplication.shared.recordPermission == .undetermined {
-            _ = await AVAudioApplication.requestRecordPermission()
+        if AVAudioSession.sharedInstance().recordPermission == .undetermined {
+            AVAudioSession.sharedInstance().requestRecordPermission { _ in }
         }
     }
 }
