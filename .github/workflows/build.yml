@@ -19,13 +19,13 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Build (unsigned)
+      - name: Build (unsigned, Release)
         run: |
           xcodebuild \
             -project Ritoras.xcodeproj \
             -scheme Ritoras \
             -destination 'generic/platform=iOS' \
-            -configuration Debug \
+            -configuration Release \
             build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
@@ -34,7 +34,7 @@ jobs:
 
       - name: Verify keyboard Info.plist
         run: |
-          PLIST="build/Debug-iphoneos/Ritoras.app/PlugIns/RitorasKeyboard.appex/Info.plist"
+          PLIST="build/Release-iphoneos/Ritoras.app/PlugIns/RitorasKeyboard.appex/Info.plist"
           echo "=== Keyboard extension Info.plist ==="
           plutil -p "$PLIST"
           echo "=== Key checks ==="
@@ -74,8 +74,11 @@ jobs:
 
       - name: Package .ipa (unsigned — on-device signing by SideStore)
         run: |
+          # Strip any debug/preview dylibs that would be unsigned and crash on device
+          find build/Release-iphoneos/Ritoras.app -name "*.debug.dylib" -delete
+          find build/Release-iphoneos/Ritoras.app -name "__preview.dylib" -delete
           mkdir -p Payload
-          cp -r build/Debug-iphoneos/Ritoras.app Payload/
+          cp -r build/Release-iphoneos/Ritoras.app Payload/
           zip -r Ritoras.ipa Payload/
 
       - name: Verify .ipa contains keyboard extension
@@ -97,4 +100,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Ritoras.app
-          path: build/Debug-iphoneos/Ritoras.app
+          path: build/Release-iphoneos/Ritoras.app
