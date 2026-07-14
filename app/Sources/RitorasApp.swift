@@ -8,23 +8,23 @@ struct RitorasApp: App {
 
     var body: some Scene {
         WindowGroup {
-            if onboardingCompleted {
-                NavigationStack {
-                    SettingsView()
+            Group {
+                if onboardingCompleted {
+                    NavigationStack {
+                        SettingsView()
+                    }
+                } else {
+                    OnboardingView(onboardingCompleted: $onboardingCompleted)
                 }
-                .environmentObject(settings)
-            } else {
-                OnboardingView(onboardingCompleted: $onboardingCompleted)
-                    .environmentObject(settings)
             }
-        }
-    }
-    .task {
-        // Request microphone permission from the container app.
-        // The keyboard extension CANNOT show this dialog without being dismissed.
-        // By granting here, the keyboard can record without any dialog.
-        if AVAudioSession.sharedInstance().recordPermission == .undetermined {
-            AVAudioSession.sharedInstance().requestRecordPermission { _ in }
+            .environmentObject(settings)
+            .task {
+                // Request microphone permission from the container app.
+                // The keyboard extension CANNOT show this dialog without being dismissed.
+                if AVAudioSession.sharedInstance().recordPermission == .undetermined {
+                    AVAudioSession.sharedInstance().requestRecordPermission { _ in }
+                }
+            }
         }
     }
 }

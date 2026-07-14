@@ -1,5 +1,4 @@
 import SwiftUI
-import AVFoundation
 
 struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
@@ -13,7 +12,6 @@ struct SettingsView: View {
             authSection
             timeoutSection
             languageSection
-            micPermissionSection
             infoSection
         }
         .navigationTitle("Ritoras Settings")
@@ -122,28 +120,6 @@ struct SettingsView: View {
             }
         } header: {
             Text("Language")
-        }
-    }
-
-    // MARK: - Microphone Permission Section
-
-    private var micPermissionSection: some View {
-        let granted = AVAudioSession.sharedInstance().recordPermission == .granted
-
-        return Section {
-            HStack {
-                Text("Microphone")
-                Spacer()
-                Text(granted ? "Granted" : "Not granted")
-                    .foregroundColor(granted ? .green : .red)
-            }
-            if !granted {
-                Button("Grant Microphone Access") {
-                    AVAudioSession.sharedInstance().requestRecordPermission { _ in }
-                }
-            }
-        } header: {
-            Text("Permissions")
         }
     }
 
