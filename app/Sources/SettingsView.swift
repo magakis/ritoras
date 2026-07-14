@@ -4,6 +4,7 @@ struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @State private var showOnboarding = false
     @State private var showResetConfirmation = false
+    @State private var pastedLogs = ""
 
     var body: some View {
         Form {
@@ -12,6 +13,7 @@ struct SettingsView: View {
             authSection
             timeoutSection
             languageSection
+            debugSection
             infoSection
         }
         .navigationTitle("Ritoras Settings")
@@ -120,6 +122,21 @@ struct SettingsView: View {
             }
         } header: {
             Text("Language")
+        }
+    }
+
+    // MARK: - Debug Logs Section
+
+    private var debugSection: some View {
+        Section {
+            Text("If the keyboard shows errors, long-press the keyboard to copy logs, then paste them here:")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            TextEditor(text: $pastedLogs)
+                .frame(height: 150)
+                .font(.system(size: 11, design: .monospaced))
+        } header: {
+            Text("Debug Logs")
         }
     }
 

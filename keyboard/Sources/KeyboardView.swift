@@ -170,7 +170,7 @@ class KeyboardView: UIView {
             micButton.backgroundColor = .systemRed
             micButton.isEnabled = true
             micButton.isHidden = false
-            stateLabel.text = message
+            stateLabel.text = "\(message)\n\nTap to dismiss • Long-press to copy logs"
             stateLabel.textColor = .systemRed
             activityIndicator.stopAnimating()
         }
