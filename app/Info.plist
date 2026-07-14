@@ -33,5 +33,7 @@
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Ritoras needs microphone access to transcribe your speech to text.</string>
 </dict>
 </plist>

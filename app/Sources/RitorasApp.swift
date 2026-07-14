@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 
 @main
 struct RitorasApp: App {
@@ -16,6 +17,14 @@ struct RitorasApp: App {
                 OnboardingView(onboardingCompleted: $onboardingCompleted)
                     .environmentObject(settings)
             }
+        }
+    }
+    .task {
+        // Request microphone permission from the container app.
+        // The keyboard extension CANNOT show this dialog without being dismissed.
+        // By granting here, the keyboard can record without any dialog.
+        if AVAudioApplication.shared.recordPermission == .undetermined {
+            _ = await AVAudioApplication.requestRecordPermission()
         }
     }
 }

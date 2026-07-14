@@ -10,6 +10,7 @@ actor AudioRecorder {
 
     enum AudioRecorderError: LocalizedError {
         case permissionDenied
+        case permissionNotRequested
         case recordingEmpty
         case invalidSessionConfiguration(Error)
         case recorderSetupFailed(Error)
@@ -19,6 +20,8 @@ actor AudioRecorder {
             switch self {
             case .permissionDenied:
                 return "Microphone permission was denied. Enable it in Settings."
+            case .permissionNotRequested:
+                return "Open the Ritoras app first to grant microphone access, then try again."
             case .recordingEmpty:
                 return "Recording was too short or empty. Please try again."
             case .invalidSessionConfiguration(let error):
@@ -49,10 +52,19 @@ actor AudioRecorder {
             throw AudioRecorderError.alreadyRecording
         }
 
-        // 1. Request permission
-        let granted = await AVAudioApplication.requestRecordPermission()
-        guard granted else {
+        // 1. Check permission — do NOT call requestRecordPermission() from the keyboard!
+        // That would show a system dialog and dismiss the keyboard.
+        // The container app is responsible for requesting permission.
+        let permission = AVAudioApplication.shared.recordPermission
+        switch permission {
+        case .granted:
+            break // Proceed with recording
+        case .denied:
             throw AudioRecorderError.permissionDenied
+        case .undetermined:
+            throw AudioRecorderError.permissionNotRequested
+        @unknown default:
+            throw AudioRecorderError.permissionNotRequested
         }
 
         // 2. Configure audio session (must be BEFORE creating AVAudioRecorder)
