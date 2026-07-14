@@ -128,15 +128,16 @@ struct SettingsView: View {
     // MARK: - Microphone Permission Section
 
     private var micPermissionSection: some View {
-        Section {
+        let granted = AVAudioSession.sharedInstance().recordPermission == .granted
+
+        return Section {
             HStack {
                 Text("Microphone")
                 Spacer()
-                let granted = AVAudioSession.sharedInstance().recordPermission == .granted
                 Text(granted ? "Granted" : "Not granted")
                     .foregroundColor(granted ? .green : .red)
             }
-            if AVAudioSession.sharedInstance().recordPermission != .granted {
+            if !granted {
                 Button("Grant Microphone Access") {
                     AVAudioSession.sharedInstance().requestRecordPermission { _ in }
                 }
