@@ -2,7 +2,7 @@ import Foundation
 
 struct SharedConfig {
     struct Defaults {
-        static let baseUrl = "http://localhost:5000"
+        static let baseUrl = "http://100.107.181.45:5000"
         static let model = ""
         static let apiKey = ""
         static let timeoutSeconds: TimeInterval = 30.0

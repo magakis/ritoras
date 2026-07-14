@@ -11,7 +11,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private var keyboardView: KeyboardView!
-    private let audioRecorder = AudioRecorder()
+    private lazy var audioRecorder = AudioRecorder()
     private var pendingAudioURL: URL?
 
     // MARK: - Lifecycle

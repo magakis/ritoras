@@ -24,12 +24,15 @@
 	<true/>
 	<key>NSExtension</key>
 	<dict>
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<key>RequestsOpenAccess</key>
+			<true/>
+		</dict>
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.keyboard-service</string>
 		<key>NSExtensionPrincipalClass</key>
 		<string>RitorasKeyboard.KeyboardViewController</string>
-		<key>RequestsOpenAccess</key>
-		<true/>
 	</dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Ritoras needs microphone access to transcribe your speech to text.</string>

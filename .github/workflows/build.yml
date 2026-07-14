@@ -47,10 +47,10 @@ jobs:
             FAIL=1
           fi
           # Check RequestsOpenAccess is true
-          if plutil -extract NSExtension.RequestsOpenAccess raw -o - "$PLIST" 2>/dev/null | grep -q "true"; then
+          if plutil -extract NSExtension.NSExtensionAttributes.RequestsOpenAccess raw -o - "$PLIST" 2>/dev/null | grep -q "true"; then
             echo "✅ RequestsOpenAccess = true"
           else
-            echo "❌ RequestsOpenAccess missing or not true"
+            echo "❌ RequestsOpenAccess missing or not true (expected under NSExtension.NSExtensionAttributes)"
             FAIL=1
           fi
           # Check NSExtensionPrincipalClass is set
