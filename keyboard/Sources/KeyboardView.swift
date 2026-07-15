@@ -13,6 +13,7 @@ enum KeyboardState: Equatable {
 
 protocol KeyboardViewDelegate: AnyObject {
     func keyboardViewDidTapMicButton(_ view: KeyboardView)
+    func keyboardViewDidTapNextKeyboard(_ view: KeyboardView)
 }
 
 // MARK: - KeyboardView
@@ -53,6 +54,14 @@ class KeyboardView: UIView {
         return indicator
     }()
 
+    private let nextKeyboardButton: UIButton = {
+        let button = UIButton(type: .system)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.setImage(UIImage(systemName: "globe"), for: .normal)
+        button.tintColor = .darkGray
+        return button
+    }()
+
     private let fullAccessBanner: UIView = {
         let view = UIView()
         view.translatesAutoresizingMaskIntoConstraints = false
@@ -88,15 +97,23 @@ class KeyboardView: UIView {
     private func setupView() {
         backgroundColor = UIColor.systemGray6
 
+        addSubview(nextKeyboardButton)
         addSubview(micButton)
         addSubview(stateLabel)
         addSubview(activityIndicator)
         addSubview(fullAccessBanner)
         fullAccessBanner.addSubview(fullAccessLabel)
 
+        nextKeyboardButton.addTarget(self, action: #selector(nextKeyboardTapped), for: .touchUpInside)
         micButton.addTarget(self, action: #selector(micButtonTapped), for: .touchUpInside)
 
         NSLayoutConstraint.activate([
+            // Next Keyboard button — top-left corner
+            nextKeyboardButton.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 8),
+            nextKeyboardButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+            nextKeyboardButton.widthAnchor.constraint(equalToConstant: 36),
+            nextKeyboardButton.heightAnchor.constraint(equalToConstant: 36),
+
             // Mic button — centered vertically with a slight upward offset
             micButton.centerXAnchor.constraint(equalTo: centerXAnchor),
             micButton.centerYAnchor.constraint(equalTo: centerYAnchor, constant: -20),
@@ -130,6 +147,10 @@ class KeyboardView: UIView {
 
     @objc private func micButtonTapped() {
         delegate?.keyboardViewDidTapMicButton(self)
+    }
+
+    @objc private func nextKeyboardTapped() {
+        delegate?.keyboardViewDidTapNextKeyboard(self)
     }
 
     // MARK: - State Configuration

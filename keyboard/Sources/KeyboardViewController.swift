@@ -1,5 +1,4 @@
 import UIKit
-import AVFoundation
 
 class KeyboardViewController: UIInputViewController {
 
@@ -22,16 +21,8 @@ class KeyboardViewController: UIInputViewController {
         let entry = "[\(timestamp)] \(message)"
         var logs = UserDefaults.standard.array(forKey: "ritoras_logs") as? [String] ?? []
         logs.append(entry)
-        // Keep only last 50 entries
         if logs.count > 50 { logs.removeFirst(logs.count - 50) }
         UserDefaults.standard.set(logs, forKey: "ritoras_logs")
-    }
-
-    private func copyLogsToClipboard() {
-        let logs = UserDefaults.standard.array(forKey: "ritoras_logs") as? [String] ?? []
-        let text = logs.joined(separator: "\n")
-        UIPasteboard.general.string = text
-        state = .error("Logs copied to clipboard! Paste somewhere to share.")
     }
 
     // MARK: - Lifecycle
@@ -39,9 +30,8 @@ class KeyboardViewController: UIInputViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        // Install global exception handler as last-resort crash catcher
         NSSetUncaughtExceptionHandler { exception in
-            let msg = "FATAL: \(exception.name.rawValue): \(exception.reason ?? "unknown")\n\(exception.callStackSymbols.prefix(10).joined(separator: "\n"))"
+            let msg = "FATAL: \(exception.name.rawValue): \(exception.reason ?? "unknown")"
             var logs = UserDefaults.standard.array(forKey: "ritoras_logs") as? [String] ?? []
             logs.append("[FATAL] \(msg)")
             UserDefaults.standard.set(logs, forKey: "ritoras_logs")
@@ -49,19 +39,19 @@ class KeyboardViewController: UIInputViewController {
 
         setupKeyboardView()
         state = .idle
-        log("Keyboard viewDidLoad — hasFullAccess: \(hasFullAccess)")
+        log("viewDidLoad OK, hasFullAccess: \(hasFullAccess)")
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         keyboardView.showFullAccessBanner(!hasFullAccess)
         state = .idle
-        log("Keyboard viewDidAppear — hasFullAccess: \(hasFullAccess), recordPermission: \(AVAudioSession.sharedInstance().recordPermission.rawValue)")
+        log("viewDidAppear OK, hasFullAccess: \(hasFullAccess)")
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        log("Keyboard viewWillDisappear — cleaning up")
+        log("viewWillDisappear")
         Task { @MainActor [weak self] in
             guard let self = self else { return }
             await self.audioRecorder.cleanup()
@@ -90,30 +80,32 @@ class KeyboardViewController: UIInputViewController {
             keyboardView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
-        let heightConstraint = view.heightAnchor.constraint(equalToConstant: 300)
+        let heightConstraint = view.heightAnchor.constraint(equalToConstant: 280)
         heightConstraint.priority = .defaultHigh
         heightConstraint.isActive = true
 
-        // Long-press on the view to copy logs (for debugging)
+        // Long-press to copy logs (debugging)
         let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
         view.addGestureRecognizer(longPress)
     }
 
     @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
         if gesture.state == .began {
-            copyLogsToClipboard()
+            let logs = UserDefaults.standard.array(forKey: "ritoras_logs") as? [String] ?? []
+            UIPasteboard.general.string = logs.joined(separator: "\n")
+            state = .error("Logs copied to clipboard! Paste somewhere to share.")
         }
     }
 
-    // MARK: - State Transitions
+    // MARK: - Mic Button
 
     private func handleMicButtonTap() {
-        log("Mic button tapped, state: \(state)")
+        log("Mic tapped, state: \(state)")
 
         switch state {
         case .idle:
             guard hasFullAccess else {
-                state = .error("Full Access required. Go to Settings → General → Keyboard → Ritoras → Allow Full Access.")
+                state = .error("Full Access required. Settings → General → Keyboard → Ritoras → Allow Full Access.")
                 return
             }
             startRecording()
@@ -134,13 +126,10 @@ class KeyboardViewController: UIInputViewController {
     private func startRecording() {
         log("Starting recording...")
 
-        // Check mic permission BEFORE doing anything
-        let micPermission = AVAudioSession.sharedInstance().recordPermission
-        log("Microphone permission: \(micPermission.rawValue) (0=undetermined, 1=denied, 2=granted)")
-
-        if micPermission != .granted {
-            log("ERROR: Microphone not granted. User must open Ritoras app first.")
-            state = .error("Microphone not granted. Open the Ritoras app first to grant access, then try again.")
+        // Check mic permission via AudioRecorder (avoids importing AVFoundation here)
+        guard AudioRecorder.hasMicrophonePermission else {
+            log("ERROR: Mic permission not granted")
+            state = .error("Microphone not granted. Open the Ritoras app first to grant access.")
             return
         }
 
@@ -153,10 +142,10 @@ class KeyboardViewController: UIInputViewController {
                     await self.audioRecorder.cleanup()
                     return
                 }
-                self.log("Recording started successfully at \(url.path)")
+                self.log("Recording started: \(url.lastPathComponent)")
                 self.state = .recording
             } catch {
-                self.log("ERROR starting recording: \(error)")
+                self.log("Recording error: \(error)")
                 self.state = .error("Recording failed: \(error.localizedDescription)")
             }
         }
@@ -165,57 +154,46 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Transcription
 
     private func stopAndTranscribe() {
-        log("Stopping recording, starting transcription...")
+        log("Stopping, transcribing...")
 
         Task { @MainActor [weak self] in
             guard let self = self else { return }
 
-            // 1. Stop recording
             let url = await self.audioRecorder.stopRecording()
             guard let url = url else {
-                self.log("ERROR: Recording was empty or too short")
+                self.log("Recording too short")
                 await self.audioRecorder.cleanup()
-                self.state = .error("Recording too short. Please try again.")
+                self.state = .error("Recording too short. Try again.")
                 return
             }
 
-            self.log("Recording saved: \(url.lastPathComponent)")
             self.pendingAudioURL = url
             self.state = .transcribing
 
-            // 2. Load config
             let config = SharedConfig.load()
-            self.log("Config: baseUrl=\(config.baseUrl), timeout=\(config.timeoutSeconds)s")
+            self.log("Sending to \(config.baseUrl)...")
 
-            // 3. Transcribe
             do {
-                self.log("Sending to Whisper server...")
                 let transcript = try await WhisperClient.transcribe(audioURL: url, config: config)
-
                 guard self.state == .transcribing else {
                     self.cleanupPendingAudio()
                     return
                 }
 
-                self.log("Transcription received: \(transcript.prefix(50))...")
-
-                // 4. Insert text
-                let proxy = self.textDocumentProxy
-                proxy.insertText(transcript + " ")
+                self.log("Got transcript: \(transcript.prefix(50))")
+                self.textDocumentProxy.insertText(transcript + " ")
                 self.cleanupPendingAudio()
                 await self.audioRecorder.cleanup()
                 self.state = .idle
 
             } catch {
-                self.log("ERROR during transcription: \(error)")
+                self.log("Transcription error: \(error)")
                 self.cleanupPendingAudio()
                 await self.audioRecorder.cleanup()
                 self.state = .error("Transcription failed: \(error.localizedDescription)")
             }
         }
     }
-
-    // MARK: - Cleanup
 
     private func cleanupPendingAudio() {
         if let url = pendingAudioURL {
@@ -230,5 +208,9 @@ class KeyboardViewController: UIInputViewController {
 extension KeyboardViewController: KeyboardViewDelegate {
     func keyboardViewDidTapMicButton(_ view: KeyboardView) {
         handleMicButtonTap()
+    }
+
+    func keyboardViewDidTapNextKeyboard(_ view: KeyboardView) {
+        advanceToNextInputMode()
     }
 }

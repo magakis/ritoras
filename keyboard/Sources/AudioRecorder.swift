@@ -34,6 +34,13 @@ actor AudioRecorder {
         }
     }
 
+    // MARK: - Permission
+
+    /// Checks microphone permission without importing AVFoundation in the caller.
+    static var hasMicrophonePermission: Bool {
+        AVAudioSession.sharedInstance().recordPermission == .granted
+    }
+
     // MARK: - Start Recording
 
     /// Starts recording speech to a temporary M4A/AAC file (16 kHz, mono).
