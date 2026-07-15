@@ -331,6 +331,78 @@ class KeyboardViewController: UIInputViewController {
     /// suspended/terminated and relaunched \u{2014} e.g. the user switched apps and came
     /// back. `pendingRequestId` survives in UserDefaults, so a fully relaunched
     /// keyboard process can still recover the result.
+    /// Reads the tagged Ritoras dictation payload from the clipboard. The
+    /// clipboard is the reliable cross-process channel under SideStore (where the
+    /// App Group is NOT shared), so the container app writes the result here as a
+    /// custom `org.ritoras.dictation` pasteboard type alongside the plain text.
+    private func clipboardPayload() -> [String: Any]? {
+        guard let data = UIPasteboard.general.data(forPasteboardType: "org.ritoras.dictation") else { return nil }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        guard json["source"] as? String == "ritoras" else { return nil }
+        return json
+    }
+
+    /// Checks the clipboard (primary under SideStore) and the App Group payload for
+    /// a terminal result matching `id`. On a terminal status it performs the
+    /// insert / state change and returns true; returns false while still in
+    /// progress or when no matching data exists yet.
+    @discardableResult
+    private func tryResolveFromStores(id: UUID) -> Bool {
+        // 1. App Group payload (file + UserDefaults) \u{2014} works on App Store builds.
+        if let payload = DictationPayload.current(), payload.id == id {
+            switch payload.status {
+            case .completed:
+                log("resolve: appgroup completed \u{2192} insert")
+                insertDictationResult(text: payload.text ?? "")
+                return true
+            case .error:
+                stopDictationTransports(); pendingRequestId = nil
+                state = .error(payload.errorMessage ?? "Transcription failed.")
+                log("resolve: appgroup error")
+                return true
+            case .cancelled:
+                stopDictationTransports(); pendingRequestId = nil
+                state = .idle
+                log("resolve: appgroup cancelled")
+                return true
+            case .recording, .transcribing:
+                break
+            }
+        }
+
+        // 2. Clipboard (primary channel under SideStore).
+        if let clip = clipboardPayload() {
+            let clipId = UUID(uuidString: clip["id"] as? String ?? "")
+            let status = clip["status"] as? String ?? ""
+            let ts = clip["timestamp"] as? Double ?? 0
+            let age = ts > 0 ? Date().timeIntervalSince1970 - ts : 0
+            if clipId == id, age < 300 {
+                switch status {
+                case "completed":
+                    log("resolve: clipboard completed (age \(Int(age))s) \u{2192} insert")
+                    insertDictationResult(text: clip["text"] as? String ?? "")
+                    return true
+                case "error":
+                    stopDictationTransports(); pendingRequestId = nil
+                    state = .error(clip["errorMessage"] as? String ?? "Transcription failed.")
+                    log("resolve: clipboard error")
+                    return true
+                case "cancelled":
+                    stopDictationTransports(); pendingRequestId = nil
+                    state = .idle
+                    log("resolve: clipboard cancelled")
+                    return true
+                default:
+                    break  // recording/transcribing \u{2014} keep polling
+                }
+            } else if clipId != id {
+                log("resolve: clipboard id mismatch (\(clipId?.uuidString ?? "nil") != \(id))")
+            }
+        }
+
+        return false
+    }
+
     private func checkForPendingDictation() {
         guard let id = pendingRequestId else {
             state = .idle
@@ -346,31 +418,10 @@ class KeyboardViewController: UIInputViewController {
             }
         }
 
-        // Transcription may have already finished while we were gone.
-        let payload = DictationPayload.current()
-        log("Resume: payload=\(payload.map { "\($0.id) \($0.status)" } ?? "nil"), pending=\(id)")
+        // Clipboard (primary under SideStore) + App Group payload.
+        if tryResolveFromStores(id: id) { return }
 
-        if let payload = payload, payload.id == id {
-            switch payload.status {
-            case .completed:
-                log("Resume: payload completed \u{2192} insert")
-                insertDictationResult(text: payload.text ?? "")
-                return
-            case .error:
-                stopDictationTransports()
-                state = .error(payload.errorMessage ?? "Transcription failed.")
-                pendingRequestId = nil
-                return
-            case .cancelled:
-                stopDictationTransports()
-                pendingRequestId = nil
-                state = .idle
-                return
-            case .recording, .transcribing:
-                break  // still in progress \u{2014} fall through to polling
-            }
-        }
-
+        // Fallback: poll the server.
         startServerPolling()
     }
 
@@ -462,14 +513,15 @@ class KeyboardViewController: UIInputViewController {
 
     // MARK: - Server Polling (Works when app is backgrounded)
 
-    /// Polls every ~1.2s for up to ~60s. Each cycle checks the App Group payload
-    /// file FIRST (instantly consistent across processes), then the server as a
-    /// secondary channel. Resolves as soon as EITHER yields a terminal status.
+    /// Polls every ~1.2s for up to ~60s. Each cycle checks the clipboard + App
+    /// Group payload FIRST (the clipboard is the reliable channel under SideStore),
+    /// then the server as a fallback. Resolves as soon as ANY yields a terminal
+    /// status.
     private func startServerPolling() {
         serverPollCount = 0
         serverPollTimer?.invalidate()
         serverPollTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { [weak self] timer in
-            guard let self = self else { timer.invalidate(); return }
+            guard let self = self, let id = self.pendingRequestId else { timer.invalidate(); return }
             self.serverPollCount += 1
 
             if self.serverPollCount > 50 {  // ~60 seconds
@@ -477,38 +529,17 @@ class KeyboardViewController: UIInputViewController {
                 self.stopDictationTransports()
                 self.pendingRequestId = nil
                 self.state = .error("Dictation timed out. Try again.")
-                self.log("Polling timed out after 60s \u{2014} no result from App Group or server")
+                self.log("Polling timed out after 60s \u{2014} no result from clipboard/App Group/server")
                 return
             }
 
-            // Primary channel: App Group payload (file-backed, no cross-process lag).
-            if let payload = DictationPayload.current(), payload.id == self.pendingRequestId {
-                switch payload.status {
-                case .completed:
-                    timer.invalidate()
-                    self.log("Poll #\(self.serverPollCount): payload completed \u{2192} insert")
-                    self.insertDictationResult(text: payload.text ?? "")
-                    return
-                case .error:
-                    timer.invalidate()
-                    self.stopDictationTransports()
-                    self.pendingRequestId = nil
-                    self.state = .error(payload.errorMessage ?? "Transcription failed.")
-                    self.log("Poll #\(self.serverPollCount): payload error")
-                    return
-                case .cancelled:
-                    timer.invalidate()
-                    self.stopDictationTransports()
-                    self.pendingRequestId = nil
-                    self.state = .idle
-                    self.log("Poll #\(self.serverPollCount): payload cancelled")
-                    return
-                case .recording, .transcribing:
-                    break  // still in progress \u{2014} keep polling
-                }
+            // Primary channels: clipboard + App Group payload.
+            if self.tryResolveFromStores(id: id) {
+                timer.invalidate()
+                return
             }
 
-            // Secondary channel: the server.
+            // Fallback channel: the server.
             self.pollServerForDictation()
         }
     }

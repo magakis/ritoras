@@ -18,14 +18,37 @@ final class DictationViewModel: ObservableObject {
 
     // MARK: - Clipboard Transport
 
-    /// Writes plain dictation text to the clipboard for manual paste fallback.
-    /// The server (postResultToServer) handles structured data for the keyboard.
-    /// Only writes for "completed" status; other statuses are server-only.
+    /// Writes the dictation result to the clipboard as a MULTI-TYPE pasteboard
+    /// entry so the keyboard can auto-read and auto-insert it:
+    ///   - `public.utf8-plain-text`: the clean transcription text, so manual paste
+    ///     and other apps behave exactly as before.
+    ///   - `org.ritoras.dictation`: a tagged JSON payload ({source, id, status,
+    ///     text, timestamp}) the keyboard uses to identify our result and insert it.
+    ///
+    /// The clipboard is the reliable cross-process channel under SideStore signing,
+    /// where the App Group container is NOT shared between the app and the keyboard.
+    /// Only terminal statuses are written, so we don't clobber the user's clipboard
+    /// while recording/transcribing.
     private func writeToClipboard(status: String, text: String? = nil, errorMessage: String? = nil) {
+        guard status == "completed" || status == "error" || status == "cancelled" else { return }
+        guard let id = activeID else { return }
+
+        var payload: [String: Any] = [
+            "source": "ritoras",
+            "id": id.uuidString,
+            "status": status,
+            "timestamp": Date().timeIntervalSince1970,
+        ]
+        if let text = text { payload["text"] = text }
+        if let errorMessage = errorMessage { payload["errorMessage"] = errorMessage }
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: payload) else { return }
+
+        var item: [String: Any] = ["org.ritoras.dictation": jsonData]
+        // Clean plain text only on success, so manual paste yields the words.
         if status == "completed", let text = text, !text.isEmpty {
-            UIPasteboard.general.string = text
+            item["public.utf8-plain-text"] = text
         }
-        // For all other statuses, don't touch the clipboard
+        UIPasteboard.general.setItems([item], options: [:])
     }
 
     // MARK: - Server Transport
