@@ -4,9 +4,7 @@ struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @State private var showOnboarding = false
     @State private var showResetConfirmation = false
-    @State private var pastedLogs = ""
     @State private var testStatuses: [Int: TestStatus] = [:]
-    @State private var showSavedToast = false
 
     enum TestStatus: Equatable {
         case untested
@@ -37,7 +35,6 @@ struct SettingsView: View {
         Form {
             serverSection
             timeoutSection
-            debugSection
             infoSection
         }
         .navigationTitle("Ritoras Settings")
@@ -47,18 +44,10 @@ struct SettingsView: View {
                     Image(systemName: "questionmark.circle")
                 }
             }
-            ToolbarItemGroup(placement: .navigationBarTrailing) {
-                Button("Save") {
-                    settings.save()
-                    showSavedToast = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                        showSavedToast = false
-                    }
-                }
+            ToolbarItem(placement: .navigationBarTrailing) {
                 Button("Reset") {
                     showResetConfirmation = true
                 }
-                EditButton()
             }
         }
         .alert("Reset to Defaults", isPresented: $showResetConfirmation) {
@@ -73,20 +62,6 @@ struct SettingsView: View {
         .sheet(isPresented: $showOnboarding) {
             OnboardingView(onboardingCompleted: .constant(true))
         }
-        .overlay {
-            if showSavedToast {
-                Text("Saved ✓")
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 10)
-                    .background(.ultraThinMaterial)
-                    .cornerRadius(8)
-                    .transition(.opacity.animation(.easeInOut(duration: 0.3)))
-                    .allowsHitTesting(false)
-            }
-        }
-        .onReceive(settings.$servers) { _ in
-            // Clear stale test statuses when servers array changes
-        }
     }
 
     // MARK: - Server Section
@@ -95,6 +70,15 @@ struct SettingsView: View {
         Section {
             ForEach(settings.servers.indices, id: \.self) { index in
                 HStack(spacing: 8) {
+                    Button {
+                        settings.servers.remove(at: index)
+                        testStatuses = [:]
+                    } label: {
+                        Image(systemName: "minus.circle.fill")
+                            .foregroundColor(.red)
+                    }
+                    .buttonStyle(.borderless)
+
                     TextField("Server URL", text: $settings.servers[index])
                         .textContentType(.URL)
                         .textInputAutocapitalization(.never)
@@ -113,10 +97,6 @@ struct SettingsView: View {
             }
             .onDelete { offsets in
                 settings.servers.remove(atOffsets: offsets)
-                testStatuses = [:]
-            }
-            .onMove { source, destination in
-                settings.servers.move(fromOffsets: source, toOffset: destination)
                 testStatuses = [:]
             }
 
@@ -144,21 +124,6 @@ struct SettingsView: View {
             }
         } header: {
             Text("Network")
-        }
-    }
-
-    // MARK: - Debug Logs Section
-
-    private var debugSection: some View {
-        Section {
-            Text("If the keyboard shows errors, long-press the keyboard to copy logs, then paste them here:")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            TextEditor(text: $pastedLogs)
-                .frame(height: 150)
-                .font(.system(size: 11, design: .monospaced))
-        } header: {
-            Text("Debug Logs")
         }
     }
 

@@ -5,6 +5,12 @@ struct SharedConfig {
         static let baseUrl = "http://100.107.181.45:5000"
         static let timeoutSeconds: TimeInterval = 30.0
         static let appGroupId = "group.com.ritoras.app"
+        static let urlScheme = "ritoras"
+        static let dictateURLPath = "dictate"
+        static let darwinNotificationName = "com.ritoras.dictationCompleted"
+        static let dictationPayloadKey = "dictation.payload"
+        static let dictationTimeoutSeconds: TimeInterval = 30
+        static var dictateURL: URL { URL(string: "\(urlScheme)://\(dictateURLPath)")! }
     }
 
     let servers: [String]

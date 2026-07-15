@@ -4,8 +4,9 @@ import UIKit
 
 enum KeyboardState: Equatable {
     case idle
-    case recording
-    case transcribing
+    case openingApp
+    case waiting
+    case inserting
     case error(String)
 }
 
@@ -43,7 +44,7 @@ class KeyboardView: UIView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.axis = .vertical
         stack.distribution = .fillEqually
-        stack.spacing = 4
+        stack.spacing = 6
         return stack
     }()
 
@@ -51,14 +52,13 @@ class KeyboardView: UIView {
     private var rowStacks: [UIStackView] = []
     private var keyButtons: [KeyAction: UIButton] = [:]
     private var micButton: UIButton?
+    private var blurView: UIVisualEffectView!
 
     // MARK: - Current Layout Mode
 
     private var currentLayoutMode: KeyboardLayoutMode = .letters
     private var isShifted: Bool = false
     private var isCapsLock: Bool = false
-    private var isRecording: Bool = false
-    private var isTranscribing: Bool = false
 
     // MARK: - Suggestion Bar Constraints
 
@@ -100,7 +100,19 @@ class KeyboardView: UIView {
     }
 
     private func setupView() {
-        backgroundColor = UIColor.systemGray6
+        backgroundColor = .clear
+
+        // Blur effect behind everything (native iOS keyboard look)
+        let blurEffect = UIBlurEffect(style: .systemMaterial)
+        blurView = UIVisualEffectView(effect: blurEffect)
+        blurView.translatesAutoresizingMaskIntoConstraints = false
+        insertSubview(blurView, at: 0)
+        NSLayoutConstraint.activate([
+            blurView.topAnchor.constraint(equalTo: topAnchor),
+            blurView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            blurView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            blurView.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
 
         // Full Access banner
         addSubview(fullAccessBanner)
@@ -133,14 +145,14 @@ class KeyboardView: UIView {
         suggestionBarTopNormal?.isActive = true
 
         NSLayoutConstraint.activate([
-            suggestionBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            suggestionBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            suggestionBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3),
+            suggestionBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -3),
             suggestionBar.heightAnchor.constraint(equalToConstant: 40),
 
             keyRowsStack.topAnchor.constraint(equalTo: suggestionBar.bottomAnchor, constant: 4),
-            keyRowsStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            keyRowsStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            keyRowsStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+            keyRowsStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 3),
+            keyRowsStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -3),
+            keyRowsStack.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -4),
         ])
     }
 
@@ -153,11 +165,9 @@ class KeyboardView: UIView {
         for _ in 0..<3 {
             let button = UIButton(type: .system)
             button.translatesAutoresizingMaskIntoConstraints = false
-            button.titleLabel?.font = UIFont.systemFont(ofSize: 16, weight: .medium)
-            button.setTitleColor(.darkGray, for: .normal)
-            button.backgroundColor = UIColor.systemGray5
-            button.layer.cornerRadius = 6
-            button.clipsToBounds = true
+            button.titleLabel?.font = UIFont.systemFont(ofSize: 16, weight: .regular)
+            button.setTitleColor(.label, for: .normal)
+            button.backgroundColor = .clear
             button.addTarget(self, action: #selector(suggestionTapped(_:)), for: .touchUpInside)
             suggestionBar.addArrangedSubview(button)
             suggestionButtons.append(button)
@@ -182,7 +192,7 @@ class KeyboardView: UIView {
             rowStack.translatesAutoresizingMaskIntoConstraints = false
             rowStack.axis = .horizontal
             rowStack.distribution = .fill
-            rowStack.spacing = 4
+            rowStack.spacing = 6
             rowStack.alignment = .fill
 
             let totalWeight = rowDef.reduce(0) { $0 + $1.widthWeight }
@@ -216,11 +226,24 @@ class KeyboardView: UIView {
         let button = KeyButton(type: .system)
         button.translatesAutoresizingMaskIntoConstraints = false
         button.keyDefinition = keyDef
-        button.titleLabel?.font = UIFont.systemFont(ofSize: 18)
-        button.setTitleColor(.darkText, for: .normal)
-        button.backgroundColor = UIColor.white
-        button.layer.cornerRadius = 6
-        button.clipsToBounds = true
+        button.setTitleColor(.label, for: .normal)
+        button.layer.cornerRadius = 5.5
+
+        switch keyDef.action {
+        case .insertText:
+            // Letter key: white rounded rect with shadow
+            button.backgroundColor = .systemBackground
+            button.titleLabel?.font = UIFont.systemFont(ofSize: 22.0, weight: .light)
+            button.layer.shadowColor = UIColor.black.cgColor
+            button.layer.shadowOpacity = 0.15
+            button.layer.shadowOffset = CGSize(width: 0, height: 1)
+            button.layer.shadowRadius = 0.5
+        default:
+            // Special key (Shift, Delete, 123, Return, mic, space): gray
+            button.backgroundColor = Self.specialKeyColor()
+            button.titleLabel?.font = UIFont.systemFont(ofSize: 16, weight: .regular)
+        }
+
         button.addTarget(self, action: #selector(keyTapped(_:)), for: .touchUpInside)
 
         // Apply label based on shift state
@@ -244,7 +267,7 @@ class KeyboardView: UIView {
                 button.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.2)
             } else {
                 button.setTitle(keyDef.label, for: .normal)
-                button.backgroundColor = UIColor.white
+                button.backgroundColor = Self.specialKeyColor()
             }
             return
         }
@@ -284,28 +307,29 @@ class KeyboardView: UIView {
             micBtn.setImage(UIImage(systemName: "mic.fill", withConfiguration: config), for: .normal)
             micBtn.setTitle(nil, for: .normal)
             micBtn.tintColor = .systemBlue
-            micBtn.backgroundColor = UIColor.white
+            micBtn.backgroundColor = UIColor.systemBackground
             micBtn.isEnabled = true
-            isRecording = false
-            isTranscribing = false
 
-        case .recording:
-            micBtn.setImage(UIImage(systemName: "stop.circle.fill", withConfiguration: config), for: .normal)
+        case .openingApp:
+            micBtn.setImage(UIImage(systemName: "arrow.up.right.square.fill", withConfiguration: config), for: .normal)
             micBtn.setTitle(nil, for: .normal)
-            micBtn.tintColor = .white
-            micBtn.backgroundColor = .systemRed
-            micBtn.isEnabled = true
-            isRecording = true
-            isTranscribing = false
-
-        case .transcribing:
-            micBtn.setImage(nil, for: .normal)
-            micBtn.setTitle("...", for: .normal)
-            micBtn.tintColor = .darkGray
-            micBtn.backgroundColor = UIColor.systemGray4
+            micBtn.tintColor = .systemBlue
+            micBtn.backgroundColor = Self.specialKeyColor()
             micBtn.isEnabled = false
-            isRecording = false
-            isTranscribing = true
+
+        case .waiting:
+            micBtn.setImage(UIImage(systemName: "ellipsis.circle.fill", withConfiguration: config), for: .normal)
+            micBtn.setTitle(nil, for: .normal)
+            micBtn.tintColor = .systemGray
+            micBtn.backgroundColor = Self.specialKeyColor()
+            micBtn.isEnabled = false
+
+        case .inserting:
+            micBtn.setImage(UIImage(systemName: "checkmark.circle.fill", withConfiguration: config), for: .normal)
+            micBtn.setTitle(nil, for: .normal)
+            micBtn.tintColor = .systemGreen
+            micBtn.backgroundColor = Self.specialKeyColor()
+            micBtn.isEnabled = false
 
         case .error:
             let errConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .regular)
@@ -314,8 +338,6 @@ class KeyboardView: UIView {
             micBtn.tintColor = .white
             micBtn.backgroundColor = .systemRed
             micBtn.isEnabled = true
-            isRecording = false
-            isTranscribing = false
         }
     }
 
@@ -364,7 +386,7 @@ class KeyboardView: UIView {
                 shiftButton.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.2)
             } else {
                 shiftButton.setTitle("⇧", for: .normal)
-                shiftButton.backgroundColor = UIColor.white
+                shiftButton.backgroundColor = Self.specialKeyColor()
             }
         }
     }
@@ -386,6 +408,20 @@ class KeyboardView: UIView {
         fullAccessBanner.isHidden = !show
         suggestionBarTopConstraint?.isActive = show
         suggestionBarTopNormal?.isActive = !show
+    }
+
+    // MARK: - Helpers
+
+    /// Dynamic color for special keys (Shift, Delete, 123, Return, mic).
+    /// Light: #D1D4D9, Dark: 18% white.
+    private static func specialKeyColor() -> UIColor {
+        return UIColor { traitCollection in
+            if traitCollection.userInterfaceStyle == .dark {
+                return UIColor(white: 0.18, alpha: 1)
+            } else {
+                return UIColor(red: 0.82, green: 0.84, blue: 0.86, alpha: 1)
+            }
+        }
     }
 }
 

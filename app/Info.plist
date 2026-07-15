@@ -39,5 +39,16 @@
 	<array>
 		<string>audio</string>
 	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.ritoras.app</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>ritoras</string>
+			</array>
+		</dict>
+	</array>
 	</dict>
 </plist>

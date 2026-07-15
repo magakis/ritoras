@@ -7,12 +7,14 @@ class KeyboardViewController: UIInputViewController {
     private var state: KeyboardState = .idle {
         didSet {
             keyboardView.configure(for: state)
+            errorResetWorkItem?.cancel()
+            if case .error = state {
+                scheduleErrorReset()
+            }
         }
     }
 
     private var keyboardView: KeyboardView!
-    private lazy var audioRecorder = AudioRecorder()
-    private var pendingAudioURL: URL?
 
     // MARK: - Keyboard State
 
@@ -45,6 +47,11 @@ class KeyboardViewController: UIInputViewController {
     private lazy var predictionEngine: PredictionEngine? = {
         PredictionEngine()
     }()
+
+    private var darwinToken: DarwinObserverToken?
+    private var pendingRequestId: UUID?
+    private var waitTimer: Timer?
+    private var errorResetWorkItem: DispatchWorkItem?
 
     // MARK: - Logging
 
@@ -85,11 +92,6 @@ class KeyboardViewController: UIInputViewController {
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         log("viewWillDisappear")
-        Task { @MainActor [weak self] in
-            guard let self = self else { return }
-            await self.audioRecorder.cleanup()
-            self.cleanupPendingAudio()
-        }
     }
 
     override func textDidChange(_ textInput: UITextInput?) {
@@ -99,9 +101,9 @@ class KeyboardViewController: UIInputViewController {
     }
 
     deinit {
-        if let url = pendingAudioURL {
-            try? FileManager.default.removeItem(at: url)
-        }
+        darwinToken = nil
+        waitTimer?.invalidate()
+        errorResetWorkItem?.cancel()
     }
 
     // MARK: - Setup
@@ -274,107 +276,129 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Mic Button
 
     private func handleMicButtonTap() {
-        log("Mic tapped, state: \(state)")
-
         switch state {
         case .idle:
             guard hasFullAccess else {
                 state = .error("Full Access required. Settings → General → Keyboard → Ritoras → Allow Full Access.")
                 return
             }
-            startRecording()
-
-        case .recording:
-            stopAndTranscribe()
-
-        case .transcribing:
-            break
-
+            openContainerAppForDictation()
         case .error:
-            state = .idle
+            state = .idle   // tap error to dismiss
+        default:
+            break   // ignore taps while openingApp/waiting/inserting
         }
     }
 
-    // MARK: - Recording
+    // MARK: - Dictation via Container App
 
-    private func startRecording() {
-        log("Starting recording...")
+    private func openContainerAppForDictation() {
+        let id = UUID()
+        pendingRequestId = id
 
-        // Check mic permission via AudioRecorder (avoids importing AVFoundation here)
-        guard AudioRecorder.hasMicrophonePermission else {
-            log("ERROR: Mic permission not granted")
-            state = .error("Microphone not granted. Open the Ritoras app first to grant access.")
+        // Build URL with id query param
+        var components = URLComponents(url: SharedConfig.Defaults.dictateURL, resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "id", value: id.uuidString)]
+        guard let url = components.url else {
+            state = .error("Couldn't create dictation URL.")
             return
         }
 
-        Task { @MainActor [weak self] in
-            guard let self = self, self.state == .idle else { return }
+        state = .openingApp
+        log("Opening container app for dictation, id: \(id)")
 
-            do {
-                let url = try await self.audioRecorder.startRecording()
-                guard self.state == .idle else {
-                    await self.audioRecorder.cleanup()
-                    return
+        extensionContext.open(url) { [weak self] success in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if success {
+                    self.state = .waiting
+                    self.startWaitingForDictation(id: id)
+                } else {
+                    self.state = .error("Couldn't open Ritoras app. Make sure it's installed.")
                 }
-                self.log("Recording started: \(url.lastPathComponent)")
-                self.state = .recording
-            } catch {
-                self.log("Recording error: \(error)")
-                self.state = .error("Recording failed: \(error.localizedDescription)")
             }
         }
     }
 
-    // MARK: - Transcription
+    private func startWaitingForDictation(id: UUID) {
+        // Register Darwin notification observer
+        darwinToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinNotificationName) { [weak self] in
+            DispatchQueue.main.async {
+                self?.handleDictationCompleted()
+            }
+        }
 
-    private func stopAndTranscribe() {
-        log("Stopping, transcribing...")
+        // Start timeout timer
+        waitTimer = Timer.scheduledTimer(withTimeInterval: SharedConfig.Defaults.dictationTimeoutSeconds, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.handleTimeout()
+            }
+        }
+    }
 
-        Task { @MainActor [weak self] in
+    private func handleDictationCompleted() {
+        darwinToken = nil
+        waitTimer?.invalidate()
+        waitTimer = nil
+
+        guard let payload = DictationPayload.current() else {
+            state = .error("No dictation result received.")
+            return
+        }
+
+        // Ignore stale payloads (wrong request ID)
+        guard payload.id == pendingRequestId else {
+            log("Ignoring stale dictation payload (id mismatch)")
+            return
+        }
+
+        switch payload.status {
+        case .completed:
+            let text = payload.text ?? ""
+            if text.isEmpty {
+                state = .error("Nothing was heard. Try again.")
+            } else {
+                state = .inserting
+                textDocumentProxy.insertText(text + " ")
+                log("Inserted dictation: \(text)")
+                // Reset to idle after brief delay
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                    self?.state = .idle
+                }
+            }
+        case .cancelled:
+            state = .idle
+            log("Dictation cancelled")
+        case .error:
+            state = .error(payload.errorMessage ?? "Transcription failed.")
+        case .recording, .transcribing:
+            // Premature signal — keep waiting
+            startWaitingForDictation(id: pendingRequestId!)
+            return
+        }
+
+        pendingRequestId = nil
+    }
+
+    private func handleTimeout() {
+        darwinToken = nil
+        waitTimer = nil
+        pendingRequestId = nil
+        state = .error("Dictation timed out. Try again.")
+        log("Dictation timed out")
+    }
+
+    // MARK: - Error Auto-Reset
+
+    private func scheduleErrorReset() {
+        let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-
-            let url = await self.audioRecorder.stopRecording()
-            guard let url = url else {
-                self.log("Recording too short")
-                await self.audioRecorder.cleanup()
-                self.state = .error("Recording too short. Try again.")
-                return
-            }
-
-            self.pendingAudioURL = url
-            self.state = .transcribing
-
-            let config = SharedConfig.load()
-            self.log("Transcribing (servers: \(config.servers.count))...")
-
-            do {
-                let transcript = try await WhisperClient.transcribe(audioURL: url, config: config)
-                guard self.state == .transcribing else {
-                    self.cleanupPendingAudio()
-                    return
-                }
-
-                self.log("Got transcript: \(transcript.prefix(50))")
-                self.textDocumentProxy.insertText(transcript + " ")
-                self.updateCurrentWord()
-                self.cleanupPendingAudio()
-                await self.audioRecorder.cleanup()
+            if case .error = self.state {
                 self.state = .idle
-
-            } catch {
-                self.log("Transcription error: \(error)")
-                self.cleanupPendingAudio()
-                await self.audioRecorder.cleanup()
-                self.state = .error("Transcription failed: \(error.localizedDescription)")
             }
         }
-    }
-
-    private func cleanupPendingAudio() {
-        if let url = pendingAudioURL {
-            try? FileManager.default.removeItem(at: url)
-            pendingAudioURL = nil
-        }
+        errorResetWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: workItem)
     }
 }
 
