@@ -22,7 +22,6 @@ class KeyboardViewController: UIInputViewController {
     private var pendingRequestId: UUID?
     private var waitTimer: Timer?
     private var errorResetWorkItem: DispatchWorkItem?
-    private var lastProcessedPayloadId: UUID?
     private var pollTimer: Timer?
     private var pollCount = 0
     private var clipboardPollTimer: Timer?
