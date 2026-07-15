@@ -14,6 +14,7 @@ enum KeyboardState: Equatable {
 
 protocol KeyboardViewDelegate: AnyObject {
     func keyboardViewDidTapMicButton(_ view: KeyboardView)
+    func keyboardViewDidTapSwitchButton(_ view: KeyboardView)
 }
 
 // MARK: - KeyboardView
@@ -22,6 +23,8 @@ class KeyboardView: UIView {
     weak var delegate: KeyboardViewDelegate?
 
     private let micButton = UIButton(type: .system)
+    private let switchButton = UIButton(type: .system)
+    private let buttonStack = UIStackView()
     private let hintLabel = UILabel()
     private let stateLabel = UILabel()
 
@@ -48,14 +51,35 @@ class KeyboardView: UIView {
                 : UIColor(white: 0.92, alpha: 1)
         }
 
-        // Mic button — large, centered
+        // Mic button — 60pt diameter
         micButton.translatesAutoresizingMaskIntoConstraints = false
-        micButton.layer.cornerRadius = 35  // half of 70pt diameter
+        micButton.layer.cornerRadius = 30
         micButton.clipsToBounds = true
         micButton.addTarget(self, action: #selector(micTapped), for: .touchUpInside)
-        addSubview(micButton)
 
-        // Hint label — below mic button
+        // Switch keyboard button — 44pt, globe icon
+        switchButton.translatesAutoresizingMaskIntoConstraints = false
+        switchButton.layer.cornerRadius = 22
+        switchButton.clipsToBounds = true
+        switchButton.backgroundColor = UIColor { tc in
+            tc.userInterfaceStyle == .dark
+                ? UIColor(white: 0.35, alpha: 1)
+                : .systemGray4
+        }
+        switchButton.tintColor = .label
+        switchButton.setImage(UIImage(systemName: "globe", withConfiguration: UIImage.SymbolConfiguration(pointSize: 22, weight: .regular)), for: .normal)
+        switchButton.addTarget(self, action: #selector(switchTapped), for: .touchUpInside)
+
+        // Button stack — mic + switch side by side
+        buttonStack.axis = .horizontal
+        buttonStack.spacing = 16
+        buttonStack.alignment = .center
+        buttonStack.addArrangedSubview(micButton)
+        buttonStack.addArrangedSubview(switchButton)
+        buttonStack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(buttonStack)
+
+        // Hint label — below button stack
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
         hintLabel.font = .systemFont(ofSize: 13, weight: .regular)
         hintLabel.textColor = UIColor { tc in
@@ -78,17 +102,23 @@ class KeyboardView: UIView {
         stateLabel.isHidden = true
         addSubview(stateLabel)
 
-        // Layout constraints
+        // Layout constraints — compact
         NSLayoutConstraint.activate([
-            // Mic button — centered horizontally, with padding from top
-            micButton.centerXAnchor.constraint(equalTo: centerXAnchor),
-            micButton.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 12),
-            micButton.widthAnchor.constraint(equalToConstant: 70),
-            micButton.heightAnchor.constraint(equalToConstant: 70),
+            // Button stack — centered horizontally, close to top
+            buttonStack.centerXAnchor.constraint(equalTo: centerXAnchor),
+            buttonStack.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 10),
 
-            // Hint label — below mic button
+            // Mic button size
+            micButton.widthAnchor.constraint(equalToConstant: 60),
+            micButton.heightAnchor.constraint(equalToConstant: 60),
+
+            // Switch button size
+            switchButton.widthAnchor.constraint(equalToConstant: 44),
+            switchButton.heightAnchor.constraint(equalToConstant: 44),
+
+            // Hint label — below button stack
             hintLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
-            hintLabel.topAnchor.constraint(equalTo: micButton.bottomAnchor, constant: 8),
+            hintLabel.topAnchor.constraint(equalTo: buttonStack.bottomAnchor, constant: 6),
 
             // State label — below hint
             stateLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
@@ -108,7 +138,7 @@ class KeyboardView: UIView {
     }
 
     func configure(for state: KeyboardState) {
-        let largeConfig = UIImage.SymbolConfiguration(pointSize: 32, weight: .medium)
+        let largeConfig = UIImage.SymbolConfiguration(pointSize: 28, weight: .medium)
 
         switch state {
         case .idle:
@@ -183,5 +213,9 @@ class KeyboardView: UIView {
 
     @objc private func micTapped() {
         delegate?.keyboardViewDidTapMicButton(self)
+    }
+
+    @objc private func switchTapped() {
+        delegate?.keyboardViewDidTapSwitchButton(self)
     }
 }

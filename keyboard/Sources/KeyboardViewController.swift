@@ -92,7 +92,7 @@ class KeyboardViewController: UIInputViewController {
             keyboardView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
-        let heightConstraint = view.heightAnchor.constraint(equalToConstant: 140)
+        let heightConstraint = view.heightAnchor.constraint(equalToConstant: 110)
         heightConstraint.priority = .defaultHigh
         heightConstraint.isActive = true
 
@@ -468,5 +468,9 @@ class KeyboardViewController: UIInputViewController {
 extension KeyboardViewController: KeyboardViewDelegate {
     func keyboardViewDidTapMicButton(_ view: KeyboardView) {
         handleMicButtonTap()
+    }
+
+    func keyboardViewDidTapSwitchButton(_ view: KeyboardView) {
+        advanceToNextInputMode()
     }
 }
