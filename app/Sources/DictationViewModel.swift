@@ -38,6 +38,7 @@ final class DictationViewModel: ObservableObject {
 
     func start(id: UUID) async {
         activeID = id
+        phase = .recording
 
         // Save initial recording payload
         DictationPayload(id: id, status: .recording, timestamp: Date()).save()
@@ -101,6 +102,7 @@ final class DictationViewModel: ObservableObject {
 
         guard let url = audioURL else {
             UIApplication.shared.isIdleTimerDisabled = false
+            AudioSession.deactivate()
             let message = "Recording was empty. Please try again."
             DictationPayload(
                 id: id, status: .error, errorMessage: message, timestamp: Date()
@@ -115,6 +117,14 @@ final class DictationViewModel: ObservableObject {
         DictationPayload(id: id, status: .transcribing, timestamp: Date()).save()
         writeToClipboard(status: "transcribing")
 
+        // Start background task to keep app alive during transcription
+        var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "WhisperTranscription") {
+            // Expiration handler — app is about to be killed
+            UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            backgroundTaskID = .invalid
+        }
+
         do {
             let config = SharedConfig.load()
             let text = try await WhisperClient.transcribe(audioURL: url, config: config)
@@ -126,9 +136,11 @@ final class DictationViewModel: ObservableObject {
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
             TranscriptionHistory.shared.add(text: text)
             UIApplication.shared.isIdleTimerDisabled = false
+            AudioSession.deactivate()
             phase = .done(text)
         } catch {
             UIApplication.shared.isIdleTimerDisabled = false
+            AudioSession.deactivate()
             let message = error.localizedDescription
             DictationPayload(
                 id: id, status: .error, errorMessage: message, timestamp: Date()
@@ -136,6 +148,12 @@ final class DictationViewModel: ObservableObject {
             writeToClipboard(status: "error", errorMessage: message)
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
             phase = .error(message)
+        }
+
+        // End background task
+        if backgroundTaskID != .invalid {
+            UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            backgroundTaskID = .invalid
         }
     }
 
