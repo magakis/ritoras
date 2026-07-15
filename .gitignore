@@ -22,3 +22,7 @@ build/
 # Swift Package Manager (if used later)
 .swiftpm/
 Package.resolved
+
+# OpenCode internal state
+.opencode/instincts/
+.opencode/commands/
