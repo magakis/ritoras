@@ -127,12 +127,10 @@ class KeyboardViewController: UIInputViewController {
             }
             openContainerAppForDictation()
         case .error:
-            state = .idle   // tap error to dismiss, ready for new dictation
-            // Also clean up any stale polling
+            state = .idle
             clipboardPollTimer?.invalidate()
-            clipboardPollTimer = nil
             serverPollTimer?.invalidate()
-            serverPollTimer = nil
+            clearClipboardDictation()
         default:
             break   // ignore taps while openingApp/waiting/inserting
         }
