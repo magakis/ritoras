@@ -55,6 +55,8 @@ class KeyboardViewController: UIInputViewController {
     private var lastProcessedPayloadId: UUID?
     private var pollTimer: Timer?
     private var pollCount = 0
+    private var clipboardPollTimer: Timer?
+    private var clipboardPollCount = 0
 
     // MARK: - Logging
 
@@ -108,6 +110,7 @@ class KeyboardViewController: UIInputViewController {
         darwinToken = nil
         waitTimer?.invalidate()
         pollTimer?.invalidate()
+        clipboardPollTimer?.invalidate()
         errorResetWorkItem?.cancel()
     }
 
@@ -369,8 +372,10 @@ class KeyboardViewController: UIInputViewController {
         waitTimer?.invalidate()
         waitTimer = nil
 
+        // Try App Group first (works if properly signed)
         guard let payload = DictationPayload.current() else {
-            state = .error("No dictation result received.")
+            // Try clipboard fallback (works under SideStore)
+            tryClipboardDictation()
             return
         }
 
@@ -419,7 +424,12 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Pending Dictation (Recovery on Keyboard Reappear)
 
     private func checkForPendingDictation() {
-        guard let payload = DictationPayload.current() else { return }
+        // Try App Group first (works if properly signed)
+        guard let payload = DictationPayload.current() else {
+            // Try clipboard (works under SideStore — App Group doesn't)
+            tryClipboardDictation()
+            return
+        }
 
         // Only process payloads from the last 120 seconds (ignore old ones)
         guard Date().timeIntervalSince(payload.timestamp) < 120 else { return }
@@ -516,6 +526,99 @@ class KeyboardViewController: UIInputViewController {
     private func clearDictationPayload() {
         guard let defaults = UserDefaults(suiteName: SharedConfig.Defaults.appGroupId) else { return }
         defaults.removeObject(forKey: SharedConfig.Defaults.dictationPayloadKey)
+    }
+
+    // MARK: - Clipboard Transport (SideStore fallback)
+
+    /// Reads a dictation payload from the system pasteboard and processes it.
+    /// Called when the App Group path returns nothing (SideStore signing).
+    private func tryClipboardDictation() {
+        guard let clipboardStr = UIPasteboard.general.string else { return }
+        guard let data = clipboardStr.data(using: .utf8) else { return }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        guard json["source"] as? String == "ritoras" else { return }
+
+        guard let timestamp = json["timestamp"] as? Double else { return }
+        guard Date().timeIntervalSince1970 - timestamp < 120 else { return }  // Only recent payloads
+
+        let status = json["status"] as? String ?? ""
+        let payloadIdString = json["id"] as? String ?? ""
+        let payloadId = UUID(uuidString: payloadIdString)
+
+        // Prevent double-processing
+        if payloadId == lastProcessedPayloadId { return }
+
+        switch status {
+        case "completed":
+            let text = json["text"] as? String ?? ""
+            if text.isEmpty {
+                state = .error("Nothing was heard. Try again.")
+            } else {
+                state = .inserting
+                textDocumentProxy.insertText(text + " ")
+                log("Auto-inserted dictation from clipboard: \(text)")
+            }
+            lastProcessedPayloadId = payloadId
+            clearClipboardDictation()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.state = .idle
+            }
+
+        case "transcribing":
+            log("Dictation still transcribing (clipboard), starting poll")
+            state = .waiting
+            startClipboardPolling()
+
+        case "recording":
+            log("Dictation still recording (clipboard), starting poll")
+            state = .waiting
+            startClipboardPolling()
+
+        case "error":
+            let errorMessage = json["errorMessage"] as? String ?? "Transcription failed."
+            state = .error(errorMessage)
+            lastProcessedPayloadId = payloadId
+            clearClipboardDictation()
+
+        case "cancelled":
+            clearClipboardDictation()
+            // Stay idle
+
+        default:
+            break
+        }
+    }
+
+    /// Polls the clipboard every second for up to 30 seconds while the
+    /// container app is still transcribing or recording.
+    private func startClipboardPolling() {
+        clipboardPollCount = 0
+        clipboardPollTimer?.invalidate()
+        clipboardPollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            guard let self = self else { timer.invalidate(); return }
+            self.clipboardPollCount += 1
+
+            if self.clipboardPollCount > 30 {
+                timer.invalidate()
+                self.state = .error("Dictation timed out. Try again.")
+                return
+            }
+
+            // Re-check clipboard
+            self.tryClipboardDictation()
+
+            // If we're no longer in waiting state, the polling found a result — stop
+            if case .waiting = self.state {
+                // Still waiting, keep polling
+            } else {
+                timer.invalidate()
+            }
+        }
+    }
+
+    /// Clears the clipboard dictation payload to prevent re-processing.
+    private func clearClipboardDictation() {
+        UIPasteboard.general.string = ""
     }
 
     // MARK: - Error Auto-Reset

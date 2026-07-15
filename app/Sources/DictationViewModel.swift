@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import UIKit
 
 @MainActor
 final class DictationViewModel: ObservableObject {
@@ -15,11 +16,32 @@ final class DictationViewModel: ObservableObject {
     private var recorder: AudioRecorder?
     private var activeID: UUID?
 
+    // MARK: - Clipboard Transport
+
+    /// Writes dictation status to the system pasteboard so the keyboard can
+    /// read it even when App Groups don't work (SideStore signing).
+    private func writeToClipboard(status: String, text: String? = nil, errorMessage: String? = nil) {
+        var payload: [String: Any] = [
+            "source": "ritoras",
+            "timestamp": Date().timeIntervalSince1970,
+            "status": status,
+            "id": activeID?.uuidString ?? UUID().uuidString
+        ]
+        if let text = text { payload["text"] = text }
+        if let errorMessage = errorMessage { payload["errorMessage"] = errorMessage }
+
+        if let data = try? JSONSerialization.data(withJSONObject: payload),
+           let jsonStr = String(data: data, encoding: .utf8) {
+            UIPasteboard.general.string = jsonStr
+        }
+    }
+
     func start(id: UUID) async {
         activeID = id
 
         // Save initial recording payload
         DictationPayload(id: id, status: .recording, timestamp: Date()).save()
+        writeToClipboard(status: "recording")
 
         // Check microphone permission before attempting to record
         switch AVAudioSession.sharedInstance().recordPermission {
@@ -34,6 +56,7 @@ final class DictationViewModel: ObservableObject {
                 DictationPayload(
                     id: id, status: .error, errorMessage: message, timestamp: Date()
                 ).save()
+                writeToClipboard(status: "error", errorMessage: message)
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
                 phase = .error(message)
                 return
@@ -43,6 +66,7 @@ final class DictationViewModel: ObservableObject {
             DictationPayload(
                 id: id, status: .error, errorMessage: message, timestamp: Date()
             ).save()
+            writeToClipboard(status: "error", errorMessage: message)
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
             phase = .error(message)
             return
@@ -62,6 +86,7 @@ final class DictationViewModel: ObservableObject {
             DictationPayload(
                 id: id, status: .error, errorMessage: message, timestamp: Date()
             ).save()
+            writeToClipboard(status: "error", errorMessage: message)
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
             phase = .error(message)
         }
@@ -78,6 +103,7 @@ final class DictationViewModel: ObservableObject {
             DictationPayload(
                 id: id, status: .error, errorMessage: message, timestamp: Date()
             ).save()
+            writeToClipboard(status: "error", errorMessage: message)
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
             phase = .error(message)
             return
@@ -85,6 +111,7 @@ final class DictationViewModel: ObservableObject {
 
         phase = .transcribing
         DictationPayload(id: id, status: .transcribing, timestamp: Date()).save()
+        writeToClipboard(status: "transcribing")
 
         do {
             let config = SharedConfig.load()
@@ -93,6 +120,7 @@ final class DictationViewModel: ObservableObject {
             DictationPayload(
                 id: id, status: .completed, text: text, timestamp: Date()
             ).save()
+            writeToClipboard(status: "completed", text: text)
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
             phase = .done(text)
         } catch {
@@ -100,6 +128,7 @@ final class DictationViewModel: ObservableObject {
             DictationPayload(
                 id: id, status: .error, errorMessage: message, timestamp: Date()
             ).save()
+            writeToClipboard(status: "error", errorMessage: message)
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
             phase = .error(message)
         }
@@ -113,6 +142,7 @@ final class DictationViewModel: ObservableObject {
             DictationPayload(
                 id: id, status: .cancelled, timestamp: Date()
             ).save()
+            writeToClipboard(status: "cancelled")
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
         }
         activeID = nil
