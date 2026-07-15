@@ -3,7 +3,7 @@ import Foundation
 enum DarwinNotifier {
     static func post(_ name: String) {
         CFNotificationCenterPostNotification(
-            CFNotificationCenterGetDarwinNotifyZone(),
+            CFNotificationCenterGetDarwinNotifyCenter(),
             CFNotificationName(rawValue: name as CFString),
             nil, nil, true
         )
@@ -37,7 +37,7 @@ final class DarwinObserverToken {
         }
         
         CFNotificationCenterAddObserver(
-            CFNotificationCenterGetDarwinNotifyZone(),
+            CFNotificationCenterGetDarwinNotifyCenter(),
             observerPtr,
             callback,
             name as CFString,
@@ -49,7 +49,7 @@ final class DarwinObserverToken {
     deinit {
         if let observer = observer {
             CFNotificationCenterRemoveObserver(
-                CFNotificationCenterGetDarwinNotifyZone(),
+                CFNotificationCenterGetDarwinNotifyCenter(),
                 observer,
                 CFNotificationName(rawValue: name as CFString),
                 nil

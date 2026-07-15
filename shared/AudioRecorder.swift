@@ -38,7 +38,7 @@ actor AudioRecorder {
 
     /// Checks microphone permission without importing AVFoundation in the caller.
     static var hasMicrophonePermission: Bool {
-        AVAudioSession.sharedInstance().recordPermission == .granted
+        AVAudioApplication.shared.recordPermission == .granted
     }
 
     // MARK: - Start Recording
@@ -66,7 +66,7 @@ actor AudioRecorder {
         // 1. Check permission — do NOT call requestRecordPermission() from the keyboard!
         // That would show a system dialog and dismiss the keyboard.
         // The container app is responsible for requesting permission.
-        let permission = AVAudioSession.sharedInstance().recordPermission
+        let permission = AVAudioApplication.shared.recordPermission
         switch permission {
         case .granted:
             break // Proceed with recording

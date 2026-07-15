@@ -307,7 +307,7 @@ class KeyboardViewController: UIInputViewController {
         state = .openingApp
         log("Opening container app for dictation, id: \(id)")
 
-        extensionContext.open(url) { [weak self] success in
+        extensionContext?.open(url) { [weak self] success in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 if success {
