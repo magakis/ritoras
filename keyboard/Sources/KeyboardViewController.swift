@@ -69,13 +69,19 @@ class KeyboardViewController: UIInputViewController {
 
     // MARK: - Logging
 
+    /// Serial queue so the read-modify-write of the log buffer is safe across the
+    /// main thread and the URLSession completion-handler thread.
+    private let logQueue = DispatchQueue(label: "ritoras.kb.log", qos: .utility)
+
     private func log(_ message: String) {
         let timestamp = DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)
         let entry = "[\(timestamp)] \(message)"
-        var logs = UserDefaults.standard.array(forKey: "ritoras_logs") as? [String] ?? []
-        logs.append(entry)
-        if logs.count > 50 { logs.removeFirst(logs.count - 50) }
-        UserDefaults.standard.set(logs, forKey: "ritoras_logs")
+        logQueue.sync {
+            var logs = UserDefaults.standard.array(forKey: "ritoras_logs") as? [String] ?? []
+            logs.append(entry)
+            if logs.count > 120 { logs.removeFirst(logs.count - 120) }
+            UserDefaults.standard.set(logs, forKey: "ritoras_logs")
+        }
     }
 
     // MARK: - Lifecycle
@@ -341,9 +347,13 @@ class KeyboardViewController: UIInputViewController {
         }
 
         // Transcription may have already finished while we were gone.
-        if let payload = DictationPayload.current(), payload.id == id {
+        let payload = DictationPayload.current()
+        log("Resume: payload=\(payload.map { "\($0.id) \($0.status)" } ?? "nil"), pending=\(id)")
+
+        if let payload = payload, payload.id == id {
             switch payload.status {
             case .completed:
+                log("Resume: payload completed \u{2192} insert")
                 insertDictationResult(text: payload.text ?? "")
                 return
             case .error:
@@ -452,22 +462,53 @@ class KeyboardViewController: UIInputViewController {
 
     // MARK: - Server Polling (Works when app is backgrounded)
 
-    /// Polls the server every 1.5s for up to 60 seconds to get the dictation result.
+    /// Polls every ~1.2s for up to ~60s. Each cycle checks the App Group payload
+    /// file FIRST (instantly consistent across processes), then the server as a
+    /// secondary channel. Resolves as soon as EITHER yields a terminal status.
     private func startServerPolling() {
         serverPollCount = 0
         serverPollTimer?.invalidate()
-        serverPollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] timer in
+        serverPollTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { [weak self] timer in
             guard let self = self else { timer.invalidate(); return }
             self.serverPollCount += 1
 
-            if self.serverPollCount > 40 {  // 60 seconds at 1.5s intervals
+            if self.serverPollCount > 50 {  // ~60 seconds
                 timer.invalidate()
                 self.stopDictationTransports()
                 self.pendingRequestId = nil
                 self.state = .error("Dictation timed out. Try again.")
+                self.log("Polling timed out after 60s \u{2014} no result from App Group or server")
                 return
             }
 
+            // Primary channel: App Group payload (file-backed, no cross-process lag).
+            if let payload = DictationPayload.current(), payload.id == self.pendingRequestId {
+                switch payload.status {
+                case .completed:
+                    timer.invalidate()
+                    self.log("Poll #\(self.serverPollCount): payload completed \u{2192} insert")
+                    self.insertDictationResult(text: payload.text ?? "")
+                    return
+                case .error:
+                    timer.invalidate()
+                    self.stopDictationTransports()
+                    self.pendingRequestId = nil
+                    self.state = .error(payload.errorMessage ?? "Transcription failed.")
+                    self.log("Poll #\(self.serverPollCount): payload error")
+                    return
+                case .cancelled:
+                    timer.invalidate()
+                    self.stopDictationTransports()
+                    self.pendingRequestId = nil
+                    self.state = .idle
+                    self.log("Poll #\(self.serverPollCount): payload cancelled")
+                    return
+                case .recording, .transcribing:
+                    break  // still in progress \u{2014} keep polling
+                }
+            }
+
+            // Secondary channel: the server.
             self.pollServerForDictation()
         }
     }
@@ -478,19 +519,24 @@ class KeyboardViewController: UIInputViewController {
         guard let server = config.servers.first else { return }
         guard let url = URL(string: "\(server)/dictation_result/latest") else { return }
 
-        let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
-            guard let self = self,
-                  let data = data,
-                  error == nil,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        let task = URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
+            guard let self = self else { return }
+            if let error = error {
+                self.log("poll: network error \(error.localizedDescription)")
+                return
+            }
+            guard let data = data else { self.log("poll: empty response"); return }
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                self.log("poll: unparseable body \(String(data: data, encoding: .utf8) ?? "?")")
+                return
+            }
 
             let status = json["status"] as? String ?? "none"
             let timestamp = json["timestamp"] as? Double ?? 0
 
-            // If the server returned {"detail":"Not Found"} (404), there's nothing to process
+            // If the server returned {"detail":"Not Found"} (404), keep polling silently.
             if status == "none" && json["detail"] != nil {
-                // Server returned an error (likely 404 — endpoint not deployed yet)
-                // Just keep polling silently
+                self.log("poll: 404/detail \(json["detail"] ?? "")")
                 return
             }
 
@@ -499,12 +545,12 @@ class KeyboardViewController: UIInputViewController {
                 // path, ignore the stale server response (prevents double-insert).
                 guard self.pendingRequestId != nil else { return }
 
-                // Only process recent results
-                guard timestamp > 0 else { return }
-                guard Date().timeIntervalSince1970 - timestamp < 120 else { return }
-
-                // Prevent double-processing
+                guard timestamp > 0 else { self.log("poll: timestamp 0"); return }
+                let age = Date().timeIntervalSince1970 - timestamp
+                guard age < 120 else { self.log("poll: result stale (\(Int(age))s)"); return }
                 if timestamp <= self.lastProcessedTimestamp { return }
+
+                self.log("poll: server status=\(status) age=\(Int(age))s")
 
                 switch status {
                 case "completed":
@@ -524,11 +570,10 @@ class KeyboardViewController: UIInputViewController {
                     self.state = .idle
 
                 case "transcribing", "recording":
-                    self.log("Server says still transcribing (poll \(self.serverPollCount)/40)")
-                    // Keep polling
+                    break  // keep polling
 
                 default:
-                    break
+                    self.log("poll: unknown status '\(status)'")
                 }
             }
         }
