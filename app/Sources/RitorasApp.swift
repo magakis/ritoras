@@ -27,10 +27,21 @@ struct RitorasApp: App {
                 }
             }
             .onOpenURL { url in
+                print("📡 [RitorasApp] Received URL: \(url.absoluteString)")
+
                 guard url.scheme == SharedConfig.Defaults.urlScheme,
-                      url.host == SharedConfig.Defaults.dictateURLPath else { return }
-                let id = parseId(from: url) ?? UUID()
-                dictationRequest = DictationRequest(id: id)
+                      url.host == SharedConfig.Defaults.dictateURLPath else {
+                    print("📡 [RitorasApp] URL doesn't match ritoras://dictate — ignoring")
+                    return
+                }
+
+                if let id = parseId(from: url) {
+                    print("📡 [RitorasApp] Parsed dictation ID: \(id)")
+                    dictationRequest = DictationRequest(id: id)
+                } else {
+                    print("📡 [RitorasApp] Failed to parse ID from URL: \(url)")
+                    // Don't present DictationView with random UUID
+                }
             }
             .fullScreenCover(item: $dictationRequest) { request in
                 DictationView(requestId: request.id)
@@ -42,10 +53,24 @@ struct RitorasApp: App {
     /// Supports both `ritoras://dictate` (returns nil) and
     /// `ritoras://dictate?id=<UUID>` (returns the parsed UUID).
     private func parseId(from url: URL) -> UUID? {
-        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let queryItems = components.queryItems else { return nil }
-        guard let idString = queryItems.first(where: { $0.name == "id" })?.value else { return nil }
-        return UUID(uuidString: idString)
+        // Try URLComponents first
+        if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let idString = components.queryItems?.first(where: { $0.name == "id" })?.value,
+           let uuid = UUID(uuidString: idString) {
+            return uuid
+        }
+        // Manual fallback: parse query string directly
+        guard let query = url.query else { return nil }
+        for param in query.split(separator: "&") {
+            let parts = param.split(separator: "=", maxSplits: 1)
+            if parts.count == 2, parts[0] == "id" {
+                let value = String(parts[1]).removingPercentEncoding ?? String(parts[1])
+                if let uuid = UUID(uuidString: value) {
+                    return uuid
+                }
+            }
+        }
+        return nil
     }
 }
 

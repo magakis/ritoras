@@ -307,13 +307,20 @@ class KeyboardViewController: UIInputViewController {
         state = .openingApp
         log("Opening container app for dictation, id: \(id)")
 
-        extensionContext?.open(url) { [weak self] success in
+        guard let context = extensionContext else {
+            log("extensionContext is nil — cannot open container app")
+            state = .error("Keyboard extension context unavailable.")
+            return
+        }
+        context.open(url) { [weak self] success in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 if success {
+                    self.log("Container app opened successfully, waiting for dictation")
                     self.state = .waiting
                     self.startWaitingForDictation(id: id)
                 } else {
+                    self.log("Failed to open container app (extensionContext.open returned false)")
                     self.state = .error("Couldn't open Ritoras app. Make sure it's installed.")
                 }
             }
