@@ -48,7 +48,14 @@ final class BackgroundTranscriptionService: NSObject {
     /// Starts a background upload of `audioURL` to the Whisper server. Returns
     /// immediately; the result is delivered via the delegate callbacks.
     func transcribe(audioURL: URL, id: UUID, config: SharedConfig) {
-        guard let server = config.servers.first else {
+        // Background URLSession transfers run inside nsurlsessiond, which does NOT
+        // route through Tailscale — so it cannot reach Tailscale-only hosts
+        // (100.64.0.0/10 CGNAT). Prefer the first configured server that isn't a
+        // Tailscale address; fall back to the first configured server otherwise.
+        // The server list is user-configurable in Settings.
+        let server = config.servers.first(where: { !Self.isTailscaleAddress($0) })
+            ?? config.servers.first
+        guard let server else {
             deliver(id: id, status: "error", text: nil, errorMessage: "No server configured.")
             return
         }
@@ -78,6 +85,13 @@ final class BackgroundTranscriptionService: NSObject {
         let task = session.uploadTask(with: request, fromFile: bodyURL)
         task.taskDescription = id.uuidString
         task.resume()
+    }
+
+    /// Tailscale uses the 100.64.0.0/10 CGNAT range, which nsurlsessiond cannot
+    /// route to. Used to pick a background-upload target nsurlsessiond can reach.
+    private static func isTailscaleAddress(_ server: String) -> Bool {
+        guard let host = URL(string: server)?.host else { return false }
+        return host.hasPrefix("100.")
     }
 }
 

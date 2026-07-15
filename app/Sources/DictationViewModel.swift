@@ -32,6 +32,8 @@ final class DictationViewModel: ObservableObject {
             let errorMessage = note.userInfo?["errorMessage"] as? String ?? ""
             Task { @MainActor in
                 guard id == self.activeID else { return }
+                // Don't clobber a result the foreground upload already delivered.
+                guard case .transcribing = self.phase else { return }
                 switch status {
                 case "completed":
                     self.phase = text.isEmpty
