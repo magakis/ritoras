@@ -127,7 +127,12 @@ class KeyboardViewController: UIInputViewController {
             }
             openContainerAppForDictation()
         case .error:
-            state = .idle   // tap error to dismiss
+            state = .idle   // tap error to dismiss, ready for new dictation
+            // Also clean up any stale polling
+            clipboardPollTimer?.invalidate()
+            clipboardPollTimer = nil
+            serverPollTimer?.invalidate()
+            serverPollTimer = nil
         default:
             break   // ignore taps while openingApp/waiting/inserting
         }
@@ -136,6 +141,14 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Dictation via Container App
 
     private func openContainerAppForDictation() {
+        // Clear any stale clipboard/server data from previous sessions
+        clearClipboardDictation()
+        lastProcessedTimestamp = 0
+        clipboardPollTimer?.invalidate()
+        clipboardPollTimer = nil
+        serverPollTimer?.invalidate()
+        serverPollTimer = nil
+
         let id = UUID()
         pendingRequestId = id
 
@@ -368,6 +381,13 @@ class KeyboardViewController: UIInputViewController {
             let status = json["status"] as? String ?? "none"
             let timestamp = json["timestamp"] as? Double ?? 0
 
+            // If the server returned {"detail":"Not Found"} (404), there's nothing to process
+            if status == "none" && json["detail"] != nil {
+                // Server returned an error (likely 404 — endpoint not deployed yet)
+                // Just keep polling silently
+                return
+            }
+
             DispatchQueue.main.async {
                 // Only process recent results
                 guard timestamp > 0 else { return }
@@ -452,6 +472,14 @@ class KeyboardViewController: UIInputViewController {
             }
 
         case "transcribing", "recording":
+            // Check if this is stale data from a previous session
+            let age = Date().timeIntervalSince1970 - timestamp
+            if age > 15 {
+                // Stale — the app should have progressed by now. Clear and ignore.
+                log("Ignoring stale clipboard data (age: \(Int(age))s)")
+                clearClipboardDictation()
+                return  // Stay in current state (idle)
+            }
             log("Dictation still \(status) (clipboard), starting poll")
             state = .waiting
             if clipboardPollTimer == nil {
