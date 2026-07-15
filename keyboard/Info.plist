@@ -28,6 +28,8 @@
 		<dict>
 			<key>RequestsOpenAccess</key>
 			<true/>
+			<key>PrimaryLanguage</key>
+			<string>en-US</string>
 		</dict>
 		<key>NSExtensionPointIdentifier</key>
 		<string>com.apple.keyboard-service</string>
