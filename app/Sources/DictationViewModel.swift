@@ -18,22 +18,14 @@ final class DictationViewModel: ObservableObject {
 
     // MARK: - Clipboard Transport
 
-    /// Writes dictation status to the system pasteboard so the keyboard can
-    /// read it even when App Groups don't work (SideStore signing).
+    /// Writes plain dictation text to the clipboard for manual paste fallback.
+    /// The server (postResultToServer) handles structured data for the keyboard.
+    /// Only writes for "completed" status; other statuses are server-only.
     private func writeToClipboard(status: String, text: String? = nil, errorMessage: String? = nil) {
-        var payload: [String: Any] = [
-            "source": "ritoras",
-            "timestamp": Date().timeIntervalSince1970,
-            "status": status,
-            "id": activeID?.uuidString ?? UUID().uuidString
-        ]
-        if let text = text { payload["text"] = text }
-        if let errorMessage = errorMessage { payload["errorMessage"] = errorMessage }
-
-        if let data = try? JSONSerialization.data(withJSONObject: payload),
-           let jsonStr = String(data: data, encoding: .utf8) {
-            UIPasteboard.general.string = jsonStr
+        if status == "completed", let text = text, !text.isEmpty {
+            UIPasteboard.general.string = text
         }
+        // For all other statuses, don't touch the clipboard
     }
 
     // MARK: - Server Transport
@@ -42,8 +34,15 @@ final class DictationViewModel: ObservableObject {
     /// for results. Works even when the app is backgrounded (clipboard fails).
     private func postResultToServer(status: String, text: String? = nil, errorMessage: String? = nil) {
         let config = SharedConfig.load()
-        guard let server = config.servers.first else { return }
-        guard let url = URL(string: "\(server)/dictation_result") else { return }
+        guard let server = config.servers.first else {
+            print("⚠️ postResultToServer: no server configured")
+            return
+        }
+        let baseURL = server.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let url = URL(string: "\(baseURL)/dictation_result") else {
+            print("⚠️ postResultToServer: invalid URL")
+            return
+        }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -58,10 +57,21 @@ final class DictationViewModel: ObservableObject {
         if let text = text { payload["text"] = text }
         if let errorMessage = errorMessage { payload["errorMessage"] = errorMessage }
 
-        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        } catch {
+            print("⚠️ postResultToServer: failed to serialize JSON: \(error)")
+            return
+        }
 
-        // Fire and forget — use a background task so it completes even if app is backgrounded
-        URLSession.shared.dataTask(with: request).resume()
+        print("📡 postResultToServer: POSTing to \(url.absoluteString) status=\(status)")
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            if let error = error {
+                print("⚠️ postResultToServer: error: \(error)")
+            } else if let response = response as? HTTPURLResponse {
+                print("📡 postResultToServer: response \(response.statusCode)")
+            }
+        }.resume()
     }
 
     func start(id: UUID) async {

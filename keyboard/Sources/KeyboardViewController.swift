@@ -250,9 +250,7 @@ class KeyboardViewController: UIInputViewController {
 
         // Try App Group first (works if properly signed)
         guard let payload = DictationPayload.current() else {
-            // Try clipboard fallback (works under SideStore)
-            tryClipboardDictation()
-            // Also poll the server — clipboard fails when app is backgrounded
+            // Poll the server (sole IPC mechanism; clipboard has plain text for manual paste only)
             pollServerForDictation()
             if state == .idle {
                 state = .waiting
@@ -306,15 +304,9 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Pending Dictation (Recovery on Keyboard Reappear)
 
     private func checkForPendingDictation() {
-        // Try clipboard first (instant, works if user stayed in app)
-        tryClipboardDictation()
-
-        // If clipboard didn't find a completed result, poll the server
-        if state == .idle {
-            // Clipboard found nothing — check server
-            state = .waiting
-            startServerPolling()
-        }
+        // Server is the sole IPC mechanism (clipboard has plain text for manual paste only)
+        state = .waiting
+        startServerPolling()
     }
 
     private func startPollingForDictation(payloadId: UUID) {
