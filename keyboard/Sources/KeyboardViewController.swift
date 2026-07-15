@@ -307,24 +307,40 @@ class KeyboardViewController: UIInputViewController {
         state = .openingApp
         log("Opening container app for dictation, id: \(id)")
 
-        guard let context = extensionContext else {
-            log("extensionContext is nil — cannot open container app")
-            state = .error("Keyboard extension context unavailable.")
-            return
+        // Use responder chain traversal — extensionContext.open() does NOT work for keyboard extensions
+        let opened = openURL(url, id: id)
+        if !opened {
+            log("Failed to traverse responder chain — UIApplication not found")
+            state = .error("Couldn't open Ritoras app. Make sure it's installed.")
         }
-        context.open(url) { [weak self] success in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                if success {
-                    self.log("Container app opened successfully, waiting for dictation")
-                    self.state = .waiting
-                    self.startWaitingForDictation(id: id)
-                } else {
-                    self.log("Failed to open container app (extensionContext.open returned false)")
-                    self.state = .error("Couldn't open Ritoras app. Make sure it's installed.")
+    }
+
+    /// Opens a URL by traversing the responder chain to find UIApplication.
+    /// This is the ONLY way to open URLs from a keyboard extension.
+    /// extensionContext.open() does NOT work for keyboard extensions (returns false by design).
+    @discardableResult
+    private func openURL(_ url: URL, id: UUID) -> Bool {
+        var responder: UIResponder? = self
+        while let r = responder {
+            if let application = r as? UIApplication {
+                application.open(url, options: [:]) { [weak self] success in
+                    DispatchQueue.main.async {
+                        guard let self = self else { return }
+                        if success {
+                            self.log("Container app opened successfully, waiting for dictation")
+                            self.state = .waiting
+                            self.startWaitingForDictation(id: id)
+                        } else {
+                            self.log("Failed to open container app (application.open returned false)")
+                            self.state = .error("Couldn't open Ritoras app. Make sure it's installed.")
+                        }
+                    }
                 }
+                return true
             }
+            responder = r.next
         }
+        return false
     }
 
     private func startWaitingForDictation(id: UUID) {
