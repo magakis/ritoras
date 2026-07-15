@@ -14,6 +14,44 @@ class KeyboardViewController: UIInputViewController {
     private lazy var audioRecorder = AudioRecorder()
     private var pendingAudioURL: URL?
 
+    // MARK: - Keyboard State
+
+    private var isShifted: Bool = false {
+        didSet {
+            keyboardView.setShiftState(shifted: isShifted, capsLock: isCapsLock)
+        }
+    }
+
+    private var isCapsLock: Bool = false {
+        didSet {
+            keyboardView.setShiftState(shifted: isShifted, capsLock: isCapsLock)
+        }
+    }
+
+    private var layoutMode: KeyboardLayoutMode = .letters {
+        didSet {
+            keyboardView.setLayoutMode(layoutMode)
+        }
+    }
+
+    private var currentWordPrefix: String = "" {
+        didSet {
+            updateSuggestions()
+        }
+    }
+
+    private var lastShiftTapTime: Date?
+
+    private lazy var predictionEngine: PredictionEngine? = {
+        // Wrap in do-catch to degrade gracefully if memory is constrained
+        do {
+            return PredictionEngine()
+        } catch {
+            log("PredictionEngine init failed: \(error)")
+            return nil
+        }
+    }()
+
     // MARK: - Logging
 
     private func log(_ message: String) {
@@ -46,6 +84,7 @@ class KeyboardViewController: UIInputViewController {
         super.viewDidAppear(animated)
         keyboardView.showFullAccessBanner(!hasFullAccess)
         state = .idle
+        updateCurrentWord()
         log("viewDidAppear OK, hasFullAccess: \(hasFullAccess)")
     }
 
@@ -57,6 +96,12 @@ class KeyboardViewController: UIInputViewController {
             await self.audioRecorder.cleanup()
             self.cleanupPendingAudio()
         }
+    }
+
+    override func textDidChange(_ textInput: UITextInput?) {
+        super.textDidChange(textInput)
+        // Recompute current word when text changes externally (e.g., dictation)
+        updateCurrentWord()
     }
 
     deinit {
@@ -95,6 +140,141 @@ class KeyboardViewController: UIInputViewController {
             UIPasteboard.general.string = logs.joined(separator: "\n")
             state = .error("Logs copied to clipboard! Paste somewhere to share.")
         }
+    }
+
+    // MARK: - Current Word Tracking
+
+    private func updateCurrentWord() {
+        guard let context = textDocumentProxy.documentContextBeforeInput as String?,
+              !context.isEmpty else {
+            currentWordPrefix = ""
+            return
+        }
+
+        // Find the last whitespace or newline boundary
+        if let lastSpace = context.rangeOfCharacter(
+            from: .whitespacesAndNewlines,
+            options: .backwards
+        ) {
+            let start = context.index(after: lastSpace.lowerBound)
+            currentWordPrefix = String(context[start...])
+        } else {
+            // Entire context before cursor is the current word
+            currentWordPrefix = context
+        }
+    }
+
+    // MARK: - Suggestions
+
+    private func updateSuggestions() {
+        guard let engine = predictionEngine else {
+            keyboardView.updateSuggestions([])
+            return
+        }
+
+        let suggestions = engine.suggest(prefix: currentWordPrefix, limit: 3)
+        keyboardView.updateSuggestions(suggestions)
+    }
+
+    // MARK: - Key Action Handling
+
+    private func handleKeyAction(_ action: KeyAction) {
+        switch action {
+        case .insertText(let char):
+            handleInsertText(char)
+        case .backspace:
+            handleBackspace()
+        case .shift:
+            handleShift()
+        case .shiftLock:
+            isCapsLock.toggle()
+            isShifted = isCapsLock
+        case .toggleNumber:
+            if layoutMode == .letters {
+                layoutMode = .numbers
+            }
+        case .toggleLetters:
+            layoutMode = .letters
+        case .mic:
+            handleMicButtonTap()
+        case .space:
+            handleSpace()
+        case .return:
+            handleReturn()
+        }
+    }
+
+    private func handleInsertText(_ char: String) {
+        // Apply shift for the first letter if shifted
+        if isShifted && !isCapsLock && char.rangeOfCharacter(from: .letters) != nil {
+            textDocumentProxy.insertText(char.uppercased())
+            isShifted = false
+        } else if isCapsLock && char.rangeOfCharacter(from: .letters) != nil {
+            textDocumentProxy.insertText(char.uppercased())
+        } else {
+            textDocumentProxy.insertText(char)
+        }
+
+        currentWordPrefix.append(char)
+        log("Inserted: \(char), prefix: \(currentWordPrefix)")
+    }
+
+    private func handleBackspace() {
+        textDocumentProxy.deleteBackward()
+
+        if !currentWordPrefix.isEmpty {
+            currentWordPrefix.removeLast()
+        } else {
+            // Try to reconstruct prefix from context after backspace
+            updateCurrentWord()
+        }
+
+        log("Backspace, prefix: \(currentWordPrefix)")
+    }
+
+    private func handleShift() {
+        let now = Date()
+        if let lastTap = lastShiftTapTime, now.timeIntervalSince(lastTap) < 0.3 {
+            // Double tap → caps lock
+            isCapsLock = true
+            isShifted = true
+            lastShiftTapTime = nil
+            log("Caps lock ON")
+        } else {
+            isShifted.toggle()
+            if !isShifted {
+                isCapsLock = false
+            }
+            lastShiftTapTime = now
+            log("Shift: \(isShifted ? "ON" : "OFF")")
+        }
+    }
+
+    private func handleSpace() {
+        textDocumentProxy.insertText(" ")
+        currentWordPrefix = ""
+        log("Space, prefix reset")
+    }
+
+    private func handleReturn() {
+        textDocumentProxy.insertText("\n")
+        currentWordPrefix = ""
+        log("Return")
+    }
+
+    // MARK: - Suggestion Handling
+
+    private func handleSuggestionTap(_ word: String) {
+        // Delete the current word prefix
+        for _ in currentWordPrefix {
+            textDocumentProxy.deleteBackward()
+        }
+
+        // Insert the suggested word + space
+        textDocumentProxy.insertText(word + " ")
+        currentWordPrefix = ""
+
+        log("Suggestion tapped: \(word)")
     }
 
     // MARK: - Mic Button
@@ -171,7 +351,7 @@ class KeyboardViewController: UIInputViewController {
             self.state = .transcribing
 
             let config = SharedConfig.load()
-            self.log("Sending to \(config.baseUrl)...")
+            self.log("Transcribing (servers: \(config.servers.count))...")
 
             do {
                 let transcript = try await WhisperClient.transcribe(audioURL: url, config: config)
@@ -182,6 +362,7 @@ class KeyboardViewController: UIInputViewController {
 
                 self.log("Got transcript: \(transcript.prefix(50))")
                 self.textDocumentProxy.insertText(transcript + " ")
+                self.updateCurrentWord()
                 self.cleanupPendingAudio()
                 await self.audioRecorder.cleanup()
                 self.state = .idle
@@ -210,7 +391,11 @@ extension KeyboardViewController: KeyboardViewDelegate {
         handleMicButtonTap()
     }
 
-    func keyboardViewDidTapNextKeyboard(_ view: KeyboardView) {
-        advanceToNextInputMode()
+    func keyboardView(_ view: KeyboardView, didTapKeyAction action: KeyAction) {
+        handleKeyAction(action)
+    }
+
+    func keyboardView(_ view: KeyboardView, didTapSuggestion word: String) {
+        handleSuggestionTap(word)
     }
 }

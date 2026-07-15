@@ -46,10 +46,14 @@ actor AudioRecorder {
     /// Starts recording speech to a temporary M4A/AAC file (16 kHz, mono).
     ///
     /// This method:
-    /// 1. Requests microphone permission (iOS 17+ `AVAudioApplication` API).
+    /// 1. Checks microphone permission status (must be pre-granted by the container app).
     /// 2. Configures `AVAudioSession` (must happen before creating the recorder
     ///    to avoid `AVAudioSessionErrorCodeCannotStartRecording` / 561145187).
     /// 3. Creates the recorder with Whisper‑friendly settings.
+    /// 4. Calls `prepareToRecord()` before `record()` — skipping this is a
+    ///    documented cause of `record()` returning false.
+    /// 5. Calls `record()` with a single retry on failure: reconfigures the audio
+    ///    session and retries once to handle the first-activation race.
     ///
     /// - Returns: The file URL of the recording in progress.
     /// - Throws: `AudioRecorderError` if permission is denied, session configuration
@@ -95,24 +99,50 @@ actor AudioRecorder {
             AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue
         ]
 
-        // 5. Create and start recorder
+        // 5. Create recorder
+        let newRecorder: AVAudioRecorder
         do {
-            let newRecorder = try AVAudioRecorder(url: tempURL, settings: settings)
-            guard newRecorder.record() else {
-                // record() returned false — clean up and throw
-                currentFileURL = nil
-                AudioSession.deactivate()
-                throw AudioRecorderError.recorderSetupFailed(
-                    NSError(domain: "AVAudioRecorder", code: 0,
-                            userInfo: [NSLocalizedDescriptionKey: "record() returned false"])
-                )
-            }
-            recorder = newRecorder
+            newRecorder = try AVAudioRecorder(url: tempURL, settings: settings)
         } catch {
             currentFileURL = nil
             AudioSession.deactivate()
             throw AudioRecorderError.recorderSetupFailed(error)
         }
+
+        // 6. Prepare the recorder before recording — skipping prepareToRecord()
+        //    is a documented cause of record() returning false.
+        guard newRecorder.prepareToRecord() else {
+            currentFileURL = nil
+            AudioSession.deactivate()
+            throw AudioRecorderError.recorderSetupFailed(
+                NSError(domain: "AVAudioRecorder", code: 0,
+                        userInfo: [NSLocalizedDescriptionKey: "prepareToRecord() returned false"])
+            )
+        }
+
+        // 7. Start recording with a single retry for first-activation race.
+        //    The first setActive(true) after the keyboard appears can silently fail,
+        //    causing record() to return false. Reconfiguring the session and retrying
+        //    resolves this.
+        if !newRecorder.record() {
+            do {
+                try AudioSession.configure()
+            } catch {
+                currentFileURL = nil
+                AudioSession.deactivate()
+                throw AudioRecorderError.invalidSessionConfiguration(error)
+            }
+            guard newRecorder.record() else {
+                currentFileURL = nil
+                AudioSession.deactivate()
+                throw AudioRecorderError.recorderSetupFailed(
+                    NSError(domain: "AVAudioRecorder", code: 0,
+                            userInfo: [NSLocalizedDescriptionKey: "record() returned false after retry"])
+                )
+            }
+        }
+
+        recorder = newRecorder
 
         return tempURL
     }

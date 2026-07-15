@@ -27,6 +27,7 @@ targets:
         INFOPLIST_FILE: app/Info.plist
         PRODUCT_NAME: Ritoras
         GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: app/Ritoras.entitlements
 
   RitorasKeyboard:
     type: app-extension
@@ -40,3 +41,4 @@ targets:
         INFOPLIST_FILE: keyboard/Info.plist
         PRODUCT_NAME: RitorasKeyboard
         GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: keyboard/RitorasKeyboard.entitlements

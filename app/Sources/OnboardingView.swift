@@ -3,7 +3,15 @@ import SwiftUI
 struct OnboardingView: View {
     @Binding var onboardingCompleted: Bool
     @State private var currentPage = 0
-    @State private var showTestAlert = false
+    @State private var testServerURL: String = ""
+    @State private var testStatus: ConnectionTestStatus = .untested
+
+    enum ConnectionTestStatus: Equatable {
+        case untested
+        case testing
+        case success
+        case failure(String)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -22,10 +30,11 @@ struct OnboardingView: View {
                 .padding(.bottom, 32)
         }
         .background(Color(.systemGroupedBackground))
-        .alert("Test Connection", isPresented: $showTestAlert) {
-            Button("OK") {}
-        } message: {
-            Text("Connection testing will be implemented in a future update.")
+        .onAppear {
+            if testServerURL.isEmpty {
+                let config = SharedConfig.load()
+                testServerURL = config.servers.first ?? SharedConfig.Defaults.baseUrl
+            }
         }
     }
 
@@ -166,22 +175,62 @@ struct OnboardingView: View {
                 .font(.largeTitle)
                 .fontWeight(.bold)
 
-            Text("Enter your Whisper server details in the Settings screen. You'll need your server URL and optionally an API key.")
+            Text("Enter your Whisper server URL below to test the connection.")
                 .font(.body)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
 
+            TextField("Server URL", text: $testServerURL)
+                .textContentType(.URL)
+                .textInputAutocapitalization(.never)
+                .keyboardType(.URL)
+                .textFieldStyle(.roundedBorder)
+                .padding(.horizontal, 32)
+                .autocorrectionDisabled()
+
             Button {
-                showTestAlert = true
+                testConnection()
             } label: {
-                Label("Test Connection", systemImage: "antenna.radiowaves.left.and.right")
+                Label(testStatus == .testing ? "Testing..." : "Test Connection",
+                      systemImage: "antenna.radiowaves.left.and.right")
             }
             .buttonStyle(.bordered)
+            .disabled(testStatus == .testing)
+
+            if case .success = testStatus {
+                Label("Connected ✓", systemImage: "checkmark.circle.fill")
+                    .foregroundColor(.green)
+            } else if case .failure(let msg) = testStatus {
+                Label(msg, systemImage: "xmark.circle.fill")
+                    .foregroundColor(.red)
+                    .font(.caption)
+            }
 
             Spacer()
         }
         .tag(3)
+    }
+
+    // MARK: - Helpers
+
+    private func testConnection() {
+        let server = testServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !server.isEmpty else {
+            testStatus = .failure("Please enter a server URL.")
+            return
+        }
+
+        testStatus = .testing
+
+        Task {
+            let healthy = await WhisperClient.checkHealth(serverURL: server, timeout: 10)
+            await MainActor.run {
+                testStatus = healthy
+                    ? .success
+                    : .failure("Could not reach server. Check the URL and try again.")
+            }
+        }
     }
 
     // MARK: - Step Row Helper
