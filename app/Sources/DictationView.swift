@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct DictationView: View {
     @StateObject private var viewModel = DictationViewModel()
@@ -7,6 +8,7 @@ struct DictationView: View {
 
     @State private var elapsed: TimeInterval = 0
     @State private var timer: Timer?
+    @State private var showHistory = false
 
     var body: some View {
         ZStack {
@@ -29,6 +31,9 @@ struct DictationView: View {
                 Spacer()
             }
             .padding()
+        }
+        .sheet(isPresented: $showHistory) {
+            HistoryView()
         }
         .task {
             await viewModel.start(id: requestId)
@@ -77,6 +82,16 @@ struct DictationView: View {
             Text("Tap to stop recording")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
+
+            Button("Cancel") {
+                Task {
+                    await viewModel.cancel()
+                    dismiss()
+                }
+            }
+            .font(.subheadline)
+            .foregroundColor(.secondary)
+            .padding(.top, 8)
         }
         .onAppear {
             startTimer()
@@ -129,6 +144,20 @@ struct DictationView: View {
                 Text("Swipe back to return to your keyboard")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
+            }
+
+            HStack(spacing: 16) {
+                Button {
+                    UIPasteboard.general.string = text
+                } label: {
+                    Label("Copy Text", systemImage: "doc.on.doc")
+                }
+                .buttonStyle(.bordered)
+
+                Button("History") {
+                    showHistory = true
+                }
+                .buttonStyle(.bordered)
             }
 
             Button("Done") {

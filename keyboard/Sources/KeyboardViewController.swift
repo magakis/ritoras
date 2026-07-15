@@ -16,37 +16,7 @@ class KeyboardViewController: UIInputViewController {
 
     private var keyboardView: KeyboardView!
 
-    // MARK: - Keyboard State
-
-    private var isShifted: Bool = false {
-        didSet {
-            keyboardView.setShiftState(shifted: isShifted, capsLock: isCapsLock)
-        }
-    }
-
-    private var isCapsLock: Bool = false {
-        didSet {
-            keyboardView.setShiftState(shifted: isShifted, capsLock: isCapsLock)
-        }
-    }
-
-    private var layoutMode: KeyboardLayoutMode = .letters {
-        didSet {
-            keyboardView.setLayoutMode(layoutMode)
-        }
-    }
-
-    private var currentWordPrefix: String = "" {
-        didSet {
-            updateSuggestions()
-        }
-    }
-
-    private var lastShiftTapTime: Date?
-
-    private lazy var predictionEngine: PredictionEngine? = {
-        PredictionEngine()
-    }()
+    // MARK: - Dictation State
 
     private var darwinToken: DarwinObserverToken?
     private var pendingRequestId: UUID?
@@ -88,9 +58,8 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        keyboardView.showFullAccessBanner(!hasFullAccess)
+        keyboardView.updateFullAccess(hasFullAccess)
         state = .idle
-        updateCurrentWord()
         log("viewDidAppear OK, hasFullAccess: \(hasFullAccess)")
         checkForPendingDictation()
     }
@@ -98,12 +67,6 @@ class KeyboardViewController: UIInputViewController {
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         log("viewWillDisappear")
-    }
-
-    override func textDidChange(_ textInput: UITextInput?) {
-        super.textDidChange(textInput)
-        // Recompute current word when text changes externally (e.g., dictation)
-        updateCurrentWord()
     }
 
     deinit {
@@ -129,7 +92,7 @@ class KeyboardViewController: UIInputViewController {
             keyboardView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
-        let heightConstraint = view.heightAnchor.constraint(equalToConstant: 280)
+        let heightConstraint = view.heightAnchor.constraint(equalToConstant: 140)
         heightConstraint.priority = .defaultHigh
         heightConstraint.isActive = true
 
@@ -146,148 +109,13 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
-    // MARK: - Current Word Tracking
-
-    private func updateCurrentWord() {
-        guard let context = textDocumentProxy.documentContextBeforeInput as String?,
-              !context.isEmpty else {
-            currentWordPrefix = ""
-            return
-        }
-
-        // Find the last whitespace or newline boundary
-        if let lastSpace = context.rangeOfCharacter(
-            from: .whitespacesAndNewlines,
-            options: .backwards
-        ) {
-            let start = context.index(after: lastSpace.lowerBound)
-            currentWordPrefix = String(context[start...])
-        } else {
-            // Entire context before cursor is the current word
-            currentWordPrefix = context
-        }
-    }
-
-    // MARK: - Suggestions
-
-    private func updateSuggestions() {
-        guard let engine = predictionEngine else {
-            keyboardView.updateSuggestions([])
-            return
-        }
-
-        let suggestions = engine.suggest(prefix: currentWordPrefix, limit: 3)
-        keyboardView.updateSuggestions(suggestions)
-    }
-
-    // MARK: - Key Action Handling
-
-    private func handleKeyAction(_ action: KeyAction) {
-        switch action {
-        case .insertText(let char):
-            handleInsertText(char)
-        case .backspace:
-            handleBackspace()
-        case .shift:
-            handleShift()
-        case .shiftLock:
-            isCapsLock.toggle()
-            isShifted = isCapsLock
-        case .toggleNumber:
-            if layoutMode == .letters {
-                layoutMode = .numbers
-            }
-        case .toggleLetters:
-            layoutMode = .letters
-        case .mic:
-            handleMicButtonTap()
-        case .space:
-            handleSpace()
-        case .return:
-            handleReturn()
-        }
-    }
-
-    private func handleInsertText(_ char: String) {
-        // Apply shift for the first letter if shifted
-        if isShifted && !isCapsLock && char.rangeOfCharacter(from: .letters) != nil {
-            textDocumentProxy.insertText(char.uppercased())
-            isShifted = false
-        } else if isCapsLock && char.rangeOfCharacter(from: .letters) != nil {
-            textDocumentProxy.insertText(char.uppercased())
-        } else {
-            textDocumentProxy.insertText(char)
-        }
-
-        currentWordPrefix.append(char)
-        log("Inserted: \(char), prefix: \(currentWordPrefix)")
-    }
-
-    private func handleBackspace() {
-        textDocumentProxy.deleteBackward()
-
-        if !currentWordPrefix.isEmpty {
-            currentWordPrefix.removeLast()
-        } else {
-            // Try to reconstruct prefix from context after backspace
-            updateCurrentWord()
-        }
-
-        log("Backspace, prefix: \(currentWordPrefix)")
-    }
-
-    private func handleShift() {
-        let now = Date()
-        if let lastTap = lastShiftTapTime, now.timeIntervalSince(lastTap) < 0.3 {
-            // Double tap → caps lock
-            isCapsLock = true
-            isShifted = true
-            lastShiftTapTime = nil
-            log("Caps lock ON")
-        } else {
-            isShifted.toggle()
-            if !isShifted {
-                isCapsLock = false
-            }
-            lastShiftTapTime = now
-            log("Shift: \(isShifted ? "ON" : "OFF")")
-        }
-    }
-
-    private func handleSpace() {
-        textDocumentProxy.insertText(" ")
-        currentWordPrefix = ""
-        log("Space, prefix reset")
-    }
-
-    private func handleReturn() {
-        textDocumentProxy.insertText("\n")
-        currentWordPrefix = ""
-        log("Return")
-    }
-
-    // MARK: - Suggestion Handling
-
-    private func handleSuggestionTap(_ word: String) {
-        // Delete the current word prefix
-        for _ in currentWordPrefix {
-            textDocumentProxy.deleteBackward()
-        }
-
-        // Insert the suggested word + space
-        textDocumentProxy.insertText(word + " ")
-        currentWordPrefix = ""
-
-        log("Suggestion tapped: \(word)")
-    }
-
     // MARK: - Mic Button
 
     private func handleMicButtonTap() {
         switch state {
         case .idle:
             guard hasFullAccess else {
-                state = .error("Full Access required. Settings → General → Keyboard → Ritoras → Allow Full Access.")
+                state = .error("Full Access required. Settings \u{2192} General \u{2192} Keyboard \u{2192} Ritoras \u{2192} Allow Full Access.")
                 return
             }
             openContainerAppForDictation()
@@ -640,13 +468,5 @@ class KeyboardViewController: UIInputViewController {
 extension KeyboardViewController: KeyboardViewDelegate {
     func keyboardViewDidTapMicButton(_ view: KeyboardView) {
         handleMicButtonTap()
-    }
-
-    func keyboardView(_ view: KeyboardView, didTapKeyAction action: KeyAction) {
-        handleKeyAction(action)
-    }
-
-    func keyboardView(_ view: KeyboardView, didTapSuggestion word: String) {
-        handleSuggestionTap(word)
     }
 }

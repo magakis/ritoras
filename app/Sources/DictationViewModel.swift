@@ -81,6 +81,7 @@ final class DictationViewModel: ObservableObject {
             let newRecorder = AudioRecorder()
             _ = try await newRecorder.startRecording()
             recorder = newRecorder
+            UIApplication.shared.isIdleTimerDisabled = true
         } catch {
             let message = error.localizedDescription
             DictationPayload(
@@ -99,6 +100,7 @@ final class DictationViewModel: ObservableObject {
         let audioURL = await recorder.stopRecording()
 
         guard let url = audioURL else {
+            UIApplication.shared.isIdleTimerDisabled = false
             let message = "Recording was empty. Please try again."
             DictationPayload(
                 id: id, status: .error, errorMessage: message, timestamp: Date()
@@ -122,8 +124,11 @@ final class DictationViewModel: ObservableObject {
             ).save()
             writeToClipboard(status: "completed", text: text)
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+            TranscriptionHistory.shared.add(text: text)
+            UIApplication.shared.isIdleTimerDisabled = false
             phase = .done(text)
         } catch {
+            UIApplication.shared.isIdleTimerDisabled = false
             let message = error.localizedDescription
             DictationPayload(
                 id: id, status: .error, errorMessage: message, timestamp: Date()
@@ -135,6 +140,7 @@ final class DictationViewModel: ObservableObject {
     }
 
     func cancel() async {
+        UIApplication.shared.isIdleTimerDisabled = false
         await recorder?.cleanup()
         recorder = nil
 

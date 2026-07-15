@@ -35,6 +35,7 @@ struct SettingsView: View {
         Form {
             serverSection
             timeoutSection
+            historySection
             infoSection
         }
         .navigationTitle("Ritoras Settings")
@@ -124,6 +125,16 @@ struct SettingsView: View {
             }
         } header: {
             Text("Network")
+        }
+    }
+
+    // MARK: - History Section
+
+    private var historySection: some View {
+        Section {
+            NavigationLink("Transcription History") {
+                HistoryView()
+            }
         }
     }
 
