@@ -14,7 +14,6 @@ enum KeyboardState: Equatable {
 
 protocol KeyboardViewDelegate: AnyObject {
     func keyboardViewDidTapMicButton(_ view: KeyboardView)
-    func keyboardViewDidTapSwitchButton(_ view: KeyboardView)
 }
 
 // MARK: - KeyboardView
@@ -23,7 +22,6 @@ class KeyboardView: UIView {
     weak var delegate: KeyboardViewDelegate?
 
     private let micButton = UIButton(type: .system)
-    private let switchButton = UIButton(type: .system)
     private let buttonStack = UIStackView()
     private let hintLabel = UILabel()
     private let stateLabel = UILabel()
@@ -57,25 +55,11 @@ class KeyboardView: UIView {
         micButton.clipsToBounds = true
         micButton.addTarget(self, action: #selector(micTapped), for: .touchUpInside)
 
-        // Switch keyboard button — 44pt, globe icon
-        switchButton.translatesAutoresizingMaskIntoConstraints = false
-        switchButton.layer.cornerRadius = 22
-        switchButton.clipsToBounds = true
-        switchButton.backgroundColor = UIColor { tc in
-            tc.userInterfaceStyle == .dark
-                ? UIColor(white: 0.35, alpha: 1)
-                : .systemGray4
-        }
-        switchButton.tintColor = .label
-        switchButton.setImage(UIImage(systemName: "globe", withConfiguration: UIImage.SymbolConfiguration(pointSize: 22, weight: .regular)), for: .normal)
-        switchButton.addTarget(self, action: #selector(switchTapped), for: .touchUpInside)
-
-        // Button stack — mic + switch side by side
+        // Button stack — mic centered
         buttonStack.axis = .horizontal
         buttonStack.spacing = 16
         buttonStack.alignment = .center
         buttonStack.addArrangedSubview(micButton)
-        buttonStack.addArrangedSubview(switchButton)
         buttonStack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(buttonStack)
 
@@ -111,10 +95,6 @@ class KeyboardView: UIView {
             // Mic button size
             micButton.widthAnchor.constraint(equalToConstant: 60),
             micButton.heightAnchor.constraint(equalToConstant: 60),
-
-            // Switch button size
-            switchButton.widthAnchor.constraint(equalToConstant: 44),
-            switchButton.heightAnchor.constraint(equalToConstant: 44),
 
             // Hint label — below button stack
             hintLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
@@ -215,7 +195,4 @@ class KeyboardView: UIView {
         delegate?.keyboardViewDidTapMicButton(self)
     }
 
-    @objc private func switchTapped() {
-        delegate?.keyboardViewDidTapSwitchButton(self)
-    }
 }

@@ -392,15 +392,13 @@ class KeyboardViewController: UIInputViewController {
                 self?.state = .idle
             }
 
-        case "transcribing":
-            log("Dictation still transcribing (clipboard), starting poll")
+        case "transcribing", "recording":
+            log("Dictation still \(status) (clipboard), starting poll")
             state = .waiting
-            startClipboardPolling()
-
-        case "recording":
-            log("Dictation still recording (clipboard), starting poll")
-            state = .waiting
-            startClipboardPolling()
+            if clipboardPollTimer == nil {
+                startClipboardPolling()
+            }
+            return
 
         case "error":
             let errorMessage = json["errorMessage"] as? String ?? "Transcription failed."
@@ -426,20 +424,70 @@ class KeyboardViewController: UIInputViewController {
             guard let self = self else { timer.invalidate(); return }
             self.clipboardPollCount += 1
 
+            // Timeout after 30 seconds
             if self.clipboardPollCount > 30 {
                 timer.invalidate()
+                self.clipboardPollTimer = nil
                 self.state = .error("Dictation timed out. Try again.")
+                self.clearClipboardDictation()
                 return
             }
 
-            // Re-check clipboard
-            self.tryClipboardDictation()
+            // Directly check clipboard — do NOT call tryClipboardDictation() (causes infinite recursion)
+            guard let clipboardStr = UIPasteboard.general.string,
+                  let data = clipboardStr.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  json["source"] as? String == "ritoras" else {
+                return  // No ritoras payload, keep polling
+            }
 
-            // If we're no longer in waiting state, the polling found a result — stop
-            if case .waiting = self.state {
-                // Still waiting, keep polling
-            } else {
+            guard let timestamp = json["timestamp"] as? Double else { return }
+            guard Date().timeIntervalSince1970 - timestamp < 120 else { return }
+
+            let status = json["status"] as? String ?? ""
+            let payloadId = UUID(uuidString: json["id"] as? String ?? "")
+
+            if payloadId == self.lastProcessedPayloadId { return }
+
+            switch status {
+            case "completed":
                 timer.invalidate()
+                self.clipboardPollTimer = nil
+                let text = json["text"] as? String ?? ""
+                if text.isEmpty {
+                    self.state = .error("Nothing was heard. Try again.")
+                } else {
+                    self.state = .inserting
+                    self.textDocumentProxy.insertText(text + " ")
+                    self.log("Inserted dictation from clipboard poll: \(text)")
+                }
+                self.lastProcessedPayloadId = payloadId
+                self.clearClipboardDictation()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                    self?.state = .idle
+                }
+
+            case "error":
+                timer.invalidate()
+                self.clipboardPollTimer = nil
+                let errorMessage = json["errorMessage"] as? String ?? "Transcription failed."
+                self.state = .error(errorMessage)
+                self.lastProcessedPayloadId = payloadId
+                self.clearClipboardDictation()
+
+            case "cancelled":
+                timer.invalidate()
+                self.clipboardPollTimer = nil
+                self.clearClipboardDictation()
+                self.state = .idle
+
+            case "transcribing", "recording":
+                // Still in progress — keep polling (DO NOT reset counter, DO NOT restart polling)
+                self.log("Still transcribing (poll \(self.clipboardPollCount)/30)")
+                break
+
+            default:
+                break
             }
         }
     }
@@ -470,7 +518,4 @@ extension KeyboardViewController: KeyboardViewDelegate {
         handleMicButtonTap()
     }
 
-    func keyboardViewDidTapSwitchButton(_ view: KeyboardView) {
-        advanceToNextInputMode()
-    }
 }
