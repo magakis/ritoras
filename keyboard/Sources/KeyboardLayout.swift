@@ -2,7 +2,7 @@ import UIKit
 
 // MARK: - Key Action
 
-enum KeyAction: Equatable {
+enum KeyAction: Hashable {
     case insertText(String)
     case backspace
     case shift

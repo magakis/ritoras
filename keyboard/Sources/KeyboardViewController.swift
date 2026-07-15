@@ -43,13 +43,7 @@ class KeyboardViewController: UIInputViewController {
     private var lastShiftTapTime: Date?
 
     private lazy var predictionEngine: PredictionEngine? = {
-        // Wrap in do-catch to degrade gracefully if memory is constrained
-        do {
-            return PredictionEngine()
-        } catch {
-            log("PredictionEngine init failed: \(error)")
-            return nil
-        }
+        PredictionEngine()
     }()
 
     // MARK: - Logging

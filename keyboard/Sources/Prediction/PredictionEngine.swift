@@ -70,12 +70,12 @@ final class PredictionEngine {
         }
 
         // Collect all words under this prefix
-        var results: [(word: String, frequency: Int)] = []
+        var results: [(String, Int)] = []
         collectWords(from: node, prefix: lowerPrefix, results: &results)
 
         // Sort by frequency descending and take top N
-        results.sort { $0.frequency > $1.frequency }
-        let top = results.prefix(limit).map { $0.word }
+        results.sort { $0.1 > $1.1 }
+        let top = results.prefix(limit).map { $0.0 }
 
         // Preserve original capitalization style
         if trimmed.first?.isUppercase == true {
@@ -85,10 +85,10 @@ final class PredictionEngine {
     }
 
     private func defaultSuggestions(limit: Int) -> [String] {
-        var results: [(word: String, frequency: Int)] = []
+        var results: [(String, Int)] = []
         collectWords(from: root, prefix: "", results: &results)
-        results.sort { $0.frequency > $1.frequency }
-        return results.prefix(limit).map { $0.word }
+        results.sort { $0.1 > $1.1 }
+        return results.prefix(limit).map { $0.0 }
     }
 
     private func collectWords(from node: TrieNode, prefix: String, results: inout [(String, Int)]) {

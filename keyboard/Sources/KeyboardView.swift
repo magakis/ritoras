@@ -130,7 +130,7 @@ class KeyboardView: UIView {
         suggestionBarTopConstraint = suggestionBar.topAnchor.constraint(equalTo: fullAccessBanner.bottomAnchor, constant: 4)
         suggestionBarTopNormal = suggestionBar.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 4)
 
-        suggestionBarTopNormal.isActive = true
+        suggestionBarTopNormal?.isActive = true
 
         NSLayoutConstraint.activate([
             suggestionBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
