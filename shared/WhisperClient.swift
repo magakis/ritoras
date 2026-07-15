@@ -157,6 +157,26 @@ enum WhisperClient {
         return false
     }
 
+    /// Writes the multipart/form-data body to a temp file and returns its URL.
+    /// Background URLSession uploads REQUIRE a file body (`uploadTask(with:fromFile:)`);
+    /// Data-bodied uploads are not background-safe.
+    static func writeMultipartBodyToFile(baseURL: String, audioURL: URL, boundary: String) throws -> URL {
+        let bodyURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("whisper-body-\(UUID().uuidString).bin")
+
+        var body = Data()
+        func append(_ string: String) { body.append(string.data(using: .utf8)!) }
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"audio\"; filename=\"audio.m4a\"\r\n")
+        append("Content-Type: audio/mp4\r\n\r\n")
+        body.append(try Data(contentsOf: audioURL))
+        append("\r\n")
+        append("--\(boundary)--\r\n")
+
+        try body.write(to: bodyURL)
+        return bodyURL
+    }
+
     // MARK: - Private Helpers
 
     /// Builds a multipart/form-data URLRequest targeting a single server.

@@ -16,6 +16,40 @@ final class DictationViewModel: ObservableObject {
     private var recorder: AudioRecorder?
     private var activeID: UUID?
 
+    private var resultObserver: NSObjectProtocol?
+
+    init() {
+        // BackgroundTranscriptionService posts .dictationResultReady when a
+        // background transcription finishes. Update the UI if the result is for
+        // the dictation currently on screen.
+        resultObserver = NotificationCenter.default.addObserver(
+            forName: .dictationResultReady, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self = self else { return }
+            let id = note.userInfo?["id"] as? UUID
+            let status = note.userInfo?["status"] as? String ?? ""
+            let text = note.userInfo?["text"] as? String ?? ""
+            let errorMessage = note.userInfo?["errorMessage"] as? String ?? ""
+            Task { @MainActor in
+                guard id == self.activeID else { return }
+                switch status {
+                case "completed":
+                    self.phase = text.isEmpty
+                        ? .error("Nothing was heard. Try again.")
+                        : .done(text)
+                case "error":
+                    self.phase = .error(errorMessage.isEmpty ? "Transcription failed." : errorMessage)
+                default:
+                    break
+                }
+            }
+        }
+    }
+
+    deinit {
+        if let resultObserver { NotificationCenter.default.removeObserver(resultObserver) }
+    }
+
     // MARK: - Clipboard Transport
 
     /// Writes the dictation result to the clipboard as a MULTI-TYPE pasteboard
@@ -181,49 +215,19 @@ final class DictationViewModel: ObservableObject {
 
         phase = .transcribing
         DictationPayload(id: id, status: .transcribing, timestamp: Date()).save()
-        writeToClipboard(status: "transcribing")
         postResultToServer(status: "transcribing")
+        UIApplication.shared.isIdleTimerDisabled = false
+        AudioSession.deactivate()
 
-        // Start background task to keep app alive during transcription
-        var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
-        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "WhisperTranscription") {
-            // Expiration handler — app is about to be killed
-            UIApplication.shared.endBackgroundTask(backgroundTaskID)
-            backgroundTaskID = .invalid
-        }
-
-        do {
-            let config = SharedConfig.load()
-            let text = try await WhisperClient.transcribe(audioURL: url, config: config)
-
-            DictationPayload(
-                id: id, status: .completed, text: text, timestamp: Date()
-            ).save()
-            writeToClipboard(status: "completed", text: text)
-            postResultToServer(status: "completed", text: text)
-            DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-            TranscriptionHistory.shared.add(text: text)
-            UIApplication.shared.isIdleTimerDisabled = false
-            AudioSession.deactivate()
-            phase = .done(text)
-        } catch {
-            UIApplication.shared.isIdleTimerDisabled = false
-            AudioSession.deactivate()
-            let message = error.localizedDescription
-            DictationPayload(
-                id: id, status: .error, errorMessage: message, timestamp: Date()
-            ).save()
-            writeToClipboard(status: "error", errorMessage: message)
-            postResultToServer(status: "error", errorMessage: message)
-            DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-            phase = .error(message)
-        }
-
-        // End background task
-        if backgroundTaskID != .invalid {
-            UIApplication.shared.endBackgroundTask(backgroundTaskID)
-            backgroundTaskID = .invalid
-        }
+        // Hand transcription to the background URLSession service. nsurlsessiond
+        // performs the upload out-of-process, so it completes even if iOS
+        // suspends or kills this app while the user is in another app (Scenario
+        // B). The result is delivered via BackgroundTranscriptionService to the
+        // clipboard (which the keyboard auto-reads), the App Group, and a Darwin
+        // notification; if we're still in the foreground, .dictationResultReady
+        // updates this view model so the UI shows "done".
+        let config = SharedConfig.load()
+        BackgroundTranscriptionService.shared.transcribe(audioURL: url, id: id, config: config)
     }
 
     func cancel() async {
