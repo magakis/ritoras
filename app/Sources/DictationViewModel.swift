@@ -219,15 +219,47 @@ final class DictationViewModel: ObservableObject {
         UIApplication.shared.isIdleTimerDisabled = false
         AudioSession.deactivate()
 
-        // Hand transcription to the background URLSession service. nsurlsessiond
-        // performs the upload out-of-process, so it completes even if iOS
-        // suspends or kills this app while the user is in another app (Scenario
-        // B). The result is delivered via BackgroundTranscriptionService to the
-        // clipboard (which the keyboard auto-reads), the App Group, and a Darwin
-        // notification; if we're still in the foreground, .dictationResultReady
-        // updates this view model so the UI shows "done".
         let config = SharedConfig.load()
+
+        // Background URLSession upload — if the user backgrounds the app before
+        // the foreground upload finishes, nsurlsessiond completes this one and
+        // delivers the result (Scenario B). Background session tasks are often
+        // deferred while the app is foreground, so we ALSO run the foreground
+        // upload below for the responsive on-screen UI.
         BackgroundTranscriptionService.shared.transcribe(audioURL: url, id: id, config: config)
+
+        // Foreground upload (Scenario A) — runs immediately while the app is in
+        // the foreground and updates the UI directly. A background task keeps
+        // the app alive briefly if the user switches away mid-flight.
+        var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "WhisperTranscription") {
+            UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            backgroundTaskID = .invalid
+        }
+
+        do {
+            let text = try await WhisperClient.transcribe(audioURL: url, config: config)
+            guard activeID == id else { return }
+            DictationPayload(id: id, status: .completed, text: text, timestamp: Date()).save()
+            writeToClipboard(status: "completed", text: text)
+            postResultToServer(status: "completed", text: text)
+            DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+            TranscriptionHistory.shared.add(text: text)
+            phase = .done(text)
+        } catch {
+            guard activeID == id else { return }
+            let message = error.localizedDescription
+            DictationPayload(id: id, status: .error, errorMessage: message, timestamp: Date()).save()
+            writeToClipboard(status: "error", errorMessage: message)
+            postResultToServer(status: "error", errorMessage: message)
+            DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+            phase = .error(message)
+        }
+
+        if backgroundTaskID != .invalid {
+            UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            backgroundTaskID = .invalid
+        }
     }
 
     func cancel() async {
