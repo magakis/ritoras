@@ -14,6 +14,7 @@ enum KeyboardState: Equatable {
 
 protocol KeyboardViewDelegate: AnyObject {
     func keyboardViewDidTapMicButton(_ view: KeyboardView)
+    func keyboardViewDidTapBackspace(_ view: KeyboardView)
 }
 
 // MARK: - KeyboardView
@@ -22,6 +23,7 @@ class KeyboardView: UIView {
     weak var delegate: KeyboardViewDelegate?
 
     private let micButton = UIButton(type: .system)
+    private let backspaceButton = UIButton(type: .system)
     private let buttonStack = UIStackView()
     private let hintLabel = UILabel()
     private let stateLabel = UILabel()
@@ -55,11 +57,23 @@ class KeyboardView: UIView {
         micButton.clipsToBounds = true
         micButton.addTarget(self, action: #selector(micTapped), for: .touchUpInside)
 
-        // Button stack — mic centered
+        // Backspace button — 44pt, to the right of mic
+        backspaceButton.translatesAutoresizingMaskIntoConstraints = false
+        backspaceButton.layer.cornerRadius = 22
+        backspaceButton.clipsToBounds = true
+        backspaceButton.addTarget(self, action: #selector(backspaceTapped), for: .touchUpInside)
+
+        // Long-press for continuous backspace
+        let backspaceLongPress = UILongPressGestureRecognizer(target: self, action: #selector(backspaceLongPress(_:)))
+        backspaceLongPress.minimumPressDuration = 0.4
+        backspaceButton.addGestureRecognizer(backspaceLongPress)
+
+        // Button stack — mic + backspace
         buttonStack.axis = .horizontal
-        buttonStack.spacing = 16
+        buttonStack.spacing = 20
         buttonStack.alignment = .center
         buttonStack.addArrangedSubview(micButton)
+        buttonStack.addArrangedSubview(backspaceButton)
         buttonStack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(buttonStack)
 
@@ -95,6 +109,10 @@ class KeyboardView: UIView {
             // Mic button size
             micButton.widthAnchor.constraint(equalToConstant: 60),
             micButton.heightAnchor.constraint(equalToConstant: 60),
+
+            // Backspace button size
+            backspaceButton.widthAnchor.constraint(equalToConstant: 44),
+            backspaceButton.heightAnchor.constraint(equalToConstant: 44),
 
             // Hint label — below button stack
             hintLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
@@ -134,6 +152,7 @@ class KeyboardView: UIView {
             hintLabel.text = hasFullAccess ? "Tap to dictate" : "Enable Full Access to dictate"
             hintLabel.isHidden = false
             stateLabel.isHidden = true
+            configureBackspace(enabled: true)
 
         case .openingApp:
             micButton.isHidden = false
@@ -188,11 +207,41 @@ class KeyboardView: UIView {
             stateLabel.text = message
             stateLabel.isHidden = false
             stateLabel.numberOfLines = 2
+            configureBackspace(enabled: true)
         }
     }
 
     @objc private func micTapped() {
         delegate?.keyboardViewDidTapMicButton(self)
+    }
+
+    @objc private func backspaceTapped() {
+        delegate?.keyboardViewDidTapBackspace(self)
+    }
+
+    @objc private func backspaceLongPress(_ gesture: UILongPressGestureRecognizer) {
+        if gesture.state == .began {
+            backspaceTapped()
+        } else if gesture.state == .changed {
+            backspaceTapped()
+        }
+    }
+
+    private func configureBackspace(enabled: Bool) {
+        let config = UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
+        backspaceButton.setImage(UIImage(systemName: "delete.left", withConfiguration: config), for: .normal)
+        backspaceButton.tintColor = UIColor { tc in
+            tc.userInterfaceStyle == .dark
+                ? UIColor(white: 0.7, alpha: 1)
+                : UIColor(white: 0.3, alpha: 1)
+        }
+        backspaceButton.backgroundColor = UIColor { tc in
+            tc.userInterfaceStyle == .dark
+                ? UIColor(white: 0.28, alpha: 1)
+                : UIColor(white: 0.82, alpha: 1)
+        }
+        backspaceButton.isEnabled = enabled
+        backspaceButton.isHidden = !enabled
     }
 
 }

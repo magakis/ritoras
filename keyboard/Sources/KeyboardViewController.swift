@@ -28,9 +28,20 @@ class KeyboardViewController: UIInputViewController {
     private var clipboardPollTimer: Timer?
     private var clipboardPollCount = 0
 
+    // Persisted across keyboard process restarts
+    private var lastProcessedPayloadId: UUID? {
+        get { UUID(uuidString: UserDefaults.standard.string(forKey: "ritoras_last_pid") ?? "") }
+        set { UserDefaults.standard.set(newValue?.uuidString, forKey: "ritoras_last_pid") }
+    }
+
     // MARK: - Server Polling
 
-    private var lastProcessedTimestamp: Double = 0
+    // Persisted across keyboard process restarts to prevent re-processing
+    // the same dictation result when the user switches apps.
+    private var lastProcessedTimestamp: Double {
+        get { UserDefaults.standard.double(forKey: "ritoras_last_ts") }
+        set { UserDefaults.standard.set(newValue, forKey: "ritoras_last_ts") }
+    }
     private var serverPollTimer: Timer?
     private var serverPollCount = 0
 
@@ -65,14 +76,34 @@ class KeyboardViewController: UIInputViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         keyboardView.updateFullAccess(hasFullAccess)
-        state = .idle
-        log("viewDidAppear OK, hasFullAccess: \(hasFullAccess)")
-        checkForPendingDictation()
+
+        // ONLY check for pending dictation if we actually have an active request.
+        // This prevents the keyboard from entering "Dictating..." state every time
+        // it appears in a new app.
+        if let id = pendingRequestId {
+            log("viewDidAppear — resuming pending dictation: \(id)")
+            state = .waiting
+            checkForPendingDictation()
+        } else {
+            state = .idle
+            log("viewDidAppear — idle, hasFullAccess: \(hasFullAccess)")
+        }
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         log("viewWillDisappear")
+
+        // Cancel ALL timers so they don't fire across app switches.
+        // The dictation may still complete on the server while we're away;
+        // when the keyboard reappears, viewDidAppear will resume polling
+        // if pendingRequestId is still set.
+        waitTimer?.invalidate()
+        pollTimer?.invalidate()
+        clipboardPollTimer?.invalidate()
+        serverPollTimer?.invalidate()
+        errorResetWorkItem?.cancel()
+        darwinToken = nil
     }
 
     deinit {
@@ -406,6 +437,7 @@ class KeyboardViewController: UIInputViewController {
                         self.log("Inserted dictation from server: \(text)")
                     }
                     self.lastProcessedTimestamp = timestamp
+                    self.pendingRequestId = nil
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                         self?.state = .idle
                     }
@@ -464,6 +496,7 @@ class KeyboardViewController: UIInputViewController {
                 log("Auto-inserted dictation from clipboard: \(text)")
             }
             lastProcessedPayloadId = payloadId
+            pendingRequestId = nil
             clearClipboardDictation()
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                 self?.state = .idle
@@ -547,6 +580,7 @@ class KeyboardViewController: UIInputViewController {
                     self.log("Inserted dictation from clipboard poll: \(text)")
                 }
                 self.lastProcessedPayloadId = payloadId
+                self.pendingRequestId = nil
                 self.clearClipboardDictation()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                     self?.state = .idle
@@ -603,4 +637,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         handleMicButtonTap()
     }
 
+    func keyboardViewDidTapBackspace(_ view: KeyboardView) {
+        textDocumentProxy.deleteBackward()
+    }
 }
