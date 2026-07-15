@@ -36,6 +36,34 @@ final class DictationViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Server Transport
+
+    /// Posts dictation status to the Whisper server so the keyboard can poll
+    /// for results. Works even when the app is backgrounded (clipboard fails).
+    private func postResultToServer(status: String, text: String? = nil, errorMessage: String? = nil) {
+        let config = SharedConfig.load()
+        guard let server = config.servers.first else { return }
+        guard let url = URL(string: "\(server)/dictation_result") else { return }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 10
+
+        var payload: [String: Any] = [
+            "source": "ritoras",
+            "timestamp": Date().timeIntervalSince1970,
+            "status": status
+        ]
+        if let text = text { payload["text"] = text }
+        if let errorMessage = errorMessage { payload["errorMessage"] = errorMessage }
+
+        request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+        // Fire and forget — use a background task so it completes even if app is backgrounded
+        URLSession.shared.dataTask(with: request).resume()
+    }
+
     func start(id: UUID) async {
         activeID = id
         phase = .recording
@@ -43,6 +71,7 @@ final class DictationViewModel: ObservableObject {
         // Save initial recording payload
         DictationPayload(id: id, status: .recording, timestamp: Date()).save()
         writeToClipboard(status: "recording")
+        postResultToServer(status: "recording")
 
         // Check microphone permission before attempting to record
         switch AVAudioSession.sharedInstance().recordPermission {
@@ -58,6 +87,7 @@ final class DictationViewModel: ObservableObject {
                     id: id, status: .error, errorMessage: message, timestamp: Date()
                 ).save()
                 writeToClipboard(status: "error", errorMessage: message)
+                postResultToServer(status: "error", errorMessage: message)
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
                 phase = .error(message)
                 return
@@ -68,6 +98,7 @@ final class DictationViewModel: ObservableObject {
                 id: id, status: .error, errorMessage: message, timestamp: Date()
             ).save()
             writeToClipboard(status: "error", errorMessage: message)
+            postResultToServer(status: "error", errorMessage: message)
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
             phase = .error(message)
             return
@@ -89,6 +120,7 @@ final class DictationViewModel: ObservableObject {
                 id: id, status: .error, errorMessage: message, timestamp: Date()
             ).save()
             writeToClipboard(status: "error", errorMessage: message)
+            postResultToServer(status: "error", errorMessage: message)
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
             phase = .error(message)
         }
@@ -108,6 +140,7 @@ final class DictationViewModel: ObservableObject {
                 id: id, status: .error, errorMessage: message, timestamp: Date()
             ).save()
             writeToClipboard(status: "error", errorMessage: message)
+            postResultToServer(status: "error", errorMessage: message)
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
             phase = .error(message)
             return
@@ -116,6 +149,7 @@ final class DictationViewModel: ObservableObject {
         phase = .transcribing
         DictationPayload(id: id, status: .transcribing, timestamp: Date()).save()
         writeToClipboard(status: "transcribing")
+        postResultToServer(status: "transcribing")
 
         // Start background task to keep app alive during transcription
         var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
@@ -133,6 +167,7 @@ final class DictationViewModel: ObservableObject {
                 id: id, status: .completed, text: text, timestamp: Date()
             ).save()
             writeToClipboard(status: "completed", text: text)
+            postResultToServer(status: "completed", text: text)
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
             TranscriptionHistory.shared.add(text: text)
             UIApplication.shared.isIdleTimerDisabled = false
@@ -146,6 +181,7 @@ final class DictationViewModel: ObservableObject {
                 id: id, status: .error, errorMessage: message, timestamp: Date()
             ).save()
             writeToClipboard(status: "error", errorMessage: message)
+            postResultToServer(status: "error", errorMessage: message)
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
             phase = .error(message)
         }
@@ -167,6 +203,7 @@ final class DictationViewModel: ObservableObject {
                 id: id, status: .cancelled, timestamp: Date()
             ).save()
             writeToClipboard(status: "cancelled")
+            postResultToServer(status: "cancelled")
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
         }
         activeID = nil

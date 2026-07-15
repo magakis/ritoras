@@ -28,6 +28,12 @@ class KeyboardViewController: UIInputViewController {
     private var clipboardPollTimer: Timer?
     private var clipboardPollCount = 0
 
+    // MARK: - Server Polling
+
+    private var lastProcessedTimestamp: Double = 0
+    private var serverPollTimer: Timer?
+    private var serverPollCount = 0
+
     // MARK: - Logging
 
     private func log(_ message: String) {
@@ -74,6 +80,7 @@ class KeyboardViewController: UIInputViewController {
         waitTimer?.invalidate()
         pollTimer?.invalidate()
         clipboardPollTimer?.invalidate()
+        serverPollTimer?.invalidate()
         errorResetWorkItem?.cancel()
     }
 
@@ -204,6 +211,12 @@ class KeyboardViewController: UIInputViewController {
         guard let payload = DictationPayload.current() else {
             // Try clipboard fallback (works under SideStore)
             tryClipboardDictation()
+            // Also poll the server — clipboard fails when app is backgrounded
+            pollServerForDictation()
+            if state == .idle {
+                state = .waiting
+                startServerPolling()
+            }
             return
         }
 
@@ -252,50 +265,14 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Pending Dictation (Recovery on Keyboard Reappear)
 
     private func checkForPendingDictation() {
-        // Try App Group first (works if properly signed)
-        guard let payload = DictationPayload.current() else {
-            // Try clipboard (works under SideStore — App Group doesn't)
-            tryClipboardDictation()
-            return
-        }
+        // Try clipboard first (instant, works if user stayed in app)
+        tryClipboardDictation()
 
-        // Only process payloads from the last 120 seconds (ignore old ones)
-        guard Date().timeIntervalSince(payload.timestamp) < 120 else { return }
-
-        // Don't process the same payload twice — track the last processed payload ID
-        if payload.id == lastProcessedPayloadId { return }
-
-        switch payload.status {
-        case .completed:
-            let text = payload.text ?? ""
-            if text.isEmpty {
-                state = .error("Nothing was heard. Try again.")
-            } else {
-                state = .inserting
-                textDocumentProxy.insertText(text + " ")
-                log("Auto-inserted dictation on keyboard return: \(text)")
-            }
-            lastProcessedPayloadId = payload.id
-            clearDictationPayload()
-            // Reset to idle after brief delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                self?.state = .idle
-            }
-
-        case .recording, .transcribing:
-            // User came back while still transcribing — show waiting state and poll
-            log("Dictation still in progress, starting poll")
+        // If clipboard didn't find a completed result, poll the server
+        if state == .idle {
+            // Clipboard found nothing — check server
             state = .waiting
-            startPollingForDictation(payloadId: payload.id)
-
-        case .error:
-            state = .error(payload.errorMessage ?? "Transcription failed.")
-            lastProcessedPayloadId = payload.id
-            clearDictationPayload()
-
-        case .cancelled:
-            clearDictationPayload()
-            // Stay idle, no text to insert
+            startServerPolling()
         }
     }
 
@@ -354,6 +331,88 @@ class KeyboardViewController: UIInputViewController {
     private func clearDictationPayload() {
         guard let defaults = UserDefaults(suiteName: SharedConfig.Defaults.appGroupId) else { return }
         defaults.removeObject(forKey: SharedConfig.Defaults.dictationPayloadKey)
+    }
+
+    // MARK: - Server Polling (Works when app is backgrounded)
+
+    /// Polls the server every 1.5s for up to 60 seconds to get the dictation result.
+    private func startServerPolling() {
+        serverPollCount = 0
+        serverPollTimer?.invalidate()
+        serverPollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] timer in
+            guard let self = self else { timer.invalidate(); return }
+            self.serverPollCount += 1
+
+            if self.serverPollCount > 40 {  // 60 seconds at 1.5s intervals
+                timer.invalidate()
+                self.state = .error("Dictation timed out. Try again.")
+                return
+            }
+
+            self.pollServerForDictation()
+        }
+    }
+
+    /// One-shot HTTP GET to the server for the current dictation result.
+    private func pollServerForDictation() {
+        let config = SharedConfig.load()
+        guard let server = config.servers.first else { return }
+        guard let url = URL(string: "\(server)/dictation_result/latest") else { return }
+
+        let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+            guard let self = self,
+                  let data = data,
+                  error == nil,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+
+            let status = json["status"] as? String ?? "none"
+            let timestamp = json["timestamp"] as? Double ?? 0
+
+            DispatchQueue.main.async {
+                // Only process recent results
+                guard timestamp > 0 else { return }
+                guard Date().timeIntervalSince1970 - timestamp < 120 else { return }
+
+                // Prevent double-processing
+                if timestamp <= self.lastProcessedTimestamp { return }
+
+                switch status {
+                case "completed":
+                    self.serverPollTimer?.invalidate()
+                    let text = json["text"] as? String ?? ""
+                    if text.isEmpty {
+                        self.state = .error("Nothing was heard. Try again.")
+                    } else {
+                        self.state = .inserting
+                        self.textDocumentProxy.insertText(text + " ")
+                        self.log("Inserted dictation from server: \(text)")
+                    }
+                    self.lastProcessedTimestamp = timestamp
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                        self?.state = .idle
+                    }
+
+                case "error":
+                    self.serverPollTimer?.invalidate()
+                    let errorMessage = json["errorMessage"] as? String ?? "Transcription failed."
+                    self.state = .error(errorMessage)
+                    self.lastProcessedTimestamp = timestamp
+
+                case "cancelled":
+                    self.serverPollTimer?.invalidate()
+                    self.lastProcessedTimestamp = timestamp
+                    self.state = .idle
+
+                case "transcribing", "recording":
+                    self.log("Server says still transcribing (poll \(self.serverPollCount)/40)")
+                    // Keep polling
+
+                default:
+                    break
+                }
+            }
+        }
+        task.resume()
     }
 
     // MARK: - Clipboard Transport (SideStore fallback)
