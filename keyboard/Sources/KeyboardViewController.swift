@@ -52,6 +52,9 @@ class KeyboardViewController: UIInputViewController {
     private var pendingRequestId: UUID?
     private var waitTimer: Timer?
     private var errorResetWorkItem: DispatchWorkItem?
+    private var lastProcessedPayloadId: UUID?
+    private var pollTimer: Timer?
+    private var pollCount = 0
 
     // MARK: - Logging
 
@@ -87,6 +90,7 @@ class KeyboardViewController: UIInputViewController {
         state = .idle
         updateCurrentWord()
         log("viewDidAppear OK, hasFullAccess: \(hasFullAccess)")
+        checkForPendingDictation()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -103,6 +107,7 @@ class KeyboardViewController: UIInputViewController {
     deinit {
         darwinToken = nil
         waitTimer?.invalidate()
+        pollTimer?.invalidate()
         errorResetWorkItem?.cancel()
     }
 
@@ -409,6 +414,108 @@ class KeyboardViewController: UIInputViewController {
         pendingRequestId = nil
         state = .error("Dictation timed out. Try again.")
         log("Dictation timed out")
+    }
+
+    // MARK: - Pending Dictation (Recovery on Keyboard Reappear)
+
+    private func checkForPendingDictation() {
+        guard let payload = DictationPayload.current() else { return }
+
+        // Only process payloads from the last 120 seconds (ignore old ones)
+        guard Date().timeIntervalSince(payload.timestamp) < 120 else { return }
+
+        // Don't process the same payload twice — track the last processed payload ID
+        if payload.id == lastProcessedPayloadId { return }
+
+        switch payload.status {
+        case .completed:
+            let text = payload.text ?? ""
+            if text.isEmpty {
+                state = .error("Nothing was heard. Try again.")
+            } else {
+                state = .inserting
+                textDocumentProxy.insertText(text + " ")
+                log("Auto-inserted dictation on keyboard return: \(text)")
+            }
+            lastProcessedPayloadId = payload.id
+            clearDictationPayload()
+            // Reset to idle after brief delay
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.state = .idle
+            }
+
+        case .recording, .transcribing:
+            // User came back while still transcribing — show waiting state and poll
+            log("Dictation still in progress, starting poll")
+            state = .waiting
+            startPollingForDictation(payloadId: payload.id)
+
+        case .error:
+            state = .error(payload.errorMessage ?? "Transcription failed.")
+            lastProcessedPayloadId = payload.id
+            clearDictationPayload()
+
+        case .cancelled:
+            clearDictationPayload()
+            // Stay idle, no text to insert
+        }
+    }
+
+    private func startPollingForDictation(payloadId: UUID) {
+        pollCount = 0
+        pollTimer?.invalidate()
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            guard let self = self else { timer.invalidate(); return }
+            self.pollCount += 1
+
+            // Timeout after 30 seconds
+            if self.pollCount > 30 {
+                timer.invalidate()
+                self.state = .error("Dictation timed out. Try again.")
+                self.clearDictationPayload()
+                return
+            }
+
+            guard let payload = DictationPayload.current() else { return }
+            guard payload.id == payloadId else { return }  // Ignore different payloads
+
+            switch payload.status {
+            case .completed:
+                timer.invalidate()
+                let text = payload.text ?? ""
+                if text.isEmpty {
+                    self.state = .error("Nothing was heard. Try again.")
+                } else {
+                    self.state = .inserting
+                    self.textDocumentProxy.insertText(text + " ")
+                    self.log("Inserted dictation after polling: \(text)")
+                }
+                self.lastProcessedPayloadId = payload.id
+                self.clearDictationPayload()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                    self?.state = .idle
+                }
+
+            case .error:
+                timer.invalidate()
+                self.state = .error(payload.errorMessage ?? "Transcription failed.")
+                self.lastProcessedPayloadId = payload.id
+                self.clearDictationPayload()
+
+            case .cancelled:
+                timer.invalidate()
+                self.clearDictationPayload()
+                self.state = .idle
+
+            case .recording, .transcribing:
+                break  // Keep polling
+            }
+        }
+    }
+
+    private func clearDictationPayload() {
+        guard let defaults = UserDefaults(suiteName: SharedConfig.Defaults.appGroupId) else { return }
+        defaults.removeObject(forKey: SharedConfig.Defaults.dictationPayloadKey)
     }
 
     // MARK: - Error Auto-Reset
