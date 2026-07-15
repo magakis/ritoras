@@ -19,7 +19,6 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Dictation State
 
     private var darwinToken: DarwinObserverToken?
-    private var pendingRequestId: UUID?
     private var waitTimer: Timer?
     private var errorResetWorkItem: DispatchWorkItem?
     private var pollTimer: Timer?
@@ -41,6 +40,30 @@ class KeyboardViewController: UIInputViewController {
         get { UserDefaults.standard.double(forKey: "ritoras_last_ts") }
         set { UserDefaults.standard.set(newValue, forKey: "ritoras_last_ts") }
     }
+
+    /// The active dictation request ID, persisted so the keyboard can resume
+    /// waiting for its result even after iOS terminates the extension process
+    /// (which happens routinely when the user switches apps). Setting it to nil
+    /// also clears the companion start timestamp so no stale state lingers.
+    private var pendingRequestId: UUID? {
+        get { UUID(uuidString: UserDefaults.standard.string(forKey: "ritoras_pending_id") ?? "") }
+        set {
+            if let newValue = newValue {
+                UserDefaults.standard.set(newValue.uuidString, forKey: "ritoras_pending_id")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "ritoras_pending_id")
+                UserDefaults.standard.removeObject(forKey: "ritoras_pending_start")
+            }
+        }
+    }
+
+    /// Wall-clock time the current pending request was started, used to expire
+    /// requests that never resolved so they don't haunt every keyboard reappearance.
+    private var pendingRequestStart: Double {
+        get { UserDefaults.standard.double(forKey: "ritoras_pending_start") }
+        set { UserDefaults.standard.set(newValue, forKey: "ritoras_pending_start") }
+    }
+
     private var serverPollTimer: Timer?
     private var serverPollCount = 0
 
@@ -76,16 +99,22 @@ class KeyboardViewController: UIInputViewController {
         super.viewDidAppear(animated)
         keyboardView.updateFullAccess(hasFullAccess)
 
-        // ONLY check for pending dictation if we actually have an active request.
-        // This prevents the keyboard from entering "Dictating..." state every time
-        // it appears in a new app.
+        // Resume a dictation that was in progress when iOS suspended/terminated
+        // the extension. pendingRequestId survives in UserDefaults, so even a
+        // fully relaunched keyboard process can recover the result.
         if let id = pendingRequestId {
-            log("viewDidAppear — resuming pending dictation: \(id)")
-            state = .waiting
-            checkForPendingDictation()
+            let age = pendingRequestStart > 0 ? Date().timeIntervalSince1970 - pendingRequestStart : 0
+            if age > 300 {  // >5 min — the result is unrecoverable; abandon it
+                log("viewDidAppear \u{2014} pending dictation stale (\(Int(age))s), discarding")
+                pendingRequestId = nil
+                state = .idle
+            } else {
+                log("viewDidAppear \u{2014} resuming pending dictation: \(id)")
+                checkForPendingDictation()
+            }
         } else {
             state = .idle
-            log("viewDidAppear — idle, hasFullAccess: \(hasFullAccess)")
+            log("viewDidAppear \u{2014} idle, hasFullAccess: \(hasFullAccess)")
         }
     }
 
@@ -179,6 +208,7 @@ class KeyboardViewController: UIInputViewController {
 
         let id = UUID()
         pendingRequestId = id
+        pendingRequestStart = Date().timeIntervalSince1970
 
         // Build URL with id query param
         var components = URLComponents(url: SharedConfig.Defaults.dictateURL, resolvingAgainstBaseURL: false)!
@@ -244,13 +274,11 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func handleDictationCompleted() {
-        darwinToken = nil
-        waitTimer?.invalidate()
-        waitTimer = nil
+        stopDictationTransports()
 
         // Try App Group first (works if properly signed)
         guard let payload = DictationPayload.current() else {
-            // Poll the server (sole IPC mechanism; clipboard has plain text for manual paste only)
+            // No payload yet \u{2014} poll the server and keep polling.
             pollServerForDictation()
             if state == .idle {
                 state = .waiting
@@ -259,38 +287,28 @@ class KeyboardViewController: UIInputViewController {
             return
         }
 
-        // Ignore stale payloads (wrong request ID)
-        guard payload.id == pendingRequestId else {
+        // Ignore stale payloads (wrong request ID, or no pending request at all)
+        guard let id = pendingRequestId, payload.id == id else {
             log("Ignoring stale dictation payload (id mismatch)")
             return
         }
 
         switch payload.status {
         case .completed:
-            let text = payload.text ?? ""
-            if text.isEmpty {
-                state = .error("Nothing was heard. Try again.")
-            } else {
-                state = .inserting
-                textDocumentProxy.insertText(text + " ")
-                log("Inserted dictation: \(text)")
-                // Reset to idle after brief delay
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                    self?.state = .idle
-                }
-            }
+            insertDictationResult(text: payload.text ?? "")
+            return
         case .cancelled:
+            pendingRequestId = nil
             state = .idle
             log("Dictation cancelled")
         case .error:
+            pendingRequestId = nil
             state = .error(payload.errorMessage ?? "Transcription failed.")
         case .recording, .transcribing:
-            // Premature signal — keep waiting
-            startWaitingForDictation(id: pendingRequestId!)
+            // Premature signal \u{2014} keep waiting
+            startWaitingForDictation(id: id)
             return
         }
-
-        pendingRequestId = nil
     }
 
     private func handleTimeout() {
@@ -303,10 +321,76 @@ class KeyboardViewController: UIInputViewController {
 
     // MARK: - Pending Dictation (Recovery on Keyboard Reappear)
 
+    /// Resumes waiting for an in-progress dictation after the keyboard process was
+    /// suspended/terminated and relaunched \u{2014} e.g. the user switched apps and came
+    /// back. `pendingRequestId` survives in UserDefaults, so a fully relaunched
+    /// keyboard process can still recover the result.
     private func checkForPendingDictation() {
-        // Server is the sole IPC mechanism (clipboard has plain text for manual paste only)
+        guard let id = pendingRequestId else {
+            state = .idle
+            return
+        }
         state = .waiting
+        log("Resuming pending dictation: \(id)")
+
+        // Re-register the Darwin observer (it was torn down in viewWillDisappear).
+        if darwinToken == nil {
+            darwinToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinNotificationName) { [weak self] in
+                DispatchQueue.main.async { self?.handleDictationCompleted() }
+            }
+        }
+
+        // Transcription may have already finished while we were gone.
+        if let payload = DictationPayload.current(), payload.id == id {
+            switch payload.status {
+            case .completed:
+                insertDictationResult(text: payload.text ?? "")
+                return
+            case .error:
+                stopDictationTransports()
+                state = .error(payload.errorMessage ?? "Transcription failed.")
+                pendingRequestId = nil
+                return
+            case .cancelled:
+                stopDictationTransports()
+                pendingRequestId = nil
+                state = .idle
+                return
+            case .recording, .transcribing:
+                break  // still in progress \u{2014} fall through to polling
+            }
+        }
+
         startServerPolling()
+    }
+
+    /// Tears down every active result-transport (timers + Darwin observer) so that
+    /// once one path resolves the dictation, no competing path re-inserts the text.
+    private func stopDictationTransports() {
+        waitTimer?.invalidate()
+        pollTimer?.invalidate()
+        serverPollTimer?.invalidate()
+        clipboardPollTimer?.invalidate()
+        darwinToken = nil
+    }
+
+    /// Inserts the transcribed text, clears the pending request, and resets the
+    /// keyboard to idle. Centralizes the shared insert+reset flow and guarantees
+    /// every other transport is stopped first (prevents double-insert now that the
+    /// Darwin observer and server polling can run concurrently on resume).
+    private func insertDictationResult(text: String) {
+        stopDictationTransports()
+        pendingRequestId = nil
+        if text.isEmpty {
+            state = .error("Nothing was heard. Try again.")
+            return
+        }
+        state = .inserting
+        textDocumentProxy.insertText(text + " ")
+        log("Inserted dictation: \(text)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.state = .idle
+        }
     }
 
     private func startPollingForDictation(payloadId: UUID) {
@@ -378,6 +462,8 @@ class KeyboardViewController: UIInputViewController {
 
             if self.serverPollCount > 40 {  // 60 seconds at 1.5s intervals
                 timer.invalidate()
+                self.stopDictationTransports()
+                self.pendingRequestId = nil
                 self.state = .error("Dictation timed out. Try again.")
                 return
             }
@@ -409,6 +495,10 @@ class KeyboardViewController: UIInputViewController {
             }
 
             DispatchQueue.main.async {
+                // If this dictation was already resolved via the App Group / Darwin
+                // path, ignore the stale server response (prevents double-insert).
+                guard self.pendingRequestId != nil else { return }
+
                 // Only process recent results
                 guard timestamp > 0 else { return }
                 guard Date().timeIntervalSince1970 - timestamp < 120 else { return }
@@ -418,30 +508,19 @@ class KeyboardViewController: UIInputViewController {
 
                 switch status {
                 case "completed":
-                    self.serverPollTimer?.invalidate()
-                    let text = json["text"] as? String ?? ""
-                    if text.isEmpty {
-                        self.state = .error("Nothing was heard. Try again.")
-                    } else {
-                        self.state = .inserting
-                        self.textDocumentProxy.insertText(text + " ")
-                        self.log("Inserted dictation from server: \(text)")
-                    }
                     self.lastProcessedTimestamp = timestamp
-                    self.pendingRequestId = nil
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                        self?.state = .idle
-                    }
+                    self.insertDictationResult(text: json["text"] as? String ?? "")
 
                 case "error":
-                    self.serverPollTimer?.invalidate()
-                    let errorMessage = json["errorMessage"] as? String ?? "Transcription failed."
-                    self.state = .error(errorMessage)
+                    self.stopDictationTransports()
                     self.lastProcessedTimestamp = timestamp
+                    self.pendingRequestId = nil
+                    self.state = .error(json["errorMessage"] as? String ?? "Transcription failed.")
 
                 case "cancelled":
-                    self.serverPollTimer?.invalidate()
+                    self.stopDictationTransports()
                     self.lastProcessedTimestamp = timestamp
+                    self.pendingRequestId = nil
                     self.state = .idle
 
                 case "transcribing", "recording":
