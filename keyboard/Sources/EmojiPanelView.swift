@@ -347,7 +347,7 @@ extension EmojiPanelView: UICollectionViewDataSource {
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: EmojiCell.reuseIdentifier, for: indexPath) as! EmojiCell
-        cell.configure(with: EmojiData.applying(.current, to: allEmojis[indexPath.item]))
+        cell.configure(with: EmojiSkinTone.applying(.current, to: allEmojis[indexPath.item]))
         return cell
     }
 }
@@ -363,7 +363,7 @@ extension EmojiPanelView: UICollectionViewDelegateFlowLayout {
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: false)
-        let emoji = EmojiData.applying(.current, to: allEmojis[indexPath.item])
+        let emoji = EmojiSkinTone.applying(.current, to: allEmojis[indexPath.item])
         onSelect?(emoji)
     }
 }
