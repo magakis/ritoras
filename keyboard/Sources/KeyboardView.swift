@@ -74,14 +74,20 @@ private class KeyButton: UIButton {
                 : UIColor(white: 0.3, alpha: 1)
         }
 
-        configureSpecialKeyImage()
-        if title(for: .normal) == nil {
-            setTitle(keyDefinition.label, for: .normal)
-        }
+        // The row stack sizes keys proportionally via fillProportionally using the
+        // intrinsic width below. Use a large proportional base so distribution is
+        // numerically stable, and keep content priorities low so button content
+        // (icon/label) never overrides the layout.
+        setContentHuggingPriority(.defaultLow, for: .horizontal)
+        setContentHuggingPriority(.defaultLow, for: .vertical)
+        setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+
+        configureContent()
     }
 
     override var intrinsicContentSize: CGSize {
-        CGSize(width: keyDefinition.widthWeight, height: UIView.noIntrinsicMetric)
+        CGSize(width: keyDefinition.widthWeight * 100, height: UIView.noIntrinsicMetric)
     }
 
     override var isHighlighted: Bool {
@@ -90,26 +96,27 @@ private class KeyButton: UIButton {
         }
     }
 
-    private func configureSpecialKeyImage() {
+    /// Sets EITHER an SF Symbol image OR a text title — never both — based on the key's action.
+    private func configureContent() {
         let config = UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
 
         switch keyDefinition.action {
         case .backspace:
             setImage(UIImage(systemName: "delete.left", withConfiguration: config), for: .normal)
-            setTitle(nil, for: .normal)
         case .shift, .shiftLock:
             let name = keyDefinition.action == .shiftLock ? "shift.fill" : "shift"
             setImage(UIImage(systemName: name, withConfiguration: config), for: .normal)
-            setTitle(nil, for: .normal)
         case .mic:
             setImage(UIImage(systemName: "mic.fill", withConfiguration: config), for: .normal)
-            setTitle(nil, for: .normal)
             tintColor = .white
         case .return:
             setImage(UIImage(systemName: "return.left", withConfiguration: config), for: .normal)
-            setTitle(nil, for: .normal)
+        case .globe:
+            setImage(UIImage(systemName: "globe", withConfiguration: config), for: .normal)
+        case .emoji:
+            setTitle("☺", for: .normal)
         default:
-            break
+            setTitle(keyDefinition.label, for: .normal)
         }
     }
 
@@ -209,45 +216,6 @@ private class SuggestionBar: UIView {
     }
 }
 
-// MARK: - FloatingStrip
-
-private class FloatingStrip: UIView {
-    var globeTapped: (() -> Void)?
-
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        setup()
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        setup()
-    }
-
-    private func setup() {
-        let globeButton = UIButton(type: .system)
-        globeButton.translatesAutoresizingMaskIntoConstraints = false
-        let config = UIImage.SymbolConfiguration(pointSize: 18, weight: .medium)
-        globeButton.setImage(UIImage(systemName: "globe", withConfiguration: config), for: .normal)
-        globeButton.tintColor = UIColor { tc in
-            tc.userInterfaceStyle == .dark
-                ? UIColor(white: 0.7, alpha: 1)
-                : UIColor(white: 0.3, alpha: 1)
-        }
-        globeButton.addTarget(self, action: #selector(globeButtonTapped), for: .touchUpInside)
-        addSubview(globeButton)
-
-        NSLayoutConstraint.activate([
-            globeButton.centerXAnchor.constraint(equalTo: centerXAnchor),
-            globeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-    }
-
-    @objc private func globeButtonTapped() {
-        globeTapped?()
-    }
-}
-
 // MARK: - KeyboardView
 
 class KeyboardView: UIView {
@@ -270,7 +238,6 @@ class KeyboardView: UIView {
         return panel
     }()
     private let bottomActionRow = UIStackView()
-    private let floatingStrip = FloatingStrip()
 
     // Key references
     private weak var micKeyButton: KeyButton?
@@ -305,7 +272,6 @@ class KeyboardView: UIView {
         setupSuggestionBar()
         setupLetterRegion()
         setupEmojiPanel()
-        setupFloatingStrip()
         setupConstraints()
 
         rebuildKeyRows()
@@ -358,15 +324,6 @@ class KeyboardView: UIView {
         addSubview(emojiPanelView)
     }
 
-    private func setupFloatingStrip() {
-        floatingStrip.translatesAutoresizingMaskIntoConstraints = false
-        floatingStrip.globeTapped = { [weak self] in
-            guard let self = self else { return }
-            self.delegate?.keyboardView(self, didPerform: .globe)
-        }
-        addSubview(floatingStrip)
-    }
-
     private func setupConstraints() {
         NSLayoutConstraint.activate([
             // SuggestionBar — top (hidden in emoji mode)
@@ -387,17 +344,11 @@ class KeyboardView: UIView {
             emojiPanelView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             emojiPanelView.bottomAnchor.constraint(equalTo: bottomActionRow.topAnchor, constant: -6),
 
-            // Bottom action row (Row 4) — always visible
+            // Bottom action row (Row 4) — always visible, pinned to the bottom
             bottomActionRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             bottomActionRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            bottomActionRow.bottomAnchor.constraint(equalTo: floatingStrip.topAnchor, constant: -6),
+            bottomActionRow.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -6),
             bottomActionRow.heightAnchor.constraint(equalToConstant: 48),
-
-            // FloatingStrip — bottom
-            floatingStrip.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            floatingStrip.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            floatingStrip.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -6),
-            floatingStrip.heightAnchor.constraint(equalToConstant: 28),
         ])
     }
 
