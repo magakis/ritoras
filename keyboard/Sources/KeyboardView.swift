@@ -39,6 +39,20 @@ protocol KeyboardViewDelegate: AnyObject {
 private class KeyButton: UIButton {
     let keyDefinition: KeyDefinition
 
+    /// Set true when a long-press gesture fires on this button, so the subsequent
+    /// touchUpInside can be suppressed (prevents a long-press + tap double-fire).
+    var shiftLongPressDidFire = false
+
+    /// Thin underline shown beneath the shift icon when Caps Lock is engaged,
+    /// matching the native iOS keyboard's caps-lock affordance.
+    private let capsLockUnderline: UIView = {
+        let view = UIView()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        view.layer.cornerRadius = 1
+        return view
+    }()
+
     init(definition: KeyDefinition) {
         self.keyDefinition = definition
         super.init(frame: .zero)
@@ -52,7 +66,7 @@ private class KeyButton: UIButton {
     private func setup() {
         layer.cornerRadius = 6
         clipsToBounds = true
-        titleLabel?.font = .systemFont(ofSize: 26, weight: .bold)
+        titleLabel?.font = .systemFont(ofSize: 24, weight: .bold)
         titleLabel?.textAlignment = .center
         contentHorizontalAlignment = .center
         contentVerticalAlignment = .center
@@ -77,7 +91,41 @@ private class KeyButton: UIButton {
         // Keys are positioned by manual frame math in KeyboardRowView.layoutSubviews
         // (NOT UIStackView.fillProportionally, which squashes the last key whenever
         // spacing is non-zero). No intrinsicContentSize override is needed.
+        addSubview(capsLockUnderline)
         configureContent()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // Position the caps-lock underline at the bottom-center of the key.
+        let lineWidth: CGFloat = 12
+        let lineHeight: CGFloat = 2
+        capsLockUnderline.frame = CGRect(
+            x: (bounds.width - lineWidth) / 2,
+            y: bounds.height - 9,
+            width: lineWidth,
+            height: lineHeight
+        )
+    }
+
+    /// Updates the shift key's icon (outline → filled) and shows the caps-lock
+    /// underline when locked. Only affects shift keys.
+    func updateShiftVisual(_ state: ShiftState) {
+        guard keyDefinition.action == .shift else { return }
+        let config = UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
+        switch state {
+        case .lower:
+            setImage(UIImage(systemName: "shift", withConfiguration: config), for: .normal)
+            capsLockUnderline.backgroundColor = .clear
+        case .upper:
+            setImage(UIImage(systemName: "shift.fill", withConfiguration: config), for: .normal)
+            capsLockUnderline.backgroundColor = .clear
+        case .locked:
+            setImage(UIImage(systemName: "shift.fill", withConfiguration: config), for: .normal)
+            capsLockUnderline.backgroundColor = UIColor { tc in
+                tc.userInterfaceStyle == .dark ? UIColor.white : UIColor.black
+            }
+        }
     }
 
     override var isHighlighted: Bool {
@@ -306,6 +354,7 @@ class KeyboardView: UIView {
     // Key references
     private weak var micKeyButton: KeyButton?
     private weak var emojiKeyButton: KeyButton?
+    private weak var shiftKeyButton: KeyButton?
     private weak var bottomRowView: KeyboardRowView?
 
     // State tracking
@@ -420,6 +469,7 @@ class KeyboardView: UIView {
         keyStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         bottomRowView?.removeFromSuperview()
         bottomRowView = nil
+        shiftKeyButton = nil
 
         let rows = KeyboardLayout.rows(for: currentLayoutMode)
 
@@ -440,6 +490,13 @@ class KeyboardView: UIView {
                     emojiKeyButton = button
                     let isEmoji = !emojiPanelView.isHidden
                     button.setTitle(isEmoji ? "ABC" : "☺", for: .normal)
+                case .shift:
+                    shiftKeyButton = button
+                    // Long-press the shift key → Caps Lock (like the native keyboard).
+                    button.addTarget(self, action: #selector(shiftTouchDown(_:)), for: .touchDown)
+                    let longPress = UILongPressGestureRecognizer(target: self, action: #selector(shiftLongPressed(_:)))
+                    longPress.minimumPressDuration = 0.4
+                    button.addGestureRecognizer(longPress)
                 default:
                     break
                 }
@@ -491,7 +548,24 @@ class KeyboardView: UIView {
     // MARK: - Actions
 
     @objc private func keyTapped(_ sender: KeyButton) {
+        // Suppress the tap that follows a long-press (e.g. shift caps-lock).
+        if sender.shiftLongPressDidFire {
+            sender.shiftLongPressDidFire = false
+            return
+        }
         delegate?.keyboardView(self, didPerform: sender.keyDefinition.action)
+    }
+
+    /// Resets the long-press flag at the start of each touch on the shift key.
+    @objc private func shiftTouchDown(_ sender: KeyButton) {
+        sender.shiftLongPressDidFire = false
+    }
+
+    /// Long-pressing the shift key engages Caps Lock (like the native keyboard).
+    @objc private func shiftLongPressed(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began, let button = gesture.view as? KeyButton else { return }
+        button.shiftLongPressDidFire = true
+        delegate?.keyboardView(self, didPerform: .shiftLock)
     }
 
     // MARK: - Public API
@@ -588,6 +662,12 @@ class KeyboardView: UIView {
         } else {
             updateKeyButtonLabels()
         }
+
+        updateShiftVisual()
+    }
+
+    private func updateShiftVisual() {
+        shiftKeyButton?.updateShiftVisual(currentShiftState)
     }
 
     func refreshSuggestions() {

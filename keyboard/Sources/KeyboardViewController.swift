@@ -822,10 +822,13 @@ extension KeyboardViewController: KeyboardViewDelegate {
             textDocumentProxy.insertText("\n")
 
         case .toggleNumber:
-            layoutMode = layoutMode == .letters ? .numbers : .letters
+            layoutMode = .numbers
 
         case .toggleLetters:
             layoutMode = .letters
+
+        case .toggleSymbols:
+            layoutMode = .symbols
 
         case .mic:
             handleMicButtonTap()

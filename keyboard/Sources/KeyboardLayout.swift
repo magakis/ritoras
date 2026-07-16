@@ -9,6 +9,7 @@ enum KeyAction: Hashable {
     case shiftLock
     case toggleNumber
     case toggleLetters
+    case toggleSymbols
     case mic
     case space
     case emoji
@@ -111,14 +112,14 @@ enum KeyboardLayout {
             KeyDefinition(label: "\"", shiftedLabel: nil, action: .insertText("\""), widthWeight: 1),
         ],
 
-        // Row 3: . , ? ! ' ` backspace
+        // Row 3: #+= . , ? ! ' backspace
         [
+            KeyDefinition(label: "#+=", shiftedLabel: nil, action: .toggleSymbols, widthWeight: 1.5),
             KeyDefinition(label: ".", shiftedLabel: nil, action: .insertText("."), widthWeight: 1),
             KeyDefinition(label: ",", shiftedLabel: nil, action: .insertText(","), widthWeight: 1),
             KeyDefinition(label: "?", shiftedLabel: nil, action: .insertText("?"), widthWeight: 1),
             KeyDefinition(label: "!", shiftedLabel: nil, action: .insertText("!"), widthWeight: 1),
             KeyDefinition(label: "'", shiftedLabel: nil, action: .insertText("'"), widthWeight: 1),
-            KeyDefinition(label: "`", shiftedLabel: nil, action: .insertText("`"), widthWeight: 1),
             KeyDefinition(label: "⌫", shiftedLabel: nil, action: .backspace, widthWeight: 1.5),
         ],
 
@@ -163,14 +164,14 @@ enum KeyboardLayout {
             KeyDefinition(label: "•", shiftedLabel: nil, action: .insertText("•"), widthWeight: 1),
         ],
 
-        // Row 3: . , ? ! ' ` backspace
+        // Row 3: 123 . , ? ! ' backspace
         [
+            KeyDefinition(label: "123", shiftedLabel: nil, action: .toggleNumber, widthWeight: 1.5),
             KeyDefinition(label: ".", shiftedLabel: nil, action: .insertText("."), widthWeight: 1),
             KeyDefinition(label: ",", shiftedLabel: nil, action: .insertText(","), widthWeight: 1),
             KeyDefinition(label: "?", shiftedLabel: nil, action: .insertText("?"), widthWeight: 1),
             KeyDefinition(label: "!", shiftedLabel: nil, action: .insertText("!"), widthWeight: 1),
             KeyDefinition(label: "'", shiftedLabel: nil, action: .insertText("'"), widthWeight: 1),
-            KeyDefinition(label: "`", shiftedLabel: nil, action: .insertText("`"), widthWeight: 1),
             KeyDefinition(label: "⌫", shiftedLabel: nil, action: .backspace, widthWeight: 1.5),
         ],
 
