@@ -971,14 +971,22 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         case .wordRepeat:
             let n = BackspaceModel.wordUnitLength(for: textDocumentProxy.documentContextBeforeInput)
-            guard n > 0 else {
-                backspaceTimer?.invalidate()
-                backspaceTimer = nil
-                backspacePhase = nil
-                return
-            }
-            for _ in 0..<n {
-                guard textDocumentProxy.hasText else { break }
+            if n > 0 {
+                // Normal whole-word deletion.
+                for _ in 0..<n {
+                    guard textDocumentProxy.hasText else { break }
+                    textDocumentProxy.deleteBackward()
+                }
+            } else {
+                // documentContextBeforeInput returned nil/empty (host quirk) but text may
+                // still exist. Degrade to a single character delete so the user does not
+                // see deletion halt mid-hold. Only stop when the field is genuinely empty.
+                guard textDocumentProxy.hasText else {
+                    backspaceTimer?.invalidate()
+                    backspaceTimer = nil
+                    backspacePhase = nil
+                    return
+                }
                 textDocumentProxy.deleteBackward()
             }
             keyboardView.refreshSuggestions()
