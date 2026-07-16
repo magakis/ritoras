@@ -20,9 +20,9 @@ Pass `refresh` to skip commit and push — just download the latest CI artifact 
 
 ### Step 1: Check Prerequisites
 
-1. **iPhone connection** — run `idevice_id -l`. If the output is empty, report error: `No iPhone detected. Connect the device and ensure usbmuxd is running on the host.`
-   - Verify the connected UDID matches the expected device: `00008140-001A2D312688801C`
-   - If unexpected UDID appears, flag it but proceed — the device may have been re-paired
+1. **iPhone connection** — run `idev detect` (this restarts usbmuxd if a hot-plugged device isn't yet visible, then prints the UDID). If the output is empty, report error: `No iPhone detected. Ensure the device is unlocked, connected over USB, and that the host's usbmuxd is stopped (the container runs its own).` Then stop.
+   - Verify the detected UDID matches the expected device: `00008140-001A2D312688801C`
+   - If an unexpected UDID appears, flag it but proceed — the device may have been re-paired
 
 2. **Deploy script** — verify `scripts/deploy-ipa.mjs` exists in the repo root
 
@@ -77,7 +77,7 @@ If the script timed out waiting for download (printed a warning), include the ti
 
 ### Step 5: Stream Logs
 
-1. Run `idevicesyslog -m Ritoras -x` with a 120-second timeout
+1. Run `idev run idevicesyslog -m Ritoras -x` with a 120-second timeout
 2. Monitor the output for:
    - App process starting (messages containing `Ritoras Keyboard` or `com.ritoras.app`)
    - Error messages or crashes

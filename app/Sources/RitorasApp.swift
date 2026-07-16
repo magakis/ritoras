@@ -3,7 +3,6 @@ import AVFoundation
 
 @main
 struct RitorasApp: App {
-    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var settings = AppSettings.shared
     @AppStorage("onboardingCompleted") private var onboardingCompleted = false
     @State private var dictationRequest: DictationRequest?
@@ -79,20 +78,4 @@ struct RitorasApp: App {
 /// DictationView as a `.fullScreenCover(item:)`.
 struct DictationRequest: Identifiable {
     let id: UUID
-}
-
-/// Handles background URLSession delivery: when iOS relaunches the app to
-/// deliver a completed background transcription upload, we store the completion
-/// handler and reconnect the session so the delegate callbacks fire (and the
-/// completion handler is invoked once all events are processed).
-final class AppDelegate: NSObject, UIApplicationDelegate {
-    func application(
-        _ application: UIApplication,
-        handleEventsForBackgroundURLSession identifier: String,
-        completionHandler: @escaping () -> Void
-    ) {
-        guard identifier == BackgroundTranscriptionService.identifier else { return }
-        BackgroundTranscriptionService.shared.backgroundCompletionHandler = completionHandler
-        BackgroundTranscriptionService.shared.reconnect()
-    }
 }

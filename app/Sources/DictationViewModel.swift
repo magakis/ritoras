@@ -16,42 +16,6 @@ final class DictationViewModel: ObservableObject {
     private var recorder: AudioRecorder?
     private var activeID: UUID?
 
-    private var resultObserver: NSObjectProtocol?
-
-    init() {
-        // BackgroundTranscriptionService posts .dictationResultReady when a
-        // background transcription finishes. Update the UI if the result is for
-        // the dictation currently on screen.
-        resultObserver = NotificationCenter.default.addObserver(
-            forName: .dictationResultReady, object: nil, queue: .main
-        ) { [weak self] note in
-            guard let self = self else { return }
-            let id = note.userInfo?["id"] as? UUID
-            let status = note.userInfo?["status"] as? String ?? ""
-            let text = note.userInfo?["text"] as? String ?? ""
-            let errorMessage = note.userInfo?["errorMessage"] as? String ?? ""
-            Task { @MainActor in
-                guard id == self.activeID else { return }
-                // Don't clobber a result the foreground upload already delivered.
-                guard case .transcribing = self.phase else { return }
-                switch status {
-                case "completed":
-                    self.phase = text.isEmpty
-                        ? .error("Nothing was heard. Try again.")
-                        : .done(text)
-                case "error":
-                    self.phase = .error(errorMessage.isEmpty ? "Transcription failed." : errorMessage)
-                default:
-                    break
-                }
-            }
-        }
-    }
-
-    deinit {
-        if let resultObserver { NotificationCenter.default.removeObserver(resultObserver) }
-    }
-
     // MARK: - Clipboard Transport
 
     /// Writes the dictation result to the clipboard as a MULTI-TYPE pasteboard
@@ -222,13 +186,6 @@ final class DictationViewModel: ObservableObject {
         AudioSession.deactivate()
 
         let config = SharedConfig.load()
-
-        // Background URLSession upload — if the user backgrounds the app before
-        // the foreground upload finishes, nsurlsessiond completes this one and
-        // delivers the result (Scenario B). Background session tasks are often
-        // deferred while the app is foreground, so we ALSO run the foreground
-        // upload below for the responsive on-screen UI.
-        BackgroundTranscriptionService.shared.transcribe(audioURL: url, id: id, config: config)
 
         // Foreground upload (Scenario A) — runs immediately while the app is in
         // the foreground and updates the UI directly. A background task keeps
