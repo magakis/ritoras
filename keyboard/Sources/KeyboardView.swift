@@ -460,7 +460,7 @@ class KeyboardView: UIView {
             emojiPanelView.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 6),
             emojiPanelView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             emojiPanelView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            emojiPanelView.bottomAnchor.constraint(equalTo: bottomActionRow.topAnchor, constant: -6),
+            emojiPanelView.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -6),
 
             // Bottom action row (Row 4) — always visible, pinned to the bottom
             bottomActionRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
@@ -672,6 +672,7 @@ class KeyboardView: UIView {
         let isEmoji = mode == .emoji
         suggestionBar.isHidden = isEmoji
         letterRegionContainer.isHidden = isEmoji
+        bottomActionRow.isHidden = isEmoji
         emojiPanelView.isHidden = !isEmoji
         emojiKeyButton?.setTitle(isEmoji ? "ABC" : "☺", for: .normal)
 

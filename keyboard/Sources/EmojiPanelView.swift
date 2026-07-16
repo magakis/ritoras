@@ -50,19 +50,36 @@ final class EmojiPanelView: UIView {
         button.titleLabel?.font = .systemFont(ofSize: 16, weight: .medium)
         return button
     }()
-    private let recentsLabel: UILabel = {
-        let label = UILabel()
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.text = "Recents"
-        label.font = .systemFont(ofSize: 14, weight: .medium)
-        label.textAlignment = .right
-        return label
+    private let toneButton: UIButton = {
+        let button = UIButton(type: .system)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        let config = UIImage.SymbolConfiguration(pointSize: 16, weight: .medium)
+        button.setImage(UIImage(systemName: "gearshape", withConfiguration: config), for: .normal)
+        return button
     }()
     private let collectionView: UICollectionView
+    private let categoryBar = UIScrollView()
+    private var categoryButtons: [UIButton] = []
+    /// `nil` means "Recents" is selected.
+    private var selectedCategory: String?
+    private let emptyStateLabel: UILabel = {
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.text = "No recent emojis yet"
+        label.textAlignment = .center
+        label.font = .systemFont(ofSize: 16)
+        label.textColor = UIColor { tc in
+            tc.userInterfaceStyle == .dark
+                ? UIColor.white.withAlphaComponent(0.4)
+                : UIColor.black.withAlphaComponent(0.4)
+        }
+        label.isHidden = true
+        return label
+    }()
 
     // MARK: - Data
 
-    /// Flat list: recents (if non-empty) followed by all categorized emojis.
+    /// Currently displayed emojis for the selected category.
     private var allEmojis: [String] = []
 
     // MARK: - Layout Constants
@@ -106,7 +123,21 @@ final class EmojiPanelView: UIView {
         clipsToBounds = true
 
         setupHeader()
+        setupCategoryBar()
         setupCollectionView()
+
+        // Empty-state label
+        addSubview(emptyStateLabel)
+        NSLayoutConstraint.activate([
+            emptyStateLabel.centerXAnchor.constraint(equalTo: collectionView.centerXAnchor),
+            emptyStateLabel.centerYAnchor.constraint(equalTo: collectionView.centerYAnchor),
+        ])
+
+        // Initial category: prefer Recents if non-empty, else first real category
+        if EmojiRecents.get().isEmpty {
+            selectedCategory = EmojiData.categories.first?.name
+        }
+        updateTabSelection()
 
         // Wire dismiss button
         dismissButton.addTarget(self, action: #selector(dismissTapped), for: .touchUpInside)
@@ -122,11 +153,13 @@ final class EmojiPanelView: UIView {
         }, for: .normal)
         headerView.addSubview(dismissButton)
 
-        // Recents label on right
-        recentsLabel.textColor = UIColor { tc in
-            tc.userInterfaceStyle == .dark ? UIColor(white: 0.7, alpha: 1) : UIColor(white: 0.4, alpha: 1)
+        // Tone picker button on far right
+        toneButton.tintColor = UIColor { tc in
+            tc.userInterfaceStyle == .dark ? UIColor(white: 0.9, alpha: 1) : UIColor(white: 0.2, alpha: 1)
         }
-        headerView.addSubview(recentsLabel)
+        headerView.addSubview(toneButton)
+        toneButton.menu = buildToneMenu()
+        toneButton.showsMenuAsPrimaryAction = true
 
         NSLayoutConstraint.activate([
             headerView.topAnchor.constraint(equalTo: topAnchor),
@@ -138,8 +171,8 @@ final class EmojiPanelView: UIView {
             dismissButton.centerYAnchor.constraint(equalTo: headerView.centerYAnchor),
             dismissButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 44),
 
-            recentsLabel.trailingAnchor.constraint(equalTo: headerView.trailingAnchor, constant: -12),
-            recentsLabel.centerYAnchor.constraint(equalTo: headerView.centerYAnchor),
+            toneButton.trailingAnchor.constraint(equalTo: headerView.trailingAnchor, constant: -12),
+            toneButton.centerYAnchor.constraint(equalTo: headerView.centerYAnchor),
         ])
     }
 
@@ -153,7 +186,7 @@ final class EmojiPanelView: UIView {
         addSubview(collectionView)
 
         NSLayoutConstraint.activate([
-            collectionView.topAnchor.constraint(equalTo: headerView.bottomAnchor),
+            collectionView.topAnchor.constraint(equalTo: categoryBar.bottomAnchor),
             collectionView.leadingAnchor.constraint(equalTo: leadingAnchor),
             collectionView.trailingAnchor.constraint(equalTo: trailingAnchor),
             collectionView.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -163,17 +196,137 @@ final class EmojiPanelView: UIView {
     // MARK: - Data
 
     func reloadData() {
-        let recents = EmojiRecents.get()
-        if recents.isEmpty {
-            allEmojis = EmojiData.categories.flatMap { $0.emojis }
-            recentsLabel.isHidden = true
+        if selectedCategory == nil {
+            // Recents tab
+            let recents = EmojiRecents.get()
+            if recents.isEmpty {
+                allEmojis = []
+                emptyStateLabel.isHidden = false
+                bringSubviewToFront(emptyStateLabel)
+            } else {
+                allEmojis = recents
+                emptyStateLabel.isHidden = true
+            }
         } else {
-            allEmojis = recents + EmojiData.categories.flatMap { $0.emojis }
-            recentsLabel.isHidden = false
+            allEmojis = EmojiData.categories.first { $0.name == selectedCategory }?.emojis ?? []
+            emptyStateLabel.isHidden = true
         }
         collectionView.reloadData()
-        // Scroll to top when reloading (recents are at the top)
         collectionView.setContentOffset(.zero, animated: false)
+    }
+
+    // MARK: - Category Bar
+
+    private func setupCategoryBar() {
+        categoryBar.translatesAutoresizingMaskIntoConstraints = false
+        categoryBar.showsHorizontalScrollIndicator = false
+        categoryBar.backgroundColor = .clear
+        addSubview(categoryBar)
+
+        let stack = UIStackView()
+        stack.axis = .horizontal
+        stack.distribution = .fill
+        stack.alignment = .fill
+        stack.spacing = 2
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        categoryBar.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            categoryBar.topAnchor.constraint(equalTo: headerView.bottomAnchor),
+            categoryBar.leadingAnchor.constraint(equalTo: leadingAnchor),
+            categoryBar.trailingAnchor.constraint(equalTo: trailingAnchor),
+            categoryBar.heightAnchor.constraint(equalToConstant: 36),
+
+            stack.topAnchor.constraint(equalTo: categoryBar.contentLayoutGuide.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: categoryBar.contentLayoutGuide.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: categoryBar.contentLayoutGuide.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: categoryBar.contentLayoutGuide.bottomAnchor),
+            stack.heightAnchor.constraint(equalTo: categoryBar.frameLayoutGuide.heightAnchor),
+        ])
+
+        let recentsButton = makeCategoryButton(title: "Recents")
+        stack.addArrangedSubview(recentsButton)
+
+        for cat in EmojiData.categories {
+            let button = makeCategoryButton(title: cat.name)
+            stack.addArrangedSubview(button)
+        }
+
+        updateTabSelection()
+    }
+
+    private func makeCategoryButton(title: String) -> UIButton {
+        let button = UIButton(type: .system)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.setTitle(title, for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
+        button.contentEdgeInsets = UIEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
+        button.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        button.addTarget(self, action: #selector(categoryTapped(_:)), for: .touchUpInside)
+        categoryButtons.append(button)
+        return button
+    }
+
+    @objc private func categoryTapped(_ sender: UIButton) {
+        guard let index = categoryButtons.firstIndex(of: sender) else { return }
+
+        if index == 0 {
+            selectedCategory = nil
+        } else {
+            selectedCategory = EmojiData.categories[index - 1].name
+        }
+
+        updateTabSelection()
+        reloadData()
+    }
+
+    private func updateTabSelection() {
+        for (index, button) in categoryButtons.enumerated() {
+            let isSelected: Bool
+            if index == 0 {
+                isSelected = selectedCategory == nil
+            } else {
+                isSelected = selectedCategory == EmojiData.categories[index - 1].name
+            }
+
+            button.backgroundColor = UIColor { tc in
+                if isSelected {
+                    tc.userInterfaceStyle == .dark
+                        ? UIColor(white: 0.30, alpha: 1)
+                        : UIColor(white: 0.80, alpha: 1)
+                } else {
+                    .clear
+                }
+            }
+
+            button.setTitleColor(UIColor { tc in
+                if isSelected {
+                    tc.userInterfaceStyle == .dark
+                        ? UIColor.white
+                        : UIColor.black
+                } else {
+                    tc.userInterfaceStyle == .dark
+                        ? UIColor(white: 0.6, alpha: 1)
+                        : UIColor(white: 0.4, alpha: 1)
+                }
+            }, for: .normal)
+        }
+    }
+
+    // MARK: - Tone Menu
+
+    private func buildToneMenu() -> UIMenu {
+        let actions = EmojiSkinTone.allCases.map { tone in
+            UIAction(
+                title: "\(tone.sample) \(tone.displayName)",
+                state: tone == EmojiSkinTone.current ? .on : .off
+            ) { [weak self] _ in
+                EmojiSkinTone.current = tone
+                self?.collectionView.reloadData()
+                self?.toneButton.menu = self?.buildToneMenu()
+            }
+        }
+        return UIMenu(title: "", children: actions)
     }
 }
 
@@ -194,7 +347,7 @@ extension EmojiPanelView: UICollectionViewDataSource {
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: EmojiCell.reuseIdentifier, for: indexPath) as! EmojiCell
-        cell.configure(with: allEmojis[indexPath.item])
+        cell.configure(with: EmojiData.applying(.current, to: allEmojis[indexPath.item]))
         return cell
     }
 }
@@ -210,7 +363,7 @@ extension EmojiPanelView: UICollectionViewDelegateFlowLayout {
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: false)
-        let emoji = allEmojis[indexPath.item]
+        let emoji = EmojiData.applying(.current, to: allEmojis[indexPath.item])
         onSelect?(emoji)
     }
 }

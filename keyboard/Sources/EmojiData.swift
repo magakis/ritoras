@@ -171,3 +171,64 @@ enum EmojiRecents {
         UserDefaults.standard.set(recents, forKey: storageKey)
     }
 }
+
+// MARK: - EmojiSkinTone
+
+enum EmojiSkinTone: String, CaseIterable {
+    case none = ""
+    case light = "\u{1F3FB}"
+    case lightMedium = "\u{1F3FC}"
+    case medium = "\u{1F3FD}"
+    case mediumDark = "\u{1F3FE}"
+    case dark = "\u{1F3FF}"
+
+    var displayName: String {
+        switch self {
+        case .none: return "None"
+        case .light: return "Light"
+        case .lightMedium: return "Light Medium"
+        case .medium: return "Medium"
+        case .mediumDark: return "Medium Dark"
+        case .dark: return "Dark"
+        }
+    }
+
+    var sample: String {
+        "👍" + rawValue
+    }
+
+    // MARK: - Persistence (mirrors EmojiRecents pattern)
+
+    private static let storageKey = "ritoras_emoji_skin_tone"
+
+    static var current: EmojiSkinTone {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: storageKey) else { return .light }
+            return EmojiSkinTone(rawValue: raw) ?? .light
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: storageKey)
+        }
+    }
+
+    // MARK: - Application
+
+    private static let skinToneCapable: Set<String> = [
+        "👍", "👎", "👊", "✊", "🤛", "🤜", "👏", "🙌",
+        "👐", "🤲", "🤝", "🙏", "✌️", "🤞", "🫶", "🤟",
+        "🤘", "🤙", "🖐️", "✋", "👌", "🤌", "🤏", "🫵",
+        "💪", "🦵", "🦶", "👂", "🦻",
+    ]
+
+    static func applying(_ tone: EmojiSkinTone, to base: String) -> String {
+        guard tone != .none, skinToneCapable.contains(base) else {
+            return base
+        }
+        var modified = base
+        // Strip trailing VS16 (U+FE0F) if present so modifier appends cleanly
+        if modified.unicodeScalars.last == "\u{FE0F}" {
+            modified = String(modified.unicodeScalars.dropLast())
+        }
+        return modified + tone.rawValue
+    }
+}
