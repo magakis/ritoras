@@ -10,6 +10,10 @@ struct SharedConfig {
         static let darwinNotificationName = "com.ritoras.dictationCompleted"
         static let dictationPayloadKey = "dictation.payload"
         static let dictationTimeoutSeconds: TimeInterval = 30
+        static let backspaceInitialRepeatDelay: TimeInterval = 0.5
+        static let backspaceCharRepeatInterval: TimeInterval = 0.1
+        static let backspaceCharsBeforeWordMode: Int = 22
+        static let backspaceWordRepeatInterval: TimeInterval = 0.35
         static var dictateURL: URL { URL(string: "\(urlScheme)://\(dictateURLPath)")! }
     }
 

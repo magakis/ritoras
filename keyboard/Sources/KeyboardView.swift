@@ -32,6 +32,13 @@ protocol KeyboardViewDelegate: AnyObject {
     func keyboardView(_ view: KeyboardView, didTapSuggestion text: String)
     func keyboardViewNeedsSuggestions(_ view: KeyboardView) -> [String]
     func keyboardViewMicState(_ view: KeyboardView) -> KeyboardState
+    func keyboardViewBackspaceDidBegin(_ view: KeyboardView)
+    func keyboardViewBackspaceDidEnd(_ view: KeyboardView)
+}
+
+extension KeyboardViewDelegate {
+    func keyboardViewBackspaceDidBegin(_ view: KeyboardView) {}
+    func keyboardViewBackspaceDidEnd(_ view: KeyboardView) {}
 }
 
 // MARK: - KeyButton
@@ -42,6 +49,10 @@ private class KeyButton: UIButton {
     /// Set true when a long-press gesture fires on this button, so the subsequent
     /// touchUpInside can be suppressed (prevents a long-press + tap double-fire).
     var shiftLongPressDidFire = false
+
+    /// Set true on touch-down so the trailing touchUpInside can be suppressed
+    /// (prevents a duplicate backspace when Phase 4 handles it on touch-down).
+    var backspaceSuppressTap = false
 
     /// Thin underline shown beneath the shift icon when Caps Lock is engaged,
     /// matching the native iOS keyboard's caps-lock affordance.
@@ -497,6 +508,11 @@ class KeyboardView: UIView {
                     let longPress = UILongPressGestureRecognizer(target: self, action: #selector(shiftLongPressed(_:)))
                     longPress.minimumPressDuration = 0.4
                     button.addGestureRecognizer(longPress)
+                case .backspace:
+                    button.addTarget(self, action: #selector(backspaceTouchDown(_:)), for: .touchDown)
+                    button.addTarget(self, action: #selector(backspaceTouchUp(_:)), for: .touchUpInside)
+                    button.addTarget(self, action: #selector(backspaceTouchUp(_:)), for: .touchUpOutside)
+                    button.addTarget(self, action: #selector(backspaceTouchUp(_:)), for: .touchCancel)
                 default:
                     break
                 }
@@ -553,6 +569,10 @@ class KeyboardView: UIView {
             sender.shiftLongPressDidFire = false
             return
         }
+        if sender.backspaceSuppressTap {
+            sender.backspaceSuppressTap = false
+            return
+        }
         delegate?.keyboardView(self, didPerform: sender.keyDefinition.action)
     }
 
@@ -566,6 +586,18 @@ class KeyboardView: UIView {
         guard gesture.state == .began, let button = gesture.view as? KeyButton else { return }
         button.shiftLongPressDidFire = true
         delegate?.keyboardView(self, didPerform: .shiftLock)
+    }
+
+    /// Touch-down on backspace sets the suppression flag and signals the controller
+    /// to begin the repeat sequence (single delete immediately, repeated deletes in Phase 4).
+    @objc private func backspaceTouchDown(_ sender: KeyButton) {
+        sender.backspaceSuppressTap = true
+        delegate?.keyboardViewBackspaceDidBegin(self)
+    }
+
+    /// Touch-up (including outside or cancelled) signals the controller to stop repeating.
+    @objc private func backspaceTouchUp(_ sender: KeyButton) {
+        delegate?.keyboardViewBackspaceDidEnd(self)
     }
 
     // MARK: - Public API

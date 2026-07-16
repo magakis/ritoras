@@ -1,5 +1,10 @@
 import UIKit
 
+private enum BackspacePhase {
+    case charRepeat
+    case wordRepeat
+}
+
 class KeyboardViewController: UIInputViewController {
 
     // MARK: - State
@@ -35,6 +40,12 @@ class KeyboardViewController: UIInputViewController {
     private lazy var predictionEngine = PredictionEngine()
 
     private var keyboardView: KeyboardView!
+
+    // MARK: - Backspace State
+
+    private var backspaceTimer: Timer?
+    private var backspacePhase: BackspacePhase?
+    private var backspaceSingleCharCount = 0
 
     // MARK: - Dictation State
 
@@ -158,6 +169,10 @@ class KeyboardViewController: UIInputViewController {
         serverPollTimer?.invalidate()
         errorResetWorkItem?.cancel()
         darwinToken = nil
+        backspaceTimer?.invalidate()
+        backspaceTimer = nil
+        backspacePhase = nil
+        backspaceSingleCharCount = 0
     }
 
     deinit {
@@ -167,6 +182,7 @@ class KeyboardViewController: UIInputViewController {
         clipboardPollTimer?.invalidate()
         serverPollTimer?.invalidate()
         errorResetWorkItem?.cancel()
+        backspaceTimer?.invalidate()
     }
 
     // MARK: - Setup
@@ -871,6 +887,33 @@ extension KeyboardViewController: KeyboardViewDelegate {
         return state
     }
 
+    // MARK: - Backspace Long-Press
+
+    func keyboardViewBackspaceDidBegin(_ view: KeyboardView) {
+        backspaceTimer?.invalidate()
+        backspaceTimer = nil
+        backspaceSingleCharCount = 0
+        backspacePhase = nil
+
+        guard textDocumentProxy.hasText else { return }
+
+        textDocumentProxy.deleteBackward()
+        backspaceSingleCharCount = 1
+        keyboardView.refreshSuggestions()
+
+        guard textDocumentProxy.hasText else { return }
+
+        backspacePhase = .charRepeat
+        scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceInitialRepeatDelay, repeats: false)
+    }
+
+    func keyboardViewBackspaceDidEnd(_ view: KeyboardView) {
+        backspaceTimer?.invalidate()
+        backspaceTimer = nil
+        backspacePhase = nil
+        backspaceSingleCharCount = 0
+    }
+
     // MARK: - Text Changes
 
     override func textDidChange(_ textInput: UITextInput?) {
@@ -886,5 +929,62 @@ extension KeyboardViewController: KeyboardViewDelegate {
             return text.uppercased()
         }
         return text
+    }
+
+    // MARK: - Backspace Timer
+
+    private func scheduleBackspaceTimer(after interval: TimeInterval, repeats: Bool) {
+        backspaceTimer?.invalidate()
+        backspaceTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: repeats) { [weak self] timer in
+            guard let self = self else { timer.invalidate(); return }
+            self.handleBackspaceTick()
+        }
+    }
+
+    private func handleBackspaceTick() {
+        guard textDocumentProxy.hasText else {
+            backspaceTimer?.invalidate()
+            backspaceTimer = nil
+            backspacePhase = nil
+            return
+        }
+
+        switch backspacePhase {
+        case .charRepeat:
+            textDocumentProxy.deleteBackward()
+            backspaceSingleCharCount += 1
+            keyboardView.refreshSuggestions()
+
+            guard textDocumentProxy.hasText else {
+                backspaceTimer?.invalidate()
+                backspaceTimer = nil
+                backspacePhase = nil
+                return
+            }
+
+            if backspaceSingleCharCount >= SharedConfig.Defaults.backspaceCharsBeforeWordMode {
+                backspacePhase = .wordRepeat
+                scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceWordRepeatInterval, repeats: true)
+            } else {
+                scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceCharRepeatInterval, repeats: true)
+            }
+
+        case .wordRepeat:
+            let n = BackspaceModel.wordUnitLength(for: textDocumentProxy.documentContextBeforeInput)
+            guard n > 0 else {
+                backspaceTimer?.invalidate()
+                backspaceTimer = nil
+                backspacePhase = nil
+                return
+            }
+            for _ in 0..<n {
+                guard textDocumentProxy.hasText else { break }
+                textDocumentProxy.deleteBackward()
+            }
+            keyboardView.refreshSuggestions()
+
+        case nil:
+            break
+        }
     }
 }
