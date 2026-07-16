@@ -69,7 +69,7 @@ enum KeyboardLayout {
 
         // Row 3: shift z x c v b n m backspace
         [
-            KeyDefinition(label: "⇧", shiftedLabel: "⇪", action: .shift, widthWeight: 1.6),
+            KeyDefinition(label: "⇧", shiftedLabel: "⇪", action: .shift, widthWeight: 1.5),
             KeyDefinition(label: "z", shiftedLabel: "Z", action: .insertText("z"), widthWeight: 1),
             KeyDefinition(label: "x", shiftedLabel: "X", action: .insertText("x"), widthWeight: 1),
             KeyDefinition(label: "c", shiftedLabel: "C", action: .insertText("c"), widthWeight: 1),
@@ -77,7 +77,7 @@ enum KeyboardLayout {
             KeyDefinition(label: "b", shiftedLabel: "B", action: .insertText("b"), widthWeight: 1),
             KeyDefinition(label: "n", shiftedLabel: "N", action: .insertText("n"), widthWeight: 1),
             KeyDefinition(label: "m", shiftedLabel: "M", action: .insertText("m"), widthWeight: 1),
-            KeyDefinition(label: "⌫", shiftedLabel: nil, action: .backspace, widthWeight: 1.6),
+            KeyDefinition(label: "⌫", shiftedLabel: nil, action: .backspace, widthWeight: 1.5),
         ],
 
         // Row 4: 123 emoji mic space return
@@ -119,7 +119,7 @@ enum KeyboardLayout {
             KeyDefinition(label: "!", shiftedLabel: nil, action: .insertText("!"), widthWeight: 1),
             KeyDefinition(label: "'", shiftedLabel: nil, action: .insertText("'"), widthWeight: 1),
             KeyDefinition(label: "`", shiftedLabel: nil, action: .insertText("`"), widthWeight: 1),
-            KeyDefinition(label: "⌫", shiftedLabel: nil, action: .backspace, widthWeight: 1.6),
+            KeyDefinition(label: "⌫", shiftedLabel: nil, action: .backspace, widthWeight: 1.5),
         ],
 
         // Row 4: ABC emoji mic space return
@@ -171,7 +171,7 @@ enum KeyboardLayout {
             KeyDefinition(label: "!", shiftedLabel: nil, action: .insertText("!"), widthWeight: 1),
             KeyDefinition(label: "'", shiftedLabel: nil, action: .insertText("'"), widthWeight: 1),
             KeyDefinition(label: "`", shiftedLabel: nil, action: .insertText("`"), widthWeight: 1),
-            KeyDefinition(label: "⌫", shiftedLabel: nil, action: .backspace, widthWeight: 1.6),
+            KeyDefinition(label: "⌫", shiftedLabel: nil, action: .backspace, widthWeight: 1.5),
         ],
 
         // Row 4: ABC emoji mic space return

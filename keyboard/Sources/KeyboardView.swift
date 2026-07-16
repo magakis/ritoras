@@ -74,20 +74,10 @@ private class KeyButton: UIButton {
                 : UIColor(white: 0.3, alpha: 1)
         }
 
-        // The row stack sizes keys proportionally via fillProportionally using the
-        // intrinsic width below. Use a large proportional base so distribution is
-        // numerically stable, and keep content priorities low so button content
-        // (icon/label) never overrides the layout.
-        setContentHuggingPriority(.defaultLow, for: .horizontal)
-        setContentHuggingPriority(.defaultLow, for: .vertical)
-        setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-
+        // Keys are positioned by manual frame math in KeyboardRowView.layoutSubviews
+        // (NOT UIStackView.fillProportionally, which squashes the last key whenever
+        // spacing is non-zero). No intrinsicContentSize override is needed.
         configureContent()
-    }
-
-    override var intrinsicContentSize: CGSize {
-        CGSize(width: keyDefinition.widthWeight * 100, height: UIView.noIntrinsicMetric)
     }
 
     override var isHighlighted: Bool {
@@ -134,6 +124,80 @@ private class KeyButton: UIButton {
         }
         if let color = color {
             self.backgroundColor = color
+        }
+    }
+}
+
+// MARK: - KeyboardRowView
+
+/// A single keyboard row that positions its keys via manual frame math in
+/// layoutSubviews. This deliberately avoids UIStackView.fillProportionally, which
+/// has a well-documented bug: it assigns the last arranged subview the
+/// lowest-priority proportional constraint, so the final key (P, L) gets squashed
+/// whenever spacing is non-zero.
+private class KeyboardRowView: UIView {
+    let keys: [KeyButton]
+    private let spacing: CGFloat
+    private let uniformLetterPitch: Bool
+
+    /// - Parameters:
+    ///   - keys: The key buttons, in left-to-right order.
+    ///   - spacing: Horizontal gap between keys (points).
+    ///   - uniformLetterPitch: When true, keys are sized off a shared letter "pitch"
+    ///     (= rowWidth / 10) so every weight-1 key has identical width across every
+    ///     row, with shorter rows centered (the native iOS staggered look). When
+    ///     false, keys fill the full row width proportionally to their weight
+    ///     (used for the bottom action row).
+    init(keys: [KeyButton], spacing: CGFloat = 6, uniformLetterPitch: Bool) {
+        self.keys = keys
+        self.spacing = spacing
+        self.uniformLetterPitch = uniformLetterPitch
+        super.init(frame: .zero)
+        keys.forEach {
+            // Manual frame layout: neutralize autoresizing so set frames stick exactly.
+            $0.autoresizingMask = []
+            addSubview($0)
+        }
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard !keys.isEmpty else { return }
+
+        let width = bounds.width
+        let height = bounds.height
+        let n = CGFloat(keys.count)
+        let totalSpacing = spacing * (n - 1)
+
+        if uniformLetterPitch {
+            // Letter pitch derived from a 10-key row. This guarantees every weight-1
+            // key is the SAME width regardless of which row it is in. Rows with fewer
+            // keys (e.g. 9-key row 2) end up narrower than the full width and are
+            // centered, producing the native staggered QWERTY look.
+            let pitch = (width - spacing * 9) / 10
+            let keyWidths = keys.map { pitch * $0.keyDefinition.widthWeight }
+            let contentWidth = keyWidths.reduce(0, +) + totalSpacing
+            let inset = max(0, (width - contentWidth) / 2)
+            var x = inset
+            for (i, key) in keys.enumerated() {
+                key.frame = CGRect(x: x, y: 0, width: keyWidths[i], height: height)
+                x += keyWidths[i] + spacing
+            }
+        } else {
+            // Fill the entire row proportionally to weight (bottom action row).
+            let totalWeight = keys.reduce(0.0) { $0 + $1.keyDefinition.widthWeight }
+            guard totalWeight > 0 else { return }
+            let unit = (width - totalSpacing) / totalWeight
+            var x: CGFloat = 0
+            for key in keys {
+                let w = unit * key.keyDefinition.widthWeight
+                key.frame = CGRect(x: x, y: 0, width: w, height: height)
+                x += w + spacing
+            }
         }
     }
 }
@@ -237,11 +301,12 @@ class KeyboardView: UIView {
         }
         return panel
     }()
-    private let bottomActionRow = UIStackView()
+    private let bottomActionRow = UIView()
 
     // Key references
     private weak var micKeyButton: KeyButton?
     private weak var emojiKeyButton: KeyButton?
+    private weak var bottomRowView: KeyboardRowView?
 
     // State tracking
     private var hasFullAccess = false
@@ -309,11 +374,8 @@ class KeyboardView: UIView {
             keyStack.bottomAnchor.constraint(equalTo: letterRegionContainer.bottomAnchor),
         ])
 
-        // Bottom action row (Row 4) — always visible, sits between letter rows and floating strip
-        bottomActionRow.axis = .horizontal
-        bottomActionRow.distribution = .fillProportionally
-        bottomActionRow.alignment = .fill
-        bottomActionRow.spacing = 6
+        // Bottom action row (Row 4) — a plain container; the actual keys are laid out
+        // by a KeyboardRowView pinned inside it (manual frame math, no fillProportionally).
         bottomActionRow.translatesAutoresizingMaskIntoConstraints = false
         addSubview(bottomActionRow)
     }
@@ -356,21 +418,17 @@ class KeyboardView: UIView {
 
     private func rebuildKeyRows() {
         keyStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-        bottomActionRow.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        bottomRowView?.removeFromSuperview()
+        bottomRowView = nil
 
         let rows = KeyboardLayout.rows(for: currentLayoutMode)
 
         for (rowIndex, rowDefs) in rows.enumerated() {
             let isLastRow = rowIndex == rows.count - 1
-            let targetStack = isLastRow ? bottomActionRow : keyStack
 
-            let rowStack = UIStackView()
-            rowStack.axis = .horizontal
-            rowStack.distribution = .fillProportionally
-            rowStack.alignment = .fill
-            rowStack.spacing = 6
-            rowStack.translatesAutoresizingMaskIntoConstraints = false
-
+            // Build the key buttons for this row.
+            var buttons: [KeyButton] = []
+            buttons.reserveCapacity(rowDefs.count)
             for def in rowDefs {
                 let button = KeyButton(definition: def)
                 button.addTarget(self, action: #selector(keyTapped(_:)), for: .touchUpInside)
@@ -386,10 +444,27 @@ class KeyboardView: UIView {
                     break
                 }
 
-                rowStack.addArrangedSubview(button)
+                buttons.append(button)
             }
 
-            targetStack.addArrangedSubview(rowStack)
+            // Letter rows (0–2) use a shared letter pitch so every letter key is the
+            // same width across all rows, with shorter rows centered (native stagger).
+            // The bottom action row fills its width proportionally to weight.
+            let rowView = KeyboardRowView(keys: buttons, uniformLetterPitch: !isLastRow)
+            rowView.translatesAutoresizingMaskIntoConstraints = false
+
+            if isLastRow {
+                bottomActionRow.addSubview(rowView)
+                NSLayoutConstraint.activate([
+                    rowView.topAnchor.constraint(equalTo: bottomActionRow.topAnchor),
+                    rowView.leadingAnchor.constraint(equalTo: bottomActionRow.leadingAnchor),
+                    rowView.trailingAnchor.constraint(equalTo: bottomActionRow.trailingAnchor),
+                    rowView.bottomAnchor.constraint(equalTo: bottomActionRow.bottomAnchor),
+                ])
+                bottomRowView = rowView
+            } else {
+                keyStack.addArrangedSubview(rowView)
+            }
         }
 
         // Re-apply mic state after rebuild
@@ -401,9 +476,13 @@ class KeyboardView: UIView {
     }
 
     private func updateKeyButtonLabels() {
-        for rowStack in keyStack.arrangedSubviews {
-            guard let stack = rowStack as? UIStackView else { continue }
-            for case let button as KeyButton in stack.arrangedSubviews {
+        for case let rowView as KeyboardRowView in keyStack.arrangedSubviews {
+            for button in rowView.keys {
+                button.updateLabel(for: currentShiftState)
+            }
+        }
+        if let bottomRow = bottomRowView {
+            for button in bottomRow.keys {
                 button.updateLabel(for: currentShiftState)
             }
         }
