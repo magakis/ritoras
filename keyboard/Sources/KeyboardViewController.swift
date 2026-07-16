@@ -46,7 +46,7 @@ class KeyboardViewController: UIInputViewController {
     private var backspaceTimer: Timer?
     private var backspacePhase: BackspacePhase?
     private var backspaceSingleCharCount = 0
-    private var backspaceWordCharsRemaining = 0
+    private var backspaceNilContextRetries = 0
 
     // MARK: - Dictation State
 
@@ -174,7 +174,7 @@ class KeyboardViewController: UIInputViewController {
         backspaceTimer = nil
         backspacePhase = nil
         backspaceSingleCharCount = 0
-        backspaceWordCharsRemaining = 0
+        backspaceNilContextRetries = 0
     }
 
     deinit {
@@ -185,7 +185,7 @@ class KeyboardViewController: UIInputViewController {
         serverPollTimer?.invalidate()
         errorResetWorkItem?.cancel()
         backspaceTimer?.invalidate()
-        backspaceWordCharsRemaining = 0
+        backspaceNilContextRetries = 0
     }
 
     // MARK: - Setup
@@ -900,9 +900,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         guard textDocumentProxy.hasText else { return }
 
-        // DEBUG: temporary — strip after diagnosing backspace halt
-        NSLog("[BSDBG] BEGIN")
-
         textDocumentProxy.deleteBackward()
         backspaceSingleCharCount = 1
         keyboardView.refreshSuggestions()
@@ -916,13 +913,9 @@ extension KeyboardViewController: KeyboardViewDelegate {
     func keyboardViewBackspaceDidEnd(_ view: KeyboardView) {
         backspaceTimer?.invalidate()
         backspaceTimer = nil
-
-        // DEBUG: temporary — strip after diagnosing backspace halt
-        NSLog("[BSDBG] END phase=\(backspacePhase.map { "\($0)" } ?? "nil") count=\(backspaceSingleCharCount)")
-
         backspacePhase = nil
         backspaceSingleCharCount = 0
-        backspaceWordCharsRemaining = 0
+        backspaceNilContextRetries = 0
     }
 
     // MARK: - Text Changes
@@ -930,6 +923,25 @@ extension KeyboardViewController: KeyboardViewDelegate {
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
         keyboardView.refreshSuggestions()
+    }
+
+    override func textWillChange(_ textInput: UITextInput?) {
+        super.textWillChange(textInput)
+        backspaceNilContextRetries = 0
+    }
+
+    override func selectionWillChange(_ textInput: UITextInput?) {
+        super.selectionWillChange(textInput)
+        backspaceTimer?.invalidate()
+        backspaceTimer = nil
+        backspacePhase = nil
+        backspaceSingleCharCount = 0
+        backspaceNilContextRetries = 0
+    }
+
+    override func selectionDidChange(_ textInput: UITextInput?) {
+        super.selectionDidChange(textInput)
+        backspaceNilContextRetries = 0
     }
 
     // MARK: - Helpers
@@ -960,22 +972,11 @@ extension KeyboardViewController: KeyboardViewDelegate {
             return
         }
 
-        // Capture context before mutation for debug logging.
-        let ctxForLog = textDocumentProxy.documentContextBeforeInput
-        let tailForLog = ctxForLog.map { String($0.suffix(80)) } ?? "<nil>"
-        let escapedForLog = tailForLog
-            .replacingOccurrences(of: " ", with: "·")
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\t", with: "\\t")
-
         switch backspacePhase {
         case .charRepeat:
             textDocumentProxy.deleteBackward()
             backspaceSingleCharCount += 1
             keyboardView.refreshSuggestions()
-
-            // DEBUG: temporary — strip after diagnosing backspace halt
-            NSLog("[BSDBG] phase=charRepeat hasText=\(textDocumentProxy.hasText) ctxTail=|\(escapedForLog)| n=1 deleted=1")
 
             guard textDocumentProxy.hasText else {
                 backspaceTimer?.invalidate()
@@ -986,52 +987,42 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
             if backspaceSingleCharCount >= SharedConfig.Defaults.backspaceCharsBeforeWordMode {
                 backspacePhase = .wordRepeat
-                scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceWordRepeatInterval, repeats: true)
+                scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceWordRepeatInterval, repeats: false)
             } else {
                 scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceCharRepeatInterval, repeats: true)
             }
 
         case .wordRepeat:
-            if backspaceWordCharsRemaining > 0 {
-                // Mid-word: delete one more char on its own run-loop pass (keeps the host
-                // text proxy in sync — a tight synchronous burst desyncs it in apps like Messages).
-                guard textDocumentProxy.hasText else {
-                    backspaceWordCharsRemaining = 0
+            let context = textDocumentProxy.documentContextBeforeInput
+            if context == nil || context?.isEmpty == true {
+                // Host withholding context — retry after delay instead of deleting blind.
+                backspaceNilContextRetries += 1
+                if backspaceNilContextRetries > SharedConfig.Defaults.backspaceNilContextRetryLimit {
                     backspaceTimer?.invalidate()
                     backspaceTimer = nil
                     backspacePhase = nil
+                    backspaceNilContextRetries = 0
                     return
                 }
-                textDocumentProxy.deleteBackward()
-                backspaceWordCharsRemaining -= 1
-                keyboardView.refreshSuggestions()
-                scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceWordCharInterval, repeats: false)
-            } else {
-                // Start of a new word: compute its length, delete the first char now,
-                // and spread the remaining (n-1) chars across fast ticks.
-                let n = BackspaceModel.wordUnitLength(for: textDocumentProxy.documentContextBeforeInput)
-                guard n > 0 else {
-                    // documentContextBeforeInput unavailable (host quirk) but text may remain:
-                    // degrade to a single character delete at char-repeat cadence.
-                    guard textDocumentProxy.hasText else {
-                        backspaceTimer?.invalidate()
-                        backspaceTimer = nil
-                        backspacePhase = nil
-                        return
-                    }
-                    textDocumentProxy.deleteBackward()
-                    keyboardView.refreshSuggestions()
-                    scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceCharRepeatInterval, repeats: false)
-                    return
-                }
-                textDocumentProxy.deleteBackward()
-                backspaceWordCharsRemaining = n - 1
-                keyboardView.refreshSuggestions()
-                scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceWordCharInterval, repeats: false)
+                scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceNilContextRetryInterval, repeats: false)
+                return
             }
 
-            // DEBUG: temporary — strip after diagnosing backspace halt
-            NSLog("[BSDBG] phase=wordRepeat hasText=\(textDocumentProxy.hasText) ctxTail=|\(escapedForLog)| deleted=1 wordRemaining=\(backspaceWordCharsRemaining)")
+            // Got context — reset retries and do whole-word burst deletion.
+            backspaceNilContextRetries = 0
+            let n = BackspaceModel.wordUnitLength(for: context)
+            guard n > 0 else {
+                backspaceTimer?.invalidate()
+                backspaceTimer = nil
+                backspacePhase = nil
+                return
+            }
+            for _ in 0..<n {
+                guard textDocumentProxy.hasText else { break }
+                textDocumentProxy.deleteBackward()
+            }
+            keyboardView.refreshSuggestions()
+            scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceWordRepeatInterval, repeats: false)
 
         case nil:
             break
