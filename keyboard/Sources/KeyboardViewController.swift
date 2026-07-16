@@ -897,6 +897,9 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         guard textDocumentProxy.hasText else { return }
 
+        // DEBUG: temporary — strip after diagnosing backspace halt
+        NSLog("[BSDBG] BEGIN")
+
         textDocumentProxy.deleteBackward()
         backspaceSingleCharCount = 1
         keyboardView.refreshSuggestions()
@@ -910,6 +913,10 @@ extension KeyboardViewController: KeyboardViewDelegate {
     func keyboardViewBackspaceDidEnd(_ view: KeyboardView) {
         backspaceTimer?.invalidate()
         backspaceTimer = nil
+
+        // DEBUG: temporary — strip after diagnosing backspace halt
+        NSLog("[BSDBG] END phase=\(backspacePhase.map { "\($0)" } ?? "nil") count=\(backspaceSingleCharCount)")
+
         backspacePhase = nil
         backspaceSingleCharCount = 0
     }
@@ -949,11 +956,22 @@ extension KeyboardViewController: KeyboardViewDelegate {
             return
         }
 
+        // Capture context before mutation for debug logging.
+        let ctxForLog = textDocumentProxy.documentContextBeforeInput
+        let tailForLog = ctxForLog.map { String($0.suffix(80)) } ?? "<nil>"
+        let escapedForLog = tailForLog
+            .replacingOccurrences(of: " ", with: "·")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\t", with: "\\t")
+
         switch backspacePhase {
         case .charRepeat:
             textDocumentProxy.deleteBackward()
             backspaceSingleCharCount += 1
             keyboardView.refreshSuggestions()
+
+            // DEBUG: temporary — strip after diagnosing backspace halt
+            NSLog("[BSDBG] phase=charRepeat hasText=\(textDocumentProxy.hasText) ctxTail=|\(escapedForLog)| n=1 deleted=1")
 
             guard textDocumentProxy.hasText else {
                 backspaceTimer?.invalidate()
@@ -971,25 +989,28 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         case .wordRepeat:
             let n = BackspaceModel.wordUnitLength(for: textDocumentProxy.documentContextBeforeInput)
+            var deleted = 0
             if n > 0 {
-                // Normal whole-word deletion.
                 for _ in 0..<n {
                     guard textDocumentProxy.hasText else { break }
                     textDocumentProxy.deleteBackward()
+                    deleted += 1
                 }
-            } else {
-                // documentContextBeforeInput returned nil/empty (host quirk) but text may
-                // still exist. Degrade to a single character delete so the user does not
-                // see deletion halt mid-hold. Only stop when the field is genuinely empty.
-                guard textDocumentProxy.hasText else {
-                    backspaceTimer?.invalidate()
-                    backspaceTimer = nil
-                    backspacePhase = nil
-                    return
-                }
+                scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceWordRepeatInterval, repeats: false)
+            } else if textDocumentProxy.hasText {
                 textDocumentProxy.deleteBackward()
+                deleted = 1
+                scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceCharRepeatInterval, repeats: false)
+            } else {
+                backspaceTimer?.invalidate()
+                backspaceTimer = nil
+                backspacePhase = nil
+                return
             }
             keyboardView.refreshSuggestions()
+
+            // DEBUG: temporary — strip after diagnosing backspace halt
+            NSLog("[BSDBG] phase=wordRepeat hasText=\(textDocumentProxy.hasText) ctxTail=|\(escapedForLog)| n=\(n) deleted=\(deleted)")
 
         case nil:
             break
