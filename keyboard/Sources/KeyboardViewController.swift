@@ -187,18 +187,6 @@ class KeyboardViewController: UIInputViewController {
         let heightConstraint = view.heightAnchor.constraint(equalToConstant: 290)
         heightConstraint.priority = .defaultHigh
         heightConstraint.isActive = true
-
-        // Long-press to copy logs (debugging)
-        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
-        view.addGestureRecognizer(longPress)
-    }
-
-    @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
-        if gesture.state == .began {
-            let logs = UserDefaults.standard.array(forKey: "ritoras_logs") as? [String] ?? []
-            UIPasteboard.general.string = logs.joined(separator: "\n")
-            state = .error("Logs copied to clipboard! Paste somewhere to share.")
-        }
     }
 
     // MARK: - Mic Button
