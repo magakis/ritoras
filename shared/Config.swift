@@ -14,6 +14,7 @@ struct SharedConfig {
         static let backspaceCharRepeatInterval: TimeInterval = 0.1
         static let backspaceCharsBeforeWordMode: Int = 22
         static let backspaceWordRepeatInterval: TimeInterval = 0.35
+        static let backspaceWordCharInterval: TimeInterval = 0.015   // 15ms per char while spreading a word's deletes
         static var dictateURL: URL { URL(string: "\(urlScheme)://\(dictateURLPath)")! }
     }
 
