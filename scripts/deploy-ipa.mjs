@@ -279,12 +279,114 @@ async function serve() {
 <html>
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="refresh" content="0; url=sidestore://install?url=http://${host}/Ritoras.ipa">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Ritoras Install</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 24px;
+      background: #f5f5f7;
+      color: #1d1d1f;
+    }
+    @media (prefers-color-scheme: dark) {
+      body {
+        background: #1c1c1e;
+        color: #f5f5f7;
+      }
+    }
+    .container {
+      width: 100%;
+      max-width: 480px;
+      text-align: center;
+    }
+    h1 {
+      font-size: 28px;
+      font-weight: 700;
+      margin-bottom: 8px;
+    }
+    .subtitle {
+      font-size: 16px;
+      color: #6e6e73;
+      margin-bottom: 32px;
+    }
+    @media (prefers-color-scheme: dark) {
+      .subtitle {
+        color: #98989d;
+      }
+    }
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 14px 20px;
+      font-size: 17px;
+      font-family: inherit;
+      border-radius: 12px;
+      text-decoration: none;
+      text-align: center;
+      -webkit-tap-highlight-color: transparent;
+      transition: opacity 0.2s;
+    }
+    .btn:active {
+      opacity: 0.7;
+    }
+    .btn-primary {
+      background: #007aff;
+      color: #fff;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+    .btn-secondary {
+      background: transparent;
+      color: #007aff;
+      border: 1.5px solid #007aff;
+      font-weight: 500;
+      margin-bottom: 12px;
+    }
+    @media (prefers-color-scheme: dark) {
+      .btn-primary {
+        background: #0a84ff;
+      }
+      .btn-secondary {
+        color: #0a84ff;
+        border-color: #0a84ff;
+      }
+    }
+    .btn-muted {
+      color: #6e6e73;
+      border-color: #d2d2d7;
+    }
+    @media (prefers-color-scheme: dark) {
+      .btn-muted {
+        color: #98989d;
+        border-color: #48484a;
+      }
+    }
+    .note {
+      margin-top: 24px;
+      font-size: 13px;
+      color: #6e6e73;
+    }
+    @media (prefers-color-scheme: dark) {
+      .note {
+        color: #98989d;
+      }
+    }
+  </style>
 </head>
 <body>
-  <h1>Ritoras Install</h1>
-  <a href="sidestore://install?url=http://${host}/Ritoras.ipa">Tap here to install via SideStore</a>
+  <div class="container">
+    <h1>Ritoras</h1>
+    <p class="subtitle">Install AltStore-compatible app</p>
+    <a class="btn btn-primary" href="sidestore://install?url=http://${host}/Ritoras.ipa">Install via SideStore</a>
+    <a class="btn btn-secondary" href="sidestore://">Open SideStore</a>
+    <a class="btn btn-secondary btn-muted" href="/Ritoras.ipa">Download .ipa</a>
+  </div>
 </body>
 </html>`;
       res.writeHead(200, { 'Content-Type': 'text/html' });
