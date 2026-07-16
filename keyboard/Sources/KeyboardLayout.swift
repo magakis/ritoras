@@ -11,6 +11,8 @@ enum KeyAction: Hashable {
     case toggleLetters
     case mic
     case space
+    case emoji
+    case globe
     case `return`
 }
 
@@ -78,11 +80,12 @@ enum KeyboardLayout {
             KeyDefinition(label: "⌫", shiftedLabel: nil, action: .backspace, widthWeight: 1.6),
         ],
 
-        // Row 4: 123 mic space return
+        // Row 4: 123 emoji mic space return
         [
-            KeyDefinition(label: "123", shiftedLabel: nil, action: .toggleNumber, widthWeight: 1.8),
+            KeyDefinition(label: "123", shiftedLabel: nil, action: .toggleNumber, widthWeight: 1.5),
+            KeyDefinition(label: "☺", shiftedLabel: nil, action: .emoji, widthWeight: 1.5),
             KeyDefinition(label: "", shiftedLabel: nil, action: .mic, widthWeight: 1.5),
-            KeyDefinition(label: "space", shiftedLabel: nil, action: .space, widthWeight: 5.0),
+            KeyDefinition(label: "space", shiftedLabel: nil, action: .space, widthWeight: 4.0),
             KeyDefinition(label: "return", shiftedLabel: nil, action: .return, widthWeight: 1.8),
         ],
     ]
@@ -119,11 +122,12 @@ enum KeyboardLayout {
             KeyDefinition(label: "⌫", shiftedLabel: nil, action: .backspace, widthWeight: 1.6),
         ],
 
-        // Row 4: ABC mic space return
+        // Row 4: ABC emoji mic space return
         [
-            KeyDefinition(label: "ABC", shiftedLabel: nil, action: .toggleLetters, widthWeight: 1.8),
+            KeyDefinition(label: "ABC", shiftedLabel: nil, action: .toggleLetters, widthWeight: 1.5),
+            KeyDefinition(label: "☺", shiftedLabel: nil, action: .emoji, widthWeight: 1.5),
             KeyDefinition(label: "", shiftedLabel: nil, action: .mic, widthWeight: 1.5),
-            KeyDefinition(label: "space", shiftedLabel: nil, action: .space, widthWeight: 5.0),
+            KeyDefinition(label: "space", shiftedLabel: nil, action: .space, widthWeight: 4.0),
             KeyDefinition(label: "return", shiftedLabel: nil, action: .return, widthWeight: 1.8),
         ],
     ]
@@ -170,11 +174,12 @@ enum KeyboardLayout {
             KeyDefinition(label: "⌫", shiftedLabel: nil, action: .backspace, widthWeight: 1.6),
         ],
 
-        // Row 4: ABC mic space return
+        // Row 4: ABC emoji mic space return
         [
-            KeyDefinition(label: "ABC", shiftedLabel: nil, action: .toggleLetters, widthWeight: 1.8),
+            KeyDefinition(label: "ABC", shiftedLabel: nil, action: .toggleLetters, widthWeight: 1.5),
+            KeyDefinition(label: "☺", shiftedLabel: nil, action: .emoji, widthWeight: 1.5),
             KeyDefinition(label: "", shiftedLabel: nil, action: .mic, widthWeight: 1.5),
-            KeyDefinition(label: "space", shiftedLabel: nil, action: .space, widthWeight: 5.0),
+            KeyDefinition(label: "space", shiftedLabel: nil, action: .space, widthWeight: 4.0),
             KeyDefinition(label: "return", shiftedLabel: nil, action: .return, widthWeight: 1.8),
         ],
     ]

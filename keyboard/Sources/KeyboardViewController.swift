@@ -14,6 +14,26 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
+    private var shiftState: ShiftState = .lower {
+        didSet {
+            keyboardView.apply(shift: shiftState, layoutMode: layoutMode)
+        }
+    }
+
+    private var layoutMode: KeyboardLayoutMode = .letters {
+        didSet {
+            keyboardView.apply(shift: shiftState, layoutMode: layoutMode)
+        }
+    }
+
+    private var uiMode: UIMode = .letters {
+        didSet {
+            keyboardView.apply(mode: uiMode)
+        }
+    }
+
+    private lazy var predictionEngine = PredictionEngine()
+
     private var keyboardView: KeyboardView!
 
     // MARK: - Dictation State
@@ -164,7 +184,7 @@ class KeyboardViewController: UIInputViewController {
             keyboardView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
-        let heightConstraint = view.heightAnchor.constraint(equalToConstant: 110)
+        let heightConstraint = view.heightAnchor.constraint(equalToConstant: 290)
         heightConstraint.priority = .defaultHigh
         heightConstraint.isActive = true
 
@@ -779,11 +799,101 @@ class KeyboardViewController: UIInputViewController {
 // MARK: - KeyboardViewDelegate
 
 extension KeyboardViewController: KeyboardViewDelegate {
-    func keyboardViewDidTapMicButton(_ view: KeyboardView) {
-        handleMicButtonTap()
+    func keyboardView(_ view: KeyboardView, didPerform action: KeyAction) {
+        switch action {
+        case .insertText(let s):
+            if uiMode == .emoji {
+                EmojiRecents.add(s)
+            }
+            let text = applyShift(to: s)
+            textDocumentProxy.insertText(text)
+            if shiftState == .upper {
+                shiftState = .lower
+            }
+            keyboardView.refreshSuggestions()
+
+        case .backspace:
+            textDocumentProxy.deleteBackward()
+            keyboardView.refreshSuggestions()
+
+        case .shift:
+            switch shiftState {
+            case .lower: shiftState = .upper
+            case .upper: shiftState = .locked
+            case .locked: shiftState = .lower
+            }
+
+        case .shiftLock:
+            shiftState = .locked
+
+        case .space:
+            textDocumentProxy.insertText(" ")
+            keyboardView.refreshSuggestions()
+
+        case .return:
+            textDocumentProxy.insertText("\n")
+
+        case .toggleNumber:
+            layoutMode = layoutMode == .letters ? .numbers : .letters
+
+        case .toggleLetters:
+            layoutMode = .letters
+
+        case .mic:
+            handleMicButtonTap()
+
+        case .emoji:
+            uiMode = uiMode == .letters ? .emoji : .letters
+
+        case .globe:
+            advanceToNextInputMode()
+        }
     }
 
-    func keyboardViewDidTapBackspace(_ view: KeyboardView) {
-        textDocumentProxy.deleteBackward()
+    func keyboardView(_ view: KeyboardView, didTapSuggestion text: String) {
+        let context = textDocumentProxy.documentContextBeforeInput ?? ""
+        var deleteCount = 0
+        for char in context.reversed() {
+            if char.isLetter || char.isNumber {
+                deleteCount += 1
+            } else {
+                break
+            }
+        }
+        for _ in 0..<deleteCount {
+            textDocumentProxy.deleteBackward()
+        }
+        textDocumentProxy.insertText(text + " ")
+        keyboardView.refreshSuggestions()
+    }
+
+    func keyboardViewNeedsSuggestions(_ view: KeyboardView) -> [String] {
+        guard let context = textDocumentProxy.documentContextBeforeInput else { return [] }
+        let currentWord = context
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .components(separatedBy: CharacterSet.whitespacesAndNewlines)
+            .last ?? ""
+        return predictionEngine.suggest(prefix: currentWord, limit: 3)
+    }
+
+    func keyboardViewMicState(_ view: KeyboardView) -> KeyboardState {
+        return state
+    }
+
+    // MARK: - Text Changes
+
+    override func textDidChange(_ textInput: UITextInput?) {
+        super.textDidChange(textInput)
+        keyboardView.refreshSuggestions()
+    }
+
+    // MARK: - Helpers
+
+    private func applyShift(to text: String) -> String {
+        guard !text.isEmpty, shiftState != .lower else { return text }
+        if text.rangeOfCharacter(from: .letters) != nil {
+            return text.uppercased()
+        }
+        return text
     }
 }
