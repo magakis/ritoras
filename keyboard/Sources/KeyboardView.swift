@@ -66,7 +66,7 @@ private class KeyButton: UIButton {
     private func setup() {
         layer.cornerRadius = 6
         clipsToBounds = true
-        titleLabel?.font = .systemFont(ofSize: 24, weight: .bold)
+        titleLabel?.font = .systemFont(ofSize: 24, weight: .regular)
         titleLabel?.textAlignment = .center
         contentHorizontalAlignment = .center
         contentVerticalAlignment = .center

@@ -184,7 +184,7 @@ class KeyboardViewController: UIInputViewController {
             keyboardView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
-        let heightConstraint = view.heightAnchor.constraint(equalToConstant: 290)
+        let heightConstraint = view.heightAnchor.constraint(equalToConstant: 256)
         heightConstraint.priority = .defaultHigh
         heightConstraint.isActive = true
     }
