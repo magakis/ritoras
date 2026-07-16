@@ -388,11 +388,7 @@ class KeyboardView: UIView {
     // MARK: - Setup
 
     private func setupView() {
-        backgroundColor = UIColor { tc in
-            tc.userInterfaceStyle == .dark
-                ? UIColor(white: 0.18, alpha: 1)
-                : UIColor(white: 0.92, alpha: 1)
-        }
+        backgroundColor = .clear
 
         setupSuggestionBar()
         setupLetterRegion()
