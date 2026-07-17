@@ -18,6 +18,40 @@ struct SharedConfig {
         static let backspaceNilContextRetryLimit: Int = 3
         static let backspaceNilContextRetryInterval: TimeInterval = 0.15
         static var dictateURL: URL { URL(string: "\(urlScheme)://\(dictateURLPath)")! }
+
+        // MARK: - SymSpell / Prediction Tunables
+
+        /// Maximum edit distance for SymSpell fuzzy correction.
+        static let symspellMaxEditDistance = 2
+        /// Prefix length for SymSpell delete generation.
+        static let symspellPrefixLength = 7
+        /// Internal limit per provider before merging/deduping.
+        static let providerResultLimit = 8
+
+        // MARK: - UITextChecker Spellcheck
+
+        /// Language tag passed to `UITextChecker` APIs. Matches `PrimaryLanguage`
+        /// in `keyboard/Info.plist`.
+        static let appleSpellCheckerLanguage = "en-US"
+
+        // MARK: - Bigram Prediction Tunables
+
+        /// Minimum bigram count to include in the prediction map. Bigrams with
+        /// fewer occurrences are pruned to reduce memory pressure. 5 cuts to
+        /// ~80–120k entries (~4 MB).
+        static let bigramMinCount = 5
+
+        /// Score multiplier applied when a candidate from another provider is
+        /// also a common bigram follower of the previous word.
+        static let bigramBoostFactor = 1.3
+
+        // MARK: - Memory Management
+
+        /// Maximum resident bytes allowed during dictionary load (default ~35 MB).
+        /// If the process exceeds this during `WordListLoader.loadStreamed`, the
+        /// load is aborted and a warning is logged. The engine still marks itself
+        /// ready with whatever partial vocabulary was loaded.
+        static let maxResidentBytesDuringLoad: UInt64 = 35 * 1024 * 1024
     }
 
     let servers: [String]

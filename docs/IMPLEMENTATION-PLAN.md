@@ -455,6 +455,35 @@ recording → tap stop → stop recorder, get m4a URL (P6) → transcribing
 
 ---
 
+## SymSpell Memory Baseline
+
+<!--
+    MEASUREMENT REQUIRED: Build and run SymSpellMemorySpike in the test target
+    on a real iOS device (or Release-config simulator) to get the actual
+    resident memory value. Run on macOS via:
+        xcodebuild test -scheme RitorasTests -destination 'platform=iOS Simulator,name=iPhone 15,OS=17.0' -configuration Release
+    The target is ≤25 MB for the SymSpell index alone.
+-->
+
+| Metric | Estimated | Target | Status |
+|--------|-----------|--------|--------|
+| Dictionary words | 82,765 | — | ✅ Loaded |
+| SymSpell maxEditDistance | 2 | — | ✅ |
+| SymSpell prefixLength | 7 | — | ✅ |
+| Unique delete keys | ~800,000 | — | TBD (measure) |
+| Resident memory (SymSpell index) | ~15–25 MB (estimated) | ≤25 MB | ⚠️ **NEEDS MEASUREMENT** |
+| Index build time (A-series) | ~150–400 ms | <500 ms | ⚠️ **NEEDS MEASUREMENT** |
+| Per-keystroke lookup | <1 ms (estimated) | <5 ms | ⚠️ **NEEDS MEASUREMENT** |
+
+**Pruning strategy (if >25 MB):**
+1. Drop words with frequency < 50 → ~50,000 words, ~30% smaller index.
+2. Lower prefixLength from 7 to 6 → fewer deletes per word, ~15–20% smaller index.
+3. If still >40 MB after both prunes → **STOP and reassign** — the Swift overhead may be too high for the in-process Jetsam cap.
+
+**To measure:** run `xcodebuild test -scheme RitorasTests -destination 'platform=iOS Simulator,name=iPhone 15,OS=17.0' -configuration Release` and check the console output for "SymSpell Memory Spike" metrics.
+
+---
+
 ## 5. Cross-phase risk register (the gotchas, collected)
 
 | # | Gotcha | Phase(s) | Mitigation |

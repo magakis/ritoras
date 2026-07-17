@@ -42,3 +42,19 @@ targets:
         PRODUCT_NAME: RitorasKeyboard
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_ENTITLEMENTS: keyboard/RitorasKeyboard.entitlements
+
+  RitorasTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: RitorasTests
+      - path: keyboard/Sources/Prediction
+        excludes:
+          - "Resources/"
+      - path: keyboard/Sources/Prediction/Resources
+    dependencies:
+      - target: Ritoras
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ritoras.app.tests
+        PRODUCT_NAME: RitorasTests

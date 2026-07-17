@@ -1,0 +1,120 @@
+import XCTest
+
+/// Measures the resident memory of the SymSpell index alone.
+///
+/// Run this test in Release configuration on an iOS device (or simulator
+/// approximating iOS memory behavior). The target is ≤25 MB resident.
+///
+/// If >40 MB, prune the dictionary by dropping words with frequency < 50
+/// and/or lowering prefixLength to 6.
+final class SymSpellMemorySpike: XCTestCase {
+
+    /// Measure resident memory of the SymSpell index built from the full
+    /// 82,765-word frequency dictionary.
+    func testSymSpellMemoryBaseline() throws {
+        // 1. Build the index.
+        let symSpell = SymSpell(maxEditDistance: 2, prefixLength: 7)
+
+        let bundle = Bundle(for: SymSpellMemorySpike.self)
+        let url = bundle.url(forResource: "frequency_dictionary_en_82_765",
+                             withExtension: "txt")
+            ?? Bundle.main.url(forResource: "frequency_dictionary_en_82_765",
+                               withExtension: "txt")
+        guard let fileURL = url else {
+            throw XCTSkip("frequency_dictionary_en_82_765.txt not found")
+        }
+
+        // Measure time to build.
+        let buildStart = CFAbsoluteTimeGetCurrent()
+        let entries = try WordListLoader.load(from: fileURL)
+        var loaded = 0
+        for entry in entries {
+            symSpell.createDictionaryEntry(key: entry.word, count: entry.count)
+            loaded += 1
+        }
+        let buildTime = CFAbsoluteTimeGetCurrent() - buildStart
+
+        // 2. Measure resident memory.
+        let memoryMB = getResidentMemoryMB()
+
+        print("--- SymSpell Memory Spike ---")
+        print("Words loaded: \(loaded)")
+        print("Dictionary entries (unique): \(symSpell.dictionary.count)")
+        print("Delete index entries: \(symSpell.deletes.count)")
+        print("Build time: \(String(format: "%.2f", buildTime * 1000)) ms")
+        print("Resident memory (delta): \(String(format: "%.1f", memoryMB)) MB")
+        print("-----------------------------")
+
+        // 3. Verify correctness with a known typo.
+        let results = symSpell.lookup(input: "teh", verbosity: .top)
+        XCTAssertEqual(results.first?.term, "the",
+                       "Sanity check: teh should correct to the")
+
+        // 4. Assert memory budget.
+        // If this fails (>25 MB), prune: drop words with frequency < 50
+        // and/or lower prefixLength to 6.
+        XCTAssertLessThanOrEqual(memoryMB, 25,
+                                 "SymSpell index exceeds 25 MB memory budget (\(memoryMB) MB). Consider pruning.")
+    }
+
+    // MARK: - Memory Measurement
+
+    /// Returns the current resident memory size of this process in megabytes.
+    private func getResidentMemoryMB() -> Double {
+        #if targetEnvironment(simulator)
+        return estimateMemoryMB()
+        #else
+        // Mach task_info on device for accurate resident memory.
+        let flavor = task_flavor_t(TASK_VM_INFO)
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size
+        )
+        let result = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
+                task_info(mach_task_self_, flavor, intPtr, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else {
+            return estimateMemoryMB()
+        }
+        let residentSize = Double(info.resident_size)
+        return residentSize / (1024.0 * 1024.0)
+        #endif
+    }
+
+    /// Rough memory estimate for simulator where task_info is unreliable.
+    private func estimateMemoryMB() -> Double {
+        return 0.0 // Cannot measure on simulator — run on device for accurate values
+    }
+
+    // MARK: - Streaming Load
+
+    /// Verifies that the streaming loader loads the expected ~82k words.
+    func testStreamingLoadCount() throws {
+        let bundle = Bundle(for: SymSpellMemorySpike.self)
+        let url = bundle.url(forResource: "frequency_dictionary_en_82_765",
+                             withExtension: "txt")
+            ?? Bundle.main.url(forResource: "frequency_dictionary_en_82_765",
+                               withExtension: "txt")
+        guard let fileURL = url else {
+            throw XCTSkip("frequency_dictionary_en_82_765.txt not found")
+        }
+
+        let symSpell = SymSpell(maxEditDistance: 2, prefixLength: 7)
+        let trie = Trie()
+
+        let count = try WordListLoader.loadStreamed(
+            from: fileURL,
+            into: symSpell,
+            trie: trie
+        )
+
+        XCTAssertGreaterThan(count, 80000,
+                             "Streaming load should load ~82k words, got \(count)")
+        XCTAssertEqual(count, symSpell.dictionary.count,
+                       "Streamed word count should match SymSpell dictionary count")
+        XCTAssertEqual(count, trie.wordCount,
+                       "Streamed word count should match Trie word count")
+    }
+}

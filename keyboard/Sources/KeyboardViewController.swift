@@ -1,4 +1,5 @@
 import UIKit
+import os
 
 private enum BackspacePhase {
     case charRepeat
@@ -37,7 +38,12 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
-    private lazy var predictionEngine = PredictionEngine()
+    private var predictionEngine: PredictionEngine?
+    private var isPredictionEngineReady = false
+    private let predictionBuildQueue = DispatchQueue(
+        label: "com.ritoras.prediction.build",
+        qos: .userInitiated
+    )
 
     private var keyboardView: KeyboardView!
 
@@ -116,6 +122,80 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
+    // MARK: - Prediction Engine
+
+    /// Builds the prediction engine (SymSpell + Trie) on a background queue.
+    /// Sets `isPredictionEngineReady = true` on the main queue when done.
+    private func buildPredictionEngine() {
+        isPredictionEngineReady = false
+
+        predictionBuildQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            let maxED = SharedConfig.Defaults.symspellMaxEditDistance
+            let prefixLen = SharedConfig.Defaults.symspellPrefixLength
+
+            // Build SymSpell index.
+            let symSpell = SymSpell(maxEditDistance: maxED, prefixLength: prefixLen)
+
+            // Build trie for completion.
+            let trie = Trie()
+
+            // Stream-load the frequency dictionary into both, with memory monitoring.
+            do {
+                guard let url = WordListLoader.bundledURL() else {
+                    throw WordListLoader.WordListError.bundledFileNotFound
+                }
+                let loaded = try WordListLoader.loadStreamed(
+                    from: url,
+                    into: symSpell,
+                    trie: trie
+                )
+                if loaded < 82765 {
+                    os_log(.info,
+                           "PredictionEngine: loaded %d words (partial — memory threshold hit)",
+                           loaded)
+                }
+            } catch {
+                os_log("PredictionEngine: failed to load dictionary: %{public}@",
+                       type: .error, error.localizedDescription)
+                DispatchQueue.main.async {
+                    self.isPredictionEngineReady = true
+                    self.predictionEngine = PredictionEngine()
+                }
+                return
+            }
+
+            // Create the SymSpell provider.
+            let provider = SymSpellProvider(symSpell: symSpell, trie: trie)
+
+            // Create the Apple UITextChecker provider.
+            let appleProvider = AppleSpellCheckerProvider()
+
+            // Create the BigramPredictor (lazy-loaded after a delay).
+            let bigramProvider = BigramPredictor(minCount: SharedConfig.Defaults.bigramMinCount)
+
+            // Build the engine and register providers.
+            let engine = PredictionEngine()
+            engine.addProvider(provider)
+            engine.addProvider(appleProvider)
+            engine.addProvider(bigramProvider)
+
+            DispatchQueue.main.async {
+                self.predictionEngine = engine
+                self.isPredictionEngineReady = true
+                self.log("PredictionEngine ready (\(trie.wordCount) words)")
+
+                // Lazy-load bigram map after a short delay for memory headroom.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                    bigramProvider.loadAsync {
+                        self?.log("BigramPredictor ready")
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Lifecycle
 
     override func viewDidLoad() {
@@ -129,6 +209,7 @@ class KeyboardViewController: UIInputViewController {
         }
 
         setupKeyboardView()
+        buildPredictionEngine()
         state = .idle
         log("viewDidLoad OK, hasFullAccess: \(hasFullAccess)")
     }
@@ -862,6 +943,10 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     func keyboardView(_ view: KeyboardView, didTapSuggestion text: String) {
         let context = textDocumentProxy.documentContextBeforeInput ?? ""
+
+        // Extract the typed word before deleting it (needed for learnWord).
+        let typedWord = CurrentWordExtractor.extract(from: context).currentWord
+
         var deleteCount = 0
         for char in context.reversed() {
             if char.isLetter || char.isNumber {
@@ -875,15 +960,24 @@ extension KeyboardViewController: KeyboardViewDelegate {
         }
         textDocumentProxy.insertText(text + " ")
         keyboardView.refreshSuggestions()
+
+        // If the user accepted a suggestion that differs from their typed word,
+        // learn the typed word so the system spell checker stops flagging it.
+        if !typedWord.isEmpty, typedWord.lowercased() != text.lowercased() {
+            LearnedWordsStore.shared.add(typedWord)
+        }
     }
 
     func keyboardViewNeedsSuggestions(_ view: KeyboardView) -> [String] {
-        guard let context = textDocumentProxy.documentContextBeforeInput else { return [] }
-        let currentWord = context
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .components(separatedBy: CharacterSet.whitespacesAndNewlines)
-            .last ?? ""
-        return predictionEngine.suggest(prefix: currentWord, limit: 3)
+        guard isPredictionEngineReady, let engine = predictionEngine else { return [] }
+        let context = textDocumentProxy.documentContextBeforeInput
+        let extracted = CurrentWordExtractor.extract(from: context)
+        return engine.suggestions(
+            forCurrentWord: extracted.currentWord,
+            lookupWord: extracted.lookupWord,
+            previousWord: extracted.previousWord,
+            limit: 3
+        )
     }
 
     func keyboardViewMicState(_ view: KeyboardView) -> KeyboardState {
