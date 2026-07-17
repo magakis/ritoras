@@ -197,20 +197,33 @@ private class KeyButton: UIButton {
 private class KeyboardRowView: UIView {
     let keys: [KeyButton]
     private let spacing: CGFloat
-    private let uniformLetterPitch: Bool
+    // Row 2's first and last keys MUST keep identical geometry across letters/numbers/symbols.
+    // All current edge keys (⇧, #+=, 123, ⌫) declare widthWeight 1.5; do not change one without the others.
+    private static let edgeKeyWidthWeight: CGFloat = 1.5
+
+    enum LayoutMode {
+        case letterPitch      // shared 10-key pitch, shorter rows centered (staggered QWERTY look) — rows 0,1
+        case edgeAnchored     // first & last keys pinned to fixed geometry, middle keys fill the gap — row 2
+        case proportional     // fill full row width by weight — bottom action row
+    }
+
+    private let layoutMode: LayoutMode
 
     /// - Parameters:
     ///   - keys: The key buttons, in left-to-right order.
     ///   - spacing: Horizontal gap between keys (points).
-    ///   - uniformLetterPitch: When true, keys are sized off a shared letter "pitch"
-    ///     (= rowWidth / 10) so every weight-1 key has identical width across every
-    ///     row, with shorter rows centered (the native iOS staggered look). When
-    ///     false, keys fill the full row width proportionally to their weight
-    ///     (used for the bottom action row).
-    init(keys: [KeyButton], spacing: CGFloat = 6, uniformLetterPitch: Bool) {
+    ///   - layoutMode: Layout strategy for the row.
+    ///     `.letterPitch`: keys sized off a shared 10-key pitch so every weight-1 key
+    ///       has identical width across every row, with shorter rows centered
+    ///       (the native iOS staggered look) — rows 0,1.
+    ///     `.edgeAnchored`: first & last keys pinned to fixed geometry matching the
+    ///       10-key pitch width, middle keys fill the gap — row 2 (backspace row).
+    ///     `.proportional`: keys fill the full row width proportionally to their
+    ///       weight — bottom action row.
+    init(keys: [KeyButton], spacing: CGFloat = 6, layoutMode: LayoutMode) {
         self.keys = keys
         self.spacing = spacing
-        self.uniformLetterPitch = uniformLetterPitch
+        self.layoutMode = layoutMode
         super.init(frame: .zero)
         keys.forEach {
             // Manual frame layout: neutralize autoresizing so set frames stick exactly.
@@ -232,7 +245,8 @@ private class KeyboardRowView: UIView {
         let n = CGFloat(keys.count)
         let totalSpacing = spacing * (n - 1)
 
-        if uniformLetterPitch {
+        switch layoutMode {
+        case .letterPitch:
             // Letter pitch derived from a 10-key row. This guarantees every weight-1
             // key is the SAME width regardless of which row it is in. Rows with fewer
             // keys (e.g. 9-key row 2) end up narrower than the full width and are
@@ -246,7 +260,47 @@ private class KeyboardRowView: UIView {
                 key.frame = CGRect(x: x, y: 0, width: keyWidths[i], height: height)
                 x += keyWidths[i] + spacing
             }
-        } else {
+
+        case .edgeAnchored:
+            // Pin first & last keys to the exact geometry the letters-mode row 2 produces
+            // (pitch from the 10-key formula, inset matching a centered 10.0-weight row),
+            // then distribute the middle keys equally across the remaining gap.
+            guard keys.count >= 2 else {
+                // Degenerate: fall back to plain letter-pitch centering.
+                let pitch = (width - spacing * 9) / 10
+                let keyWidths = keys.map { pitch * $0.keyDefinition.widthWeight }
+                let contentWidth = keyWidths.reduce(0, +) + totalSpacing
+                let inset = max(0, (width - contentWidth) / 2)
+                var x = inset
+                for (i, key) in keys.enumerated() {
+                    key.frame = CGRect(x: x, y: 0, width: keyWidths[i], height: height)
+                    x += keyWidths[i] + spacing
+                }
+                return
+            }
+            let pitch = (width - spacing * 9) / 10
+            let edgeWidth = pitch * Self.edgeKeyWidthWeight
+            let inset = spacing / 2
+            // First key: flush-left at the letters-mode position.
+            keys.first!.frame = CGRect(x: inset, y: 0, width: edgeWidth, height: height)
+            // Last key (backspace): flush-right, mirroring first.
+            keys.last!.frame = CGRect(x: width - inset - edgeWidth, y: 0, width: edgeWidth, height: height)
+            // Middle keys fill the gap between the two anchors.
+            let middle = Array(keys.dropFirst().dropLast())
+            if !middle.isEmpty {
+                let gapStart = inset + edgeWidth + spacing
+                let gapEnd = width - inset - edgeWidth - spacing
+                let gap = max(0, gapEnd - gapStart)
+                let m = CGFloat(middle.count)
+                let middleWidth = max(0, (gap - spacing * (m - 1)) / m)
+                var mx = gapStart
+                for key in middle {
+                    key.frame = CGRect(x: mx, y: 0, width: middleWidth, height: height)
+                    mx += middleWidth + spacing
+                }
+            }
+
+        case .proportional:
             // Fill the entire row proportionally to weight (bottom action row).
             let totalWeight = keys.reduce(0.0) { $0 + $1.keyDefinition.widthWeight }
             guard totalWeight > 0 else { return }
@@ -516,10 +570,18 @@ class KeyboardView: UIView {
                 buttons.append(button)
             }
 
-            // Letter rows (0–2) use a shared letter pitch so every letter key is the
-            // same width across all rows, with shorter rows centered (native stagger).
-            // The bottom action row fills its width proportionally to weight.
-            let rowView = KeyboardRowView(keys: buttons, uniformLetterPitch: !isLastRow)
+            // Row 2 (the backspace row, directly above the action row) is edge-anchored so
+            // ⇧/#+=/123 and ⌫ land on identical pixel positions across all three layout modes.
+            // The top two rows keep centered letter-pitch (staggered look); the action row fills proportionally.
+            let layoutMode: KeyboardRowView.LayoutMode
+            if isLastRow {
+                layoutMode = .proportional
+            } else if rowIndex == rows.count - 2 {
+                layoutMode = .edgeAnchored
+            } else {
+                layoutMode = .letterPitch
+            }
+            let rowView = KeyboardRowView(keys: buttons, layoutMode: layoutMode)
             rowView.translatesAutoresizingMaskIntoConstraints = false
 
             if isLastRow {
