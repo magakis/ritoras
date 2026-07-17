@@ -19,6 +19,11 @@ struct SharedConfig {
         static let backspaceNilContextRetryInterval: TimeInterval = 0.15
         static var dictateURL: URL { URL(string: "\(urlScheme)://\(dictateURLPath)")! }
 
+        // MARK: - Auto-Capitalization
+
+        static let autoCapitalizationEnabledKey = "autoCapitalizationEnabled"
+        static let autoCapitalizationEnabledDefault = true
+
         // MARK: - SymSpell / Prediction Tunables
 
         /// Maximum edit distance for SymSpell fuzzy correction.
@@ -77,5 +82,16 @@ struct SharedConfig {
             servers: [Defaults.baseUrl],
             timeoutSeconds: Defaults.timeoutSeconds
         )
+    }
+
+    /// Reads the auto-capitalization enabled flag from the App Group.
+    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Returns the default (`true`) when the App Group is unavailable or the key is unset.
+    static func autoCapitalizationEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.autoCapitalizationEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.autoCapitalizationEnabledKey) as? Bool)
+            ?? Defaults.autoCapitalizationEnabledDefault
     }
 }

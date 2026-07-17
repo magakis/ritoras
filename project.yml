@@ -52,6 +52,9 @@ targets:
         excludes:
           - "Resources/"
       - path: keyboard/Sources/Prediction/Resources
+      - path: keyboard/Sources/AutoCapitalization
+        excludes:
+          - AutoCapTraits.swift
     dependencies:
       - target: Ritoras
     settings:

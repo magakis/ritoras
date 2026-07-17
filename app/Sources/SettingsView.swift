@@ -35,6 +35,7 @@ struct SettingsView: View {
         Form {
             serverSection
             timeoutSection
+            keyboardSection
             historySection
             infoSection
         }
@@ -125,6 +126,16 @@ struct SettingsView: View {
             }
         } header: {
             Text("Network")
+        }
+    }
+
+    // MARK: - Keyboard Section
+
+    private var keyboardSection: some View {
+        Section {
+            Toggle("Auto-Capitalization", isOn: $settings.autoCapitalizationEnabled)
+        } header: {
+            Text("Keyboard")
         }
     }
 

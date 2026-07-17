@@ -22,15 +22,22 @@ class KeyboardViewController: UIInputViewController {
 
     private var shiftState: ShiftState = .lower {
         didSet {
-            keyboardView.apply(shift: shiftState, layoutMode: layoutMode)
+            keyboardView.apply(shift: displayedShiftState, layoutMode: layoutMode)
         }
     }
 
     private var layoutMode: KeyboardLayoutMode = .letters {
         didSet {
-            keyboardView.apply(shift: shiftState, layoutMode: layoutMode)
+            keyboardView.apply(shift: displayedShiftState, layoutMode: layoutMode)
         }
     }
+
+    // MARK: - Auto-Capitalization (derived state — never mutates shiftState)
+
+    private var autoCapActive = false
+    private var userOverrodeAutoCap = false
+    private var lastAtSentenceStart = false
+    private var lastRecomputedContext: String?
 
     private var uiMode: UIMode = .letters {
         didSet {
@@ -898,17 +905,24 @@ extension KeyboardViewController: KeyboardViewDelegate {
             if shiftState == .upper {
                 shiftState = .lower
             }
+            recomputeAutoCap()
             keyboardView.refreshSuggestions()
 
         case .backspace:
             textDocumentProxy.deleteBackward()
+            recomputeAutoCap()
             keyboardView.refreshSuggestions()
 
         case .shift:
-            switch shiftState {
-            case .lower: shiftState = .upper
-            case .upper: shiftState = .locked
-            case .locked: shiftState = .lower
+            if effectiveAutoCapActive && shiftState == .lower {
+                userOverrodeAutoCap = true
+                refreshShiftVisual()
+            } else {
+                switch shiftState {
+                case .lower: shiftState = .upper
+                case .upper: shiftState = .locked
+                case .locked: shiftState = .lower
+                }
             }
 
         case .shiftLock:
@@ -916,10 +930,12 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         case .space:
             textDocumentProxy.insertText(" ")
+            recomputeAutoCap()
             keyboardView.refreshSuggestions()
 
         case .return:
             textDocumentProxy.insertText("\n")
+            recomputeAutoCap()
 
         case .toggleNumber:
             layoutMode = .numbers
@@ -1017,6 +1033,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
         keyboardView.refreshSuggestions()
+        recomputeAutoCap()
     }
 
     override func textWillChange(_ textInput: UITextInput?) {
@@ -1036,12 +1053,63 @@ extension KeyboardViewController: KeyboardViewDelegate {
     override func selectionDidChange(_ textInput: UITextInput?) {
         super.selectionDidChange(textInput)
         backspaceNilContextRetries = 0
+        recomputeAutoCap()
+    }
+
+    // MARK: - Auto-Capitalization Helpers
+
+    private var effectiveAutoCapActive: Bool { autoCapActive && !userOverrodeAutoCap }
+
+    private var displayedShiftState: ShiftState {
+        if shiftState == .lower && effectiveAutoCapActive { return .upper }
+        return shiftState
+    }
+
+    private func recomputeAutoCap() {
+        // User-facing master toggle (default ON). Read from the App Group on every recompute.
+        guard SharedConfig.autoCapitalizationEnabled() else {
+            autoCapActive = false
+            lastAtSentenceStart = false
+            lastRecomputedContext = nil
+            refreshShiftVisual()
+            return
+        }
+
+        // Respect the host field's text-input traits — no auto-cap in URL/email/numeric fields
+        // or when the host explicitly disables capitalization.
+        if AutoCapTraits.shouldSuppress(
+            keyboardType: textDocumentProxy.keyboardType,
+            autocapitalizationType: textDocumentProxy.autocapitalizationType
+        ) {
+            autoCapActive = false
+            lastAtSentenceStart = false
+            lastRecomputedContext = nil
+            refreshShiftVisual()
+            return
+        }
+        let context = textDocumentProxy.documentContextBeforeInput ?? ""
+        // Dedup: if context is unchanged since the last recompute, the result will be identical — skip.
+        if context == lastRecomputedContext { return }
+        let wants = AutoCapitalizer.shouldCapitalizeNext(contextBeforeCursor: context)
+        if wants && !lastAtSentenceStart {
+            userOverrodeAutoCap = false
+        }
+        lastAtSentenceStart = wants
+        autoCapActive = wants
+        lastRecomputedContext = context
+        refreshShiftVisual()
+    }
+
+    private func refreshShiftVisual() {
+        keyboardView.apply(shift: displayedShiftState, layoutMode: layoutMode)
     }
 
     // MARK: - Helpers
 
     private func applyShift(to text: String) -> String {
-        guard !text.isEmpty, shiftState != .lower else { return text }
+        guard !text.isEmpty else { return text }
+        let wantsCaps = shiftState != .lower || effectiveAutoCapActive
+        guard wantsCaps else { return text }
         if text.rangeOfCharacter(from: .letters) != nil {
             return text.uppercased()
         }
