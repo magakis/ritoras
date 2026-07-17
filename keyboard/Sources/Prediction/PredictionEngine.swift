@@ -1,102 +1,139 @@
 import Foundation
 
-// MARK: - Trie Node
-
-final class TrieNode {
-    var children: [Character: TrieNode] = [:]
-    var frequency: Int = 0
-    var isTerminal: Bool = false
-}
-
-// MARK: - Prediction Engine
-
+/// The prediction engine that merges suggestions from multiple SuggestionProviders.
+///
+/// Collects suggestions from all registered providers, deduplicates by text
+/// (keeping the highest score), sorts by score descending, and returns the
+/// top-N results.
 final class PredictionEngine {
 
-    private let root = TrieNode()
-    private let totalWordCount: Int
+    // MARK: - Default Top-3 Fallback
 
-    // MARK: - Initialization
+    /// Hardcoded suggestions shown on a fresh text field (no current word,
+    /// no previous word) when no provider returns results.
+    private static let defaultTopSuggestions = ["the", "I", "and"]
 
-    init() {
-        let words = WordList.words
-        totalWordCount = words.count
-        for (index, word) in words.enumerated() {
-            insert(word: word, frequency: max(1, totalWordCount - index))
-        }
+    // MARK: - Providers
+
+    private var providers: [SuggestionProvider] = []
+
+    // MARK: - Registration
+
+    func addProvider(_ provider: SuggestionProvider) {
+        providers.append(provider)
     }
 
-    private func insert(word: String, frequency: Int) {
-        var node = root
-        for char in word {
-            if let next = node.children[char] {
-                node = next
-            } else {
-                let next = TrieNode()
-                node.children[char] = next
-                node = next
-            }
-        }
-        node.isTerminal = true
-        if frequency > node.frequency {
-            node.frequency = frequency
-        }
-    }
+    // MARK: - Public API
 
-    // MARK: - Suggestions
-
-    /// Returns the top-N most frequent words matching the given prefix.
+    /// Returns suggestions for the current word context, merged and deduped.
     /// - Parameters:
-    ///   - prefix: The prefix to match (can be empty for default suggestions).
-    ///   - limit: Maximum number of suggestions to return (default 3).
-    /// - Returns: Array of suggested words, highest frequency first.
-    func suggest(prefix: String, limit: Int = 3) -> [String] {
-        let trimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+    ///   - currentWord: The word currently being typed (empty when after whitespace) — used for display.
+    ///   - lookupWord: The word with trailing punctuation stripped — used for dictionary lookups.
+    ///   - previousWord: The word before the current word (nil if no prior word).
+    ///   - limit: Maximum number of suggestions to return.
+    /// - Returns: Sorted array of suggestion strings.
+    func suggestions(
+        forCurrentWord currentWord: String,
+        lookupWord: String,
+        previousWord: String? = nil,
+        limit: Int = 3
+    ) -> [String] {
+        let context = SuggestionContext(
+            currentWord: currentWord,
+            lookupWord: lookupWord,
+            previousWord: previousWord,
+            isMidWord: false
+        )
 
-        guard !trimmed.isEmpty else {
-            // Return the 3 most common words overall
-            return defaultSuggestions(limit: limit)
-        }
-
-        // Normalize to lowercase for trie lookup
-        let lowerPrefix = trimmed.lowercased()
-
-        // Navigate to the prefix node
-        var node = root
-        for char in lowerPrefix {
-            guard let next = node.children[char] else {
-                return []
+        // ──────────────────────────────────────────────
+        // EMPTY-PREFIX CASE: cursor is after whitespace
+        // ──────────────────────────────────────────────
+        if currentWord.isEmpty {
+            // In this case only BigramPredictor (and any future lexicon
+            // provider) can contribute — SymSpell and Apple return [] for
+            // empty words.
+            var bigramSuggestions: [Suggestion] = []
+            for provider in providers {
+                let results = provider.suggest(for: context, limit: limit)
+                bigramSuggestions.append(contentsOf: results)
             }
-            node = next
+
+            // No results and no previous word → hardcoded top-3 fallback.
+            if bigramSuggestions.isEmpty, previousWord == nil {
+                return Self.defaultTopSuggestions
+            }
+
+            return bigramSuggestions
+                .sorted { $0.score > $1.score }
+                .prefix(limit)
+                .map { $0.text }
         }
 
-        // Collect all words under this prefix
-        var results: [(String, Int)] = []
-        collectWords(from: node, prefix: lowerPrefix, results: &results)
-
-        // Sort by frequency descending and take top N
-        results.sort { $0.1 > $1.1 }
-        let top = results.prefix(limit).map { $0.0 }
-
-        // Preserve original capitalization style
-        if trimmed.first?.isUppercase == true {
-            return top.map { $0.capitalized }
+        // ──────────────────────────────────────────────
+        // MID-WORD CASE: user is typing a word
+        // ──────────────────────────────────────────────
+        var allSuggestions: [Suggestion] = []
+        for provider in providers {
+            let results = provider.suggest(for: context, limit: limit)
+            allSuggestions.append(contentsOf: results)
         }
-        return top
-    }
 
-    private func defaultSuggestions(limit: Int) -> [String] {
-        var results: [(String, Int)] = []
-        collectWords(from: root, prefix: "", results: &results)
-        results.sort { $0.1 > $1.1 }
-        return results.prefix(limit).map { $0.0 }
-    }
+        // — Boost Apple suggestions when SymSpell is uncertain —
+        // When the highest-scoring SymSpell correction (excluding the input
+        // word itself) is below 0.7, SymSpell has low confidence — defer to
+        // Apple's native spellchecker by boosting its scores.
+        let symspellMaxNonInput = allSuggestions
+            .filter { $0.source == .symspell && $0.text.lowercased() != currentWord.lowercased() }
+            .map { $0.score }
+            .max() ?? 0
 
-    private func collectWords(from node: TrieNode, prefix: String, results: inout [(String, Int)]) {
-        if node.isTerminal {
-            results.append((prefix, node.frequency))
+        if symspellMaxNonInput < 0.7 {
+            allSuggestions = allSuggestions.map { suggestion in
+                guard suggestion.source == .apple else { return suggestion }
+                return Suggestion(
+                    text: suggestion.text,
+                    score: min(suggestion.score * 1.2, 1.0),
+                    source: suggestion.source
+                )
+            }
         }
-        for (char, child) in node.children {
-            collectWords(from: child, prefix: prefix + String(char), results: &results)
+
+        // — Bigram re-rank —
+        // Boost candidates from non-bigram providers by bigramBoostFactor if
+        // they are common followers of the previous word.
+        if let prev = previousWord?.lowercased(), !prev.isEmpty {
+            if let bigram = providers.compactMap({ $0 as? BigramPredictor }).first,
+               let followers = bigram.followerWordSet(for: prev) {
+                allSuggestions = allSuggestions.map { suggestion in
+                    guard suggestion.source != .bigram else { return suggestion }
+                    guard followers.contains(suggestion.text.lowercased()) else { return suggestion }
+                    return Suggestion(
+                        text: suggestion.text,
+                        score: min(suggestion.score * SharedConfig.Defaults.bigramBoostFactor, 1.0),
+                        source: suggestion.source
+                    )
+                }
+            }
         }
+
+        // — Dedupe by text, keeping the highest score —
+        var bestByText: [String: Suggestion] = [:]
+        for suggestion in allSuggestions {
+            if let existing = bestByText[suggestion.text] {
+                if suggestion.score > existing.score {
+                    bestByText[suggestion.text] = suggestion
+                }
+            } else {
+                bestByText[suggestion.text] = suggestion
+            }
+        }
+
+        // — Sort by score descending, take limit —
+        let sorted = bestByText.values
+            .sorted { $0.score > $1.score }
+            .prefix(limit)
+            .map { $0.text }
+
+        return sorted
     }
 }
