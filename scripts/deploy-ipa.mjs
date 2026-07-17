@@ -13,6 +13,8 @@
 //
 // CLI entry points: download [runId], serve, list, list-remote [count],
 // deploy, refresh, push, wait [sha], prune
+//   serve auto-shutdown: RITORAS_SERVE_MIN (default 15 min fixed window)
+//   GET /sync: live on-demand build refresh during serve (distinct from CLI refresh)
 
 import { execSync } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -203,7 +205,7 @@ function findVersion(runId) {
 // until process exit — on a long-running server serving many .ipa files this
 // would exhaust fds. The !stream.destroyed guard prevents double-destroy
 // when the stream ended naturally before the close event fired.
-function streamIpa(version, res, label, onActivity) {
+function streamIpa(version, res, label) {
   res.writeHead(200, {
     'Content-Type': 'application/octet-stream',
     'Content-Disposition': 'attachment; filename="Ritoras.ipa"',
@@ -217,17 +219,36 @@ function streamIpa(version, res, label, onActivity) {
   });
   stream.on('error', err => {
     console.error('Stream error:', err.message);
-    if (!res.headersSent) res.writeHead(500);
-    res.end('Internal error');
+    if (res.headersSent) {
+      res.destroy();
+    } else {
+      res.writeHead(500);
+      res.end('Internal error');
+    }
   });
   stream.pipe(res);
   stream.on('end', () => {
-    if (typeof onActivity === 'function') onActivity();
     console.log(`✅ ${label} downloaded (${version.shortSha})`);
   });
 }
 
-function renderIndexPage(versions, host) {
+// Idempotent teardown: clears timers, force-closes connections, exits.
+// The 500ms backstop prevents a hung server.close() from blocking the port.
+function teardown({ server, timers, code }) {
+  for (const t of (timers || [])) clearTimeout(t);
+  server.closeAllConnections?.();
+  let exited = false;
+  const exit = () => {
+    if (!exited) {
+      exited = true;
+      process.exit(code);
+    }
+  };
+  server.close(() => exit());
+  setTimeout(exit, 500);
+}
+
+function renderIndexPage(versions, host, syncInfo) {
   const latest = versions[0];
 
   function fmtDate(d) {
@@ -261,7 +282,26 @@ function renderIndexPage(versions, host) {
     }
   }
 
-  return '<!DOCTYPE html>\n<html>\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1">\n  <title>Ritoras Install</title>\n  <style>\n    * { margin: 0; padding: 0; box-sizing: border-box; }\n    body {\n      font-family: -apple-system, BlinkMacSystemFont, sans-serif;\n      display: flex;\n      flex-direction: column;\n      align-items: center;\n      justify-content: center;\n      min-height: 100vh;\n      padding: 24px;\n      background: #f5f5f7;\n      color: #1d1d1f;\n    }\n    @media (prefers-color-scheme: dark) {\n      body {\n        background: #1c1c1e;\n        color: #f5f5f7;\n      }\n    }\n    .container {\n      width: 100%;\n      max-width: 480px;\n      text-align: center;\n    }\n    h1 {\n      font-size: 28px;\n      font-weight: 700;\n      margin-bottom: 8px;\n    }\n    .subtitle {\n      font-size: 16px;\n      color: #6e6e73;\n      margin-bottom: 32px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .subtitle {\n        color: #98989d;\n      }\n    }\n    .btn {\n      display: block;\n      width: 100%;\n      padding: 14px 20px;\n      font-size: 17px;\n      font-family: inherit;\n      border-radius: 12px;\n      text-decoration: none;\n      text-align: center;\n      -webkit-tap-highlight-color: transparent;\n      transition: opacity 0.2s;\n    }\n    .btn:active {\n      opacity: 0.7;\n    }\n    .btn-primary {\n      background: #007aff;\n      color: #fff;\n      font-weight: 600;\n      margin-bottom: 12px;\n    }\n    .btn-secondary {\n      background: transparent;\n      color: #007aff;\n      border: 1.5px solid #007aff;\n      font-weight: 500;\n      margin-bottom: 12px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .btn-primary {\n        background: #0a84ff;\n      }\n      .btn-secondary {\n        color: #0a84ff;\n        border-color: #0a84ff;\n      }\n    }\n    .btn-muted {\n      color: #6e6e73;\n      border-color: #d2d2d7;\n    }\n    @media (prefers-color-scheme: dark) {\n      .btn-muted {\n        color: #98989d;\n        border-color: #48484a;\n      }\n    }\n    .badge {\n      display: inline-block;\n      background: #007aff;\n      color: #fff;\n      font-size: 12px;\n      font-weight: 600;\n      padding: 3px 10px;\n      border-radius: 10px;\n      margin-bottom: 16px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .badge {\n        background: #0a84ff;\n      }\n    }\n    .section-heading {\n      margin-top: 32px;\n      margin-bottom: 16px;\n      font-size: 20px;\n      font-weight: 600;\n      text-align: left;\n    }\n    .version-row {\n      display: flex;\n      align-items: center;\n      justify-content: space-between;\n      padding: 12px 0;\n      border-top: 1px solid #d2d2d7;\n      gap: 12px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .version-row {\n        border-top-color: #48484a;\n      }\n    }\n    .version-info {\n      text-align: left;\n      font-size: 14px;\n      line-height: 1.4;\n      min-width: 0;\n    }\n    .version-actions {\n      display: flex;\n      gap: 8px;\n      flex-shrink: 0;\n    }\n    .version-info .commit {\n      color: #6e6e73;\n      font-size: 13px;\n      overflow: hidden;\n      text-overflow: ellipsis;\n      white-space: nowrap;\n      max-width: 260px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .version-info .commit {\n        color: #98989d;\n      }\n    }\n    .version-actions .btn {\n      width: auto;\n      padding: 8px 16px;\n      font-size: 14px;\n      margin-bottom: 0;\n    }\n    .note {\n      margin-top: 24px;\n      font-size: 13px;\n      color: #6e6e73;\n    }\n    @media (prefers-color-scheme: dark) {\n      .note {\n        color: #98989d;\n      }\n    }\n  </style>\n</head>\n<body>\n  <div class="container">\n    <h1>Ritoras</h1>\n    <p class="subtitle">Build #' + escapeHtml(latest.runNumber) + ' \u2022 ' + escapeHtml(latest.shortSha) + ' \u2022 ' + escapeHtml(fmtDate(latest.builtAt)) + '</p>\n    <span class="badge">Latest</span>\n    <a class="btn btn-primary" href="sidestore://install?url=http://' + escapeHtml(host) + '/Ritoras.ipa">Install via SideStore</a>\n    <a class="btn btn-secondary" href="sidestore://">Open SideStore</a>\n    <a class="btn btn-secondary btn-muted" href="/Ritoras.ipa">Download .ipa</a>\n    ' + prevHtml + '\n  </div>\n</body>\n</html>';
+  let syncHtml = '';
+  if (syncInfo) {
+    const timeHtml = syncInfo.at ? fmtDate(syncInfo.at) : '';
+    syncHtml = '<div class="sync-banner">\n    <div class="sync-status">Currently serving: #' + escapeHtml(String(latest.runNumber)) + ' (<code>' + escapeHtml(latest.shortSha) + '</code>)</div>\n    <div class="sync-info">Last sync: ' + escapeHtml(syncInfo.status) + ' \u2014 ' + escapeHtml(syncInfo.message) + (timeHtml ? ' <span class="sync-time">' + escapeHtml(timeHtml) + '</span>' : '') + '</div>\n    <a class="btn btn-primary sync-btn" href="/sync">\u{1F504} Check for new build</a>\n  </div>';
+  }
+
+  return '<!DOCTYPE html>\n<html>\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1">\n  <title>Ritoras Install</title>\n  <style>\n    * { margin: 0; padding: 0; box-sizing: border-box; }\n    body {\n      font-family: -apple-system, BlinkMacSystemFont, sans-serif;\n      display: flex;\n      flex-direction: column;\n      align-items: center;\n      justify-content: center;\n      min-height: 100vh;\n      padding: 24px;\n      background: #f5f5f7;\n      color: #1d1d1f;\n    }\n    @media (prefers-color-scheme: dark) {\n      body {\n        background: #1c1c1e;\n        color: #f5f5f7;\n      }\n    }\n    .container {\n      width: 100%;\n      max-width: 480px;\n      text-align: center;\n    }\n    h1 {\n      font-size: 28px;\n      font-weight: 700;\n      margin-bottom: 8px;\n    }\n    .subtitle {\n      font-size: 16px;\n      color: #6e6e73;\n      margin-bottom: 32px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .subtitle {\n        color: #98989d;\n      }\n    }\n    .btn {\n      display: block;\n      width: 100%;\n      padding: 14px 20px;\n      font-size: 17px;\n      font-family: inherit;\n      border-radius: 12px;\n      text-decoration: none;\n      text-align: center;\n      -webkit-tap-highlight-color: transparent;\n      transition: opacity 0.2s;\n    }\n    .btn:active {\n      opacity: 0.7;\n    }\n    .btn-primary {\n      background: #007aff;\n      color: #fff;\n      font-weight: 600;\n      margin-bottom: 12px;\n    }\n    .btn-secondary {\n      background: transparent;\n      color: #007aff;\n      border: 1.5px solid #007aff;\n      font-weight: 500;\n      margin-bottom: 12px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .btn-primary {\n        background: #0a84ff;\n      }\n      .btn-secondary {\n        color: #0a84ff;\n        border-color: #0a84ff;\n      }\n    }\n    .btn-muted {\n      color: #6e6e73;\n      border-color: #d2d2d7;\n    }\n    @media (prefers-color-scheme: dark) {\n      .btn-muted {\n        color: #98989d;\n        border-color: #48484a;\n      }\n    }\n    .badge {\n      display: inline-block;\n      background: #007aff;\n      color: #fff;\n      font-size: 12px;\n      font-weight: 600;\n      padding: 3px 10px;\n      border-radius: 10px;\n      margin-bottom: 16px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .badge {\n        background: #0a84ff;\n      }\n    }\n    .section-heading {\n      margin-top: 32px;\n      margin-bottom: 16px;\n      font-size: 20px;\n      font-weight: 600;\n      text-align: left;\n    }\n    .version-row {\n      display: flex;\n      align-items: center;\n      justify-content: space-between;\n      padding: 12px 0;\n      border-top: 1px solid #d2d2d7;\n      gap: 12px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .version-row {\n        border-top-color: #48484a;\n      }\n    }\n    .version-info {\n      text-align: left;\n      font-size: 14px;\n      line-height: 1.4;\n      min-width: 0;\n    }\n    .version-actions {\n      display: flex;\n      gap: 8px;\n      flex-shrink: 0;\n    }\n    .version-info .commit {\n      color: #6e6e73;\n      font-size: 13px;\n      overflow: hidden;\n      text-overflow: ellipsis;\n      white-space: nowrap;\n      max-width: 260px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .version-info .commit {\n        color: #98989d;\n      }\n    }\n    .version-actions .btn {\n      width: auto;\n      padding: 8px 16px;\n      font-size: 14px;\n      margin-bottom: 0;\n    }\n    .note {\n      margin-top: 24px;\n      font-size: 13px;\n      color: #6e6e73;\n    }\n    @media (prefers-color-scheme: dark) {\n      .note {\n        color: #98989d;\n      }\n    }\n    .sync-banner {\n      margin-top: 24px;\n      padding: 16px;\n      background: #e8e8ed;\n      border-radius: 12px;\n      text-align: center;\n    }\n    @media (prefers-color-scheme: dark) {\n      .sync-banner {\n        background: #2c2c2e;\n      }\n    }\n    .sync-status {\n      font-size: 15px;\n      font-weight: 600;\n      margin-bottom: 4px;\n    }\n    .sync-info {\n      font-size: 13px;\n      color: #6e6e73;\n      margin-bottom: 12px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .sync-info {\n        color: #98989d;\n      }\n    }\n    .sync-time {\n      opacity: 0.7;\n    }\n    .sync-btn {\n      margin-bottom: 0 !important;\n    }\n  </style>\n</head>\n<body>\n  <div class="container">\n    <h1>Ritoras</h1>\n    <p class="subtitle">Build #' + escapeHtml(latest.runNumber) + ' \u2022 ' + escapeHtml(latest.shortSha) + ' \u2022 ' + escapeHtml(fmtDate(latest.builtAt)) + '</p>\n    <span class="badge">Latest</span>\n    <a class="btn btn-primary" href="sidestore://install?url=http://' + escapeHtml(host) + '/Ritoras.ipa">Install via SideStore</a>\n    <a class="btn btn-secondary" href="sidestore://">Open SideStore</a>\n    <a class="btn btn-secondary btn-muted" href="/Ritoras.ipa">Download .ipa</a>\n    ' + syncHtml + '\n    ' + prevHtml + '\n  </div>\n</body>\n</html>';
+}
+
+function renderSyncPage(syncInfo) {
+  function escapeHtml(s) {
+    return String(s ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+  const timeHtml = syncInfo.at ? '<span class="time">' + escapeHtml(syncInfo.at) + '</span>' : '';
+  return '<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1">\n  <title>Sync Status \u2014 Ritoras</title>\n  <style>\n    * { margin: 0; padding: 0; box-sizing: border-box; }\n    body {\n      font-family: -apple-system, BlinkMacSystemFont, sans-serif;\n      display: flex;\n      flex-direction: column;\n      align-items: center;\n      justify-content: center;\n      min-height: 100vh;\n      padding: 24px;\n      background: #f5f5f7;\n      color: #1d1d1f;\n    }\n    @media (prefers-color-scheme: dark) {\n      body {\n        background: #1c1c1e;\n        color: #f5f5f7;\n      }\n    }\n    .container {\n      width: 100%;\n      max-width: 480px;\n      text-align: center;\n    }\n    h1 {\n      font-size: 28px;\n      font-weight: 700;\n      margin-bottom: 8px;\n    }\n    .status-box {\n      font-size: 16px;\n      margin: 24px 0;\n      padding: 20px;\n      border-radius: 12px;\n      background: #e8e8ed;\n      text-align: left;\n      line-height: 1.6;\n    }\n    @media (prefers-color-scheme: dark) {\n      .status-box {\n        background: #2c2c2e;\n      }\n    }\n    .status-box .label {\n      font-weight: 600;\n    }\n    .back-link {\n      display: inline-block;\n      margin-top: 24px;\n      color: #007aff;\n      text-decoration: none;\n      font-size: 16px;\n    }\n  </style>\n</head>\n<body>\n  <div class="container">\n    <h1>Sync Status</h1>\n    <div class="status-box">\n      <div><span class="label">Status:</span> ' + escapeHtml(syncInfo.status) + '</div>\n      <div><span class="label">Message:</span> ' + escapeHtml(syncInfo.message) + '</div>\n      ' + (timeHtml ? '<div><span class="label">Time:</span> ' + timeHtml + '</div>' : '') + '\n    </div>\n    <a class="back-link" href="/">\u2190 Back to Install</a>\n  </div>\n</body>\n</html>';
 }
 
 // ---------------------------------------------------------------------------
@@ -504,10 +544,40 @@ async function serve() {
     process.exit(1);
   }
 
-  let lastActivityAt = Date.now();
+  // Sync state — tracks the last /sync check result
+  const syncState = { status: 'idle', message: 'Not synced yet.', at: null, fromRunId: null, toRunId: null };
+  let refreshing = false;
+  let activeDownload = null;
+
+  async function doSync() {
+    if (refreshing) return { status: 'already-refreshing' };
+    refreshing = true;
+    const before = resolveLatest()?.runId ?? null;
+    try {
+      activeDownload = download();
+      await activeDownload;
+      const after = resolveLatest()?.runId ?? null;
+      syncState.at = new Date().toISOString();
+      if (after !== before) {
+        Object.assign(syncState, { status: 'updated', fromRunId: before, toRunId: after, message: `Updated to build ${after}` });
+      } else {
+        Object.assign(syncState, { status: 'no-new-build', message: 'Already on the latest build.' });
+      }
+      return { status: syncState.status };
+    } catch (err) {
+      syncState.status = 'error';
+      syncState.message = String(err.message || err);
+      syncState.at = new Date().toISOString();
+      return { status: 'error', message: String(err.message || err) };
+    } finally {
+      activeDownload = null;
+      refreshing = false;
+    }
+  }
 
   // Routes:
   //   GET /                            Landing page — list all versions, newest first
+  //   GET /sync[/?json=1]              Live on-demand build refresh (same-origin / JSON)
   //   GET /Ritoras.ipa                 Latest build (backward-compat: existing SideStore bookmarks)
   //   GET /latest/Ritoras.ipa          Alias for the above (explicit)
   //   GET /v/<runId>/Ritoras.ipa       Specific historical build by workflow run ID
@@ -515,46 +585,65 @@ async function serve() {
   //
   // All .ipa routes stream directly (no 302) for SideStore custom-scheme compatibility.
   const server = createServer((req, res) => {
-    lastActivityAt = Date.now();
-    const path = req.url;
+    (async () => {
+      const path = req.url;
 
-    if (req.method === 'GET' && path === '/') {
-      const detected = detectReachableIPs();
-      const host = req.headers.host || (detected[0] ? `${detected[0].ip}:${port}` : `localhost:${port}`);
-      const versions = listVersions();
-      if (versions.length === 0) {
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end('<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ritoras</title></head><body style="font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f5f5f7;color:#1d1d1f"><p>No builds available yet.</p></body></html>');
-        return;
-      }
-      res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end(renderIndexPage(versions, host));
-    } else if (req.method === 'GET' && (path === '/Ritoras.ipa' || path === '/latest/Ritoras.ipa')) {
-      const v = resolveLatest();
-      if (!v) {
-        res.writeHead(404);
-        res.end('No .ipa found');
-        return;
-      }
-      streamIpa(v, res, 'latest', () => { lastActivityAt = Date.now(); });
-    } else if (req.method === 'GET') {
-      const m = path.match(/^\/v\/(\d+)\/Ritoras\.ipa$/);
-      if (m) {
-        const v = findVersion(m[1]);
-        if (!v) {
-          res.writeHead(404);
-          res.end('Version not found');
+      if (req.method === 'GET' && path === '/') {
+        const detected = detectReachableIPs();
+        const host = req.headers.host || (detected[0] ? `${detected[0].ip}:${port}` : `localhost:${port}`);
+        const versions = listVersions();
+        if (versions.length === 0) {
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end('<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ritoras</title></head><body style="font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f5f5f7;color:#1d1d1f"><p>No builds available yet.</p></body></html>');
           return;
         }
-        streamIpa(v, res, 'v' + v.runNumber, () => { lastActivityAt = Date.now(); });
-        return;
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(renderIndexPage(versions, host, syncState));
+      } else if (req.method === 'GET' && path.split('?')[0] === '/sync') {
+        const wantJson = (req.headers.accept && req.headers.accept.includes('application/json')) || path.includes('json=1');
+        const result = await doSync();
+        if (wantJson) {
+          const json = JSON.stringify({ ...syncState, ...result });
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(Buffer.byteLength(json)) });
+          res.end(json);
+        } else {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(renderSyncPage(syncState));
+        }
+      } else if (req.method === 'GET' && (path === '/Ritoras.ipa' || path === '/latest/Ritoras.ipa')) {
+        const v = resolveLatest();
+        if (!v) {
+          res.writeHead(404);
+          res.end('No .ipa found');
+          return;
+        }
+        streamIpa(v, res, 'latest');
+      } else if (req.method === 'GET') {
+        const m = path.match(/^\/v\/(\d+)\/Ritoras\.ipa$/);
+        if (m) {
+          const v = findVersion(m[1]);
+          if (!v) {
+            res.writeHead(404);
+            res.end('Version not found');
+            return;
+          }
+          streamIpa(v, res, 'v' + v.runNumber);
+          return;
+        }
+        res.writeHead(404);
+        res.end('Not found');
+      } else {
+        res.writeHead(404);
+        res.end('Not found');
       }
-      res.writeHead(404);
-      res.end('Not found');
-    } else {
-      res.writeHead(404);
-      res.end('Not found');
-    }
+    })().catch(err => {
+      try {
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'text/plain' });
+          res.end('Internal error: ' + err.message);
+        }
+      } catch {}
+    });
   });
 
   // Find a free port between 8765 and 8770
@@ -584,29 +673,41 @@ async function serve() {
     console.log(`Port 8765 in use, using port ${port}`);
   }
 
+  // Single exit path — timer, signals, and uncaughtException all funnel through finish()
+  // done guard is set synchronously BEFORE any await to prevent double-entry.
+  let done = false;
+  const finish = async (code, msg) => {
+    if (done) return;
+    done = true;
+    console.log(msg);
+    if (activeDownload) {
+      try { await Promise.race([activeDownload, new Promise(r => setTimeout(r, 10_000))]); } catch {}
+    }
+    teardown({ server, timers: [windowTimer], code });
+  };
+
+  const WINDOW_MS = parseInt(process.env.RITORAS_SERVE_MIN || '15', 10) * 60_000;
+  const windowTimer = setTimeout(
+    () => finish(0, `⏱️  Serve window (${Math.round(WINDOW_MS / 60000)} min) elapsed. Shutting down.`),
+    WINDOW_MS,
+  );
+
+  process.once('SIGINT',  () => finish(130, 'Interrupted (SIGINT).'));
+  process.once('SIGTERM', () => finish(143, 'Terminated (SIGTERM).'));
+  process.on('uncaughtException', err => finish(1, `Uncaught: ${err.message}`));
+
+  // Capture the initial latest for sync state
+  syncState.toRunId = resolveLatest()?.runId ?? null;
+
   const ips = detectReachableIPs();
   console.log('📱 Open this URL on your iPhone Safari:');
   for (const { ip } of ips) {
     console.log(`   http://${ip}:${port}/`);
   }
-  // Inactivity-based shutdown replaces the original "close after first
-  // download" behavior. Version history requires the server to survive across
-  // downloads — try latest, if broken grab the previous. Inactivity timeout
-  // is a strict superset: serves single-install (shuts down after idle) and
-  // multi-download (stays alive during active use). Override via
-  // RITORAS_IDLE_TIMEOUT_MIN (default 15 min).
-  const IDLE_TIMEOUT_MS =
-    parseInt(process.env.RITORAS_IDLE_TIMEOUT_MIN || '15', 10) * 60_000;
-  console.log(`⏱️  Server will shut down after ${Math.round(IDLE_TIMEOUT_MS / 60000)} min of inactivity.`);
+  console.log(`⏱️  Auto-shutdown in ${Math.round(WINDOW_MS / 60000)} min (fixed window).`);
 
-  while (true) {
-    await sleep(1000);
-    if (Date.now() - lastActivityAt > IDLE_TIMEOUT_MS) {
-      console.log(`⏱️  No activity for ${Math.round(IDLE_TIMEOUT_MS / 60000)} min. Shutting down.`);
-      server.close();
-      return;
-    }
-  }
+  // Block until finish() exits (timer, signal, or uncaughtException)
+  await new Promise(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -619,7 +720,7 @@ async function serve() {
 //   download [runId]  Download latest (or specific <runId>) artifact into the versioned store
 //   deploy            Download latest + serve (convenience combo)
 //   refresh           Re-download latest (replaces cached) + serve
-//   serve             Start the HTTP server (reads from the versioned store)
+//   serve             Start HTTP server (reads from versioned store; RITORAS_SERVE_MIN min auto-shutdown; GET /sync for live refresh)
 //   list              List locally-stored builds
 //   list-remote [n]   List last n (default 5) successful runs from GitHub
 //   prune             Remove old builds beyond KEEP_BUILDS
