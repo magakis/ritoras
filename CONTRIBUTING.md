@@ -298,11 +298,6 @@ line, after a blank line separating them from the body:
 :  Someone reported the problem this commit fixes, but did not contribute code.
    Adding this tag credits them without implying they endorse the fix.
 
-`Tested-by: Name <email>`
-:  Someone other than the author verified the fix works as described. Adding
-   this tag asserts that the named person tested the change and found it
-   correct. **Do not add this tag without the named person's explicit
-   consent.**
 
 `Reviewed-by: Name <email>`
 :  Someone reviewed the code and approves of the change. Adding this tag
@@ -330,7 +325,6 @@ v2: moved interruption handling into AudioSession per review
 
 Fixes: #42
 Reported-by: Alex <alex@example.com>
-Tested-by: Jordan <jordan@example.com>
 ```
 
 ---
