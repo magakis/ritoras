@@ -42,7 +42,7 @@ final class PredictionEngine {
             currentWord: currentWord,
             lookupWord: lookupWord,
             previousWord: previousWord,
-            isMidWord: false
+            isMidWord: !currentWord.isEmpty
         )
 
         // ──────────────────────────────────────────────

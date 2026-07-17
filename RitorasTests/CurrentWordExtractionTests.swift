@@ -129,11 +129,67 @@ final class CurrentWordExtractionTests: XCTestCase {
         XCTAssertEqual(result.previousWord, "hello")
     }
 
-    func test_trailing_whitespace() {
+    func test_trailing_whitespace_signals_prediction_mode() {
         let result = CurrentWordExtractor.extract(from: "hello world ")
-        XCTAssertEqual(result.currentWord, "world")
-        XCTAssertEqual(result.lookupWord, "world")
+        XCTAssertEqual(result.currentWord, "")
+        XCTAssertEqual(result.lookupWord, "")
+        XCTAssertEqual(result.previousWord, "world")
+    }
+
+    // MARK: - Word Boundary Tests (next-word prediction)
+
+    func test_empty_input_returns_all_empty() {
+        let result = CurrentWordExtractor.extract(from: nil)
+        XCTAssertEqual(result.currentWord, "")
+        XCTAssertEqual(result.lookupWord, "")
+        XCTAssertNil(result.previousWord)
+
+        let result2 = CurrentWordExtractor.extract(from: "")
+        XCTAssertEqual(result2.currentWord, "")
+        XCTAssertEqual(result2.lookupWord, "")
+        XCTAssertNil(result2.previousWord)
+    }
+
+    func test_single_space_signals_prediction_mode() {
+        let result = CurrentWordExtractor.extract(from: " ")
+        XCTAssertEqual(result.currentWord, "")
+        XCTAssertEqual(result.lookupWord, "")
+        XCTAssertNil(result.previousWord)
+    }
+
+    func test_word_with_trailing_space_signals_prediction_mode() {
+        let result = CurrentWordExtractor.extract(from: "hello ")
+        XCTAssertEqual(result.currentWord, "")
+        XCTAssertEqual(result.lookupWord, "")
         XCTAssertEqual(result.previousWord, "hello")
+    }
+
+    func test_multiple_words_with_trailing_space_signals_prediction_mode() {
+        let result = CurrentWordExtractor.extract(from: "I am ")
+        XCTAssertEqual(result.currentWord, "")
+        XCTAssertEqual(result.lookupWord, "")
+        XCTAssertEqual(result.previousWord, "am")
+    }
+
+    func test_mid_word_with_previous_word_context() {
+        let result = CurrentWordExtractor.extract(from: "I am")
+        XCTAssertEqual(result.currentWord, "am")
+        XCTAssertEqual(result.lookupWord, "am")
+        XCTAssertEqual(result.previousWord, "I")
+    }
+
+    func test_comma_then_space_strips_punctuation_from_previous_word() {
+        let result = CurrentWordExtractor.extract(from: "hello, ")
+        XCTAssertEqual(result.currentWord, "")
+        XCTAssertEqual(result.lookupWord, "")
+        XCTAssertEqual(result.previousWord, "hello")
+    }
+
+    func test_apostrophe_preserved_in_previous_word() {
+        let result = CurrentWordExtractor.extract(from: "don't ")
+        XCTAssertEqual(result.currentWord, "")
+        XCTAssertEqual(result.lookupWord, "")
+        XCTAssertEqual(result.previousWord, "don't")
     }
 
     func test_newlines_in_context() {

@@ -15,8 +15,8 @@ enum CurrentWordExtractor {
         let previousWord: String?
     }
 
-    /// Extracts the last whitespace-separated token as `currentWord`/`lookupWord` and the
-    /// second-to-last as `previousWord`.
+    /// Extracts the current word, lookup word, and previous word from the
+    /// document context before the cursor.
     ///
     /// - Parameter context: The full string before the cursor (from `textDocumentProxy.documentContextBeforeInput`).
     /// - Returns: An `ExtractedContext` with:
@@ -24,40 +24,60 @@ enum CurrentWordExtractor {
     ///   `lookupWord`: same as currentWord but with trailing non-apostrophe punctuation stripped.
     ///   `previousWord`: the second-to-last token, with trailing punctuation stripped (nil if none).
     static func extract(from context: String?) -> ExtractedContext {
-        guard let context = context, !context.isEmpty else {
+        guard let context, !context.isEmpty else {
             return ExtractedContext(currentWord: "", lookupWord: "", previousWord: nil)
         }
 
+        // Check if cursor is at a word boundary (last char is whitespace).
+        let isAtWordBoundary = context.last?.isWhitespace ?? true
+
+        // Split into non-empty tokens (do NOT trim the input first).
         let tokens = context
-            .trimmingCharacters(in: .whitespacesAndNewlines)
             .components(separatedBy: CharacterSet.whitespacesAndNewlines)
             .filter { !$0.isEmpty }
 
-        let currentWord = tokens.last ?? ""
-        let previousWord: String?
-        if tokens.count >= 2 {
-            var prev = tokens[tokens.count - 2]
-            // Strip trailing punctuation from previousWord.
-            while let last = prev.last, last.isPunctuation {
-                prev = String(prev.dropLast())
-            }
-            previousWord = prev.isEmpty ? nil : prev
+        if isAtWordBoundary {
+            // Cursor is after whitespace → ready for next-word prediction.
+            let currentWord = ""
+            let lookupWord = ""
+            let previousWord = stripTrailingPunctuation(from: tokens.last)
+            return ExtractedContext(currentWord: currentWord, lookupWord: lookupWord, previousWord: previousWord)
         } else {
-            previousWord = nil
-        }
+            // Cursor is mid-word → completions of the current word.
+            let currentWord = tokens.last ?? ""
+            let lookupWord = stripTrailingNonApostrophePunctuation(from: currentWord)
 
-        // Strip trailing punctuation from currentWord for lookupWord.
-        // Apostrophes are never stripped — they're too ambiguous (contractions,
-        // possessives, names like O'Brien).
-        var lookupWord = currentWord
-        while let last = lookupWord.last, last != "'", last.isPunctuation {
-            lookupWord = String(lookupWord.dropLast())
-        }
+            let previousWord: String?
+            if tokens.count >= 2 {
+                previousWord = stripTrailingPunctuation(from: tokens[tokens.count - 2])
+            } else {
+                previousWord = nil
+            }
 
-        return ExtractedContext(
-            currentWord: currentWord,
-            lookupWord: lookupWord,
-            previousWord: previousWord
-        )
+            return ExtractedContext(currentWord: currentWord, lookupWord: lookupWord, previousWord: previousWord)
+        }
+    }
+
+    // MARK: - Helpers
+
+    /// Strip ALL trailing punctuation (apostrophes included) from a finished word.
+    /// Returns `nil` if the input is nil, empty, or becomes empty after stripping.
+    private static func stripTrailingPunctuation(from word: String?) -> String? {
+        guard let word = word, !word.isEmpty else { return nil }
+        var result = word
+        while let last = result.last, last.isPunctuation {
+            result = String(result.dropLast())
+        }
+        return result.isEmpty ? nil : result
+    }
+
+    /// Strip trailing punctuation from a word, but preserve apostrophes
+    /// (contractions like don't, names like O'Brien, possessives).
+    private static func stripTrailingNonApostrophePunctuation(from word: String) -> String {
+        var result = word
+        while let last = result.last, last != "'", last.isPunctuation {
+            result = String(result.dropLast())
+        }
+        return result
     }
 }

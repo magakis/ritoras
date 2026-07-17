@@ -100,4 +100,27 @@ final class PredictionEngineTests: XCTestCase {
         _ = engine.suggestions(forCurrentWord: "friend", lookupWord: "friend", previousWord: "dear", limit: 3)
         wait(for: [expectation], timeout: 1.0)
     }
+
+    // MARK: - Next-Word Prediction Integration
+
+    func test_no_previous_word_returns_hardcoded_fallback() {
+        let engine = PredictionEngine()
+        let result = engine.suggestions(forCurrentWord: "", lookupWord: "", previousWord: nil, limit: 3)
+        XCTAssertEqual(result, ["the", "I", "and"])
+    }
+
+    func test_next_word_prediction_returns_bigram_followers() {
+        let engine = PredictionEngine()
+        let predictor = BigramPredictor(minCount: 1)
+        predictor.loadFromLines([
+            "I am 100",
+            "I have 80",
+            "I think 60",
+        ])
+        engine.addProvider(predictor)
+
+        let result = engine.suggestions(forCurrentWord: "", lookupWord: "", previousWord: "I", limit: 3)
+        XCTAssertEqual(result, ["am", "have", "think"],
+                       "Engine should return top bigram followers for 'I' when currentWord is empty")
+    }
 }
