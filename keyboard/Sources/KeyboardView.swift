@@ -6,6 +6,7 @@ enum KeyboardState: Equatable {
     case idle
     case openingApp
     case waiting
+    case waitingConfirm
     case inserting
     case error(String)
 }
@@ -706,7 +707,15 @@ class KeyboardView: UIView {
                 }
             )
             micButton.tintColor = .white
-            micButton.isEnabled = false
+            micButton.isEnabled = true
+
+        case .waitingConfirm:
+            micButton.applyMicStyle(
+                icon: "questionmark.circle.fill",
+                backgroundColor: .systemOrange
+            )
+            micButton.tintColor = .white
+            micButton.isEnabled = true
 
         case .inserting:
             micButton.applyMicStyle(

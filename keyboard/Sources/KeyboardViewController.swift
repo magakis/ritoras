@@ -17,6 +17,11 @@ class KeyboardViewController: UIInputViewController {
             if case .error = state {
                 scheduleErrorReset()
             }
+            #if DEBUG
+            if oldValue == .waitingConfirm || state == .waitingConfirm {
+                log("[Debug] state: \(oldValue) -> \(state)")
+            }
+            #endif
         }
     }
 
@@ -76,6 +81,7 @@ class KeyboardViewController: UIInputViewController {
     private var pollCount = 0
     private var clipboardPollTimer: Timer?
     private var clipboardPollCount = 0
+    private var confirmStopTimer: Timer?
 
     // Persisted across keyboard process restarts
     private var lastProcessedPayloadId: UUID? {
@@ -262,6 +268,8 @@ class KeyboardViewController: UIInputViewController {
         pollTimer?.invalidate()
         clipboardPollTimer?.invalidate()
         serverPollTimer?.invalidate()
+        confirmStopTimer?.invalidate()
+        confirmStopTimer = nil
         errorResetWorkItem?.cancel()
         darwinToken = nil
         backspaceTimer?.invalidate()
@@ -277,6 +285,8 @@ class KeyboardViewController: UIInputViewController {
         pollTimer?.invalidate()
         clipboardPollTimer?.invalidate()
         serverPollTimer?.invalidate()
+        confirmStopTimer?.invalidate()
+        confirmStopTimer = nil
         errorResetWorkItem?.cancel()
         backspaceTimer?.invalidate()
         backspaceNilContextRetries = 0
@@ -312,13 +322,23 @@ class KeyboardViewController: UIInputViewController {
                 return
             }
             openContainerAppForDictation()
+        case .waiting:
+            // First tap: enter confirmation state, start 3s timer
+            state = .waitingConfirm
+            scheduleConfirmStopTimeout()
+            #if DEBUG
+            log("[Debug] Mic: .waiting -> .waitingConfirm, 3s timer started")
+            #endif
+        case .waitingConfirm:
+            // Second tap within 3s: cancel dictation
+            cancelDictation()
         case .error:
             state = .idle
             clipboardPollTimer?.invalidate()
             serverPollTimer?.invalidate()
             clearClipboardDictation()
         default:
-            break   // ignore taps while openingApp/waiting/inserting
+            break   // ignore taps while openingApp/inserting
         }
     }
 
@@ -446,6 +466,26 @@ class KeyboardViewController: UIInputViewController {
         log("Dictation timed out")
     }
 
+    /// Starts a 3-second timeout. If the user does not tap again before it fires,
+    /// the keyboard reverts from .waitingConfirm back to .waiting (still polling).
+    private func scheduleConfirmStopTimeout() {
+        confirmStopTimer?.invalidate()
+        #if DEBUG
+        log("[Debug] confirmStopTimer scheduled (3s)")
+        #endif
+        confirmStopTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if self.state == .waitingConfirm {
+                    self.state = .waiting  // revert to waiting (still polling)
+                    #if DEBUG
+                    self.log("[Debug] confirmStopTimeout fired — .waitingConfirm -> .waiting")
+                    #endif
+                }
+            }
+        }
+    }
+
     // MARK: - Pending Dictation (Recovery on Keyboard Reappear)
 
     /// Resumes waiting for an in-progress dictation after the keyboard process was
@@ -554,6 +594,24 @@ class KeyboardViewController: UIInputViewController {
         serverPollTimer?.invalidate()
         clipboardPollTimer?.invalidate()
         darwinToken = nil
+        confirmStopTimer?.invalidate()
+        confirmStopTimer = nil
+    }
+
+    /// Cancels the current dictation: stops all polling, clears the pending
+    /// request (both in-memory and UserDefaults), and resets the keyboard to
+    /// idle. This is a local-only operation — it does NOT attempt to notify
+    /// the container app (which may be crashed). The container app cleans up
+    /// via its own timeout/error handling.
+    private func cancelDictation() {
+        confirmStopTimer?.invalidate()
+        confirmStopTimer = nil
+        stopDictationTransports()
+        pendingRequestId = nil
+        state = .idle
+        #if DEBUG
+        log("[Debug] Dictation cancelled by user (tap-to-confirm-stop)")
+        #endif
     }
 
     /// Inserts the transcribed text, clears the pending request, and resets the
