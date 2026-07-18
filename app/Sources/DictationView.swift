@@ -55,6 +55,13 @@ struct DictationView: View {
 
     private var recordingContent: some View {
         VStack(spacing: 24) {
+            Text(viewModel.activeModeLabel)
+                .font(.caption2)
+                .fontWeight(.semibold)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .background(.tertiary, in: Capsule())
+
             Image(systemName: "waveform")
                 .font(.system(size: 48))
                 .foregroundColor(Color(.systemRed))

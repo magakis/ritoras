@@ -23,15 +23,35 @@ class AppSettings: ObservableObject {
         autocorrectOnSpaceEnabled = SharedConfig.autocorrectOnSpaceEnabled()
         dictationMode = SharedConfig.dictationMode()
 
-        $servers.dropFirst().sink { [weak self] _ in self?.saveToAppGroup() }.store(in: &cancellables)
-        $timeoutSeconds.dropFirst().sink { [weak self] _ in self?.saveToAppGroup() }.store(in: &cancellables)
-        $autoCapitalizationEnabled.dropFirst().sink { [weak self] _ in self?.saveToAppGroup() }.store(in: &cancellables)
-        $autocorrectOnSpaceEnabled.dropFirst().sink { [weak self] _ in self?.saveToAppGroup() }.store(in: &cancellables)
+        $servers.dropFirst().sink { [weak self] newValue in
+            #if DEBUG
+            print("[AppSettings] saving servers (\(newValue.count) entries)")
+            #endif
+            self?.saveServers(newValue)
+        }.store(in: &cancellables)
+        $timeoutSeconds.dropFirst().sink { [weak self] newValue in
+            #if DEBUG
+            print("[AppSettings] saving timeoutSeconds=\(newValue)")
+            #endif
+            self?.saveTimeoutSeconds(newValue)
+        }.store(in: &cancellables)
+        $autoCapitalizationEnabled.dropFirst().sink { [weak self] newValue in
+            #if DEBUG
+            print("[AppSettings] saving autoCapitalizationEnabled=\(newValue)")
+            #endif
+            self?.saveAutoCapitalizationEnabled(newValue)
+        }.store(in: &cancellables)
+        $autocorrectOnSpaceEnabled.dropFirst().sink { [weak self] newValue in
+            #if DEBUG
+            print("[AppSettings] saving autocorrectOnSpaceEnabled=\(newValue)")
+            #endif
+            self?.saveAutocorrectOnSpaceEnabled(newValue)
+        }.store(in: &cancellables)
         $dictationMode.dropFirst().sink { [weak self] newValue in
             #if DEBUG
-            print("[AppSettings] dictationMode changed to \(newValue.rawValue)")
+            print("[AppSettings] saving dictationMode=\(newValue.rawValue)")
             #endif
-            self?.saveToAppGroup()
+            self?.saveDictationMode(newValue)
         }.store(in: &cancellables)
     }
 
@@ -48,6 +68,28 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(autoCapitalizationEnabled, forKey: SharedConfig.Defaults.autoCapitalizationEnabledKey)
         appGroupDefaults?.set(autocorrectOnSpaceEnabled, forKey: SharedConfig.Defaults.autocorrectOnSpaceEnabledKey)
         appGroupDefaults?.set(dictationMode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
+    }
+
+    private func saveServers(_ servers: [String]) {
+        if let data = try? JSONEncoder().encode(servers) {
+            appGroupDefaults?.set(data, forKey: "servers")
+        }
+    }
+
+    private func saveTimeoutSeconds(_ seconds: TimeInterval) {
+        appGroupDefaults?.set(seconds, forKey: "timeoutSeconds")
+    }
+
+    private func saveAutoCapitalizationEnabled(_ enabled: Bool) {
+        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.autoCapitalizationEnabledKey)
+    }
+
+    private func saveAutocorrectOnSpaceEnabled(_ enabled: Bool) {
+        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.autocorrectOnSpaceEnabledKey)
+    }
+
+    private func saveDictationMode(_ mode: SharedConfig.DictationMode) {
+        appGroupDefaults?.set(mode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
     }
 
     func resetToDefaults() {

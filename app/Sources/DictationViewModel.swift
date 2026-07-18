@@ -13,6 +13,7 @@ final class DictationViewModel: ObservableObject {
 
     @Published var phase: DictationPhase = .recording
     @Published private(set) var livePartial: String = ""
+    @Published private(set) var activeModeLabel: String = ""
 
     private var recorder: AudioRecorder?
     private var activeID: UUID?
@@ -146,7 +147,10 @@ final class DictationViewModel: ObservableObject {
             break
         }
 
-        switch SharedConfig.dictationMode() {
+        let mode = SharedConfig.dictationMode()
+        activeModeLabel = mode == .stream ? "STREAM" : "BATCH"
+
+        switch mode {
         case .batch:
             do {
                 try AudioSession.configure()
