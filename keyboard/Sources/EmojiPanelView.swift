@@ -8,7 +8,7 @@ final class EmojiCell: UICollectionViewCell {
     let emojiLabel: UILabel = {
         let label = UILabel()
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .systemFont(ofSize: 32)
+        label.font = .systemFont(ofSize: 28)
         label.textAlignment = .center
         label.adjustsFontSizeToFitWidth = false
         return label
@@ -62,6 +62,9 @@ final class EmojiPanelView: UIView {
     private var categoryButtons: [UIButton] = []
     /// `nil` means "Recents" is selected.
     private var selectedCategory: String?
+    private var searchDebounceWorkItem: DispatchWorkItem?
+    private var currentQuery: String = ""
+    private let selectionFeedback = UISelectionFeedbackGenerator()
     private let emptyStateLabel: UILabel = {
         let label = UILabel()
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -76,6 +79,24 @@ final class EmojiPanelView: UIView {
         label.isHidden = true
         return label
     }()
+    private let searchBar: UISearchBar = {
+        let sb = UISearchBar()
+        sb.placeholder = "Search emoji"
+        sb.searchBarStyle = .minimal
+        sb.returnKeyType = .done
+        sb.enablesReturnKeyAutomatically = false
+        // Suppress inner keyboard — the keyboard extension provides input
+        sb.searchTextField.inputView = UIView()
+        // Dark-mode-aware colors
+        sb.barTintColor = UIColor { tc in
+            tc.userInterfaceStyle == .dark ? UIColor(white: 0.1, alpha: 1) : UIColor(white: 0.95, alpha: 1)
+        }
+        sb.searchTextField.textColor = UIColor { tc in
+            tc.userInterfaceStyle == .dark ? .white : .black
+        }
+        sb.translatesAutoresizingMaskIntoConstraints = false
+        return sb
+    }()
 
     // MARK: - Data
 
@@ -84,9 +105,9 @@ final class EmojiPanelView: UIView {
 
     // MARK: - Layout Constants
 
-    private static let columns: CGFloat = 6
+    private static let columns: CGFloat = 8
     private static let spacing: CGFloat = 6
-    private static let cellSize: CGFloat = 44
+    private static let cellSize: CGFloat = 36
 
     // MARK: - Init
 
@@ -123,6 +144,7 @@ final class EmojiPanelView: UIView {
         clipsToBounds = true
 
         setupHeader()
+        setupSearchBar()
         setupCategoryBar()
         setupCollectionView()
 
@@ -176,6 +198,18 @@ final class EmojiPanelView: UIView {
         ])
     }
 
+    private func setupSearchBar() {
+        searchBar.delegate = self
+        addSubview(searchBar)
+
+        NSLayoutConstraint.activate([
+            searchBar.topAnchor.constraint(equalTo: headerView.bottomAnchor),
+            searchBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            searchBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            searchBar.heightAnchor.constraint(equalToConstant: 36),
+        ])
+    }
+
     private func setupCollectionView() {
         collectionView.backgroundColor = .clear
         collectionView.dataSource = self
@@ -196,6 +230,10 @@ final class EmojiPanelView: UIView {
     // MARK: - Data
 
     func reloadData() {
+        if !currentQuery.isEmpty {
+            performSearch(currentQuery)
+            return
+        }
         if selectedCategory == nil {
             // Recents tab
             let recents = EmojiRecents.get()
@@ -209,6 +247,34 @@ final class EmojiPanelView: UIView {
             }
         } else {
             allEmojis = EmojiData.categories.first { $0.name == selectedCategory }?.emojis ?? []
+            emptyStateLabel.isHidden = true
+        }
+        collectionView.reloadData()
+        collectionView.setContentOffset(.zero, animated: false)
+    }
+
+    private func performSearch(_ rawQuery: String) {
+        let trimmed = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        currentQuery = trimmed
+        if trimmed.isEmpty {
+            emptyStateLabel.isHidden = true
+            reloadData()
+            return
+        }
+        let lower = trimmed.lowercased()
+        let tokens = lower.split(separator: " ").map(String.init)
+        let matches = EmojiData.searchable.filter { entry in
+            let nameLower = entry.name.lowercased()
+            let keywordsLower = entry.keywords.map { $0.lowercased() }
+            return tokens.allSatisfy { token in
+                nameLower.contains(token) || keywordsLower.contains { $0.contains(token) }
+            }
+        }
+        allEmojis = matches.map(\.char)
+        if matches.isEmpty {
+            emptyStateLabel.text = "No results for \"\(trimmed)\""
+            emptyStateLabel.isHidden = false
+        } else {
             emptyStateLabel.isHidden = true
         }
         collectionView.reloadData()
@@ -232,7 +298,7 @@ final class EmojiPanelView: UIView {
         categoryBar.addSubview(stack)
 
         NSLayoutConstraint.activate([
-            categoryBar.topAnchor.constraint(equalTo: headerView.bottomAnchor),
+            categoryBar.topAnchor.constraint(equalTo: searchBar.bottomAnchor),
             categoryBar.leadingAnchor.constraint(equalTo: leadingAnchor),
             categoryBar.trailingAnchor.constraint(equalTo: trailingAnchor),
             categoryBar.heightAnchor.constraint(equalToConstant: 36),
@@ -268,6 +334,12 @@ final class EmojiPanelView: UIView {
     }
 
     @objc private func categoryTapped(_ sender: UIButton) {
+        if !currentQuery.isEmpty {
+            searchBar.text = ""
+            currentQuery = ""
+            searchDebounceWorkItem?.cancel()
+            searchDebounceWorkItem = nil
+        }
         guard let index = categoryButtons.firstIndex(of: sender) else { return }
 
         if index == 0 {
@@ -362,8 +434,23 @@ extension EmojiPanelView: UICollectionViewDelegateFlowLayout {
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+        selectionFeedback.selectionChanged()
         collectionView.deselectItem(at: indexPath, animated: false)
         let emoji = EmojiSkinTone.applying(.current, to: allEmojis[indexPath.item])
         onSelect?(emoji)
+    }
+}
+
+// MARK: - UISearchBarDelegate
+
+extension EmojiPanelView: UISearchBarDelegate {
+    func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
+        searchDebounceWorkItem?.cancel()
+        let query = searchText
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.performSearch(query)
+        }
+        searchDebounceWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: workItem)
     }
 }
