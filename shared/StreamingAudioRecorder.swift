@@ -240,15 +240,14 @@ actor StreamingAudioRecorder {
         ) { buffer, _ in
             let frameLength = Int(buffer.frameLength)
             guard frameLength > 0,
-                  let channelData = buffer.floatChannelData,
-                  let channel0 = channelData[0] else {
+                  let channelData = buffer.floatChannelData else {
                 #if DEBUG
                 print("[StreamingAudioRecorder] tap callback: invalid buffer (frameLength=\(frameLength), floatChannelData=\(buffer.floatChannelData != nil ? "non-nil" : "nil"))")
                 #endif
                 return
             }
 
-            let floatPtr = UnsafeBufferPointer(start: channel0, count: frameLength)
+            let floatPtr = UnsafeBufferPointer(start: channelData[0], count: frameLength)
 
             // Compute RMS energy
             var sumSquares: Float = 0
