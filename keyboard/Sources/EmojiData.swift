@@ -19,28 +19,9 @@ enum EmojiData {
     /// Phase 4 will replace EmojiSkinTone.skinToneCapable with this.
     static let skinToneCapable: Set<String> = {
         Set(loadCached().skinToneCapable)
-    }()
+     }()
 
-    // MARK: - Models
-
-    struct EmojiEntry: Decodable {
-        let char: String
-        let name: String
-        let keywords: [String]
-    }
-
-    struct EmojiCategory: Decodable {
-        let id: String
-        let name: String
-        let emojis: [EmojiEntry]
-    }
-
-    struct EmojiDataFile: Decodable {
-        let categories: [EmojiCategory]
-        let skinToneCapable: [String]
-    }
-
-    // MARK: - Cache
+     // MARK: - Cache
 
     private static var _cached: EmojiDataFile?
 
@@ -198,6 +179,25 @@ enum EmojiData {
         "🇷🇴", "🇧🇬", "🇷🇺", "🇯🇵", "🇨🇳", "🇮🇳", "🇧🇷",
         "🇦🇺", "🇳🇿", "🇿🇦", "🇲🇽", "🇦🇷", "🇰🇷",
     ]
+}
+
+// MARK: - Emoji Data Models
+
+struct EmojiEntry: Decodable {
+    let char: String
+    let name: String
+    let keywords: [String]
+}
+
+struct EmojiCategory: Decodable {
+    let id: String
+    let name: String
+    let emojis: [EmojiEntry]
+}
+
+struct EmojiDataFile: Decodable {
+    let categories: [EmojiCategory]
+    let skinToneCapable: [String]
 }
 
 // MARK: - EmojiDataLoader
