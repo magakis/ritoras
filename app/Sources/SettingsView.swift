@@ -35,6 +35,7 @@ struct SettingsView: View {
         Form {
             serverSection
             timeoutSection
+            dictationSection
             keyboardSection
             historySection
             infoSection
@@ -126,6 +127,22 @@ struct SettingsView: View {
             }
         } header: {
             Text("Network")
+        }
+    }
+
+    // MARK: - Dictation Section
+
+    private var dictationSection: some View {
+        Section {
+            Picker("Mode", selection: $settings.dictationMode) {
+                Text("Batch (full recording)").tag(SharedConfig.DictationMode.batch)
+                Text("Stream (live)").tag(SharedConfig.DictationMode.stream)
+            }
+            .pickerStyle(.segmented)
+        } header: {
+            Text("Dictation")
+        } footer: {
+            Text("Batch records the whole clip then transcribes (most reliable). Stream transcribes live as you pause — faster feedback, needs a stable connection.")
         }
     }
 

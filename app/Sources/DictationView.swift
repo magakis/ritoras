@@ -69,6 +69,15 @@ struct DictationView: View {
                 .monospacedDigit()
                 .contentTransition(.numericText())
 
+            if !viewModel.livePartial.isEmpty {
+                Text(viewModel.livePartial)
+                    .font(.callout)
+                    .foregroundColor(.secondary)
+                    .lineLimit(3)
+                    .padding(.horizontal)
+                    .multilineTextAlignment(.center)
+            }
+
             Button(action: {
                 timer?.invalidate()
                 Task { await viewModel.stop() }

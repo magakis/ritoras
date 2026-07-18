@@ -24,6 +24,26 @@ struct SharedConfig {
         static let autoCapitalizationEnabledKey = "autoCapitalizationEnabled"
         static let autoCapitalizationEnabledDefault = true
 
+        // MARK: - Dictation Mode
+
+        static let dictationModeKey = "dictationMode"
+        static let dictationModeDefault: DictationMode = .batch
+
+        // MARK: - Streaming / VAD Tunables
+
+        /// RMS threshold for VAD speech detection. Higher = less sensitive.
+        static let streamVadSpeechRms: Float = 0.02
+        /// Silence duration (ms) before a chunk is finalized.
+        static let streamVadSilenceMs: Int = 600
+        /// Minimum speech duration (ms) to accept a chunk.
+        static let streamVadMinSpeechMs: Int = 300
+        /// Maximum audio segment length before forced chunk finalization.
+        static let streamMaxChunkSeconds: TimeInterval = 8.0
+        /// WebSocket connection timeout.
+        static let streamWsConnectTimeout: TimeInterval = 8.0
+        /// How long to wait for a final transcription after the last audio chunk.
+        static let streamFinalTimeout: TimeInterval = 30.0
+
         // MARK: - SymSpell / Prediction Tunables
 
         /// Maximum edit distance for SymSpell fuzzy correction.
@@ -59,6 +79,13 @@ struct SharedConfig {
         static let maxResidentBytesDuringLoad: UInt64 = 35 * 1024 * 1024
     }
 
+    // MARK: - Dictation Mode
+
+    enum DictationMode: String, CaseIterable {
+        case batch
+        case stream
+    }
+
     let servers: [String]
     let timeoutSeconds: TimeInterval
 
@@ -82,6 +109,19 @@ struct SharedConfig {
             servers: [Defaults.baseUrl],
             timeoutSeconds: Defaults.timeoutSeconds
         )
+    }
+
+    /// Reads the dictation mode from the App Group.
+    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Returns `.batch` when the App Group is unavailable or the key is unset.
+    static func dictationMode() -> DictationMode {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.dictationModeDefault
+        }
+        guard let raw = defaults.string(forKey: Defaults.dictationModeKey) else {
+            return Defaults.dictationModeDefault
+        }
+        return DictationMode(rawValue: raw) ?? Defaults.dictationModeDefault
     }
 
     /// Reads the auto-capitalization enabled flag from the App Group.

@@ -209,7 +209,7 @@ No API key, no model parameter, no language parameter — just the audio file.
 | Language | English (hardcoded, not configurable) |
 | Quantization | int8 |
 | Auth | None |
-| Stream endpoint | WebSocket `/stream` (real-time, not used by Ritoras) |
+| Stream endpoint | WebSocket `/stream` (real-time streaming, used by Ritoras in stream mode — see §10) |
 
 ### File location
 
@@ -230,7 +230,10 @@ fields are already preserved for this purpose.
 
 ## 9. Client implementation reference
 
-The client is at `keyboard/Sources/WhisperClient.swift`. Key design decisions:
+### Batch mode (`/transcribe`)
+
+The batch client is at `keyboard/Sources/WhisperClient.swift`. Key design
+decisions:
 
 - **No third-party HTTP libraries** — uses `URLSession.shared.data(for:)` with
   `async/await` (iOS 15+).
@@ -245,3 +248,210 @@ The client is at `keyboard/Sources/WhisperClient.swift`. Key design decisions:
   falls back to plain text extraction if JSON parsing fails.
 - **File cleanup** — the caller (Phase 8 / `KeyboardViewController`) is
   responsible for deleting `audioURL` after transcription completes.
+
+### Stream mode (`/stream`)
+
+The streaming client spans three files:
+
+- `shared/WhisperStreamClient.swift` — WebSocket connection lifecycle (connect,
+  send binary chunks, send END/PING, receive partial/final/error/PONG frames,
+  disconnect).
+- `shared/StreamingAudioRecorder.swift` — client-side energy-based VAD state
+  machine running on an `AVAudioEngine` tap, emitting 16 kHz mono float32 PCM
+  chunks per detected speech segment.
+- `shared/Config.swift` — `DictationMode` enum (`.batch` / `.stream`) and all
+  streaming tunables (see §10 for reference).
+
+---
+
+## 10. Streaming mode (`/stream` WebSocket)
+
+### Overview
+
+Ritoras uses the `/stream` WebSocket endpoint behind a user-facing
+`DictationMode` toggle (default `.batch`, values: `.batch` | `.stream`). When
+`.stream` is selected, the container app opens a persistent WebSocket
+connection, streams 16 kHz mono float32 PCM chunks emitted by a client-side
+energy VAD, and receives live `partial` transcriptions followed by a single
+normalized `final` when the user stops dictating.
+
+Unlike the stateless `POST /transcribe` endpoint, `/stream` maintains a session
+spanning one dictation: one WebSocket connect → N binary audio frames → one
+`{"type":"END"}` → drain worker → `final` response → close.
+
+### Client → Server frames
+
+| Frame | Shape | Purpose |
+|-------|-------|---------|
+| Binary | `[4-byte BE uint32 chunk_id][float32 LE PCM @ 16 kHz mono]` | One audio chunk (one Whisper call) |
+| Text JSON | `{"type":"END"}` | End of session — server drains worker and responds with `final` |
+| Text JSON | `{"type":"PING"}` | Keepalive — server responds `{"type":"PONG"}` |
+| Text JSON | `{"type":"CONTEXT","text":"..."}` | Optional Whisper `initial_prompt` (unused by Ritoras v1) |
+
+The server decodes binary frames as (`server.py:749-760`):
+
+```python
+chunk_id = struct.unpack("!I", raw[:4])[0]
+audio = np.frombuffer(raw[4:], dtype=np.float32)
+```
+
+**Binary frame layout:**
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 4 | `chunk_id` (uint32, big-endian) |
+| 4 | N×4 | PCM samples (float32, little-endian, 16 kHz mono) |
+
+Total frame size: `4 + N×4` bytes, where N is the number of audio samples.
+
+### Server → Client frames (all text JSON)
+
+| Frame | Shape | Description |
+|-------|-------|-------------|
+| `partial` | `{"type":"partial","transcription":"...","chunk_id":N}` | Per-chunk result, **RAW** (not normalized) |
+| `final` | `{"type":"final","transcription":"...","chunk_id":last}` | After END + worker drain, **FULLY NORMALIZED** |
+| `PONG` | `{"type":"PONG"}` | Keepalive response |
+| `error` | `{"type":"error","message":"..."}` | Server error |
+
+**partial vs final:**
+
+- `partial` transcriptions are the raw output from a single Whisper call (the
+  per-chunk result). They are NOT passed through the server's post-processing
+  pipeline — no substitutions, no time-format conversion, no normalization.
+  Ritoras displays them live in the container app for immediate feedback.
+- `final` is produced after the server receives `{"type":"END"}` and all
+  outstanding workers have drained. It runs through the identical pipeline as
+  `POST /transcribe`:
+  `normalize_text(convert_time_format(apply_substitutions(...)))`, including the
+  trailing space.
+
+**END / PING / CONTEXT:**
+
+- **END** (`{"type":"END"}`) — the client must send this to signal that no more
+  audio chunks will follow. The server stops accepting new chunks, waits for the
+  worker queue to drain, and returns a single `final` transcription.
+- **PING** (`{"type":"PING"}`) — keepalive. The server's idle timeout
+  (`STREAM_RECV_TIMEOUT = 600 s`, `server.py:120, 853-862`) closes the
+  connection if no frame is received within that window. The client should send
+  a PING well before 600 s of silence during long pauses.
+- **CONTEXT** (`{"type":"CONTEXT","text":"..."}`) — sets the Whisper
+  `initial_prompt` for the session. Ritoras does not send this in v1; the
+  server provides automatic cross-chunk context by threading the last 300
+  characters of accumulated transcript as `initial_prompt` to each new chunk
+  (`server.py:828`).
+
+### Client-side VAD (architectural note)
+
+The server's `VAD_ENABLED` flag (`server.py:159`) and `VAD_PARAMETERS`
+(threshold 0.2, min_speech 250 ms, min_silence 1000 ms, speech_pad 400 ms) are
+passed to faster-whisper's built-in Silero VAD **inside** `model.transcribe()`.
+This only trims silence within a single chunk before transcribing; it does
+**not** perform real-time segmentation of the inbound audio stream.
+
+Therefore, Ritoras implements client-side pause detection using an energy-based
+VAD state machine in `shared/StreamingAudioRecorder.swift`. The VAD computes
+RMS energy per audio frame (buffer of 4096 samples at 16 kHz) and tracks
+speech/silence durations:
+
+| Tunable | Default | Purpose |
+|---------|---------|---------|
+| `SharedConfig.Defaults.streamVadSpeechRms` | `0.02` | RMS threshold for speech detection. Higher = less sensitive. |
+| `SharedConfig.Defaults.streamVadSilenceMs` | `600` | Silence duration (ms) before a chunk is finalized (pause timeout). |
+| `SharedConfig.Defaults.streamVadMinSpeechMs` | `300` | Minimum speech duration (ms) to accept a chunk. Rejects brief noise. |
+| `SharedConfig.Defaults.streamMaxChunkSeconds` | `8.0` | Maximum audio segment length before forced chunk finalization. |
+
+When the VAD detects `streamVadSilenceMs` ms of continuous silence after
+speech, it emits the accumulated audio as one binary frame (with an atomically
+incrementing `chunk_id`). The same emission happens if the chunk exceeds
+`streamMaxChunkSeconds` regardless of VAD state. This delivers the
+"transcribe on pause" user experience.
+
+### Chunking model
+
+The server transcribes whatever the client sends as one binary frame as one
+Whisper call. The background worker pulls `(chunk_id, audio_array)` off an
+async queue and calls faster-whisper per chunk. Cross-chunk context continuity
+is automatic: the server threads the last 300 characters of accumulated
+transcript as `initial_prompt` for each new chunk (`server.py:828`).
+
+### Result delivery invariant
+
+In stream mode, exactly **one** `completed` payload is POSTed to
+`/dictation_result` per session, carrying the server's `final` (normalized)
+text. The payload shape is identical to batch mode. The keyboard extension
+receives it via the same `/dictation_result/latest` poll.
+
+Live `partial` transcriptions are display-only in the container app and are
+**never** sent to the keyboard extension.
+
+### Other tunables
+
+| Tunable | Default | Purpose |
+|---------|---------|---------|
+| `SharedConfig.Defaults.streamWsConnectTimeout` | `8.0 s` | WebSocket connection timeout (includes PING/PONG handshake probe). |
+| `SharedConfig.Defaults.streamFinalTimeout` | `30.0 s` | How long to wait for a `final` transcription after sending END. |
+
+### ATS note for streaming
+
+The container app connects to the WebSocket at `ws://100.x:5000/stream` (plain
+WS, not WSS). Batch mode already works over plain HTTP from the container app,
+and `URLSessionWebSocketTask` to `ws://` falls under the same ATS rules.
+
+The keyboard extension's `Info.plist` already declares
+`NSAllowsArbitraryLoads = true`. The container app's `Info.plist` does not
+currently declare an ATS exception, but if an on-device test reveals an ATS
+block for the WebSocket connection, the fix is to mirror the keyboard's
+`NSAppTransportSecurity` → `NSAllowsArbitraryLoads = true` block into
+`app/Info.plist`.
+
+### Testing with Python
+
+A self-contained test using the `websockets` library:
+
+```python
+import asyncio, json, struct, wave, numpy as np
+import websockets
+
+async def test_stream():
+    uri = "ws://100.107.181.45:5000/stream"
+    async with websockets.connect(uri) as ws:
+        # Open a 16 kHz mono WAV file
+        with wave.open("test.wav", "rb") as w:
+            assert w.getnchannels() == 1
+            assert w.getframerate() == 16000
+
+            raw = w.readframes(w.getnframes())
+            if w.getsampwidth() == 2:          # 16-bit PCM
+                samples = (
+                    np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+                    / 32768.0
+                )
+            else:                               # already float32
+                samples = np.frombuffer(raw, dtype=np.float32)
+
+        # Send in 2-second chunks
+        chunk_size = 32000  # 2 s × 16 kHz
+        for i in range(0, len(samples), chunk_size):
+            chunk = samples[i:i + chunk_size]
+            frame = struct.pack("!I", i // chunk_size) + chunk.tobytes()
+            await ws.send(frame)
+
+        await ws.send(json.dumps({"type": "END"}))
+
+        async for msg in ws:
+            print(json.loads(msg))
+
+asyncio.run(test_stream())
+```
+
+Expected output (the server echoes partial results per chunk, then the final):
+
+```
+{'type': 'partial', 'transcription': 'hello world', 'chunk_id': 0}
+{'type': 'partial', 'transcription': 'hello world this is a', 'chunk_id': 1}
+{'type': 'final', 'transcription': 'hello world this is a test transcription. ', 'chunk_id': 1}
+```
+
+Note: `partial` transcriptions are unnormalized per-chunk Whisper output. Only
+the `final` is fully normalized through substitutions, time-format conversion,
+and text normalization — identical to the `POST /transcribe` pipeline.

@@ -12,9 +12,13 @@ final class DictationViewModel: ObservableObject {
     }
 
     @Published var phase: DictationPhase = .recording
+    @Published private(set) var livePartial: String = ""
 
     private var recorder: AudioRecorder?
     private var activeID: UUID?
+
+    private var streamRecorder: StreamingAudioRecorder?
+    private var streamClient: WhisperStreamClient?
 
     // MARK: - Clipboard Transport
 
@@ -99,6 +103,7 @@ final class DictationViewModel: ObservableObject {
 
     func start(id: UUID) async {
         activeID = id
+        livePartial = ""
         phase = .recording
 
         // Save initial recording payload
@@ -141,87 +146,239 @@ final class DictationViewModel: ObservableObject {
             break
         }
 
-        do {
-            try AudioSession.configure()
-            let newRecorder = AudioRecorder()
-            _ = try await newRecorder.startRecording()
-            recorder = newRecorder
-            UIApplication.shared.isIdleTimerDisabled = true
-        } catch {
-            let message = error.localizedDescription
-            DictationPayload(
-                id: id, status: .error, errorMessage: message, timestamp: Date()
-            ).save()
-            writeToClipboard(status: "error", errorMessage: message)
-            postResultToServer(status: "error", errorMessage: message)
-            DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-            phase = .error(message)
+        switch SharedConfig.dictationMode() {
+        case .batch:
+            do {
+                try AudioSession.configure()
+                let newRecorder = AudioRecorder()
+                _ = try await newRecorder.startRecording()
+                recorder = newRecorder
+                UIApplication.shared.isIdleTimerDisabled = true
+            } catch {
+                let message = error.localizedDescription
+                DictationPayload(
+                    id: id, status: .error, errorMessage: message, timestamp: Date()
+                ).save()
+                writeToClipboard(status: "error", errorMessage: message)
+                postResultToServer(status: "error", errorMessage: message)
+                DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                phase = .error(message)
+            }
+
+        case .stream:
+            #if DEBUG
+            print("[DictationVM] start mode: stream")
+            #endif
+
+            livePartial = ""
+
+            let config = SharedConfig.load()
+            guard let server = config.servers.first else {
+                let message = "No server configured."
+                DictationPayload(id: id, status: .error, errorMessage: message, timestamp: Date()).save()
+                writeToClipboard(status: "error", errorMessage: message)
+                postResultToServer(status: "error", errorMessage: message)
+                DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                phase = .error(message)
+                return
+            }
+
+            do {
+                try AudioSession.configure()
+
+                let client = WhisperStreamClient(baseURL: server)
+                try await client.connect()
+                #if DEBUG
+                print("[DictationVM] Stream: WebSocket connected")
+                #endif
+                streamClient = client
+
+                let recorder = StreamingAudioRecorder()
+                streamRecorder = recorder
+
+                try await recorder.start { [weak self] chunkId, samples in
+                    #if DEBUG
+                    print("[DictationVM] Stream: chunk \(chunkId) (\(samples.count) samples)")
+                    #endif
+                    guard let client = await self?.streamClient else { return }
+                    try? await client.sendChunk(id: chunkId, samples: samples)
+                }
+                #if DEBUG
+                print("[DictationVM] Stream: recorder started")
+                #endif
+
+                UIApplication.shared.isIdleTimerDisabled = true
+            } catch {
+                #if DEBUG
+                print("[DictationVM] Stream start error: \(error.localizedDescription)")
+                #endif
+                streamClient?.disconnect()
+                streamClient = nil
+                streamRecorder = nil
+                AudioSession.deactivate()
+
+                let message = error.localizedDescription
+                DictationPayload(
+                    id: id, status: .error, errorMessage: message, timestamp: Date()
+                ).save()
+                writeToClipboard(status: "error", errorMessage: message)
+                postResultToServer(status: "error", errorMessage: message)
+                DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                phase = .error(message)
+            }
         }
     }
 
     func stop() async {
-        guard let recorder = recorder, let id = activeID else { return }
-        self.recorder = nil
+        switch SharedConfig.dictationMode() {
+        case .batch:
+            guard let recorder = recorder, let id = activeID else { return }
+            self.recorder = nil
 
-        let audioURL = await recorder.stopRecording()
+            let audioURL = await recorder.stopRecording()
 
-        guard let url = audioURL else {
+            guard let url = audioURL else {
+                UIApplication.shared.isIdleTimerDisabled = false
+                AudioSession.deactivate()
+                let message = "Recording was empty. Please try again."
+                DictationPayload(
+                    id: id, status: .error, errorMessage: message, timestamp: Date()
+                ).save()
+                writeToClipboard(status: "error", errorMessage: message)
+                postResultToServer(status: "error", errorMessage: message)
+                DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                phase = .error(message)
+                return
+            }
+
+            phase = .transcribing
+            DictationPayload(id: id, status: .transcribing, timestamp: Date()).save()
+            postResultToServer(status: "transcribing")
             UIApplication.shared.isIdleTimerDisabled = false
             AudioSession.deactivate()
-            let message = "Recording was empty. Please try again."
-            DictationPayload(
-                id: id, status: .error, errorMessage: message, timestamp: Date()
-            ).save()
-            writeToClipboard(status: "error", errorMessage: message)
-            postResultToServer(status: "error", errorMessage: message)
-            DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-            phase = .error(message)
-            return
-        }
 
-        phase = .transcribing
-        DictationPayload(id: id, status: .transcribing, timestamp: Date()).save()
-        postResultToServer(status: "transcribing")
-        UIApplication.shared.isIdleTimerDisabled = false
-        AudioSession.deactivate()
+            let config = SharedConfig.load()
 
-        let config = SharedConfig.load()
+            // Foreground upload (Scenario A) — runs immediately while the app is in
+            // the foreground and updates the UI directly. A background task keeps
+            // the app alive briefly if the user switches away mid-flight.
+            var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+            backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "WhisperTranscription") {
+                UIApplication.shared.endBackgroundTask(backgroundTaskID)
+                backgroundTaskID = .invalid
+            }
 
-        // Foreground upload (Scenario A) — runs immediately while the app is in
-        // the foreground and updates the UI directly. A background task keeps
-        // the app alive briefly if the user switches away mid-flight.
-        var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
-        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "WhisperTranscription") {
-            UIApplication.shared.endBackgroundTask(backgroundTaskID)
-            backgroundTaskID = .invalid
-        }
+            do {
+                let text = try await WhisperClient.transcribe(audioURL: url, config: config)
+                guard activeID == id else { return }
+                DictationPayload(id: id, status: .completed, text: text, timestamp: Date()).save()
+                writeToClipboard(status: "completed", text: text)
+                postResultToServer(status: "completed", text: text)
+                DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                TranscriptionHistory.shared.add(text: text)
+                phase = .done(text)
+            } catch {
+                guard activeID == id else { return }
+                let message = error.localizedDescription
+                DictationPayload(id: id, status: .error, errorMessage: message, timestamp: Date()).save()
+                writeToClipboard(status: "error", errorMessage: message)
+                postResultToServer(status: "error", errorMessage: message)
+                DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                phase = .error(message)
+            }
 
-        do {
-            let text = try await WhisperClient.transcribe(audioURL: url, config: config)
-            guard activeID == id else { return }
-            DictationPayload(id: id, status: .completed, text: text, timestamp: Date()).save()
-            writeToClipboard(status: "completed", text: text)
-            postResultToServer(status: "completed", text: text)
-            DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-            TranscriptionHistory.shared.add(text: text)
-            phase = .done(text)
-        } catch {
-            guard activeID == id else { return }
-            let message = error.localizedDescription
-            DictationPayload(id: id, status: .error, errorMessage: message, timestamp: Date()).save()
-            writeToClipboard(status: "error", errorMessage: message)
-            postResultToServer(status: "error", errorMessage: message)
-            DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-            phase = .error(message)
-        }
+            if backgroundTaskID != .invalid {
+                UIApplication.shared.endBackgroundTask(backgroundTaskID)
+                backgroundTaskID = .invalid
+            }
 
-        if backgroundTaskID != .invalid {
-            UIApplication.shared.endBackgroundTask(backgroundTaskID)
-            backgroundTaskID = .invalid
+        case .stream:
+            #if DEBUG
+            print("[DictationVM] stop mode: stream")
+            #endif
+
+            guard let id = activeID else { return }
+
+            phase = .transcribing
+            postResultToServer(status: "transcribing")
+            UIApplication.shared.isIdleTimerDisabled = false
+
+            var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+            backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "WhisperTranscription") {
+                UIApplication.shared.endBackgroundTask(backgroundTaskID)
+                backgroundTaskID = .invalid
+            }
+
+            await streamRecorder?.stop()
+
+            do {
+                try await streamClient?.sendEnd()
+                #if DEBUG
+                print("[DictationVM] Stream: END sent, awaiting final")
+                #endif
+
+                let text = try await streamClient?.receiveMessages { [weak self] partial in
+                    #if DEBUG
+                    let preview = partial.prefix(60)
+                    print("[DictationVM] livePartial updated: \"\(preview)...\"")
+                    #endif
+                    Task { @MainActor in
+                        self?.livePartial = partial
+                    }
+                } ?? ""
+
+                #if DEBUG
+                let preview = text.prefix(60)
+                print("[DictationVM] Stream final received: \"\(preview)...\"")
+                #endif
+
+                guard activeID == id else { return }
+
+                #if DEBUG
+                print("[DictationVM] Stream success: delivering via all channels")
+                #endif
+                DictationPayload(id: id, status: .completed, text: text, timestamp: Date()).save()
+                writeToClipboard(status: "completed", text: text)
+                postResultToServer(status: "completed", text: text)
+                DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                TranscriptionHistory.shared.add(text: text)
+                phase = .done(text)
+            } catch {
+                guard activeID == id else { return }
+                let message = error.localizedDescription
+                #if DEBUG
+                print("[DictationVM] Stream error: \(message)")
+                #endif
+                DictationPayload(id: id, status: .error, errorMessage: message, timestamp: Date()).save()
+                writeToClipboard(status: "error", errorMessage: message)
+                postResultToServer(status: "error", errorMessage: message)
+                DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                phase = .error(message)
+            }
+
+            if backgroundTaskID != .invalid {
+                UIApplication.shared.endBackgroundTask(backgroundTaskID)
+                backgroundTaskID = .invalid
+            }
+
+            await streamClient?.disconnect()
+            streamClient = nil
+            streamRecorder = nil
         }
     }
 
     func cancel() async {
+        #if DEBUG
+        print("[DictationVM] cancel: stream teardown")
+        #endif
+        await streamRecorder?.stop()
+        await streamClient?.disconnect()
+        streamClient = nil
+        streamRecorder = nil
+
+        #if DEBUG
+        print("[DictationVM] cancel: batch teardown")
+        #endif
         UIApplication.shared.isIdleTimerDisabled = false
         await recorder?.cleanup()
         recorder = nil
