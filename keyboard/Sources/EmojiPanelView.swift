@@ -35,10 +35,21 @@ final class EmojiCell: UICollectionViewCell {
 // MARK: - EmojiPanelView
 
 final class EmojiPanelView: UIView {
+    /// Shared panel background color — used by both EmojiPanelView and its host KeyboardView
+    /// so no visible seam appears between them at the top edge.
+    static let panelBackground: UIColor = UIColor { tc in
+        tc.userInterfaceStyle == .dark
+            ? UIColor(white: 0.15, alpha: 1)
+            : UIColor(white: 0.88, alpha: 1)
+    }
+
     // MARK: - Callbacks
 
     var onSelect: ((String) -> Void)?
     var onDismiss: (() -> Void)?
+    var onSearchActivate: (() -> Void)?
+    var onSearchDismiss: (() -> Void)?
+    var onSearchReturn: (() -> Void)?
 
     // MARK: - Subviews
 
@@ -79,23 +90,56 @@ final class EmojiPanelView: UIView {
         label.isHidden = true
         return label
     }()
-    private let searchBar: UISearchBar = {
-        let sb = UISearchBar()
-        sb.placeholder = "Search emoji"
-        sb.searchBarStyle = .minimal
-        sb.returnKeyType = .done
-        sb.enablesReturnKeyAutomatically = false
-        // Suppress inner keyboard — the keyboard extension provides input
-        sb.searchTextField.inputView = UIView()
-        // Dark-mode-aware colors
-        sb.barTintColor = UIColor { tc in
-            tc.userInterfaceStyle == .dark ? UIColor(white: 0.1, alpha: 1) : UIColor(white: 0.95, alpha: 1)
+    private let searchField: UITextField = {
+        let field = UITextField()
+        field.placeholder = "Search emoji"
+        field.font = .systemFont(ofSize: 15)
+        field.clearButtonMode = .whileEditing
+        field.returnKeyType = .search
+        field.autocorrectionType = .no
+        field.spellCheckingType = .no
+        field.autocapitalizationType = .none
+        field.adjustsFontSizeToFitWidth = false
+        field.translatesAutoresizingMaskIntoConstraints = false
+
+        // Magnifying glass icon as left view (UISearchBar-style)
+        let iconView = UIImageView(image: UIImage(systemName: "magnifyingglass"))
+        iconView.contentMode = .scaleAspectFit
+        iconView.frame = CGRect(x: 8, y: 5, width: 14, height: 14)
+        iconView.tintColor = UIColor { tc in
+            tc.userInterfaceStyle == .dark ? UIColor(white: 0.7, alpha: 1) : UIColor(white: 0.4, alpha: 1)
         }
-        sb.searchTextField.textColor = UIColor { tc in
+        let leftContainer = UIView(frame: CGRect(x: 0, y: 0, width: 28, height: 24))
+        leftContainer.addSubview(iconView)
+        field.leftView = leftContainer
+        field.leftViewMode = .always
+
+        // Translucent rounded background matching previous UISearchBar minimal style
+        field.backgroundColor = UIColor { tc in
+            tc.userInterfaceStyle == .dark
+                ? UIColor(white: 0.22, alpha: 1)
+                : UIColor(white: 0.82, alpha: 1)
+        }
+        field.textColor = UIColor { tc in
             tc.userInterfaceStyle == .dark ? .white : .black
         }
-        sb.translatesAutoresizingMaskIntoConstraints = false
-        return sb
+        field.tintColor = UIColor { tc in
+            tc.userInterfaceStyle == .dark ? .white : UIColor(white: 0.2, alpha: 1)
+        }
+
+        // Placeholder color adapts to dark mode
+        field.attributedPlaceholder = NSAttributedString(
+            string: "Search emoji",
+            attributes: [.foregroundColor: UIColor { tc in
+                tc.userInterfaceStyle == .dark
+                    ? UIColor(white: 0.6, alpha: 1)
+                    : UIColor(white: 0.4, alpha: 1)
+            }]
+        )
+
+        field.layer.cornerRadius = 8
+        field.clipsToBounds = true
+        return field
     }()
 
     // MARK: - Data
@@ -135,16 +179,11 @@ final class EmojiPanelView: UIView {
     // MARK: - Setup
 
     private func setupView() {
-        backgroundColor = UIColor { tc in
-            tc.userInterfaceStyle == .dark
-                ? UIColor(white: 0.15, alpha: 1)
-                : UIColor(white: 0.88, alpha: 1)
-        }
+        backgroundColor = Self.panelBackground
         layer.cornerRadius = 6
         clipsToBounds = true
 
         setupHeader()
-        setupSearchBar()
         setupCategoryBar()
         setupCollectionView()
 
@@ -160,9 +199,6 @@ final class EmojiPanelView: UIView {
             selectedCategory = EmojiData.categories.first?.name
         }
         updateTabSelection()
-
-        // Wire dismiss button
-        dismissButton.addTarget(self, action: #selector(dismissTapped), for: .touchUpInside)
     }
 
     private func setupHeader() {
@@ -173,15 +209,23 @@ final class EmojiPanelView: UIView {
         dismissButton.setTitleColor(UIColor { tc in
             tc.userInterfaceStyle == .dark ? UIColor(white: 0.9, alpha: 1) : UIColor(white: 0.2, alpha: 1)
         }, for: .normal)
-        headerView.addSubview(dismissButton)
+        dismissButton.addTarget(self, action: #selector(dismissTapped), for: .touchUpInside)
 
         // Tone picker button on far right
         toneButton.tintColor = UIColor { tc in
             tc.userInterfaceStyle == .dark ? UIColor(white: 0.9, alpha: 1) : UIColor(white: 0.2, alpha: 1)
         }
-        headerView.addSubview(toneButton)
         toneButton.menu = buildToneMenu()
         toneButton.showsMenuAsPrimaryAction = true
+
+        // Stack view with [dismissButton, searchField, toneButton]
+        let stack = UIStackView(arrangedSubviews: [dismissButton, searchField, toneButton])
+        stack.axis = .horizontal
+        stack.alignment = .fill
+        stack.distribution = .fill
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        headerView.addSubview(stack)
 
         NSLayoutConstraint.activate([
             headerView.topAnchor.constraint(equalTo: topAnchor),
@@ -189,25 +233,23 @@ final class EmojiPanelView: UIView {
             headerView.trailingAnchor.constraint(equalTo: trailingAnchor),
             headerView.heightAnchor.constraint(equalToConstant: 36),
 
-            dismissButton.leadingAnchor.constraint(equalTo: headerView.leadingAnchor, constant: 12),
-            dismissButton.centerYAnchor.constraint(equalTo: headerView.centerYAnchor),
-            dismissButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 44),
-
-            toneButton.trailingAnchor.constraint(equalTo: headerView.trailingAnchor, constant: -12),
-            toneButton.centerYAnchor.constraint(equalTo: headerView.centerYAnchor),
+            stack.topAnchor.constraint(equalTo: headerView.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: headerView.bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: headerView.leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(equalTo: headerView.trailingAnchor, constant: -8),
         ])
-    }
 
-    private func setupSearchBar() {
-        searchBar.delegate = self
-        addSubview(searchBar)
+        // Fixed-edge priorities — canonical [fixed][flexible][fixed]
+        dismissButton.setContentHuggingPriority(.required, for: .horizontal)
+        dismissButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        toneButton.setContentHuggingPriority(.required, for: .horizontal)
+        toneButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        searchField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        NSLayoutConstraint.activate([
-            searchBar.topAnchor.constraint(equalTo: headerView.bottomAnchor),
-            searchBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            searchBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            searchBar.heightAnchor.constraint(equalToConstant: 36),
-        ])
+        // Wire search field delegate + editingChanged target
+        searchField.delegate = self
+        searchField.addTarget(self, action: #selector(searchFieldEditingChanged), for: .editingChanged)
     }
 
     private func setupCollectionView() {
@@ -298,7 +340,7 @@ final class EmojiPanelView: UIView {
         categoryBar.addSubview(stack)
 
         NSLayoutConstraint.activate([
-            categoryBar.topAnchor.constraint(equalTo: searchBar.bottomAnchor),
+            categoryBar.topAnchor.constraint(equalTo: headerView.bottomAnchor),
             categoryBar.leadingAnchor.constraint(equalTo: leadingAnchor),
             categoryBar.trailingAnchor.constraint(equalTo: trailingAnchor),
             categoryBar.heightAnchor.constraint(equalToConstant: 36),
@@ -335,10 +377,11 @@ final class EmojiPanelView: UIView {
 
     @objc private func categoryTapped(_ sender: UIButton) {
         if !currentQuery.isEmpty {
-            searchBar.text = ""
+            searchField.text = ""
             currentQuery = ""
             searchDebounceWorkItem?.cancel()
             searchDebounceWorkItem = nil
+            onSearchDismiss?()
         }
         guard let index = categoryButtons.firstIndex(of: sender) else { return }
 
@@ -406,7 +449,21 @@ final class EmojiPanelView: UIView {
 
 extension EmojiPanelView {
     @objc private func dismissTapped() {
-        onDismiss?()
+        if searchField.isFirstResponder {
+            onSearchDismiss?()
+        } else {
+            onDismiss?()
+        }
+    }
+
+    @objc private func searchFieldEditingChanged() {
+        searchDebounceWorkItem?.cancel()
+        let query = searchField.text ?? ""
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.performSearch(query)
+        }
+        searchDebounceWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: workItem)
     }
 }
 
@@ -441,16 +498,23 @@ extension EmojiPanelView: UICollectionViewDelegateFlowLayout {
     }
 }
 
-// MARK: - UISearchBarDelegate
+// MARK: - UITextFieldDelegate
 
-extension EmojiPanelView: UISearchBarDelegate {
-    func searchBar(_ searchBar: UISearchBar, textDidChange searchText: String) {
-        searchDebounceWorkItem?.cancel()
-        let query = searchText
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.performSearch(query)
-        }
-        searchDebounceWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: workItem)
+extension EmojiPanelView: UITextFieldDelegate {
+    func textFieldDidBeginEditing(_ textField: UITextField) {
+        onSearchActivate?()
+    }
+
+    func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
+        return true  // observe via .editingChanged instead
+    }
+
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        onSearchReturn?()
+        return false
+    }
+
+    func textFieldShouldClear(_ textField: UITextField) -> Bool {
+        return true  // allow clear × to work; .editingChanged will fire with empty text
     }
 }

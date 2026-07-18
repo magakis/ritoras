@@ -50,6 +50,11 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
+    // MARK: - Input Target (keystroke routing)
+
+    enum InputTarget { case hostApp, emojiSearch }
+    private var inputTarget: InputTarget = .hostApp
+
     private var predictionEngine: PredictionEngine?
     private var isPredictionEngineReady = false
     private let predictionBuildQueue = DispatchQueue(
@@ -237,6 +242,13 @@ class KeyboardViewController: UIInputViewController {
         super.viewDidAppear(animated)
         keyboardView.updateFullAccess(hasFullAccess)
 
+        // Defensive: never resume in search mode after keyboard dismiss/reappear
+        inputTarget = .hostApp
+        if uiMode == .emojiSearch {
+            keyboardView.emojiPanelView.searchField.resignFirstResponder()
+            uiMode = .emoji
+        }
+
         // Resume a dictation that was in progress when iOS suspended/terminated
         // the extension. pendingRequestId survives in UserDefaults, so even a
         // fully relaunched keyboard process can recover the result.
@@ -310,6 +322,28 @@ class KeyboardViewController: UIInputViewController {
         let heightConstraint = view.heightAnchor.constraint(equalToConstant: 256)
         heightConstraint.priority = .defaultHigh
         heightConstraint.isActive = true
+
+        // Wire emoji panel search callbacks
+        keyboardView.emojiPanelView.onSearchActivate = { [weak self] in
+            guard let self = self else { return }
+            self.inputTarget = .emojiSearch
+            self.lastAutoCorrection = nil
+            self.uiMode = .emojiSearch
+        }
+
+        keyboardView.emojiPanelView.onSearchDismiss = { [weak self] in
+            guard let self = self else { return }
+            self.inputTarget = .hostApp
+            self.keyboardView.emojiPanelView.searchField.resignFirstResponder()
+            self.uiMode = .emoji
+        }
+
+        keyboardView.emojiPanelView.onSearchReturn = { [weak self] in
+            guard let self = self else { return }
+            self.inputTarget = .hostApp
+            self.keyboardView.emojiPanelView.searchField.resignFirstResponder()
+            self.uiMode = .emoji
+        }
     }
 
     // MARK: - Mic Button
@@ -619,6 +653,7 @@ class KeyboardViewController: UIInputViewController {
     /// every other transport is stopped first (prevents double-insert now that the
     /// Darwin observer and server polling can run concurrently on resume).
     private func insertDictationResult(text: String) {
+        guard inputTarget == .hostApp else { return }
         stopDictationTransports()
         pendingRequestId = nil
         if text.isEmpty {
@@ -653,6 +688,7 @@ class KeyboardViewController: UIInputViewController {
 
             switch payload.status {
             case .completed:
+                guard self.inputTarget == .hostApp else { return }
                 timer.invalidate()
                 let text = payload.text ?? ""
                 if text.isEmpty {
@@ -812,6 +848,7 @@ class KeyboardViewController: UIInputViewController {
 
         switch status {
         case "completed":
+            guard inputTarget == .hostApp else { return }
             let text = json["text"] as? String ?? ""
             if text.isEmpty {
                 state = .error("Nothing was heard. Try again.")
@@ -894,6 +931,7 @@ class KeyboardViewController: UIInputViewController {
 
             switch status {
             case "completed":
+                guard self.inputTarget == .hostApp else { return }
                 timer.invalidate()
                 self.clipboardPollTimer = nil
                 let text = json["text"] as? String ?? ""
@@ -970,7 +1008,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 applyAutocorrectIfNeeded()
             }
             let text = applyShift(to: s)
-            textDocumentProxy.insertText(text)
+            insertTargeted(text)
             if shiftState == .upper {
                 shiftState = .lower
             }
@@ -986,18 +1024,17 @@ extension KeyboardViewController: KeyboardViewDelegate {
             if let correction = lastAutoCorrection,
                isCursorRightAfterTrailingSpaceFollowing(correction.replacement) {
                 // Delete the trailing space.
-                textDocumentProxy.deleteBackward()
+                deleteTargetedBackward()
                 // Delete the corrected word.
                 for _ in 0..<correction.replacement.count {
-                    guard textDocumentProxy.hasText else { break }
-                    textDocumentProxy.deleteBackward()
+                    deleteTargetedBackward()
                 }
                 // Re-insert the originally-typed word (NO trailing space — cursor lands mid-word).
-                textDocumentProxy.insertText(correction.typed)
+                insertTargeted(correction.typed)
                 lastAutoCorrection = nil
                 wordOrigin.resetToTyping()  // user is now back to editing a .typing word
             } else {
-                textDocumentProxy.deleteBackward()
+                deleteTargetedBackward()
                 lastAutoCorrection = nil  // any non-immediate-backspace invalidates revert
             }
             recomputeAutoCap()
@@ -1020,17 +1057,21 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         case .space:
             applyAutocorrectIfNeeded()
-            textDocumentProxy.insertText(" ")
+            insertTargeted(" ")
             recomputeAutoCap()
             keyboardView.refreshSuggestions()
             wordOrigin.resetToTyping()
 
         case .return:
-            applyAutocorrectIfNeeded()
-            textDocumentProxy.insertText("\n")
-            recomputeAutoCap()
-            wordOrigin.resetToTyping()
-            keyboardView.refreshSuggestions()
+            if inputTarget == .emojiSearch {
+                keyboardView.emojiPanelView.onSearchReturn?()
+            } else {
+                applyAutocorrectIfNeeded()
+                insertTargeted("\n")
+                recomputeAutoCap()
+                wordOrigin.resetToTyping()
+                keyboardView.refreshSuggestions()
+            }
 
         case .toggleNumber:
             layoutMode = .numbers
@@ -1045,7 +1086,14 @@ extension KeyboardViewController: KeyboardViewDelegate {
             handleMicButtonTap()
 
         case .emoji:
-            uiMode = uiMode == .letters ? .emoji : .letters
+            switch uiMode {
+            case .letters:      uiMode = .emoji
+            case .emoji:        uiMode = .letters
+            case .emojiSearch:
+                inputTarget = .hostApp
+                keyboardView.emojiPanelView.searchField.resignFirstResponder()
+                uiMode = .emoji
+            }
 
         case .globe:
             advanceToNextInputMode()
@@ -1067,9 +1115,9 @@ extension KeyboardViewController: KeyboardViewDelegate {
             }
         }
         for _ in 0..<deleteCount {
-            textDocumentProxy.deleteBackward()
+            deleteTargetedBackward()
         }
-        textDocumentProxy.insertText(text + " ")
+        insertTargeted(text + " ")
         wordOrigin.markSuggestionTap()    // THE LOCK — prevents re-correction on next separator
         lastAutoCorrection = nil          // Suggestion tap invalidates any pending revert
         wordOrigin.resetToTyping()        // Trailing space starts a new word
@@ -1083,6 +1131,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
     }
 
     func keyboardViewNeedsSuggestions(_ view: KeyboardView) -> [String] {
+        guard inputTarget == .hostApp else { return [] }
         guard isPredictionEngineReady, let engine = predictionEngine else { return [] }
         let context = textDocumentProxy.documentContextBeforeInput
         let extracted = CurrentWordExtractor.extract(from: context)
@@ -1106,13 +1155,13 @@ extension KeyboardViewController: KeyboardViewDelegate {
         backspaceSingleCharCount = 0
         backspacePhase = nil
 
-        guard textDocumentProxy.hasText else { return }
+        guard hasTextInCurrentTarget else { return }
 
-        textDocumentProxy.deleteBackward()
+        deleteTargetedBackward()
         backspaceSingleCharCount = 1
         keyboardView.refreshSuggestions()
 
-        guard textDocumentProxy.hasText else { return }
+        guard hasTextInCurrentTarget else { return }
 
         backspacePhase = .charRepeat
         scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceInitialRepeatDelay, repeats: false)
@@ -1159,6 +1208,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
     // MARK: - Autocorrect-on-space
 
     private func applyAutocorrectIfNeeded() {
+        guard inputTarget == .hostApp else { return }
         // User-facing master toggle (read fresh every call, like autoCapitalizationEnabled).
         guard SharedConfig.autocorrectOnSpaceEnabled() else { return }
 
@@ -1216,10 +1266,9 @@ extension KeyboardViewController: KeyboardViewDelegate {
             // Same pattern as suggestion-tap handler (lines ~970-976).
             let deleteCount = typed.count
             for _ in 0..<deleteCount {
-                guard textDocumentProxy.hasText else { break }
-                textDocumentProxy.deleteBackward()
+                deleteTargetedBackward()
             }
-            textDocumentProxy.insertText(correction)
+            insertTargeted(correction)
             wordOrigin.markAutocorrectApplied()
             lastAutoCorrection = (typed: typed, replacement: correction)
         case .leaveAsIs:
@@ -1248,6 +1297,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
     }
 
     private func recomputeAutoCap() {
+        guard inputTarget == .hostApp else { return }
         // User-facing master toggle (default ON). Read from the App Group on every recompute.
         guard SharedConfig.autoCapitalizationEnabled() else {
             autoCapActive = false
@@ -1298,6 +1348,32 @@ extension KeyboardViewController: KeyboardViewDelegate {
         return text
     }
 
+    // MARK: - Input Target Helpers
+
+    private var hasTextInCurrentTarget: Bool {
+        switch inputTarget {
+        case .hostApp:     return textDocumentProxy.hasText
+        case .emojiSearch: return !(keyboardView.emojiPanelView.searchField.text?.isEmpty ?? true)
+        }
+    }
+
+    private func insertTargeted(_ text: String) {
+        switch inputTarget {
+        case .hostApp:     textDocumentProxy.insertText(text)
+        case .emojiSearch: keyboardView.emojiPanelView.searchField.insertText(text)
+        }
+    }
+
+    private func deleteTargetedBackward() {
+        switch inputTarget {
+        case .hostApp:
+            guard textDocumentProxy.hasText else { return }
+            textDocumentProxy.deleteBackward()
+        case .emojiSearch:
+            keyboardView.emojiPanelView.searchField.deleteBackward()
+        }
+    }
+
     // MARK: - Backspace Timer
 
     private func scheduleBackspaceTimer(after interval: TimeInterval, repeats: Bool) {
@@ -1309,20 +1385,29 @@ extension KeyboardViewController: KeyboardViewDelegate {
     }
 
     private func handleBackspaceTick() {
-        guard textDocumentProxy.hasText else {
+        guard hasTextInCurrentTarget else {
             backspaceTimer?.invalidate()
             backspaceTimer = nil
             backspacePhase = nil
             return
         }
 
+        // In search mode, always use char-repeat (no word-mode) since the
+        // search field is a single-line input with no need for word-level deletion.
+        if inputTarget == .emojiSearch {
+            deleteTargetedBackward()
+            keyboardView.refreshSuggestions()
+            scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceCharRepeatInterval, repeats: true)
+            return
+        }
+
         switch backspacePhase {
         case .charRepeat:
-            textDocumentProxy.deleteBackward()
+            deleteTargetedBackward()
             backspaceSingleCharCount += 1
             keyboardView.refreshSuggestions()
 
-            guard textDocumentProxy.hasText else {
+            guard hasTextInCurrentTarget else {
                 backspaceTimer?.invalidate()
                 backspaceTimer = nil
                 backspacePhase = nil
@@ -1362,8 +1447,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 return
             }
             for _ in 0..<n {
-                guard textDocumentProxy.hasText else { break }
-                textDocumentProxy.deleteBackward()
+                guard hasTextInCurrentTarget else { break }
+                deleteTargetedBackward()
             }
             keyboardView.refreshSuggestions()
             scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceWordRepeatInterval, repeats: false)

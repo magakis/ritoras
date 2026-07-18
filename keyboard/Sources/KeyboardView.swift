@@ -24,6 +24,7 @@ enum ShiftState: Equatable {
 enum UIMode: Equatable {
     case letters
     case emoji
+    case emojiSearch
 }
 
 // MARK: - Delegate
@@ -403,7 +404,8 @@ class KeyboardView: UIView {
     private let suggestionBar = SuggestionBar()
     private let letterRegionContainer = UIView()
     private let keyStack = UIStackView()
-    private lazy var emojiPanelView: EmojiPanelView = {
+    /// Internal so KeyboardViewController can route keystrokes to searchField in .emojiSearch mode.
+    lazy var emojiPanelView: EmojiPanelView = {
         let panel = EmojiPanelView(frame: .zero)
         panel.translatesAutoresizingMaskIntoConstraints = false
         panel.onSelect = { [weak self] emoji in
@@ -428,6 +430,10 @@ class KeyboardView: UIView {
     private var currentShiftState: ShiftState = .lower
     private var currentLayoutMode: KeyboardLayoutMode = .letters
 
+    /// Active only in `.emojiSearch` mode — pins the emoji panel's bottom edge
+    /// to the letter region's top edge, preventing overlap.
+    private var emojiSearchOverlapConstraint: NSLayoutConstraint?
+
     // MARK: - Initialization
 
     override init(frame: CGRect) {
@@ -443,7 +449,7 @@ class KeyboardView: UIView {
     // MARK: - Setup
 
     private func setupView() {
-        backgroundColor = .clear
+        backgroundColor = EmojiPanelView.panelBackground
 
         setupSuggestionBar()
         setupLetterRegion()
@@ -498,6 +504,9 @@ class KeyboardView: UIView {
     }
 
     private func setupConstraints() {
+        let emojiPanelBottom = emojiPanelView.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -6)
+        emojiPanelBottom.priority = .defaultHigh
+
         NSLayoutConstraint.activate([
             // SuggestionBar — top (hidden in emoji mode)
             suggestionBar.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 6),
@@ -512,10 +521,10 @@ class KeyboardView: UIView {
             letterRegionContainer.bottomAnchor.constraint(equalTo: bottomActionRow.topAnchor, constant: -6),
 
             // Emoji panel — replaces suggestion bar + letter region in emoji mode
-            emojiPanelView.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 6),
+            emojiPanelView.topAnchor.constraint(equalTo: topAnchor, constant: 0),
             emojiPanelView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             emojiPanelView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            emojiPanelView.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -6),
+            emojiPanelBottom,
 
             // Bottom action row (Row 4) — always visible, pinned to the bottom
             bottomActionRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
@@ -523,6 +532,11 @@ class KeyboardView: UIView {
             bottomActionRow.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -6),
             bottomActionRow.heightAnchor.constraint(equalToConstant: 48),
         ])
+
+        // Overlap constraint for .emojiSearch mode — pins panel bottom to letter region top
+        emojiSearchOverlapConstraint = emojiPanelView.bottomAnchor.constraint(equalTo: letterRegionContainer.topAnchor)
+        emojiSearchOverlapConstraint?.priority = .required
+        emojiSearchOverlapConstraint?.isActive = false
     }
 
     // MARK: - Key Rows
@@ -740,16 +754,21 @@ class KeyboardView: UIView {
     }
 
     func apply(mode: UIMode) {
-        let isEmoji = mode == .emoji
-        suggestionBar.isHidden = isEmoji
-        letterRegionContainer.isHidden = isEmoji
-        bottomActionRow.isHidden = isEmoji
-        emojiPanelView.isHidden = !isEmoji
-        emojiKeyButton?.setTitle(isEmoji ? "ABC" : "☺", for: .normal)
+        let showEmojiPanel = (mode == .emoji || mode == .emojiSearch)
+        let showLetters    = (mode == .letters || mode == .emojiSearch)
+        let showBottomRow  = showLetters
+        let showSuggestBar = (mode == .letters)
 
-        if isEmoji {
-            reloadEmojiPanel()
-        }
+        suggestionBar.isHidden = !showSuggestBar
+        letterRegionContainer.isHidden = !showLetters
+        bottomActionRow.isHidden = !showBottomRow
+        emojiPanelView.isHidden = !showEmojiPanel
+        emojiKeyButton?.setTitle(showEmojiPanel ? "ABC" : "☺", for: .normal)
+
+        // Toggle the overlap constraint — active only in .emojiSearch
+        emojiSearchOverlapConstraint?.isActive = (mode == .emojiSearch)
+
+        if showEmojiPanel { reloadEmojiPanel() }
     }
 
     func apply(shift: ShiftState, layoutMode: KeyboardLayoutMode) {
