@@ -320,7 +320,7 @@ actor WhisperStreamClient {
     ///
     /// It is safe to call this method even if the client is not currently
     /// connected; it becomes a no-op.
-    func disconnect() {
+    func disconnect() async {
         // Cancel any in-flight receive/send operations and close.
         task?.cancel(with: .goingAway, reason: nil)
         task = nil

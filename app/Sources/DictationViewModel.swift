@@ -212,7 +212,7 @@ final class DictationViewModel: ObservableObject {
                 #if DEBUG
                 print("[DictationVM] Stream start error: \(error.localizedDescription)")
                 #endif
-                streamClient?.disconnect()
+                await streamClient?.disconnect()
                 streamClient = nil
                 streamRecorder = nil
                 AudioSession.deactivate()

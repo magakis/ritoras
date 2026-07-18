@@ -1,5 +1,5 @@
 import AVFoundation
-import os.log
+import os
 
 // MARK: - Streaming Recorder Error
 
