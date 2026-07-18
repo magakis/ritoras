@@ -1,150 +1,240 @@
-import UIKit
+import Foundation
 
 // MARK: - EmojiData
 
 enum EmojiData {
 
-    /// ~500 emojis across 8 categories.
-    static let categories: [(name: String, emojis: [String])] = [
-        ("Smileys & People", smileysPeople),
-        ("Gestures", gestures),
-        ("Hearts & Emotion", heartsEmotion),
-        ("Animals & Nature", animalsNature),
-        ("Food & Drink", foodDrink),
-        ("Activities", activities),
-        ("Travel & Places", travelPlaces),
-        ("Objects", objects),
-        ("Symbols", symbols),
-    ]
+    /// ~1,870 emojis across 8 categories, sourced from @emoji-mart/data@1.2.1 (Emoji 15.1).
+    static let categories: [(name: String, emojis: [String])] = {
+        let file = loadCached()
+        return file.categories.map { ($0.name, $0.emojis.map(\.char)) }
+    }()
 
-    // MARK: - Smileys & People
+    /// All emoji entries flat-mapped across categories, for search.
+    static let searchable: [EmojiEntry] = {
+        loadCached().categories.flatMap { $0.emojis }
+    }()
+
+    /// Set of base emoji characters that support skin-tone modification.
+    /// Phase 4 will replace EmojiSkinTone.skinToneCapable with this.
+    static let skinToneCapable: Set<String> = {
+        Set(loadCached().skinToneCapable)
+    }()
+
+    // MARK: - Models
+
+    struct EmojiEntry: Decodable {
+        let char: String
+        let name: String
+        let keywords: [String]
+    }
+
+    struct EmojiCategory: Decodable {
+        let id: String
+        let name: String
+        let emojis: [EmojiEntry]
+    }
+
+    private struct EmojiDataFile: Decodable {
+        let categories: [EmojiCategory]
+        let skinToneCapable: [String]
+    }
+
+    // MARK: - Cache
+
+    private static var _cached: EmojiDataFile?
+
+    private static func loadCached() -> EmojiDataFile {
+        if let cached = _cached { return cached }
+        do {
+            let file = try EmojiDataLoader.load()
+            _cached = file
+            return file
+        } catch {
+            let fallback = makeFallback()
+            _cached = fallback
+            return fallback
+        }
+    }
+
+    // MARK: - Fallback
+
+    /// Hardcoded minimal subset used when the bundled emojis.json cannot be parsed.
+    private static func makeFallback() -> EmojiDataFile {
+        func e(_ char: String) -> EmojiEntry {
+            EmojiEntry(char: char, name: "", keywords: [])
+        }
+
+        let peopleBody = EmojiCategory(
+            id: "people", name: "People & Body",
+            emojis: (smileysPeople + gestures + heartsEmotion).map(e)
+        )
+        let animalsNature = EmojiCategory(
+            id: "nature", name: "Animals & Nature",
+            emojis: fallbackAnimalsNature.map(e)
+        )
+        let foods = EmojiCategory(
+            id: "foods", name: "Food & Drink",
+            emojis: fallbackFoodDrink.map(e)
+        )
+        let activity = EmojiCategory(
+            id: "activity", name: "Activities",
+            emojis: fallbackActivities.map(e)
+        )
+        let places = EmojiCategory(
+            id: "places", name: "Travel & Places",
+            emojis: fallbackTravelPlaces.map(e)
+        )
+        let objects = EmojiCategory(
+            id: "objects", name: "Objects",
+            emojis: fallbackObjects.map(e)
+        )
+        let symbols = EmojiCategory(
+            id: "symbols", name: "Symbols",
+            emojis: fallbackSymbols.map(e)
+        )
+        let flags = EmojiCategory(
+            id: "flags", name: "Flags",
+            emojis: fallbackFlags.map(e)
+        )
+
+        let skinToneCapable: [String] = [
+            "👍", "👎", "👊", "✊", "🤛", "🤜", "👏", "🙌",
+            "👐", "🤲", "🤝", "🙏", "✌️", "🤞", "🫶", "🤟",
+            "🤘", "🤙", "🖐️", "✋", "👌", "🤌", "🤏", "🫵",
+            "💪", "🦵", "🦶", "👂", "🦻",
+        ]
+
+        return EmojiDataFile(
+            categories: [peopleBody, animalsNature, foods, activity, places, objects, symbols, flags],
+            skinToneCapable: skinToneCapable
+        )
+    }
+
+    // MARK: - Fallback data — ~50 emojis per category, reused from the old hardcoded arrays.
 
     private static let smileysPeople: [String] = [
         "😀", "😃", "😄", "😁", "😅", "😂", "🤣", "😊",
         "😇", "🙂", "😉", "😌", "😍", "🥰", "😘", "😗",
         "😋", "😛", "😜", "🤪", "😝", "🤑", "🤗", "🤭",
-        "🤫", "🤔", "🤐", "😐", "😑", "😶", "😏", "😒",
-        "🙄", "😬", "😮", "😯", "😲", "🥺", "😢", "😭",
-        "😤", "😠", "😡", "🤬", "🤯", "😳", "🥵", "🥶",
-        "😱", "😨", "😰", "😥", "😓", "🤩", "😪", "😵",
-        "🤤", "😴", "🥴", "🤮", "🤧", "🥳", "🥸", "🤠",
-        "😎", "🤓", "🧐", "🤡", "👻", "💀", "☠️", "👽",
+        "🤫", "🤔", "🤐",
     ]
-
-    // MARK: - Gestures
 
     private static let gestures: [String] = [
         "👍", "👎", "👊", "✊", "🤛", "🤜", "👏", "🙌",
-        "👐", "🤲", "🤝", "🙏", "✌️", "🤞", "🫶", "🤟",
-        "🤘", "🤙", "🖐️", "✋", "👌", "🤌", "🤏", "🫵",
-        "💪", "🦵", "🦶", "👂", "🦻", "👃", "🧠", "🫀",
-        "👁️", "👀", "👅", "👄", "🦷",
+        "👐", "🤲", "🤝", "🙏", "✌️",
     ]
-
-    // MARK: - Hearts & Emotion
 
     private static let heartsEmotion: [String] = [
         "❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍",
-        "🤎", "💔", "❣️", "💕", "💞", "💓", "💗", "💖",
-        "💘", "💝", "💟", "❤️‍🔥", "❤️‍🩹", "♥️",
+        "🤎", "💔",
     ]
 
-    // MARK: - Animals & Nature
-
-    private static let animalsNature: [String] = [
+    private static let fallbackAnimalsNature: [String] = [
         "🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼",
         "🐨", "🐯", "🦁", "🐮", "🐷", "🐸", "🐵", "🐔",
         "🐧", "🐦", "🐤", "🦆", "🦅", "🦉", "🦇", "🐺",
         "🐗", "🐴", "🦄", "🐝", "🐛", "🦋", "🐌", "🐞",
         "🐜", "🦟", "🦗", "🪳", "🪰", "🪱", "🐙", "🦑",
         "🦐", "🦞", "🦀", "🐡", "🐠", "🐟", "🐬", "🐳",
-        "🐋", "🦈", "🐊", "🐍", "🦎", "🐢", "🐚", "🪸",
-        "🌺", "🌸", "🌼", "🌻", "🌹", "🌷", "🌿", "🍀",
-        "🌲", "🌳", "🌴", "🌵", "🌾", "🍄", "🌰", "🪴",
+        "🐋", "🦈",
     ]
 
-    // MARK: - Food & Drink
-
-    private static let foodDrink: [String] = [
+    private static let fallbackFoodDrink: [String] = [
         "🍏", "🍎", "🍐", "🍊", "🍋", "🍌", "🍉", "🍇",
         "🍓", "🫐", "🍈", "🍒", "🍑", "🥭", "🍍", "🥥",
         "🥝", "🍅", "🍆", "🥑", "🥦", "🥬", "🥒", "🌽",
         "🥕", "🧄", "🧅", "🥔", "🍠", "🫘", "🥜", "🌰",
         "🍞", "🥖", "🥨", "🧀", "🥚", "🍳", "🥞", "🧇",
         "🥓", "🥩", "🍗", "🍖", "🌭", "🍔", "🍟", "🍕",
-        "🥪", "🥙", "🧆", "🌮", "🌯", "🥗", "🥘", "🫕",
-        "🍜", "🍝", "🍲", "🍛", "🍣", "🍱", "🥟", "🦪",
-        "🍦", "🍧", "🍨", "🍩", "🍪", "🎂", "🍰", "🧁",
-        "🍫", "🍬", "🍭", "🍮", "🍯", "☕", "🍵", "🧃",
-        "🥤", "🧊", "🍺", "🍻", "🥂", "🍷", "🥃", "🍸",
+        "🥪", "🥙",
     ]
 
-    // MARK: - Activities
-
-    private static let activities: [String] = [
+    private static let fallbackActivities: [String] = [
         "⚽", "🏀", "🏈", "⚾", "🥎", "🎾", "🏐", "🏉",
         "🥏", "🎱", "🏓", "🏸", "🏒", "🏑", "🥍", "🏏",
         "🪃", "🥅", "⛳", "🏹", "🎣", "🤿", "🥊", "🥋",
         "🎯", "🪀", "🪁", "🎿", "⛷️", "🏂", "🏋️", "🤼",
         "🤸", "🤾", "🧘", "🎪", "🎭", "🎨", "🎬", "🎤",
         "🎧", "🎼", "🎹", "🥁", "🪘", "🎷", "🎺", "🎸",
-        "🎻", "🎲", "♟️", "🎮", "🕹️", "🎰", "🧩",
+        "🎻", "🎲",
     ]
 
-    // MARK: - Travel & Places
-
-    private static let travelPlaces: [String] = [
+    private static let fallbackTravelPlaces: [String] = [
         "🚗", "🚕", "🚙", "🚌", "🚎", "🏎️", "🚓", "🚑",
         "🚒", "🚐", "🛻", "🚚", "🚛", "🚜", "🛵", "🏍️",
         "🛺", "🚲", "🛴", "🚨", "🚔", "🚍", "🚘", "🚖",
         "🛩️", "✈️", "🚀", "🛸", "🚁", "🛶", "⛵", "🚤",
         "🛳️", "🚂", "🚆", "🚇", "🚊", "🚝", "🚃", "🚋",
         "🏠", "🏡", "🏢", "🏬", "🏨", "🏪", "🏫", "🏛️",
-        "⛪", "🕌", "🕍", "🛕", "🏗️", "🏘️", "🏔️", "⛰️",
-        "🌋", "🏝️", "🏖️", "🏜️", "🌅", "🌄", "🌇", "🌆",
-        "🗺️", "🗾", "🌍", "🌎", "🌏",
+        "⛪", "🕌",
     ]
 
-    // MARK: - Objects
-
-    private static let objects: [String] = [
+    private static let fallbackObjects: [String] = [
         "⌚", "📱", "💻", "⌨️", "🖥️", "🖨️", "🖱️", "🖲️",
         "🕹️", "🗜️", "💽", "💾", "💿", "📀", "📼", "📷",
         "📸", "📹", "🎥", "📽️", "🎞️", "📞", "☎️", "📟",
         "📠", "📺", "📻", "🎙️", "🎚️", "🎛️", "🧭", "⏱️",
         "⏲️", "⏰", "🕰️", "📡", "🔋", "🪫", "🔌", "💡",
         "🔦", "🕯️", "🪔", "🗑️", "🛢️", "💸", "💵", "💴",
-        "💶", "💷", "🪙", "💰", "💳", "💎", "⚖️", "🪜",
-        "🧰", "🪛", "🔧", "🔨", "⚒️", "🛠️", "⛏️", "🔩",
-        "⚙️", "🧲", "🔫", "💣", "🧪", "🔬", "🔭", "📡",
-        "💉", "🩸", "💊", "🩹", "🩺", "🚿", "🛁", "🪥",
-        "🪒", "🧴", "🧷", "💄", "💋", "👔", "👕", "👖",
-        "🧣", "🧤", "🧥", "🧦", "👗", "👘", "🩱", "🩲",
-        "👙", "👚", "👛", "👜", "👝", "🎒", "🧳", "👡",
-        "👠", "👟", "🥿", "👞", "👑", "🎩", "🎓", "🧢",
-        "⛑️", "📿", "💍", "🐚",
+        "💶", "💷",
     ]
 
-    // MARK: - Symbols
-
-    private static let symbols: [String] = [
+    private static let fallbackSymbols: [String] = [
         "✅", "❌", "❓", "❔", "❕", "❗", "‼️", "⁉️",
         "➕", "➖", "➗", "✖️", "♾️", "©️", "®️", "™️",
         "🔴", "🟠", "🟡", "🟢", "🔵", "🟣", "🟤", "⚫",
         "⚪", "🟥", "🟧", "🟨", "🟩", "🟦", "🟪", "🟫",
         "⬛", "⬜", "🔶", "🔷", "🔸", "🔹", "🔺", "🔻",
         "💠", "🔘", "🔲", "🔳", "🔈", "🔉", "🔊", "🔇",
-        "📣", "📢", "🔔", "🔕", "🎵", "🎶", "💤", "💢",
-        "💬", "🗯️", "💭", "♠️", "♥️", "♦️", "♣️", "🃏",
-        "🀄", "🔰", "🔱", "⚜️", "💯", "🔞", "🚫", "📛",
-        "🚸", "⚠️", "☢️", "☣️", "⬆️", "⬇️", "➡️", "⬅️",
-        "↗️", "↘️", "↙️", "↖️", "↕️", "🔄", "◀️", "▶️",
-        "⏸️", "⏯️", "⏹️", "⏺️", "⏭️", "⏮️", "⏩", "⏪",
-        "🔀", "🔁", "🔂", "🆕", "🆙", "🆒", "🆓", "🆖",
-        "🆗", "🆙", "🆚", "🈁", "🈂️", "🈷️", "🈶", "🈯",
-        "🉐", "🈹", "🈚", "🈲", "🈺", "🈸", "🈴", "🈳",
-        "㊗️", "㊙️", "🈺", "🈵",
+        "📣", "📢",
     ]
+
+    private static let fallbackFlags: [String] = [
+        "🏳️", "🏴", "🏁", "🚩", "🎌", "🏴‍☠️",
+        "🇺🇸", "🇬🇧", "🇨🇦", "🇫🇷", "🇩🇪", "🇮🇹", "🇪🇸",
+        "🇵🇹", "🇳🇱", "🇧🇪", "🇨🇭", "🇦🇹", "🇸🇪", "🇳🇴",
+        "🇩🇰", "🇫🇮", "🇮🇪", "🇬🇷", "🇵🇱", "🇨🇿", "🇭🇺",
+        "🇷🇴", "🇧🇬", "🇷🇺", "🇯🇵", "🇨🇳", "🇮🇳", "🇧🇷",
+        "🇦🇺", "🇳🇿", "🇿🇦", "🇲🇽", "🇦🇷", "🇰🇷",
+    ]
+}
+
+// MARK: - EmojiDataLoader
+
+enum EmojiDataLoader {
+    private static let resourceName = "emojis"
+    private static let resourceExtension = "json"
+
+    /// Returns the URL for the bundled emoji dataset in the keyboard extension's bundle.
+    static func bundledURL() -> URL? {
+        Bundle.main.url(forResource: resourceName, withExtension: resourceExtension)
+    }
+
+    /// Loads and parses the emoji dataset from a URL.
+    /// - Parameter url: URL to the emojis.json file.
+    /// - Returns: Parsed EmojiDataFile.
+    static func load() throws -> EmojiDataFile {
+        guard let url = bundledURL() else {
+            throw EmojiDataError.bundledFileNotFound
+        }
+        let data = try Data(contentsOf: url)
+        return try JSONDecoder().decode(EmojiDataFile.self, from: data)
+    }
+
+    enum EmojiDataError: Error, LocalizedError {
+        case bundledFileNotFound
+        case parseFailed(Error)
+
+        var errorDescription: String? {
+            switch self {
+            case .bundledFileNotFound:
+                return "emojis.json not found in bundle. Ensure it is included in Copy Bundle Resources."
+            case .parseFailed(let error):
+                return "emojis.json parse failed: \(error.localizedDescription)"
+            }
+        }
+    }
 }
 
 // MARK: - EmojiRecents
@@ -213,12 +303,7 @@ enum EmojiSkinTone: String, CaseIterable {
 
     // MARK: - Application
 
-    private static let skinToneCapable: Set<String> = [
-        "👍", "👎", "👊", "✊", "🤛", "🤜", "👏", "🙌",
-        "👐", "🤲", "🤝", "🙏", "✌️", "🤞", "🫶", "🤟",
-        "🤘", "🤙", "🖐️", "✋", "👌", "🤌", "🤏", "🫵",
-        "💪", "🦵", "🦶", "👂", "🦻",
-    ]
+    private static var skinToneCapable: Set<String> { EmojiData.skinToneCapable }
 
     static func applying(_ tone: EmojiSkinTone, to base: String) -> String {
         guard tone != .none, skinToneCapable.contains(base) else {
