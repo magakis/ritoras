@@ -173,21 +173,38 @@ final class DictationViewModel: ObservableObject {
             livePartial = ""
 
             let config = SharedConfig.load()
-            guard let server = config.servers.first else {
-                let message = "No server configured."
-                DictationPayload(id: id, status: .error, errorMessage: message, timestamp: Date()).save()
-                writeToClipboard(status: "error", errorMessage: message)
-                postResultToServer(status: "error", errorMessage: message)
-                DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-                phase = .error(message)
-                return
-            }
 
             do {
                 try AudioSession.configure()
 
-                let client = WhisperStreamClient(baseURL: server)
-                try await client.connect()
+                // Try servers in order with failover, mirroring batch (WhisperClient.transcribe).
+                // Empty / invalid URLs are skipped.
+                var client: WhisperStreamClient?
+                var lastError: Error?
+                for server in config.servers {
+                    let base = server.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                    guard !base.isEmpty else { continue }
+                    let candidate = WhisperStreamClient(baseURL: base)
+                    do {
+                        try await candidate.connect()
+                        client = candidate
+                        #if DEBUG
+                        print("[DictationVM] Stream: connected to \(base)")
+                        #endif
+                        break
+                    } catch {
+                        #if DEBUG
+                        print("[DictationVM] Stream: server \(base) failed: \(error.localizedDescription)")
+                        #endif
+                        lastError = error
+                        await candidate.disconnect()
+                        continue
+                    }
+                }
+
+                guard let client = client else {
+                    throw lastError ?? WhisperError.allServersFailed(config.servers)
+                }
                 #if DEBUG
                 print("[DictationVM] Stream: WebSocket connected")
                 #endif
