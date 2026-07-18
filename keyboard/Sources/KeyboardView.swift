@@ -1,4 +1,5 @@
 import UIKit
+import os
 
 // MARK: - Keyboard State
 
@@ -36,11 +37,13 @@ protocol KeyboardViewDelegate: AnyObject {
     func keyboardViewMicState(_ view: KeyboardView) -> KeyboardState
     func keyboardViewBackspaceDidBegin(_ view: KeyboardView)
     func keyboardViewBackspaceDidEnd(_ view: KeyboardView)
+    func keyboardContextToken(_ view: KeyboardView) -> UInt64
 }
 
 extension KeyboardViewDelegate {
     func keyboardViewBackspaceDidBegin(_ view: KeyboardView) {}
     func keyboardViewBackspaceDidEnd(_ view: KeyboardView) {}
+    func keyboardContextToken(_ view: KeyboardView) -> UInt64 { return 0 }
 }
 
 // MARK: - KeyButton
@@ -402,6 +405,8 @@ class KeyboardView: UIView {
 
     // Subviews
     private let suggestionBar = SuggestionBar()
+    /// Injected on every refreshSuggestions call and read by the suggestion-tap closure.
+    private var suggestionCache = SuggestionDisplayCache()
     private let letterRegionContainer = UIView()
     private let keyStack = UIStackView()
     /// Internal so KeyboardViewController can route keystrokes to searchField in .emojiSearch mode.
@@ -466,9 +471,15 @@ class KeyboardView: UIView {
         suggestionBar.clipsToBounds = true
         suggestionBar.suggestionTapped = { [weak self] index in
             guard let self = self else { return }
-            let suggestions = self.delegate?.keyboardViewNeedsSuggestions(self) ?? []
-            guard index < suggestions.count else { return }
-            self.delegate?.keyboardView(self, didTapSuggestion: suggestions[index])
+            let liveToken = self.delegate?.keyboardContextToken(self) ?? 0
+            guard let suggestion = decideSuggestionTap(cache: self.suggestionCache, liveToken: liveToken, index: index) else {
+                #if DEBUG
+                os_log(.error, "[SuggestionCache] stale tap ignored: idx=%d token=%llu live=%llu",
+                       index, self.suggestionCache.token, liveToken)
+                #endif
+                return
+            }
+            self.delegate?.keyboardView(self, didTapSuggestion: suggestion)
         }
         addSubview(suggestionBar)
     }
@@ -805,6 +816,8 @@ class KeyboardView: UIView {
 
     func refreshSuggestions() {
         let suggestions = delegate?.keyboardViewNeedsSuggestions(self) ?? []
+        let token = delegate?.keyboardContextToken(self) ?? 0
+        suggestionCache.update(suggestions, token: token)
         suggestionBar.update(with: suggestions)
     }
 

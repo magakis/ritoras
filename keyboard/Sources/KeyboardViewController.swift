@@ -85,6 +85,7 @@ class KeyboardViewController: UIInputViewController {
     private var darwinToken: DarwinObserverToken?
     private var waitTimer: Timer?
     private var errorResetWorkItem: DispatchWorkItem?
+    private var suggestionRefreshWorkItem: DispatchWorkItem?
     private var pollTimer: Timer?
     private var pollCount = 0
     private var clipboardPollTimer: Timer?
@@ -1034,7 +1035,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 shiftState = .lower
             }
             recomputeAutoCap()
-            keyboardView.refreshSuggestions()
+            scheduleSuggestionRefresh()
             if shouldAutoCorrect {
                 wordOrigin.resetToTyping()
             }
@@ -1059,7 +1060,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 lastAutoCorrection = nil  // any non-immediate-backspace invalidates revert
             }
             recomputeAutoCap()
-            keyboardView.refreshSuggestions()
+            scheduleSuggestionRefresh()
 
         case .shift:
             if effectiveAutoCapActive && shiftState == .lower {
@@ -1080,7 +1081,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             applyAutocorrectIfNeeded()
             insertTargeted(" ")
             recomputeAutoCap()
-            keyboardView.refreshSuggestions()
+            scheduleSuggestionRefresh()
             wordOrigin.resetToTyping()
 
         case .return:
@@ -1091,7 +1092,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 insertTargeted("\n")
                 recomputeAutoCap()
                 wordOrigin.resetToTyping()
-                keyboardView.refreshSuggestions()
+                scheduleSuggestionRefresh()
             }
 
         case .toggleNumber:
@@ -1142,6 +1143,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         wordOrigin.markSuggestionTap()    // THE LOCK — prevents re-correction on next separator
         lastAutoCorrection = nil          // Suggestion tap invalidates any pending revert
         wordOrigin.resetToTyping()        // Trailing space starts a new word
+        // SYNC: post-tap refresh must be immediate so the next tap sees fresh state.
         keyboardView.refreshSuggestions()
 
         // If the user accepted a suggestion that differs from their typed word,
@@ -1164,6 +1166,28 @@ extension KeyboardViewController: KeyboardViewDelegate {
         )
     }
 
+    func keyboardContextToken(_ view: KeyboardView) -> UInt64 {
+        guard inputTarget == .hostApp else { return 0 }
+        let context = textDocumentProxy.documentContextBeforeInput ?? ""
+        let suffix = String(context.suffix(50))
+        let currentWord = CurrentWordExtractor.extract(from: context).currentWord
+        return ContextHash.fnv1a("\(suffix)|\(currentWord)")
+    }
+
+    /// Debounced suggestion refresh (30ms coalescing window).
+    /// Replaces direct `keyboardView.refreshSuggestions()` calls at most typing
+    /// call sites so that rapid keystrokes do not re-query the prediction engine
+    /// redundantly. The 30ms window is below human perception but effectively
+    /// coalesces typematic-repeat bursts.
+    private func scheduleSuggestionRefresh(coalescing: TimeInterval = 0.03) {
+        suggestionRefreshWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.keyboardView.refreshSuggestions()
+        }
+        suggestionRefreshWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + coalescing, execute: workItem)
+    }
+
     func keyboardViewMicState(_ view: KeyboardView) -> KeyboardState {
         return state
     }
@@ -1180,7 +1204,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         deleteTargetedBackward()
         backspaceSingleCharCount = 1
-        keyboardView.refreshSuggestions()
+        scheduleSuggestionRefresh()
 
         guard hasTextInCurrentTarget else { return }
 
@@ -1201,6 +1225,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
         lastAutoCorrection = nil  // host text change invalidates any pending revert
+        // SYNC: system-signaled textDidChange bypasses debounce so the suggestion bar
+        // updates immediately — debounce here would feel laggy after external edits.
         keyboardView.refreshSuggestions()
         recomputeAutoCap()
     }
@@ -1418,7 +1444,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         // search field is a single-line input with no need for word-level deletion.
         if inputTarget == .emojiSearch {
             deleteTargetedBackward()
-            keyboardView.refreshSuggestions()
+            scheduleSuggestionRefresh()
             scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceCharRepeatInterval, repeats: true)
             return
         }
@@ -1427,7 +1453,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         case .charRepeat:
             deleteTargetedBackward()
             backspaceSingleCharCount += 1
-            keyboardView.refreshSuggestions()
+            scheduleSuggestionRefresh()
 
             guard hasTextInCurrentTarget else {
                 backspaceTimer?.invalidate()
@@ -1472,7 +1498,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 guard hasTextInCurrentTarget else { break }
                 deleteTargetedBackward()
             }
-            keyboardView.refreshSuggestions()
+            scheduleSuggestionRefresh()
             scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceWordRepeatInterval, repeats: false)
 
         case nil:
