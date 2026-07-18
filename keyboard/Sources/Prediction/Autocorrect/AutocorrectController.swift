@@ -36,6 +36,7 @@ enum AutocorrectController {
     ///   - origin: The origin of the current word (`.typing`, `.suggestionTap`, or `.autocorrectApplied`).
     ///   - topCorrection: The highest-scoring suggestion from the prediction engine, or `nil`.
     ///   - isLearned: Whether the user has explicitly learned this word.
+    ///   - isMisspelled: Whether the typed word is not in the system dictionary.
     ///   - config: Tunable thresholds (defaults from `SharedConfig.Defaults`).
     /// - Returns: `.correct(typedWord:correction:)` when conditions are met, otherwise `.leaveAsIs`.
     static func evaluate(
@@ -43,6 +44,7 @@ enum AutocorrectController {
         origin: WordOrigin,
         topCorrection: Suggestion?,
         isLearned: Bool,
+        isMisspelled: Bool,
         config: Config = .default
     ) -> Decision {
         // LOCKED origins — never re-correct.
@@ -54,6 +56,10 @@ enum AutocorrectController {
 
         // User has explicitly accepted this word before.
         if isLearned { return .leaveAsIs }
+
+        // Only correct genuinely misspelled words. This prevents "me" → "message",
+        // "and" → "Andrew", etc.
+        guard isMisspelled else { return .leaveAsIs }
 
         // No candidate available.
         guard let candidate = topCorrection else { return .leaveAsIs }

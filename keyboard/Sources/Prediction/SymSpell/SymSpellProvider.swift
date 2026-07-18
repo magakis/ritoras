@@ -72,7 +72,7 @@ final class SymSpellProvider: SuggestionProvider {
                 let capped = Self.applyCapitalizationTemplate(from: context.currentWord, to: completion)
                 if capped.lowercased() != word {
                     results.append(
-                        Suggestion(text: capped, score: 0.9, source: .symspell)
+                        Suggestion(text: capped, score: 0.5, source: .symspell)
                     )
                 }
             }

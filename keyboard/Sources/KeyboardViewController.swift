@@ -1117,9 +1117,26 @@ extension KeyboardViewController: KeyboardViewDelegate {
         let context = textDocumentProxy.documentContextBeforeInput ?? ""
         let extracted = CurrentWordExtractor.extract(from: context)
 
+        // Skip autocorrect when the word has surrounding punctuation (e.g., `hello"` or `"hello`).
+        guard extracted.currentWord == extracted.lookupWord else { return }
+
         guard !extracted.lookupWord.isEmpty,
               let engine = predictionEngine,
               isPredictionEngineReady else { return }
+
+        let isMisspelled: Bool = {
+            let checker = UITextChecker()
+            let nsString = extracted.lookupWord as NSString
+            let range = NSRange(location: 0, length: nsString.length)
+            let misspelledRange = checker.rangeOfMisspelledWord(
+                in: extracted.lookupWord,
+                range: range,
+                startingAt: 0,
+                wrap: false,
+                language: "en-US"
+            )
+            return misspelledRange.location != NSNotFound
+        }()
 
         let top = engine.topCorrection(
             forCurrentWord: extracted.currentWord,
@@ -1131,7 +1148,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
             typedWord: extracted.lookupWord,
             origin: wordOrigin.current,
             topCorrection: top,
-            isLearned: LearnedWordsStore.shared.contains(extracted.lookupWord)
+            isLearned: LearnedWordsStore.shared.contains(extracted.lookupWord),
+            isMisspelled: isMisspelled
         )
 
         switch decision {

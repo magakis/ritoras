@@ -15,7 +15,8 @@ final class AutocorrectControllerTests: XCTestCase {
             typedWord: "teh",
             origin: .suggestionTap,
             topCorrection: makeSuggestion(text: "the", score: 0.85),
-            isLearned: false
+            isLearned: false,
+            isMisspelled: true
         )
         XCTAssertEqual(result, .leaveAsIs)
     }
@@ -25,7 +26,8 @@ final class AutocorrectControllerTests: XCTestCase {
             typedWord: "teh",
             origin: .autocorrectApplied,
             topCorrection: makeSuggestion(text: "the", score: 0.85),
-            isLearned: false
+            isLearned: false,
+            isMisspelled: true
         )
         XCTAssertEqual(result, .leaveAsIs)
     }
@@ -37,7 +39,8 @@ final class AutocorrectControllerTests: XCTestCase {
             typedWord: "a",
             origin: .typing,
             topCorrection: makeSuggestion(text: "I", score: 0.99),
-            isLearned: false
+            isLearned: false,
+            isMisspelled: true
         )
         XCTAssertEqual(result, .leaveAsIs)
     }
@@ -48,7 +51,8 @@ final class AutocorrectControllerTests: XCTestCase {
             typedWord: longWord,
             origin: .typing,
             topCorrection: makeSuggestion(text: "b", score: 0.99),
-            isLearned: false
+            isLearned: false,
+            isMisspelled: true
         )
         XCTAssertEqual(result, .leaveAsIs)
     }
@@ -60,7 +64,8 @@ final class AutocorrectControllerTests: XCTestCase {
             typedWord: "teh",
             origin: .typing,
             topCorrection: makeSuggestion(text: "the", score: 0.99),
-            isLearned: true
+            isLearned: true,
+            isMisspelled: true
         )
         XCTAssertEqual(result, .leaveAsIs)
     }
@@ -72,7 +77,8 @@ final class AutocorrectControllerTests: XCTestCase {
             typedWord: "teh",
             origin: .typing,
             topCorrection: nil,
-            isLearned: false
+            isLearned: false,
+            isMisspelled: true
         )
         XCTAssertEqual(result, .leaveAsIs)
     }
@@ -84,7 +90,8 @@ final class AutocorrectControllerTests: XCTestCase {
             typedWord: "hello",
             origin: .typing,
             topCorrection: makeSuggestion(text: "Hello", score: 0.99),
-            isLearned: false
+            isLearned: false,
+            isMisspelled: true
         )
         XCTAssertEqual(result, .leaveAsIs)
     }
@@ -96,7 +103,8 @@ final class AutocorrectControllerTests: XCTestCase {
             typedWord: "teh",
             origin: .typing,
             topCorrection: makeSuggestion(text: "the", score: 0.5),
-            isLearned: false
+            isLearned: false,
+            isMisspelled: true
         )
         XCTAssertEqual(result, .leaveAsIs)
     }
@@ -108,7 +116,8 @@ final class AutocorrectControllerTests: XCTestCase {
             typedWord: "teh",
             origin: .typing,
             topCorrection: makeSuggestion(text: "the", score: 0.85),
-            isLearned: false
+            isLearned: false,
+            isMisspelled: true
         )
         XCTAssertEqual(result, .correct(typedWord: "teh", correction: "the"))
     }
@@ -120,7 +129,8 @@ final class AutocorrectControllerTests: XCTestCase {
             typedWord: "hello",
             origin: .typing,
             topCorrection: makeSuggestion(text: "world", score: 0.85),
-            isLearned: false
+            isLearned: false,
+            isMisspelled: true
         )
         XCTAssertEqual(result, .correct(typedWord: "hello", correction: "world"))
     }
@@ -130,7 +140,8 @@ final class AutocorrectControllerTests: XCTestCase {
             typedWord: "Hello",
             origin: .typing,
             topCorrection: makeSuggestion(text: "world", score: 0.85),
-            isLearned: false
+            isLearned: false,
+            isMisspelled: true
         )
         XCTAssertEqual(result, .correct(typedWord: "Hello", correction: "World"))
     }
@@ -140,7 +151,8 @@ final class AutocorrectControllerTests: XCTestCase {
             typedWord: "HELLO",
             origin: .typing,
             topCorrection: makeSuggestion(text: "world", score: 0.85),
-            isLearned: false
+            isLearned: false,
+            isMisspelled: true
         )
         XCTAssertEqual(result, .correct(typedWord: "HELLO", correction: "WORLD"))
     }
@@ -152,7 +164,8 @@ final class AutocorrectControllerTests: XCTestCase {
             typedWord: "hello",
             origin: .typing,
             topCorrection: makeSuggestion(text: "iPhone", score: 0.85),
-            isLearned: false
+            isLearned: false,
+            isMisspelled: true
         )
         XCTAssertEqual(result, .correct(typedWord: "hello", correction: "iphone"))
     }
@@ -170,9 +183,34 @@ final class AutocorrectControllerTests: XCTestCase {
             origin: .typing,
             topCorrection: makeSuggestion(text: "the", score: 0.85),
             isLearned: false,
+            isMisspelled: true,
             config: strictConfig
         )
         XCTAssertEqual(result, .leaveAsIs)
+    }
+
+    // MARK: - Misspelling Check
+
+    func testEvaluate_returnsLeaveAsIs_whenWordIsNotMisspelled() {
+        let result = AutocorrectController.evaluate(
+            typedWord: "me",
+            origin: .typing,
+            topCorrection: makeSuggestion(text: "message", score: 0.9),
+            isLearned: false,
+            isMisspelled: false
+        )
+        XCTAssertEqual(result, .leaveAsIs)
+    }
+
+    func testEvaluate_appliesCorrection_whenWordIsMisspelled() {
+        let result = AutocorrectController.evaluate(
+            typedWord: "helol",
+            origin: .typing,
+            topCorrection: makeSuggestion(text: "hello", score: 0.85),
+            isLearned: false,
+            isMisspelled: true
+        )
+        XCTAssertEqual(result, .correct(typedWord: "helol", correction: "hello"))
     }
 
     // MARK: - WordOriginTracker State Transitions
