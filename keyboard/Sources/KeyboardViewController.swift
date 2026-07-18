@@ -64,6 +64,8 @@ class KeyboardViewController: UIInputViewController {
 
     private var keyboardView: KeyboardView!
 
+    private var heightConstraint: NSLayoutConstraint?
+
     // MARK: - Backspace State
 
     private var backspaceTimer: Timer?
@@ -268,6 +270,16 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        installOrUpdateHeightConstraint()
+    }
+
+    override func viewIsAppearing(_ animated: Bool) {
+        super.viewIsAppearing(animated)
+        installOrUpdateHeightConstraint()
+    }
+
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         log("viewWillDisappear")
@@ -319,10 +331,6 @@ class KeyboardViewController: UIInputViewController {
             keyboardView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
-        let heightConstraint = view.heightAnchor.constraint(equalToConstant: 256)
-        heightConstraint.priority = .defaultHigh
-        heightConstraint.isActive = true
-
         // Wire emoji panel search callbacks
         keyboardView.emojiPanelView.onSearchActivate = { [weak self] in
             guard let self = self else { return }
@@ -343,6 +351,14 @@ class KeyboardViewController: UIInputViewController {
             self.inputTarget = .hostApp
             self.keyboardView.emojiPanelView.searchField.resignFirstResponder()
             self.uiMode = .emoji
+        }
+    }
+
+    private func installOrUpdateHeightConstraint() {
+        if heightConstraint == nil {
+            heightConstraint = view.heightAnchor.constraint(equalToConstant: 256)
+            heightConstraint?.priority = .defaultHigh
+            heightConstraint?.isActive = true
         }
     }
 
