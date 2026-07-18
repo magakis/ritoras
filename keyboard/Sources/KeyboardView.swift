@@ -754,6 +754,7 @@ class KeyboardView: UIView {
     }
 
     func apply(mode: UIMode) {
+        print("[diag] apply(mode: \(mode)) — suggestionBar.isHidden=\(suggestionBar.isHidden) letterRegionContainer.isHidden=\(letterRegionContainer.isHidden) bottomActionRow.isHidden=\(bottomActionRow.isHidden) emojiPanelView.isHidden=\(emojiPanelView.isHidden) letterRegionContainer.bounds=\(letterRegionContainer.bounds) keyStack.arrangedSubviews.count=\(keyStack.arrangedSubviews.count)")
         let showEmojiPanel = (mode == .emoji || mode == .emojiSearch)
         let showLetters    = (mode == .letters || mode == .emojiSearch)
         let showBottomRow  = showLetters

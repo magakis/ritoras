@@ -46,6 +46,7 @@ class KeyboardViewController: UIInputViewController {
 
     private var uiMode: UIMode = .letters {
         didSet {
+            print("[diag] uiMode didSet — new value: \(uiMode), inputTarget: \(inputTarget)")
             keyboardView.apply(mode: uiMode)
         }
     }
@@ -333,6 +334,7 @@ class KeyboardViewController: UIInputViewController {
 
         // Wire emoji panel search callbacks
         keyboardView.emojiPanelView.onSearchActivate = { [weak self] in
+            print("[diag] onSearchActivate closure fired")
             guard let self = self else { return }
             self.inputTarget = .emojiSearch
             self.lastAutoCorrection = nil
@@ -340,6 +342,7 @@ class KeyboardViewController: UIInputViewController {
         }
 
         keyboardView.emojiPanelView.onSearchDismiss = { [weak self] in
+            print("[diag] onSearchDismiss closure fired")
             guard let self = self else { return }
             self.inputTarget = .hostApp
             self.keyboardView.emojiPanelView.searchField.resignFirstResponder()
@@ -1015,7 +1018,9 @@ extension KeyboardViewController: KeyboardViewDelegate {
     func keyboardView(_ view: KeyboardView, didPerform action: KeyAction) {
         switch action {
         case .insertText(let s):
+            print("[diag] .insertText case — uiMode=\(uiMode), s=\(s)")
             if uiMode == .emoji {
+                print("[diag] EmojiRecents.add about to fire — uiMode=\(uiMode), s=\(s)")
                 EmojiRecents.add(s)
             }
             let isTriggerPunct = SharedConfig.Defaults.autocorrectTriggerPunctuation.contains(s)
@@ -1374,6 +1379,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
     }
 
     private func insertTargeted(_ text: String) {
+        print("[diag] insertTargeted — inputTarget=\(inputTarget), text=\(text)")
         switch inputTarget {
         case .hostApp:     textDocumentProxy.insertText(text)
         case .emojiSearch: keyboardView.emojiPanelView.searchField.insertText(text)
