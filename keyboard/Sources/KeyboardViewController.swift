@@ -61,6 +61,12 @@ class KeyboardViewController: UIInputViewController {
     private var backspaceSingleCharCount = 0
     private var backspaceNilContextRetries = 0
 
+    // MARK: - Autocorrect-on-space
+
+    private var wordOrigin = WordOriginTracker()
+    /// Tracks the most recent autocorrect for potential revert-on-backspace (Phase 4).
+    private var lastAutoCorrection: (typed: String, replacement: String)?
+
     // MARK: - Dictation State
 
     private var darwinToken: DarwinObserverToken?
@@ -900,6 +906,11 @@ extension KeyboardViewController: KeyboardViewDelegate {
             if uiMode == .emoji {
                 EmojiRecents.add(s)
             }
+            let isTriggerPunct = SharedConfig.Defaults.autocorrectTriggerPunctuation.contains(s)
+            let shouldAutoCorrect = isTriggerPunct && uiMode != .emoji
+            if shouldAutoCorrect {
+                applyAutocorrectIfNeeded()
+            }
             let text = applyShift(to: s)
             textDocumentProxy.insertText(text)
             if shiftState == .upper {
@@ -907,9 +918,30 @@ extension KeyboardViewController: KeyboardViewDelegate {
             }
             recomputeAutoCap()
             keyboardView.refreshSuggestions()
+            if shouldAutoCorrect {
+                wordOrigin.resetToTyping()
+            }
 
         case .backspace:
-            textDocumentProxy.deleteBackward()
+            // REVERT-ON-BACKSPACE: If cursor is immediately after "corrected_word " and
+            // the previous action was an autocorrect, revert instead of just deleting the space.
+            if let correction = lastAutoCorrection,
+               isCursorRightAfterTrailingSpaceFollowing(correction.replacement) {
+                // Delete the trailing space.
+                textDocumentProxy.deleteBackward()
+                // Delete the corrected word.
+                for _ in 0..<correction.replacement.count {
+                    guard textDocumentProxy.hasText else { break }
+                    textDocumentProxy.deleteBackward()
+                }
+                // Re-insert the originally-typed word (NO trailing space — cursor lands mid-word).
+                textDocumentProxy.insertText(correction.typed)
+                lastAutoCorrection = nil
+                wordOrigin.resetToTyping()  // user is now back to editing a .typing word
+            } else {
+                textDocumentProxy.deleteBackward()
+                lastAutoCorrection = nil  // any non-immediate-backspace invalidates revert
+            }
             recomputeAutoCap()
             keyboardView.refreshSuggestions()
 
@@ -929,13 +961,18 @@ extension KeyboardViewController: KeyboardViewDelegate {
             shiftState = .locked
 
         case .space:
+            applyAutocorrectIfNeeded()
             textDocumentProxy.insertText(" ")
             recomputeAutoCap()
             keyboardView.refreshSuggestions()
+            wordOrigin.resetToTyping()
 
         case .return:
+            applyAutocorrectIfNeeded()
             textDocumentProxy.insertText("\n")
             recomputeAutoCap()
+            wordOrigin.resetToTyping()
+            keyboardView.refreshSuggestions()
 
         case .toggleNumber:
             layoutMode = .numbers
@@ -975,6 +1012,9 @@ extension KeyboardViewController: KeyboardViewDelegate {
             textDocumentProxy.deleteBackward()
         }
         textDocumentProxy.insertText(text + " ")
+        wordOrigin.markSuggestionTap()    // THE LOCK — prevents re-correction on next separator
+        lastAutoCorrection = nil          // Suggestion tap invalidates any pending revert
+        wordOrigin.resetToTyping()        // Trailing space starts a new word
         keyboardView.refreshSuggestions()
 
         // If the user accepted a suggestion that differs from their typed word,
@@ -1032,6 +1072,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
+        lastAutoCorrection = nil  // host text change invalidates any pending revert
         keyboardView.refreshSuggestions()
         recomputeAutoCap()
     }
@@ -1052,8 +1093,73 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     override func selectionDidChange(_ textInput: UITextInput?) {
         super.selectionDidChange(textInput)
+        lastAutoCorrection = nil  // cursor move invalidates any pending revert
         backspaceNilContextRetries = 0
         recomputeAutoCap()
+    }
+
+    // MARK: - Autocorrect-on-space
+
+    private func applyAutocorrectIfNeeded() {
+        // User-facing master toggle (read fresh every call, like autoCapitalizationEnabled).
+        guard SharedConfig.autocorrectOnSpaceEnabled() else { return }
+
+        // Host-field gate (password/search/email/URL fields etc.)
+        if AutoCorrectTraits.shouldSuppress(
+            keyboardType: textDocumentProxy.keyboardType,
+            autocorrectionType: textDocumentProxy.autocorrectionType,
+            spellCheckingType: textDocumentProxy.spellCheckingType
+        ) { return }
+
+        // Only re-evaluate words the user typed char-by-char.
+        guard wordOrigin.current == .typing else { return }
+
+        let context = textDocumentProxy.documentContextBeforeInput ?? ""
+        let extracted = CurrentWordExtractor.extract(from: context)
+
+        guard !extracted.lookupWord.isEmpty,
+              let engine = predictionEngine,
+              isPredictionEngineReady else { return }
+
+        let top = engine.topCorrection(
+            forCurrentWord: extracted.currentWord,
+            lookupWord: extracted.lookupWord,
+            previousWord: extracted.previousWord
+        )
+
+        let decision = AutocorrectController.evaluate(
+            typedWord: extracted.lookupWord,
+            origin: wordOrigin.current,
+            topCorrection: top,
+            isLearned: LearnedWordsStore.shared.contains(extracted.lookupWord)
+        )
+
+        switch decision {
+        case .correct(let typed, let correction):
+            // Delete the typed word and insert the correction.
+            // Same pattern as suggestion-tap handler (lines ~970-976).
+            let deleteCount = typed.count
+            for _ in 0..<deleteCount {
+                guard textDocumentProxy.hasText else { break }
+                textDocumentProxy.deleteBackward()
+            }
+            textDocumentProxy.insertText(correction)
+            wordOrigin.markAutocorrectApplied()
+            lastAutoCorrection = (typed: typed, replacement: correction)
+        case .leaveAsIs:
+            lastAutoCorrection = nil
+        }
+    }
+
+    /// Returns true if the cursor is immediately after `<word> ` (the word followed by a single trailing space).
+    /// Used by revert-on-backspace to detect the immediate-after-autocorrect state.
+    /// Reads documentContextBeforeInput and checks it ends with `word + " "`.
+    /// Returns false if context is nil/empty or doesn't match.
+    private func isCursorRightAfterTrailingSpaceFollowing(_ word: String) -> Bool {
+        let context = textDocumentProxy.documentContextBeforeInput ?? ""
+        guard context.count > word.count + 1 else { return false }
+        let suffix = String(context.suffix(word.count + 1))
+        return suffix == word + " "
     }
 
     // MARK: - Auto-Capitalization Helpers

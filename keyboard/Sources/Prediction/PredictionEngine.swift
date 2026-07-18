@@ -72,11 +72,12 @@ final class PredictionEngine {
         // ──────────────────────────────────────────────
         // MID-WORD CASE: user is typing a word
         // ──────────────────────────────────────────────
-        var allSuggestions: [Suggestion] = []
-        for provider in providers {
-            let results = provider.suggest(for: context, limit: limit)
-            allSuggestions.append(contentsOf: results)
-        }
+        var allSuggestions = mergedPool(
+            forCurrentWord: currentWord,
+            lookupWord: lookupWord,
+            previousWord: previousWord,
+            limit: limit
+        )
 
         // — Boost Apple suggestions when SymSpell is uncertain —
         // When the highest-scoring SymSpell correction (excluding the input
@@ -135,5 +136,55 @@ final class PredictionEngine {
             .map { $0.text }
 
         return sorted
+    }
+
+    // MARK: - Autocorrect Support
+
+    /// Returns the highest-scoring non-bigram suggestion for `lookupWord`,
+    /// or nil if no provider offers a correction. Used by AutocorrectController
+    /// to make confidence-gated replacement decisions on separator press.
+    ///
+    /// Unlike `suggestions(...)`, this returns the full `Suggestion` (with score)
+    /// rather than just the text, so callers can apply a confidence threshold.
+    /// Excludes `.bigram` source — bigrams predict the NEXT word, not corrections.
+    func topCorrection(
+        forCurrentWord currentWord: String,
+        lookupWord: String,
+        previousWord: String? = nil
+    ) -> Suggestion? {
+        guard !currentWord.isEmpty, !lookupWord.isEmpty else { return nil }
+        let pool = mergedPool(
+            forCurrentWord: currentWord,
+            lookupWord: lookupWord,
+            previousWord: previousWord
+        )
+        let lowerTyped = currentWord.lowercased()
+        return pool
+            .filter { $0.source != .bigram && $0.text.lowercased() != lowerTyped }
+            .max { $0.score < $1.score }
+    }
+
+    // MARK: - Shared Pool Builder
+
+    /// Builds the unified suggestion pool from all registered providers.
+    /// Shared by both `suggestions(...)` and `topCorrection(...)`.
+    private func mergedPool(
+        forCurrentWord currentWord: String,
+        lookupWord: String,
+        previousWord: String?,
+        limit: Int = SharedConfig.Defaults.providerResultLimit
+    ) -> [Suggestion] {
+        let context = SuggestionContext(
+            currentWord: currentWord,
+            lookupWord: lookupWord,
+            previousWord: previousWord,
+            isMidWord: !currentWord.isEmpty
+        )
+        var allSuggestions: [Suggestion] = []
+        for provider in providers {
+            let results = provider.suggest(for: context, limit: limit)
+            allSuggestions.append(contentsOf: results)
+        }
+        return allSuggestions
     }
 }

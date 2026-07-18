@@ -77,6 +77,29 @@ struct SharedConfig {
         /// load is aborted and a warning is logged. The engine still marks itself
         /// ready with whatever partial vocabulary was loaded.
         static let maxResidentBytesDuringLoad: UInt64 = 35 * 1024 * 1024
+
+        // MARK: - Autocorrect-on-Space
+
+        /// Minimum character count for a typed word to be considered for autocorrect.
+        static let autocorrectMinWordLength: Int = 2
+
+        /// Maximum character count for a typed word to be considered for autocorrect.
+        /// UITextChecker has a ~25-char practical cap.
+        static let autocorrectMaxWordLength: Int = 25
+
+        /// Minimum score (0.0–1.0) a suggestion must reach to be auto-applied.
+        /// Apple guesses = 0.85, Apple completions = 0.6, SymSpell varies.
+        /// 0.7 trusts Apple guesses + high-frequency SymSpell hits, ignores completions.
+        static let autocorrectMinConfidenceScore: Double = 0.7
+
+        /// Trailing-punctuation characters that, when typed, trigger autocorrect
+        /// evaluation of the immediately-preceding word — same as space/return.
+        /// Apostrophes deliberately excluded (mid-word for contractions).
+        static let autocorrectTriggerPunctuation: Set<String> = [".", ",", "!", "?", ";", ":"]
+
+        // Used by the Auto-Correction settings toggle in the container app.
+        static let autocorrectOnSpaceEnabledKey = "autocorrectOnSpaceEnabled"
+        static let autocorrectOnSpaceEnabledDefault = true
     }
 
     // MARK: - Dictation Mode
@@ -133,5 +156,16 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.autoCapitalizationEnabledKey) as? Bool)
             ?? Defaults.autoCapitalizationEnabledDefault
+    }
+
+    /// Reads the autocorrect-on-space enabled flag from the App Group.
+    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Returns the default (`true`) when the App Group is unavailable or the key is unset.
+    static func autocorrectOnSpaceEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.autocorrectOnSpaceEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.autocorrectOnSpaceEnabledKey) as? Bool)
+            ?? Defaults.autocorrectOnSpaceEnabledDefault
     }
 }

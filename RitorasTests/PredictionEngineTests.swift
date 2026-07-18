@@ -123,4 +123,42 @@ final class PredictionEngineTests: XCTestCase {
         XCTAssertEqual(result, ["am", "have", "think"],
                        "Engine should return top bigram followers for 'I' when currentWord is empty")
     }
+
+    // MARK: - topCorrection
+
+    func test_topCorrection_empty_engine_returns_nil() {
+        let engine = PredictionEngine()
+        let result = engine.topCorrection(forCurrentWord: "hello", lookupWord: "hello")
+        XCTAssertNil(result, "Engine with no providers should return nil")
+    }
+
+    func test_topCorrection_returns_highest_scoring_non_bigram() {
+        let engine = PredictionEngine()
+        let provider = MockProvider(suggestions: [
+            Suggestion(text: "teh", score: 0.9, source: .bigram),
+            Suggestion(text: "the", score: 0.85, source: .apple),
+            Suggestion(text: "teh", score: 0.7, source: .symspell),
+        ])
+        engine.addProvider(provider)
+
+        let result = engine.topCorrection(forCurrentWord: "teh", lookupWord: "teh")
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.text, "the")
+        XCTAssertEqual(result?.score, 0.85)
+        XCTAssertEqual(result?.source, .apple)
+    }
+
+    func test_topCorrection_preserves_score() {
+        let engine = PredictionEngine()
+        let provider = MockProvider(suggestions: [
+            Suggestion(text: "weather", score: 0.95, source: .symspell),
+        ])
+        engine.addProvider(provider)
+
+        let result = engine.topCorrection(forCurrentWord: "weathr", lookupWord: "weathr")
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.text, "weather")
+        XCTAssertEqual(result?.score, 0.95)
+        XCTAssertEqual(result?.source, .symspell)
+    }
 }

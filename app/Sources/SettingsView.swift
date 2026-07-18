@@ -151,6 +151,7 @@ struct SettingsView: View {
     private var keyboardSection: some View {
         Section {
             Toggle("Auto-Capitalization", isOn: $settings.autoCapitalizationEnabled)
+            Toggle("Auto-Correction", isOn: $settings.autocorrectOnSpaceEnabled)
         } header: {
             Text("Keyboard")
         }

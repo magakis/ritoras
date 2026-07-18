@@ -51,6 +51,7 @@ targets:
       - path: keyboard/Sources/Prediction
         excludes:
           - "Resources/"
+          - "Autocorrect/AutoCorrectTraits.swift"
       - path: keyboard/Sources/Prediction/Resources
       - path: keyboard/Sources/AutoCapitalization
         excludes:

@@ -7,6 +7,7 @@ class AppSettings: ObservableObject {
     @Published var servers: [String] = []
     @Published var timeoutSeconds: TimeInterval = 30.0
     @Published var autoCapitalizationEnabled: Bool = true
+    @Published var autocorrectOnSpaceEnabled: Bool = true
     @Published var dictationMode: SharedConfig.DictationMode = .batch
 
     private var appGroupDefaults: UserDefaults?
@@ -19,11 +20,13 @@ class AppSettings: ObservableObject {
         servers = config.servers
         timeoutSeconds = config.timeoutSeconds
         autoCapitalizationEnabled = SharedConfig.autoCapitalizationEnabled()
+        autocorrectOnSpaceEnabled = SharedConfig.autocorrectOnSpaceEnabled()
         dictationMode = SharedConfig.dictationMode()
 
         $servers.dropFirst().sink { [weak self] _ in self?.saveToAppGroup() }.store(in: &cancellables)
         $timeoutSeconds.dropFirst().sink { [weak self] _ in self?.saveToAppGroup() }.store(in: &cancellables)
         $autoCapitalizationEnabled.dropFirst().sink { [weak self] _ in self?.saveToAppGroup() }.store(in: &cancellables)
+        $autocorrectOnSpaceEnabled.dropFirst().sink { [weak self] _ in self?.saveToAppGroup() }.store(in: &cancellables)
         $dictationMode.dropFirst().sink { [weak self] newValue in
             #if DEBUG
             print("[AppSettings] dictationMode changed to \(newValue.rawValue)")
@@ -43,6 +46,7 @@ class AppSettings: ObservableObject {
         }
         appGroupDefaults?.set(timeoutSeconds, forKey: "timeoutSeconds")
         appGroupDefaults?.set(autoCapitalizationEnabled, forKey: SharedConfig.Defaults.autoCapitalizationEnabledKey)
+        appGroupDefaults?.set(autocorrectOnSpaceEnabled, forKey: SharedConfig.Defaults.autocorrectOnSpaceEnabledKey)
         appGroupDefaults?.set(dictationMode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
     }
 
@@ -50,6 +54,7 @@ class AppSettings: ObservableObject {
         servers = [SharedConfig.Defaults.baseUrl]
         timeoutSeconds = SharedConfig.Defaults.timeoutSeconds
         autoCapitalizationEnabled = SharedConfig.Defaults.autoCapitalizationEnabledDefault
+        autocorrectOnSpaceEnabled = SharedConfig.Defaults.autocorrectOnSpaceEnabledDefault
         dictationMode = .batch
     }
 }
