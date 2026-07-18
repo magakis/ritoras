@@ -305,15 +305,48 @@ enum EmojiSkinTone: String, CaseIterable {
 
     private static var skinToneCapable: Set<String> { EmojiData.skinToneCapable }
 
+    /// Applies a Fitzpatrick skin-tone modifier to a skin-tone-capable emoji base.
+    /// Handles three cases: (1) ZWJ sequences — inserts modifier after first scalar,
+    /// re-adding trailing VS16 if last codepoint is text-presentation-default; (2) text-
+    /// presentation-default singletons — appends modifier then VS16; (3) emoji-presentation-
+    /// default singletons — appends modifier only.
     static func applying(_ tone: EmojiSkinTone, to base: String) -> String {
-        guard tone != .none, skinToneCapable.contains(base) else {
-            return base
+        guard tone != .none, skinToneCapable.contains(base) else { return base }
+
+        let scalars = Array(base.unicodeScalars)
+        let modifier = tone.rawValue.unicodeScalars.first!
+        let vs16: Unicode.Scalar = "\u{FE0F}"
+
+        // Case 1 — ZWJ sequence: insert modifier after first scalar
+        if scalars.contains("\u{200D}") {
+            var result: [Unicode.Scalar] = [scalars[0], modifier]
+            var tail = scalars.dropFirst()
+            // Strip VS16 immediately after first scalar (re-added at end if needed)
+            if tail.first == vs16 {
+                tail = tail.dropFirst()
+            }
+            result.append(contentsOf: tail)
+            // If trailing codepoint is BMP text-presentation-default, append VS16
+            if let last = result.last, last.value < 0x1F300, last != vs16 {
+                result.append(vs16)
+            }
+            return String(String.UnicodeScalarView(result))
         }
-        var modified = base
-        // Strip trailing VS16 (U+FE0F) if present so modifier appends cleanly
-        if modified.unicodeScalars.last == "\u{FE0F}" {
-            modified = String(modified.unicodeScalars.dropLast())
+
+        // Cases 2 & 3 — singleton base
+        var stripped = scalars
+        if stripped.last == vs16 {
+            stripped = Array(stripped.dropLast())
         }
-        return modified + tone.rawValue
+
+        var result = stripped
+        result.append(modifier)
+
+        // Case 2 — text-presentation-default singleton (< 0x1F300): needs VS16
+        if let first = result.first, first.value < 0x1F300 {
+            result.append(vs16)
+        }
+
+        return String(String.UnicodeScalarView(result))
     }
 }
