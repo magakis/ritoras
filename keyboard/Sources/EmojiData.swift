@@ -35,7 +35,7 @@ enum EmojiData {
         let emojis: [EmojiEntry]
     }
 
-    private struct EmojiDataFile: Decodable {
+    struct EmojiDataFile: Decodable {
         let categories: [EmojiCategory]
         let skinToneCapable: [String]
     }
