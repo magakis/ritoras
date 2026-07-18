@@ -28,8 +28,8 @@ struct VADEmission {
 
 /// Energy-based Voice Activity Detection state machine.
 ///
-/// Called exclusively from the audio callback thread. All mutable state is
-/// protected by `lock`; callers must lock before any mutation.
+/// Thread safety through internal locking via `os_unfair_lock`.
+/// All mutable state is protected — callers call `process()`/`flush()` directly.
 private final class VADContext: @unchecked Sendable {
     // MARK: Configuration (constants)
     let speechRms: Float
@@ -38,7 +38,7 @@ private final class VADContext: @unchecked Sendable {
     let maxChunkSamples: Int
 
     // MARK: Lock
-    let lock = OSAllocatedUnfairLock()
+    private var unfairLock = os_unfair_lock()
 
     // MARK: Mutable state
     var accumulator: [Float] = []
@@ -57,6 +57,8 @@ private final class VADContext: @unchecked Sendable {
     /// Process one audio frame. Returns an `VADEmission` if a chunk boundary
     /// is detected (pause timeout or force-flush), otherwise `nil`.
     func process(frame: [Float], frameLength: Int, rms: Float) -> VADEmission? {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
         accumulator.append(contentsOf: frame)
         let totalSamples = accumulator.count
 
@@ -111,6 +113,8 @@ private final class VADContext: @unchecked Sendable {
 
     /// Flush any remaining accumulator into an emission (for `stop()`).
     func flush() -> VADEmission? {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
         guard !accumulator.isEmpty else { return nil }
         #if DEBUG
         print("[StreamingAudioRecorder] VAD: flush \(accumulator.count) trailing samples")
@@ -129,10 +133,10 @@ private final class VADContext: @unchecked Sendable {
 /// (e.g. via WebSocket).
 ///
 /// ## Thread safety
-/// The audio-tap callback runs on a real-time audio thread. VAD state is
-/// isolated behind `VADContext.lock` (an `NSLock`) and the callback captures
-/// only the lock-protected helper and the `@Sendable` handler — never `self`
-/// of the actor — avoiding cross-isolation violations.
+/// The audio-tap callback runs on a real-time audio thread. The callback is
+/// minimal — it reads the buffer, copies samples, and dispatches all heavy
+/// work (RMS, VAD, chunk emission) to a dedicated serial `vadQueue`. VAD
+/// state is protected internally by `os_unfair_lock`.
 actor StreamingAudioRecorder {
     typealias ChunkHandler = @Sendable (UInt32, [Float]) async -> Void
 
@@ -142,8 +146,10 @@ actor StreamingAudioRecorder {
     private var isRecording = false
     private var onChunk: ChunkHandler?
 
-    /// VAD state machine; accessed only via its internal lock from the audio
-    /// callback and (under lock) from this actor's `stop()` method.
+    /// Serial queue for audio processing off the real-time audio thread.
+    private let vadQueue = DispatchQueue(label: "com.ritoras.streaming-vad", qos: .userInitiated)
+
+    /// VAD state machine; accessed only via `process()`/`flush()` which lock internally.
     private let vad: VADContext
 
     // MARK: - Initialization
@@ -227,11 +233,10 @@ actor StreamingAudioRecorder {
             )
         }
 
-        // Capture handler and VAD locally for the @Sendable closure.
-        // The closure does NOT capture actor self — it only touches
-        // lock-protected VAD state and the Sendable handler.
+        // Capture references for the @Sendable closure (no actor self capture).
         let handler = onChunk
         let vad = self.vad
+        let vadQueue = self.vadQueue
 
         inputNode.installTap(
             onBus: 0,
@@ -247,29 +252,40 @@ actor StreamingAudioRecorder {
                 return
             }
 
+            #if DEBUG
+            print("[StreamingAudioRecorder] tap callback: valid buffer, frameLength=\(frameLength)")
+            #endif
+
             let floatPtr = UnsafeBufferPointer(start: channelData[0], count: frameLength)
 
-            // Compute RMS energy
-            var sumSquares: Float = 0
-            for i in 0..<frameLength {
-                let s = floatPtr[i]
-                sumSquares += s * s
-            }
-            let rms = sqrt(sumSquares / Float(frameLength))
+            // Copy samples on the audio thread (bounded allocation, acceptable)
+            let samples = Array(floatPtr)
 
-            // Copy frames into an array for the accumulator
-            let frameArray = Array(floatPtr)
+            #if DEBUG
+            print("[StreamingAudioRecorder] tap callback: dispatching \(samples.count) samples to vadQueue")
+            #endif
 
-            // Process through VAD state machine (under lock)
-            let emission = vad.lock.withLock {
-                vad.process(frame: frameArray, frameLength: frameLength, rms: rms)
-            }
+            // Dispatch ALL heavy work (RMS, VAD, chunk emission) to the serial
+            // queue — no locks, no closures-with-ARC, no Tasks on the audio thread.
+            vadQueue.async {
+                // RMS computation (off audio thread)
+                var sumSquares: Float = 0
+                for s in samples {
+                    sumSquares += s * s
+                }
+                let rms = sqrt(sumSquares / Float(samples.count))
 
-            // Dispatch emission asynchronously — never inside the lock or
-            // on the audio thread.
-            if let emission = emission {
-                Task {
-                    await handler(emission.chunkId, emission.samples)
+                // VAD processing (locks internally via os_unfair_lock)
+                let emission = vad.process(frame: samples, frameLength: frameLength, rms: rms)
+
+                // Emit chunk if ready (Task created off the audio thread)
+                if let emission = emission {
+                    #if DEBUG
+                    print("[StreamingAudioRecorder] vadQueue: emission chunkId=\(emission.chunkId), samples=\(emission.samples.count)")
+                    #endif
+                    Task {
+                        await handler(emission.chunkId, emission.samples)
+                    }
                 }
             }
         }
@@ -300,14 +316,20 @@ actor StreamingAudioRecorder {
         guard isRecording else { return }
         isRecording = false
 
-        // Remove tap first to guarantee no more callbacks mutate VAD state
+        // Remove tap first to guarantee no more callbacks are enqueued
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         AudioSession.deactivate()
 
-        // Flush remaining accumulator (under lock)
-        let emission: VADEmission? = vad.lock.withLock {
-            vad.flush()
+        // Flush any in-progress accumulator. Route through vadQueue so it
+        // runs AFTER all pending process() blocks complete (serial ordering).
+        let vadQueue = self.vadQueue
+        let vad = self.vad
+        let emission: VADEmission? = await withCheckedContinuation { continuation in
+            vadQueue.async {
+                let result = vad.flush()
+                continuation.resume(returning: result)
+            }
         }
 
         // Dispatch final chunk
