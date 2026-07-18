@@ -83,7 +83,7 @@ final class SymSpellProvider: SuggestionProvider {
                 verbosity: .top
             )
 
-            for (term, count, distance) in corrections.prefix(limit) {
+            for (term, _, distance) in corrections.prefix(limit) {
                 let capped = Self.applyCapitalizationTemplate(from: context.currentWord, to: term)
                 if capped.lowercased() != word {
                     let score: Double

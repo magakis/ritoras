@@ -38,7 +38,7 @@ private final class VADContext: @unchecked Sendable {
     let maxChunkSamples: Int
 
     // MARK: Lock
-    let lock = NSLock()
+    let lock = OSAllocatedUnfairLock()
 
     // MARK: Mutable state
     var accumulator: [Float] = []
@@ -69,7 +69,7 @@ private final class VADContext: @unchecked Sendable {
                 if speechSampleCount >= minSpeechSamples {
                     isSpeaking = true
                     #if DEBUG
-                    os_log(.debug, "[StreamingAudioRecorder] VAD: idle → speaking")
+                    print("[StreamingAudioRecorder] VAD: idle → speaking")
                     #endif
                 }
             }
@@ -80,7 +80,7 @@ private final class VADContext: @unchecked Sendable {
             if isSpeaking && silenceSampleCount >= silenceThresholdSamples {
                 #if DEBUG
                 let silenceMs = Double(silenceSampleCount) / 16.0
-                os_log(.debug, "[StreamingAudioRecorder] VAD: pause %.0f ms → emit", silenceMs)
+                print("[StreamingAudioRecorder] VAD: pause \(silenceMs) ms → emit")
                 #endif
                 return emit()
             }
@@ -89,7 +89,7 @@ private final class VADContext: @unchecked Sendable {
         // Force-flush at max chunk size regardless of VAD state
         if totalSamples >= maxChunkSamples {
             #if DEBUG
-            os_log(.debug, "[StreamingAudioRecorder] VAD: force-flush at %d samples", totalSamples)
+            print("[StreamingAudioRecorder] VAD: force-flush at \(totalSamples) samples")
             #endif
             return emit()
         }
@@ -113,7 +113,7 @@ private final class VADContext: @unchecked Sendable {
     func flush() -> VADEmission? {
         guard !accumulator.isEmpty else { return nil }
         #if DEBUG
-        os_log(.debug, "[StreamingAudioRecorder] VAD: flush %d trailing samples", accumulator.count)
+        print("[StreamingAudioRecorder] VAD: flush \(accumulator.count) trailing samples")
         #endif
         return emit()
     }
@@ -206,7 +206,7 @@ actor StreamingAudioRecorder {
             interleaved: false
         ) else {
             #if DEBUG
-            os_log(.debug, "[StreamingAudioRecorder] CRASH-PROOF: Could not create 16kHz mono float32 audio format")
+            print("[StreamingAudioRecorder] CRASH-PROOF: Could not create 16kHz mono float32 audio format")
             #endif
             throw StreamingRecorderError.engineStartFailed(
                 NSError(domain: "StreamingAudioRecorder", code: 1,
@@ -219,7 +219,7 @@ actor StreamingAudioRecorder {
         // Verify the input node has a valid audio route
         guard inputNode.outputFormat(forBus: 0).sampleRate > 0 else {
             #if DEBUG
-            os_log(.debug, "[StreamingAudioRecorder] CRASH-PROOF: Audio input unavailable (no microphone route)")
+            print("[StreamingAudioRecorder] CRASH-PROOF: Audio input unavailable (no microphone route)")
             #endif
             throw StreamingRecorderError.engineStartFailed(
                 NSError(domain: "StreamingAudioRecorder", code: 2,
@@ -243,8 +243,7 @@ actor StreamingAudioRecorder {
                   let channelData = buffer.floatChannelData,
                   let channel0 = channelData[0] else {
                 #if DEBUG
-                os_log(.debug, "[StreamingAudioRecorder] tap callback: invalid buffer (frameLength=%d, floatChannelData=%{public}s)",
-                       frameLength, buffer.floatChannelData != nil ? "non-nil" : "nil")
+                print("[StreamingAudioRecorder] tap callback: invalid buffer (frameLength=\(frameLength), floatChannelData=\(buffer.floatChannelData != nil ? "non-nil" : "nil"))")
                 #endif
                 return
             }
@@ -263,9 +262,9 @@ actor StreamingAudioRecorder {
             let frameArray = Array(floatPtr)
 
             // Process through VAD state machine (under lock)
-            vad.lock.lock()
-            let emission = vad.process(frame: frameArray, frameLength: frameLength, rms: rms)
-            vad.lock.unlock()
+            let emission = vad.lock.withLock {
+                vad.process(frame: frameArray, frameLength: frameLength, rms: rms)
+            }
 
             // Dispatch emission asynchronously — never inside the lock or
             // on the audio thread.
@@ -290,12 +289,7 @@ actor StreamingAudioRecorder {
         isRecording = true
 
         #if DEBUG
-        os_log(.debug,
-               "[StreamingAudioRecorder] Started | RMS: %.4f | silence: %d ms | minSpeech: %d ms | maxChunk: %.1f s",
-               SharedConfig.Defaults.streamVadSpeechRms,
-               SharedConfig.Defaults.streamVadSilenceMs,
-               SharedConfig.Defaults.streamVadMinSpeechMs,
-               SharedConfig.Defaults.streamMaxChunkSeconds)
+        print("[StreamingAudioRecorder] Started | RMS: \(SharedConfig.Defaults.streamVadSpeechRms) | silence: \(SharedConfig.Defaults.streamVadSilenceMs) ms | minSpeech: \(SharedConfig.Defaults.streamVadMinSpeechMs) ms | maxChunk: \(SharedConfig.Defaults.streamMaxChunkSeconds) s")
         #endif
     }
 
@@ -313,10 +307,9 @@ actor StreamingAudioRecorder {
         AudioSession.deactivate()
 
         // Flush remaining accumulator (under lock)
-        let emission: VADEmission?
-        vad.lock.lock()
-        emission = vad.flush()
-        vad.lock.unlock()
+        let emission: VADEmission? = vad.lock.withLock {
+            vad.flush()
+        }
 
         // Dispatch final chunk
         if let emission = emission, let handler = onChunk {
@@ -326,7 +319,7 @@ actor StreamingAudioRecorder {
         onChunk = nil
 
         #if DEBUG
-        os_log(.debug, "[StreamingAudioRecorder] Stopped")
+        print("[StreamingAudioRecorder] Stopped")
         #endif
     }
 }
