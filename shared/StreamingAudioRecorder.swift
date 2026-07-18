@@ -199,14 +199,33 @@ actor StreamingAudioRecorder {
         self.onChunk = onChunk
 
         // 3. Set up engine tap at 16 kHz mono float32
-        let targetFormat = AVAudioFormat(
+        guard let targetFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: 16000,
             channels: 1,
             interleaved: false
-        )!
+        ) else {
+            #if DEBUG
+            os_log(.debug, "[StreamingAudioRecorder] CRASH-PROOF: Could not create 16kHz mono float32 audio format")
+            #endif
+            throw StreamingRecorderError.engineStartFailed(
+                NSError(domain: "StreamingAudioRecorder", code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Could not create 16kHz mono float32 audio format"])
+            )
+        }
 
         let inputNode = engine.inputNode
+
+        // Verify the input node has a valid audio route
+        guard inputNode.outputFormat(forBus: 0).sampleRate > 0 else {
+            #if DEBUG
+            os_log(.debug, "[StreamingAudioRecorder] CRASH-PROOF: Audio input unavailable (no microphone route)")
+            #endif
+            throw StreamingRecorderError.engineStartFailed(
+                NSError(domain: "StreamingAudioRecorder", code: 2,
+                        userInfo: [NSLocalizedDescriptionKey: "Audio input unavailable (no microphone route)"])
+            )
+        }
 
         // Capture handler and VAD locally for the @Sendable closure.
         // The closure does NOT capture actor self — it only touches
@@ -221,9 +240,16 @@ actor StreamingAudioRecorder {
         ) { buffer, _ in
             let frameLength = Int(buffer.frameLength)
             guard frameLength > 0,
-                  let channelData = buffer.floatChannelData else { return }
+                  let channelData = buffer.floatChannelData,
+                  let channel0 = channelData[0] else {
+                #if DEBUG
+                os_log(.debug, "[StreamingAudioRecorder] tap callback: invalid buffer (frameLength=%d, floatChannelData=%{public}s)",
+                       frameLength, buffer.floatChannelData != nil ? "non-nil" : "nil")
+                #endif
+                return
+            }
 
-            let floatPtr = UnsafeBufferPointer(start: channelData[0], count: frameLength)
+            let floatPtr = UnsafeBufferPointer(start: channel0, count: frameLength)
 
             // Compute RMS energy
             var sumSquares: Float = 0
