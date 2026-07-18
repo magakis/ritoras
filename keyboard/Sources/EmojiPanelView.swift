@@ -90,7 +90,7 @@ final class EmojiPanelView: UIView {
         label.isHidden = true
         return label
     }()
-    private let searchField: UITextField = {
+    let searchField: UITextField = {
         let field = UITextField()
         field.placeholder = "Search emoji"
         field.font = .systemFont(ofSize: 15)
