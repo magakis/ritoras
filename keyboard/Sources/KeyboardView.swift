@@ -768,6 +768,19 @@ class KeyboardView: UIView {
         // Toggle the overlap constraint — active only in .emojiSearch
         emojiSearchOverlapConstraint?.isActive = (mode == .emojiSearch)
 
+        if mode == .emojiSearch {
+            // Defensive: ensure keyStack has rows (today this is a no-op since keyStack
+            // is populated at startup, but protects against future regressions)
+            if keyStack.arrangedSubviews.isEmpty {
+                rebuildKeyRows()
+            }
+            // Force layout: when letterRegionContainer was hidden during .emoji mode,
+            // its subviews' layoutSubviews didn't fire. Triggering a layout pass now
+            // propagates fresh frames down to the KeyboardRowView instances.
+            letterRegionContainer.setNeedsLayout()
+            letterRegionContainer.layoutIfNeeded()
+        }
+
         if showEmojiPanel { reloadEmojiPanel() }
     }
 
