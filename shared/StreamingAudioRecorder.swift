@@ -167,8 +167,8 @@ actor StreamingAudioRecorder {
     /// - Parameter onChunk: Called asynchronously for each detected speech
     ///   segment. The first argument is a monotonically increasing chunk ID
     ///   (starting at 0); the second is float32 PCM samples at 16 kHz mono.
-    /// - Throws: `AudioRecorderError.permissionDenied` or `.permissionNotRequested`
-    ///   if mic access is unavailable; `AudioRecorderError.invalidSessionConfiguration`
+    /// - Throws: `AudioRecorder.AudioRecorderError.permissionDenied` or `.permissionNotRequested`
+    ///   if mic access is unavailable; `AudioRecorder.AudioRecorderError.invalidSessionConfiguration`
     ///   if session setup fails; `StreamingRecorderError.engineStartFailed` if
     ///   the audio engine cannot start.
     func start(onChunk: @escaping ChunkHandler) async throws {
@@ -182,18 +182,18 @@ actor StreamingAudioRecorder {
         case .granted:
             break
         case .denied:
-            throw AudioRecorderError.permissionDenied
+            throw AudioRecorder.AudioRecorderError.permissionDenied
         case .undetermined:
-            throw AudioRecorderError.permissionNotRequested
+            throw AudioRecorder.AudioRecorderError.permissionNotRequested
         @unknown default:
-            throw AudioRecorderError.permissionNotRequested
+            throw AudioRecorder.AudioRecorderError.permissionNotRequested
         }
 
         // 2. Configure audio session (must be before engine start)
         do {
             try AudioSession.configure()
         } catch {
-            throw AudioRecorderError.invalidSessionConfiguration(error)
+            throw AudioRecorder.AudioRecorderError.invalidSessionConfiguration(error)
         }
 
         self.onChunk = onChunk
