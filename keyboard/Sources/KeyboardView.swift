@@ -342,11 +342,9 @@ private class SuggestionBar: UIView {
     }
 
     private func setup() {
-        backgroundColor = UIColor { tc in
-            tc.userInterfaceStyle == .dark
-                ? UIColor(white: 0.25, alpha: 1)
-                : UIColor(white: 0.78, alpha: 1)
-        }
+        // Transparent so the KeyboardView's panelBackground shows through; the
+        // individual suggestion segments still draw their own tile backgrounds.
+        backgroundColor = .clear
 
         stack.axis = .horizontal
         stack.distribution = .fillEqually
@@ -475,8 +473,6 @@ class KeyboardView: UIView {
 
     private func setupSuggestionBar() {
         suggestionBar.translatesAutoresizingMaskIntoConstraints = false
-        suggestionBar.layer.cornerRadius = 6
-        suggestionBar.clipsToBounds = true
         suggestionBar.suggestionTapped = { [weak self] index in
             guard let self = self else { return }
             let liveToken = self.delegate?.keyboardContextToken(self) ?? 0
@@ -524,14 +520,14 @@ class KeyboardView: UIView {
         emojiPanelBottom.priority = .defaultHigh
 
         NSLayoutConstraint.activate([
-            // SuggestionBar — top (hidden in emoji mode)
-            suggestionBar.topAnchor.constraint(equalTo: safeAreaLayoutGuide.topAnchor, constant: 6),
+            // SuggestionBar — top (hidden in emoji mode); flush with the top edge
+            suggestionBar.topAnchor.constraint(equalTo: topAnchor, constant: 0),
             suggestionBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             suggestionBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            suggestionBar.heightAnchor.constraint(equalToConstant: 40),
+            suggestionBar.heightAnchor.constraint(equalToConstant: 36),
 
             // Letter region container — middle (rows 1–3)
-            letterRegionContainer.topAnchor.constraint(equalTo: suggestionBar.bottomAnchor, constant: 6),
+            letterRegionContainer.topAnchor.constraint(equalTo: suggestionBar.bottomAnchor, constant: 3),
             letterRegionContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             letterRegionContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             letterRegionContainer.bottomAnchor.constraint(equalTo: bottomActionRow.topAnchor, constant: -6),
