@@ -473,8 +473,6 @@ class KeyboardViewController: UIInputViewController {
             }
             return
         }
-            return
-        }
 
         // Ignore stale payloads (wrong request ID, or no pending request at all)
         guard let id = pendingRequestId, payload.id == id else {
