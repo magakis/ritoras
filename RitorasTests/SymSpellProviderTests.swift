@@ -147,4 +147,44 @@ final class SymSpellProviderTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - QWERTY Geometry-Aware Scoring Integration
+
+    func test_provider_prefers_adjacent_key_typo() {
+        let provider = makeProvider()
+        let context = SuggestionContext(
+            currentWord: "teh",
+            lookupWord: "teh",
+            previousWord: nil,
+            isMidWord: true
+        )
+        let results = provider.suggest(for: context, limit: 5)
+        let theSuggestion = results.first(where: { $0.text.lowercased() == "the" })
+        XCTAssertNotNil(theSuggestion, "Provider should suggest 'the' for typo 'teh'")
+        if let suggestion = theSuggestion {
+            XCTAssertGreaterThan(suggestion.score, 0.0,
+                                 "teh→the score should be positive with QWERTY-aware scoring")
+            XCTAssertLessThanOrEqual(suggestion.score, 1.0,
+                                     "teh→the score should not exceed 1.0")
+        }
+    }
+
+    func test_provider_geometry_aware_score_for_recieve() {
+        let provider = makeProvider()
+        let context = SuggestionContext(
+            currentWord: "recieve",
+            lookupWord: "recieve",
+            previousWord: nil,
+            isMidWord: true
+        )
+        let results = provider.suggest(for: context, limit: 5)
+        let receiveSuggestion = results.first(where: { $0.text.lowercased() == "receive" })
+        XCTAssertNotNil(receiveSuggestion, "Provider should suggest 'receive' for typo 'recieve'")
+        if let suggestion = receiveSuggestion {
+            XCTAssertGreaterThan(suggestion.score, 0.0,
+                                 "recieve→receive score should be positive with QWERTY-aware scoring")
+            XCTAssertLessThanOrEqual(suggestion.score, 1.0,
+                                     "recieve→receive score should not exceed 1.0")
+        }
+    }
 }

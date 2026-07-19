@@ -90,7 +90,14 @@ final class SymSpellProvider: SuggestionProvider {
                     if distance == 0 {
                         score = 1.0
                     } else {
-                        score = Double(1.0 - Double(distance) * 0.3)
+                        score = QwertyGeometry.score(
+                            typed: word,
+                            candidate: term,
+                            symSpellDistance: distance,
+                            beta: SharedConfig.Defaults.qwertyDistanceBeta,
+                            doublingDiscount: SharedConfig.Defaults.qwertyDoublingDiscount,
+                            transpositionDiscount: SharedConfig.Defaults.qwertyTranspositionDiscount
+                        )
                     }
                     results.append(
                         Suggestion(text: capped, score: score, source: .symspell)

@@ -53,6 +53,14 @@ struct SharedConfig {
         /// Internal limit per provider before merging/deduping.
         static let providerResultLimit = 8
 
+        /// Beta for QWERTY-geometry-aware scoring: score = exp(-beta * weightedDistance).
+        /// Higher = sharper falloff with key distance. 1.5 ≈ adjacent-key score 0.7, far-key score 0.3.
+        static let qwertyDistanceBeta: Double = 1.5
+        /// Discount applied when the edit is a doubled-letter insertion/deletion (recieve→receive).
+        static let qwertyDoublingDiscount: Double = 0.5
+        /// Discount applied when the edit is a transposition of adjacent letters (teh→the).
+        static let qwertyTranspositionDiscount: Double = 0.7
+
         // MARK: - UITextChecker Spellcheck
 
         /// Language tag passed to `UITextChecker` APIs. Matches `PrimaryLanguage`
