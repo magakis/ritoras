@@ -84,9 +84,9 @@ enum KeyboardLayout {
         // Row 4: 123 emoji mic space return
         [
             KeyDefinition(label: "123", shiftedLabel: nil, action: .toggleNumber, widthWeight: 1.5),
-            KeyDefinition(label: "☺", shiftedLabel: nil, action: .emoji, widthWeight: 1.5),
-            KeyDefinition(label: "", shiftedLabel: nil, action: .mic, widthWeight: 1.5),
-            KeyDefinition(label: "space", shiftedLabel: nil, action: .space, widthWeight: 4.0),
+            KeyDefinition(label: "☺", shiftedLabel: nil, action: .emoji, widthWeight: 1.2),
+            KeyDefinition(label: "", shiftedLabel: nil, action: .mic, widthWeight: 1.2),
+            KeyDefinition(label: "space", shiftedLabel: nil, action: .space, widthWeight: 4.6),
             KeyDefinition(label: "return", shiftedLabel: nil, action: .return, widthWeight: 1.8),
         ],
     ]
@@ -126,9 +126,9 @@ enum KeyboardLayout {
         // Row 4: ABC emoji mic space return
         [
             KeyDefinition(label: "ABC", shiftedLabel: nil, action: .toggleLetters, widthWeight: 1.5),
-            KeyDefinition(label: "☺", shiftedLabel: nil, action: .emoji, widthWeight: 1.5),
-            KeyDefinition(label: "", shiftedLabel: nil, action: .mic, widthWeight: 1.5),
-            KeyDefinition(label: "space", shiftedLabel: nil, action: .space, widthWeight: 4.0),
+            KeyDefinition(label: "☺", shiftedLabel: nil, action: .emoji, widthWeight: 1.2),
+            KeyDefinition(label: "", shiftedLabel: nil, action: .mic, widthWeight: 1.2),
+            KeyDefinition(label: "space", shiftedLabel: nil, action: .space, widthWeight: 4.6),
             KeyDefinition(label: "return", shiftedLabel: nil, action: .return, widthWeight: 1.8),
         ],
     ]
@@ -178,9 +178,9 @@ enum KeyboardLayout {
         // Row 4: ABC emoji mic space return
         [
             KeyDefinition(label: "ABC", shiftedLabel: nil, action: .toggleLetters, widthWeight: 1.5),
-            KeyDefinition(label: "☺", shiftedLabel: nil, action: .emoji, widthWeight: 1.5),
-            KeyDefinition(label: "", shiftedLabel: nil, action: .mic, widthWeight: 1.5),
-            KeyDefinition(label: "space", shiftedLabel: nil, action: .space, widthWeight: 4.0),
+            KeyDefinition(label: "☺", shiftedLabel: nil, action: .emoji, widthWeight: 1.2),
+            KeyDefinition(label: "", shiftedLabel: nil, action: .mic, widthWeight: 1.2),
+            KeyDefinition(label: "space", shiftedLabel: nil, action: .space, widthWeight: 4.6),
             KeyDefinition(label: "return", shiftedLabel: nil, action: .return, widthWeight: 1.8),
         ],
     ]

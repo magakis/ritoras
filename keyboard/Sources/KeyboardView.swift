@@ -167,8 +167,11 @@ private class KeyButton: UIButton {
         case .globe:
             setImage(UIImage(systemName: "globe", withConfiguration: config), for: .normal)
         case .emoji:
-            let smileConfig = UIImage.SymbolConfiguration(pointSize: EmojiPanelView.modeKeyPointSize, weight: .regular)
+            let smileConfig = UIImage.SymbolConfiguration(pointSize: EmojiPanelView.emojiToggleIconPointSize, weight: .regular)
             setImage(UIImage(systemName: "face.smiling", withConfiguration: smileConfig), for: .normal)
+        case .space:
+            let spaceConfig = UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
+            setImage(UIImage(systemName: "space", withConfiguration: spaceConfig), for: .normal)
         default:
             setTitle(keyDefinition.label, for: .normal)
         }
@@ -581,7 +584,7 @@ class KeyboardView: UIView {
                         button.setTitle("ABC", for: .normal)
                         button.setImage(nil, for: .normal)
                     } else {
-                        let smileConfig = UIImage.SymbolConfiguration(pointSize: EmojiPanelView.modeKeyPointSize, weight: .regular)
+                        let smileConfig = UIImage.SymbolConfiguration(pointSize: EmojiPanelView.emojiToggleIconPointSize, weight: .regular)
                         button.setImage(UIImage(systemName: "face.smiling", withConfiguration: smileConfig), for: .normal)
                         button.setTitle(nil, for: .normal)
                     }
@@ -796,7 +799,7 @@ class KeyboardView: UIView {
             emojiKeyButton?.setTitle("ABC", for: .normal)
             emojiKeyButton?.setImage(nil, for: .normal)
         } else {
-            let smileConfig = UIImage.SymbolConfiguration(pointSize: EmojiPanelView.modeKeyPointSize, weight: .regular)
+            let smileConfig = UIImage.SymbolConfiguration(pointSize: EmojiPanelView.emojiToggleIconPointSize, weight: .regular)
             emojiKeyButton?.setImage(UIImage(systemName: "face.smiling", withConfiguration: smileConfig), for: .normal)
             emojiKeyButton?.setTitle(nil, for: .normal)
         }
