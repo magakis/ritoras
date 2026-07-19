@@ -46,11 +46,6 @@ class KeyboardViewController: UIInputViewController {
 
     private var uiMode: UIMode = .letters {
         didSet {
-            // Defensive: any transition away from .emojiSearch resets inputTarget.
-            // Catches all desync paths (e.g. bottom-row ABC button doesn't fire onSearchDismiss).
-            if uiMode != .emojiSearch {
-                inputTarget = .hostApp
-            }
             keyboardView.apply(mode: uiMode)
             keyboardView.refreshDebugOverlay(inputTarget: "\(inputTarget)", uiMode: uiMode)
         }
@@ -680,6 +675,7 @@ class KeyboardViewController: UIInputViewController {
     /// every other transport is stopped first (prevents double-insert now that the
     /// Darwin observer and server polling can run concurrently on resume).
     private func insertDictationResult(text: String) {
+        guard inputTarget == .hostApp else { return }
         stopDictationTransports()
         pendingRequestId = nil
         if text.isEmpty {
@@ -714,6 +710,7 @@ class KeyboardViewController: UIInputViewController {
 
             switch payload.status {
             case .completed:
+                guard self.inputTarget == .hostApp else { return }
                 timer.invalidate()
                 let text = payload.text ?? ""
                 if text.isEmpty {
@@ -873,6 +870,7 @@ class KeyboardViewController: UIInputViewController {
 
         switch status {
         case "completed":
+            guard inputTarget == .hostApp else { return }
             let text = json["text"] as? String ?? ""
             if text.isEmpty {
                 state = .error("Nothing was heard. Try again.")
@@ -955,6 +953,7 @@ class KeyboardViewController: UIInputViewController {
 
             switch status {
             case "completed":
+                guard self.inputTarget == .hostApp else { return }
                 timer.invalidate()
                 self.clipboardPollTimer = nil
                 let text = json["text"] as? String ?? ""
