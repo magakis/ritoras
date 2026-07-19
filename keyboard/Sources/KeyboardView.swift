@@ -586,6 +586,11 @@ class KeyboardView: UIView {
             bottomActionRow.heightAnchor.constraint(equalToConstant: 48),
         ])
 
+        // Minimum height to ensure rows are visible when keyboard reappears in .emojiSearch mode
+        let lrcMinHeight = letterRegionContainer.heightAnchor.constraint(greaterThanOrEqualToConstant: 120)
+        lrcMinHeight.priority = .defaultHigh
+        lrcMinHeight.isActive = true
+
         // Overlap constraint for .emojiSearch mode — pins panel bottom to letter region top
         emojiSearchOverlapConstraint = emojiPanelView.bottomAnchor.constraint(equalTo: letterRegionContainer.topAnchor)
         emojiSearchOverlapConstraint?.priority = .required
@@ -829,16 +834,21 @@ class KeyboardView: UIView {
         emojiSearchPanelHeightConstraint?.isActive = (mode == .emojiSearch)
 
         if mode == .emojiSearch {
-            // Defensive: ensure keyStack has rows (today this is a no-op since keyStack
-            // is populated at startup, but protects against future regressions)
-            if keyStack.arrangedSubviews.isEmpty {
-                rebuildKeyRows()
-            }
-            // Force layout: when letterRegionContainer was hidden during .emoji mode,
-            // its subviews' layoutSubviews didn't fire. Triggering a layout pass now
-            // propagates fresh frames down to the KeyboardRowView instances.
+            // Always rebuild — ensures fresh row views with fresh frames every time
+            rebuildKeyRows()
+
+            // Walk the view tree and force layout on every level
             letterRegionContainer.setNeedsLayout()
             letterRegionContainer.layoutIfNeeded()
+            keyStack.setNeedsLayout()
+            keyStack.layoutIfNeeded()
+            for subview in keyStack.arrangedSubviews {
+                subview.setNeedsLayout()
+                subview.layoutIfNeeded()
+            }
+
+            // Ensure nothing's hidden behind anything
+            letterRegionContainer.superview?.bringSubviewToFront(letterRegionContainer)
         }
 
         if showEmojiPanel { reloadEmojiPanel() }
