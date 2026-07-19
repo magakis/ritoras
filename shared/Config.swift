@@ -17,6 +17,8 @@ struct SharedConfig {
         static let backspaceWordCharInterval: TimeInterval = 0.015   // 15ms per char while spreading a word's deletes
         static let backspaceNilContextRetryLimit: Int = 3
         static let backspaceNilContextRetryInterval: TimeInterval = 0.15
+        static let backspaceStaleHasTextRetryLimit: Int = 3
+        static let backspaceStaleHasTextRetryInterval: TimeInterval = 0.05  // 50ms — tighter than nil-context (150ms); on user-perceptible tap path; total max added latency 150ms
         static var dictateURL: URL { URL(string: "\(urlScheme)://\(dictateURLPath)")! }
 
         // MARK: - Auto-Capitalization
