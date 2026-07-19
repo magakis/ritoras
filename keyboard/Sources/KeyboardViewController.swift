@@ -1267,7 +1267,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 "site": "didBegin-pre",
                 "hasText": hasTextInCurrentTarget,
                 "contextBeforeLen": textDocumentProxy.documentContextBeforeInput?.count as Any,
-                "proxyId": String(ObjectIdentifier(textDocumentProxy).uintValue, radix: 16),
+                "proxyId": String(ObjectIdentifier(textDocumentProxy).hashValue, radix: 16),
                 "staleRetries": backspaceStaleHasTextRetries,
                 "nilCtxRetries": backspaceNilContextRetries,
                 "phase": String(describing: backspacePhase)
@@ -1288,7 +1288,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 "site": "didBegin-post",
                 "hasText": hasTextInCurrentTarget,
                 "contextBeforeLen": textDocumentProxy.documentContextBeforeInput?.count as Any,
-                "proxyId": String(ObjectIdentifier(textDocumentProxy).uintValue, radix: 16),
+                "proxyId": String(ObjectIdentifier(textDocumentProxy).hashValue, radix: 16),
                 "staleRetries": backspaceStaleHasTextRetries,
                 "nilCtxRetries": backspaceNilContextRetries,
                 "phase": String(describing: backspacePhase)
@@ -1513,7 +1513,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                     "site": "deleteTargetedBackward-abort",
                     "hasText": textDocumentProxy.hasText,
                     "contextBeforeLen": textDocumentProxy.documentContextBeforeInput?.count as Any,
-                    "proxyId": String(ObjectIdentifier(textDocumentProxy).uintValue, radix: 16),
+                    "proxyId": String(ObjectIdentifier(textDocumentProxy).hashValue, radix: 16),
                     "staleRetries": backspaceStaleHasTextRetries,
                     "nilCtxRetries": backspaceNilContextRetries,
                     "phase": String(describing: backspacePhase)
@@ -1551,7 +1551,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 "site": "tick-top",
                 "hasText": hasTextInCurrentTarget,
                 "contextBeforeLen": textDocumentProxy.documentContextBeforeInput?.count as Any,
-                "proxyId": String(ObjectIdentifier(textDocumentProxy).uintValue, radix: 16),
+                "proxyId": String(ObjectIdentifier(textDocumentProxy).hashValue, radix: 16),
                 "staleRetries": backspaceStaleHasTextRetries,
                 "nilCtxRetries": backspaceNilContextRetries,
                 "phase": String(describing: backspacePhase)
@@ -1590,7 +1590,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                     "site": "tick-charRepeat",
                     "hasText": hasTextInCurrentTarget,
                     "contextBeforeLen": textDocumentProxy.documentContextBeforeInput?.count as Any,
-                    "proxyId": String(ObjectIdentifier(textDocumentProxy).uintValue, radix: 16),
+                    "proxyId": String(ObjectIdentifier(textDocumentProxy).hashValue, radix: 16),
                     "staleRetries": backspaceStaleHasTextRetries,
                     "nilCtxRetries": backspaceNilContextRetries,
                     "phase": String(describing: backspacePhase)
@@ -1648,7 +1648,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                         "site": "tick-staleRetry-giveup",
                         "hasText": hasTextInCurrentTarget,
                         "contextBeforeLen": textDocumentProxy.documentContextBeforeInput?.count as Any,
-                        "proxyId": String(ObjectIdentifier(textDocumentProxy).uintValue, radix: 16),
+                        "proxyId": String(ObjectIdentifier(textDocumentProxy).hashValue, radix: 16),
                         "staleRetries": backspaceStaleHasTextRetries,
                         "nilCtxRetries": backspaceNilContextRetries,
                         "phase": String(describing: backspacePhase)
@@ -1664,7 +1664,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                     "site": "tick-staleRetry-retrying",
                     "hasText": hasTextInCurrentTarget,
                     "contextBeforeLen": textDocumentProxy.documentContextBeforeInput?.count as Any,
-                    "proxyId": String(ObjectIdentifier(textDocumentProxy).uintValue, radix: 16),
+                    "proxyId": String(ObjectIdentifier(textDocumentProxy).hashValue, radix: 16),
                     "staleRetries": backspaceStaleHasTextRetries,
                     "nilCtxRetries": backspaceNilContextRetries,
                     "phase": String(describing: backspacePhase)
@@ -1679,7 +1679,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 "site": "tick-staleRetry-recovering",
                 "hasText": hasTextInCurrentTarget,
                 "contextBeforeLen": textDocumentProxy.documentContextBeforeInput?.count as Any,
-                "proxyId": String(ObjectIdentifier(textDocumentProxy).uintValue, radix: 16),
+                "proxyId": String(ObjectIdentifier(textDocumentProxy).hashValue, radix: 16),
                 "staleRetries": backspaceStaleHasTextRetries,
                 "nilCtxRetries": backspaceNilContextRetries,
                 "phase": String(describing: backspacePhase)
