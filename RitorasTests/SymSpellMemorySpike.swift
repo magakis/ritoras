@@ -9,19 +9,19 @@ import XCTest
 /// and/or lowering prefixLength to 6.
 final class SymSpellMemorySpike: XCTestCase {
 
-    /// Measure resident memory of the SymSpell index built from the full
-    /// 82,765-word frequency dictionary.
+    /// Measure resident memory of the SymSpell index built from the
+    /// wordfreq-derived frequency dictionary.
     func testSymSpellMemoryBaseline() throws {
         // 1. Build the index.
         let symSpell = SymSpell(maxEditDistance: 2, prefixLength: 7)
 
         let bundle = Bundle(for: SymSpellMemorySpike.self)
-        let url = bundle.url(forResource: "frequency_dictionary_en_82_765",
+        let url = bundle.url(forResource: "frequency_dictionary_en_wordfreq_50k",
                              withExtension: "txt")
-            ?? Bundle.main.url(forResource: "frequency_dictionary_en_82_765",
+            ?? Bundle.main.url(forResource: "frequency_dictionary_en_wordfreq_50k",
                                withExtension: "txt")
         guard let fileURL = url else {
-            throw XCTSkip("frequency_dictionary_en_82_765.txt not found")
+            throw XCTSkip("frequency_dictionary_en_wordfreq_50k.txt not found")
         }
 
         // Measure time to build.
@@ -90,15 +90,15 @@ final class SymSpellMemorySpike: XCTestCase {
 
     // MARK: - Streaming Load
 
-    /// Verifies that the streaming loader loads the expected ~82k words.
+    /// Verifies that the streaming loader loads the expected ~50k words.
     func testStreamingLoadCount() throws {
         let bundle = Bundle(for: SymSpellMemorySpike.self)
-        let url = bundle.url(forResource: "frequency_dictionary_en_82_765",
+        let url = bundle.url(forResource: "frequency_dictionary_en_wordfreq_50k",
                              withExtension: "txt")
-            ?? Bundle.main.url(forResource: "frequency_dictionary_en_82_765",
+            ?? Bundle.main.url(forResource: "frequency_dictionary_en_wordfreq_50k",
                                withExtension: "txt")
         guard let fileURL = url else {
-            throw XCTSkip("frequency_dictionary_en_82_765.txt not found")
+            throw XCTSkip("frequency_dictionary_en_wordfreq_50k.txt not found")
         }
 
         let symSpell = SymSpell(maxEditDistance: 2, prefixLength: 7)
@@ -110,8 +110,8 @@ final class SymSpellMemorySpike: XCTestCase {
             trie: trie
         )
 
-        XCTAssertGreaterThan(count, 80000,
-                             "Streaming load should load ~82k words, got \(count)")
+        XCTAssertGreaterThan(count, 40000,
+                             "Streaming load should load ~50k words, got \(count)")
         XCTAssertEqual(count, symSpell.dictionary.count,
                        "Streamed word count should match SymSpell dictionary count")
         XCTAssertEqual(count, trie.wordCount,

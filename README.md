@@ -28,6 +28,10 @@ See [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md) for the full phas
 - A free Apple ID (for SideStore on-device signing)
 - SideStore installed on the iPhone
 
+## Third-Party Notices
+
+This project includes third-party components with separate license terms. See [docs/THIRD-PARTY-NOTICES.md](docs/THIRD-PARTY-NOTICES.md) for full attributions, including CC BY-SA 4.0 (wordfreq data) and MIT/Apache 2.0 (SymSpell).
+
 ## License
 
 MIT

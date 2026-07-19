@@ -61,9 +61,9 @@ final class SymSpellProviderTests: XCTestCase {
 
         // Load the bundled frequency dictionary.
         let testBundle = Bundle(for: SymSpellProviderTests.self)
-        let url = testBundle.url(forResource: "frequency_dictionary_en_82_765",
+        let url = testBundle.url(forResource: "frequency_dictionary_en_wordfreq_50k",
                                  withExtension: "txt")
-            ?? Bundle.main.url(forResource: "frequency_dictionary_en_82_765",
+            ?? Bundle.main.url(forResource: "frequency_dictionary_en_wordfreq_50k",
                                withExtension: "txt")
 
         if let url = url, let entries = try? WordListLoader.load(from: url) {

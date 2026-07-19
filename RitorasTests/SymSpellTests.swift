@@ -11,12 +11,12 @@ final class SymSpellTests: XCTestCase {
         // Load the bundled frequency dictionary.
         // First check the test bundle, then the main (keyboard) bundle.
         let testBundle = Bundle(for: SymSpellTests.self)
-        let url = testBundle.url(forResource: "frequency_dictionary_en_82_765",
+        let url = testBundle.url(forResource: "frequency_dictionary_en_wordfreq_50k",
                                  withExtension: "txt")
-            ?? Bundle.main.url(forResource: "frequency_dictionary_en_82_765",
+            ?? Bundle.main.url(forResource: "frequency_dictionary_en_wordfreq_50k",
                                withExtension: "txt")
         guard let url = url else {
-            throw XCTSkip("frequency_dictionary_en_82_765.txt not found in any bundle")
+            throw XCTSkip("frequency_dictionary_en_wordfreq_50k.txt not found in any bundle")
         }
 
         let entries = try WordListLoader.load(from: url)

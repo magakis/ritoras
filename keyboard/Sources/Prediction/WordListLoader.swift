@@ -3,8 +3,8 @@ import os
 
 /// Loads the bundled frequency dictionary into SymSpell and Trie.
 ///
-/// The resource file `frequency_dictionary_en_82_765.txt` contains ~82,765
-/// English words with their frequency counts, one per line:
+/// The resource file `frequency_dictionary_en_wordfreq_50k.txt` contains
+/// ~50,000 English words (wordfreq Zipf-derived) with their frequency counts, one per line:
 ///   `word count`
 enum WordListLoader {
 
@@ -15,7 +15,7 @@ enum WordListLoader {
     }
 
     /// The bundled filename (without extension).
-    private static let resourceName = "frequency_dictionary_en_82_765"
+    private static let resourceName = "frequency_dictionary_en_wordfreq_50k"
     private static let resourceExtension = "txt"
 
     /// Returns the URL for the bundled frequency dictionary in the keyboard extension's bundle.
@@ -173,7 +173,7 @@ enum WordListLoader {
         var errorDescription: String? {
             switch self {
             case .bundledFileNotFound:
-                return "frequency_dictionary_en_82_765.txt not found in bundle. Ensure it is included in Copy Bundle Resources."
+                return "frequency_dictionary_en_wordfreq_50k.txt not found in bundle. Ensure it is included in Copy Bundle Resources."
             case .fileOpenFailed(let path):
                 return "Could not open file at \(path)"
             }
