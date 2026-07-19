@@ -167,7 +167,8 @@ private class KeyButton: UIButton {
         case .globe:
             setImage(UIImage(systemName: "globe", withConfiguration: config), for: .normal)
         case .emoji:
-            setTitle("☺", for: .normal)
+            let smileConfig = UIImage.SymbolConfiguration(pointSize: EmojiPanelView.modeKeyPointSize, weight: .regular)
+            setImage(UIImage(systemName: "face.smiling", withConfiguration: smileConfig), for: .normal)
         default:
             setTitle(keyDefinition.label, for: .normal)
         }
@@ -576,8 +577,14 @@ class KeyboardView: UIView {
                     micKeyButton = button
                 case .emoji:
                     emojiKeyButton = button
-                    let isEmoji = !emojiPanelView.isHidden
-                    button.setTitle(isEmoji ? "ABC" : "☺", for: .normal)
+                    if !emojiPanelView.isHidden {
+                        button.setTitle("ABC", for: .normal)
+                        button.setImage(nil, for: .normal)
+                    } else {
+                        let smileConfig = UIImage.SymbolConfiguration(pointSize: EmojiPanelView.modeKeyPointSize, weight: .regular)
+                        button.setImage(UIImage(systemName: "face.smiling", withConfiguration: smileConfig), for: .normal)
+                        button.setTitle(nil, for: .normal)
+                    }
                 case .shift:
                     shiftKeyButton = button
                     // Long-press the shift key → Caps Lock (like the native keyboard).
@@ -597,12 +604,14 @@ class KeyboardView: UIView {
                 buttons.append(button)
             }
 
-            // Bottom-row mode-switch key (first button: 123 / ABC) matches the emoji
-            // toolbar's ABC text size and color so both read consistently.
+            // Mode-switch keys (bottom row: 123 / ABC, backspace row: #+= / 123) use
+            // the same 17pt font as the emoji toolbar's ABC text for visual consistency.
             if isLastRow, let modeSwitch = buttons.first {
                 modeSwitch.titleLabel?.font = .systemFont(ofSize: EmojiPanelView.modeKeyPointSize, weight: .regular)
-                modeSwitch.backgroundColor = .clear
-                modeSwitch.setTitleColor(EmojiPanelView.modeKeyTextColor, for: .normal)
+            }
+            if rowIndex == rows.count - 2, let modeSwitch = buttons.first,
+               modeSwitch.keyDefinition.action == .toggleNumber || modeSwitch.keyDefinition.action == .toggleSymbols {
+                modeSwitch.titleLabel?.font = .systemFont(ofSize: EmojiPanelView.modeKeyPointSize, weight: .regular)
             }
 
             // Row 2 (the backspace row, directly above the action row) is edge-anchored so
@@ -783,7 +792,14 @@ class KeyboardView: UIView {
         letterRegionContainer.isHidden = !showLetters
         bottomActionRow.isHidden = !showBottomRow
         emojiPanelView.isHidden = !showEmojiPanel
-        emojiKeyButton?.setTitle(showEmojiPanel ? "ABC" : "☺", for: .normal)
+        if showEmojiPanel {
+            emojiKeyButton?.setTitle("ABC", for: .normal)
+            emojiKeyButton?.setImage(nil, for: .normal)
+        } else {
+            let smileConfig = UIImage.SymbolConfiguration(pointSize: EmojiPanelView.modeKeyPointSize, weight: .regular)
+            emojiKeyButton?.setImage(UIImage(systemName: "face.smiling", withConfiguration: smileConfig), for: .normal)
+            emojiKeyButton?.setTitle(nil, for: .normal)
+        }
 
         // Toggle the overlap constraint — active only in .emojiSearch
         emojiSearchOverlapConstraint?.isActive = (mode == .emojiSearch)
