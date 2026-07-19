@@ -917,6 +917,7 @@ class KeyboardViewController: UIInputViewController {
                 textDocumentProxy.insertText(text + " ")
                 FileLogger.shared.info(.keyboard, "Auto-inserted dictation from clipboard",
                                        payload: ["length": text.count, "preview": String(text.prefix(30))])
+            }
             lastProcessedPayloadId = payloadId
             pendingRequestId = nil
             clearClipboardDictation()
@@ -1009,6 +1010,7 @@ class KeyboardViewController: UIInputViewController {
                     self.textDocumentProxy.insertText(text + " ")
                     FileLogger.shared.info(.keyboard, "Inserted dictation from clipboard poll",
                                            payload: ["length": text.count, "preview": String(text.prefix(30))])
+                }
                 self.lastProcessedPayloadId = payloadId
                 self.pendingRequestId = nil
                 self.clearClipboardDictation()
