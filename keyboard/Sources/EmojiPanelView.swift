@@ -376,6 +376,7 @@ final class EmojiPanelView: UIView {
     }
 
     @objc private func categoryTapped(_ sender: UIButton) {
+        print("[diag] categoryTapped — currentQuery='\(currentQuery)'")
         if !currentQuery.isEmpty {
             searchField.text = ""
             currentQuery = ""
@@ -449,6 +450,7 @@ final class EmojiPanelView: UIView {
 
 extension EmojiPanelView {
     @objc private func dismissTapped() {
+        print("[diag] dismissTapped — searchField.isFirstResponder=\(searchField.isFirstResponder)")
         if searchField.isFirstResponder {
             onSearchDismiss?()
         } else {
@@ -502,7 +504,9 @@ extension EmojiPanelView: UICollectionViewDelegateFlowLayout {
 
 extension EmojiPanelView: UITextFieldDelegate {
     func textFieldDidBeginEditing(_ textField: UITextField) {
+        print("[diag] textFieldDidBeginEditing fired — searchField.isFirstResponder=\(searchField.isFirstResponder)")
         onSearchActivate?()
+        print("[diag] onSearchActivate is wired: \(onSearchActivate != nil)")
     }
 
     func textField(_ textField: UITextField, shouldChangeCharactersIn range: NSRange, replacementString string: String) -> Bool {
