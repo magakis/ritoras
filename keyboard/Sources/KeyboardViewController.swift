@@ -691,77 +691,13 @@ class KeyboardViewController: UIInputViewController {
             return
         }
         state = .inserting
-        textDocumentProxy.insertText(text + " ")
+        textDocumentProxy.insertText(normalizedDictationInsertion(of: text))
         FileLogger.shared.info(.keyboard, "Inserted dictation",
                                payload: ["length": text.count, "preview": String(text.prefix(30))])
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             FileLogger.shared.debug(.keyboard, "Dictation insertion complete, resetting to idle")
             self?.state = .idle
         }
-    }
-
-    private func startPollingForDictation(payloadId: UUID) {
-        if inputTarget != .hostApp {
-            FileLogger.shared.warn(.keyboard, "dictation result arrived but inputTarget is not .hostApp",
-                                   payload: ["inputTarget": String(describing: inputTarget)])
-        }
-        pollCount = 0
-        pollTimer?.invalidate()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
-            guard let self = self else { timer.invalidate(); return }
-            self.pollCount += 1
-
-            // Timeout after 30 seconds
-            if self.pollCount > 30 {
-                FileLogger.shared.warn(.keyboard, "Polling timed out after 30s",
-                                       payload: ["payloadId": payloadId.uuidString])
-                timer.invalidate()
-                self.state = .error("Dictation timed out. Try again.")
-                self.clearDictationPayload()
-                return
-            }
-
-            guard let payload = DictationPayload.current() else { return }
-            guard payload.id == payloadId else { return }  // Ignore different payloads
-
-            switch payload.status {
-            case .completed:
-                timer.invalidate()
-                let text = payload.text ?? ""
-                if text.isEmpty {
-                    self.state = .error("Nothing was heard. Try again.")
-                } else {
-                    self.state = .inserting
-                    self.textDocumentProxy.insertText(text + " ")
-                }
-                FileLogger.shared.info(.keyboard, "Inserted dictation after polling",
-                                       payload: ["length": text.count, "preview": String(text.prefix(30))])
-                self.lastProcessedPayloadId = payload.id
-                self.clearDictationPayload()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                    self?.state = .idle
-                }
-
-            case .error:
-                timer.invalidate()
-                self.state = .error(payload.errorMessage ?? "Transcription failed.")
-                self.lastProcessedPayloadId = payload.id
-                self.clearDictationPayload()
-
-            case .cancelled:
-                timer.invalidate()
-                self.clearDictationPayload()
-                self.state = .idle
-
-            case .recording, .transcribing:
-                break  // Keep polling
-            }
-        }
-    }
-
-    private func clearDictationPayload() {
-        guard let defaults = UserDefaults(suiteName: SharedConfig.Defaults.appGroupId) else { return }
-        defaults.removeObject(forKey: SharedConfig.Defaults.dictationPayloadKey)
     }
 
     // MARK: - Server Polling (Works when app is backgrounded)
@@ -890,81 +826,6 @@ class KeyboardViewController: UIInputViewController {
         task.resume()
     }
 
-    // MARK: - Clipboard Transport (SideStore fallback)
-
-    /// Reads a dictation payload from the system pasteboard and processes it.
-    /// Called when the App Group path returns nothing (SideStore signing).
-    private func tryClipboardDictation() {
-        if inputTarget != .hostApp {
-            FileLogger.shared.warn(.keyboard, "dictation result arrived but inputTarget is not .hostApp",
-                                   payload: ["inputTarget": String(describing: inputTarget)])
-        }
-        guard let clipboardStr = UIPasteboard.general.string else { return }
-        guard let data = clipboardStr.data(using: .utf8) else { return }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-        guard json["source"] as? String == "ritoras" else { return }
-
-        guard let timestamp = json["timestamp"] as? Double else { return }
-        guard Date().timeIntervalSince1970 - timestamp < 120 else { return }  // Only recent payloads
-
-        let status = json["status"] as? String ?? ""
-        let payloadIdString = json["id"] as? String ?? ""
-        let payloadId = UUID(uuidString: payloadIdString)
-
-        // Prevent double-processing
-        if payloadId == lastProcessedPayloadId { return }
-
-        switch status {
-        case "completed":
-            let text = json["text"] as? String ?? ""
-            if text.isEmpty {
-                state = .error("Nothing was heard. Try again.")
-            } else {
-                state = .inserting
-                textDocumentProxy.insertText(text + " ")
-                FileLogger.shared.info(.keyboard, "Auto-inserted dictation from clipboard",
-                                       payload: ["length": text.count, "preview": String(text.prefix(30))])
-            }
-            lastProcessedPayloadId = payloadId
-            pendingRequestId = nil
-            clearClipboardDictation()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                self?.state = .idle
-            }
-
-        case "transcribing", "recording":
-            // Check if this is stale data from a previous session
-            let age = Date().timeIntervalSince1970 - timestamp
-            if age > 15 {
-                // Stale — the app should have progressed by now. Clear and ignore.
-                FileLogger.shared.warn(.keyboard, "Ignoring stale clipboard data",
-                                       payload: ["age": age, "status": status])
-                clearClipboardDictation()
-                return  // Stay in current state (idle)
-            }
-            FileLogger.shared.debug(.keyboard, "Dictation still \(status) (clipboard), starting poll",
-                                    payload: ["age": age])
-            state = .waiting
-            if clipboardPollTimer == nil {
-                startClipboardPolling()
-            }
-            return
-
-        case "error":
-            let errorMessage = json["errorMessage"] as? String ?? "Transcription failed."
-            state = .error(errorMessage)
-            lastProcessedPayloadId = payloadId
-            clearClipboardDictation()
-
-        case "cancelled":
-            clearClipboardDictation()
-            // Stay idle
-
-        default:
-            break
-        }
-    }
-
     /// Polls the clipboard every second for up to 30 seconds while the
     /// container app is still transcribing or recording.
     private func startClipboardPolling() {
@@ -989,7 +850,6 @@ class KeyboardViewController: UIInputViewController {
                 return
             }
 
-            // Directly check clipboard — do NOT call tryClipboardDictation() (causes infinite recursion)
             guard let clipboardStr = UIPasteboard.general.string,
                   let data = clipboardStr.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1014,7 +874,7 @@ class KeyboardViewController: UIInputViewController {
                     self.state = .error("Nothing was heard. Try again.")
                 } else {
                     self.state = .inserting
-                    self.textDocumentProxy.insertText(text + " ")
+                    self.insertDictationResult(text: text)
                     FileLogger.shared.info(.keyboard, "Inserted dictation from clipboard poll",
                                            payload: ["length": text.count, "preview": String(text.prefix(30))])
                 }
@@ -1425,6 +1285,17 @@ extension KeyboardViewController: KeyboardViewDelegate {
         guard context.count > word.count + 1 else { return false }
         let suffix = String(context.suffix(word.count + 1))
         return suffix == word + " "
+    }
+
+    /// Returns the text to insert so the document never has two consecutive spaces,
+    /// regardless of what trailing whitespace the transcription carried or what the
+    /// document already ends with.
+    private func normalizedDictationInsertion(of text: String) -> String {
+        let trimmedText = text.trimmingCharacters(in: .whitespaces)
+        let context = textDocumentProxy.documentContextBeforeInput ?? ""
+        if context.isEmpty { return trimmedText }
+        if context.last?.isWhitespace == true { return trimmedText }
+        return trimmedText + " "
     }
 
     // MARK: - Auto-Capitalization Helpers
