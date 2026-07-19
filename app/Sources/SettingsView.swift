@@ -172,9 +172,14 @@ struct SettingsView: View {
 
     private var diagnosticsSection: some View {
         Section {
+            Toggle("Verbose Logging", isOn: $settings.verboseLogging)
             NavigationLink("Debug Log") {
                 DebugLogView()
             }
+        } header: {
+            Text("Diagnostics")
+        } footer: {
+            Text("Verbose Logging writes additional debug-level entries to the log. Off by default.")
         }
     }
 
