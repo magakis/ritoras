@@ -70,9 +70,7 @@ private final class VADContext: @unchecked Sendable {
                 speechSampleCount += frameLength
                 if speechSampleCount >= minSpeechSamples {
                     isSpeaking = true
-                    #if DEBUG
-                    print("[StreamingAudioRecorder] VAD: idle → speaking")
-                    #endif
+                    FileLogger.shared.debug(.audio, "VAD: idle → speaking")
                 }
             }
         } else {
@@ -80,19 +78,17 @@ private final class VADContext: @unchecked Sendable {
             silenceSampleCount += frameLength
 
             if isSpeaking && silenceSampleCount >= silenceThresholdSamples {
-                #if DEBUG
                 let silenceMs = Double(silenceSampleCount) / 16.0
-                print("[StreamingAudioRecorder] VAD: pause \(silenceMs) ms → emit")
-                #endif
+                FileLogger.shared.debug(.audio, "VAD: pause → emit",
+                                        payload: ["silenceMs": silenceMs])
                 return emit()
             }
         }
 
         // Force-flush at max chunk size regardless of VAD state
         if totalSamples >= maxChunkSamples {
-            #if DEBUG
-            print("[StreamingAudioRecorder] VAD: force-flush at \(totalSamples) samples")
-            #endif
+            FileLogger.shared.debug(.audio, "VAD: force-flush",
+                                    payload: ["totalSamples": totalSamples])
             return emit()
         }
 
@@ -116,9 +112,8 @@ private final class VADContext: @unchecked Sendable {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         guard !accumulator.isEmpty else { return nil }
-        #if DEBUG
-        print("[StreamingAudioRecorder] VAD: flush \(accumulator.count) trailing samples")
-        #endif
+        FileLogger.shared.debug(.audio, "VAD: flush trailing samples",
+                                payload: ["count": accumulator.count])
         return emit()
     }
 }
@@ -211,9 +206,7 @@ actor StreamingAudioRecorder {
             channels: 1,
             interleaved: false
         ) else {
-            #if DEBUG
-            print("[StreamingAudioRecorder] CRASH-PROOF: Could not create 16kHz mono float32 audio format")
-            #endif
+            FileLogger.shared.error(.audio, "CRASH-PROOF: Could not create 16kHz mono float32 audio format")
             throw StreamingRecorderError.engineStartFailed(
                 NSError(domain: "StreamingAudioRecorder", code: 1,
                         userInfo: [NSLocalizedDescriptionKey: "Could not create 16kHz mono float32 audio format"])
@@ -224,9 +217,7 @@ actor StreamingAudioRecorder {
 
         // Verify the input node has a valid audio route
         guard inputNode.outputFormat(forBus: 0).sampleRate > 0 else {
-            #if DEBUG
-            print("[StreamingAudioRecorder] CRASH-PROOF: Audio input unavailable (no microphone route)")
-            #endif
+            FileLogger.shared.error(.audio, "CRASH-PROOF: Audio input unavailable (no microphone route)")
             throw StreamingRecorderError.engineStartFailed(
                 NSError(domain: "StreamingAudioRecorder", code: 2,
                         userInfo: [NSLocalizedDescriptionKey: "Audio input unavailable (no microphone route)"])
@@ -246,24 +237,22 @@ actor StreamingAudioRecorder {
             let frameLength = Int(buffer.frameLength)
             guard frameLength > 0,
                   let channelData = buffer.floatChannelData else {
-                #if DEBUG
-                print("[StreamingAudioRecorder] tap callback: invalid buffer (frameLength=\(frameLength), floatChannelData=\(buffer.floatChannelData != nil ? "non-nil" : "nil"))")
-                #endif
+                FileLogger.shared.warn(.audio, "tap callback: invalid buffer",
+                                       payload: ["frameLength": frameLength,
+                                                 "hasChannelData": buffer.floatChannelData != nil])
                 return
             }
 
-            #if DEBUG
-            print("[StreamingAudioRecorder] tap callback: valid buffer, frameLength=\(frameLength)")
-            #endif
+            FileLogger.shared.debug(.audio, "tap callback: valid buffer",
+                                    payload: ["frameLength": frameLength])
 
             let floatPtr = UnsafeBufferPointer(start: channelData[0], count: frameLength)
 
             // Copy samples on the audio thread (bounded allocation, acceptable)
             let samples = Array(floatPtr)
 
-            #if DEBUG
-            print("[StreamingAudioRecorder] tap callback: dispatching \(samples.count) samples to vadQueue")
-            #endif
+            FileLogger.shared.debug(.audio, "tap callback: dispatching samples to vadQueue",
+                                    payload: ["sampleCount": samples.count])
 
             // Dispatch ALL heavy work (RMS, VAD, chunk emission) to the serial
             // queue — no locks, no closures-with-ARC, no Tasks on the audio thread.
@@ -280,9 +269,9 @@ actor StreamingAudioRecorder {
 
                 // Emit chunk if ready (Task created off the audio thread)
                 if let emission = emission {
-                    #if DEBUG
-                    print("[StreamingAudioRecorder] vadQueue: emission chunkId=\(emission.chunkId), samples=\(emission.samples.count)")
-                    #endif
+                    FileLogger.shared.debug(.audio, "vadQueue: emission",
+                                            payload: ["chunkId": emission.chunkId,
+                                                      "sampleCount": emission.samples.count])
                     Task {
                         await handler(emission.chunkId, emission.samples)
                     }
@@ -303,9 +292,11 @@ actor StreamingAudioRecorder {
 
         isRecording = true
 
-        #if DEBUG
-        print("[StreamingAudioRecorder] Started | RMS: \(SharedConfig.Defaults.streamVadSpeechRms) | silence: \(SharedConfig.Defaults.streamVadSilenceMs) ms | minSpeech: \(SharedConfig.Defaults.streamVadMinSpeechMs) ms | maxChunk: \(SharedConfig.Defaults.streamMaxChunkSeconds) s")
-        #endif
+        FileLogger.shared.info(.audio, "Started",
+                               payload: ["rms": SharedConfig.Defaults.streamVadSpeechRms,
+                                         "silenceMs": SharedConfig.Defaults.streamVadSilenceMs,
+                                         "minSpeechMs": SharedConfig.Defaults.streamVadMinSpeechMs,
+                                         "maxChunkSeconds": SharedConfig.Defaults.streamMaxChunkSeconds])
     }
 
     // MARK: - Stop
@@ -339,8 +330,6 @@ actor StreamingAudioRecorder {
 
         onChunk = nil
 
-        #if DEBUG
-        print("[StreamingAudioRecorder] Stopped")
-        #endif
+        FileLogger.shared.info(.audio, "Stopped")
     }
 }

@@ -24,33 +24,28 @@ class AppSettings: ObservableObject {
         dictationMode = SharedConfig.dictationMode()
 
         $servers.dropFirst().sink { [weak self] newValue in
-            #if DEBUG
-            print("[AppSettings] saving servers (\(newValue.count) entries)")
-            #endif
+            FileLogger.shared.info(.settings, "saving servers",
+                                   payload: ["count": newValue.count])
             self?.saveServers(newValue)
         }.store(in: &cancellables)
         $timeoutSeconds.dropFirst().sink { [weak self] newValue in
-            #if DEBUG
-            print("[AppSettings] saving timeoutSeconds=\(newValue)")
-            #endif
+            FileLogger.shared.info(.settings, "saving timeoutSeconds",
+                                   payload: ["value": newValue])
             self?.saveTimeoutSeconds(newValue)
         }.store(in: &cancellables)
         $autoCapitalizationEnabled.dropFirst().sink { [weak self] newValue in
-            #if DEBUG
-            print("[AppSettings] saving autoCapitalizationEnabled=\(newValue)")
-            #endif
+            FileLogger.shared.info(.settings, "saving autoCapitalizationEnabled",
+                                   payload: ["value": newValue])
             self?.saveAutoCapitalizationEnabled(newValue)
         }.store(in: &cancellables)
         $autocorrectOnSpaceEnabled.dropFirst().sink { [weak self] newValue in
-            #if DEBUG
-            print("[AppSettings] saving autocorrectOnSpaceEnabled=\(newValue)")
-            #endif
+            FileLogger.shared.info(.settings, "saving autocorrectOnSpaceEnabled",
+                                   payload: ["value": newValue])
             self?.saveAutocorrectOnSpaceEnabled(newValue)
         }.store(in: &cancellables)
         $dictationMode.dropFirst().sink { [weak self] newValue in
-            #if DEBUG
-            print("[AppSettings] saving dictationMode=\(newValue.rawValue)")
-            #endif
+            FileLogger.shared.info(.settings, "saving dictationMode",
+                                   payload: ["value": newValue.rawValue])
             self?.saveDictationMode(newValue)
         }.store(in: &cancellables)
     }

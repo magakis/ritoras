@@ -78,9 +78,8 @@ actor WhisperStreamClient {
         task = newTask
         newTask.resume()
 
-#if DEBUG
-        print("[WhisperStreamClient] Connecting to \(url)")
-#endif
+        FileLogger.shared.info(.network, "Connecting to WebSocket",
+                               payload: ["url": url.absoluteString])
 
         try await withThrowingTaskGroup(of: Void.self) { group in
             // Probe: send PING, wait for PONG
@@ -92,9 +91,8 @@ actor WhisperStreamClient {
                         switch try await newTask.receive() {
                         case .string(let text):
                             if text.contains("PONG") {
-#if DEBUG
-                                print("[WhisperStreamClient] Connected (PONG received)")
-#endif
+                                FileLogger.shared.info(.network, "Connected (PONG received)",
+                                                       payload: ["url": self.url.absoluteString])
                                 return
                             }
                             // Unexpected message before PONG — ignore
@@ -117,9 +115,9 @@ actor WhisperStreamClient {
                 try await Task.sleep(
                     nanoseconds: UInt64(SharedConfig.Defaults.streamWsConnectTimeout * 1_000_000_000)
                 )
-#if DEBUG
-                print("[WhisperStreamClient] Connection timed out")
-#endif
+                FileLogger.shared.warn(.network, "Connection timed out",
+                                       payload: ["url": self.url.absoluteString,
+                                                 "timeout": SharedConfig.Defaults.streamWsConnectTimeout])
                 throw WhisperError.timeout
             }
 
@@ -157,9 +155,8 @@ actor WhisperStreamClient {
 
         try await task.send(.data(data))
 
-#if DEBUG
-        print("[WhisperStreamClient] Sent chunk \(id) (\(data.count) bytes)")
-#endif
+        FileLogger.shared.debug(.network, "Sent chunk",
+                                payload: ["chunkId": id, "bytes": data.count])
     }
 
     /// Signals the end of the audio stream by sending
@@ -170,9 +167,7 @@ actor WhisperStreamClient {
             throw WhisperError.networkError(URLError(.notConnectedToInternet))
         }
         try await task.send(.string(#"{"type":"END"}"#))
-#if DEBUG
-        print("[WhisperStreamClient] Sent END")
-#endif
+        FileLogger.shared.info(.network, "Sent END")
     }
 
     /// Sends a keepalive ping (`{"type":"PING"}`).  The server's
@@ -183,9 +178,7 @@ actor WhisperStreamClient {
             throw WhisperError.networkError(URLError(.notConnectedToInternet))
         }
         try await task.send(.string(#"{"type":"PING"}"#))
-#if DEBUG
-        print("[WhisperStreamClient] Sent PING")
-#endif
+        FileLogger.shared.debug(.network, "Sent PING")
     }
 
     // MARK: - Receiving
@@ -234,40 +227,36 @@ actor WhisperStreamClient {
                                 case "partial":
                                     let msg = try JSONDecoder().decode(
                                         StreamPartial.self, from: data)
-#if DEBUG
-                                    let preview = msg.transcription.prefix(60)
-                                    print("[WhisperStreamClient] Received partial: \"\(preview)...\"")
-#endif
+                                    FileLogger.shared.debug(.network, "Received partial",
+                                                            payload: ["preview": String(msg.transcription.prefix(60)),
+                                                                      "length": msg.transcription.count,
+                                                                      "chunkId": msg.chunk_id as Any])
                                     onPartial(msg.transcription)
 
                                 case "final":
                                     let msg = try JSONDecoder().decode(
                                         StreamFinal.self, from: data)
-#if DEBUG
-                                    let preview = msg.transcription.prefix(60)
-                                    print("[WhisperStreamClient] Received final: \"\(preview)...\"")
-#endif
+                                    FileLogger.shared.info(.network, "Received final",
+                                                           payload: ["preview": String(msg.transcription.prefix(60)),
+                                                                     "length": msg.transcription.count,
+                                                                     "chunkId": msg.chunk_id as Any])
                                     return msg.transcription
 
                                 case "PONG":
-#if DEBUG
-                                    print("[WhisperStreamClient] Received PONG")
-#endif
+                                    FileLogger.shared.debug(.network, "Received PONG")
                                     continue
 
                                 case "error":
                                     let msg = try JSONDecoder().decode(
                                         StreamError.self, from: data)
-#if DEBUG
-                                    print("[WhisperStreamClient] Received error: \(msg.message)")
-#endif
+                                    FileLogger.shared.error(.network, "Received error",
+                                                            payload: ["message": msg.message])
                                     throw WhisperError.httpError(0, msg.message)
 
                                 default:
                                     // Unknown type — defensive: ignore
-#if DEBUG
-                                    print("[WhisperStreamClient] Ignored unknown message type: \(base.type)")
-#endif
+                                    FileLogger.shared.warn(.network, "Ignored unknown message type",
+                                                           payload: ["type": base.type])
                                     continue
                                 }
 
@@ -275,9 +264,8 @@ actor WhisperStreamClient {
                                 throw error
                             } catch {
                                 // Malformed frame — log and skip
-#if DEBUG
-                                print("[WhisperStreamClient] Malformed frame, skipping: \(error)")
-#endif
+                                FileLogger.shared.warn(.network, "Malformed frame, skipping",
+                                                       payload: ["error": error.localizedDescription])
                                 continue
                             }
 
@@ -302,9 +290,8 @@ actor WhisperStreamClient {
                 try await Task.sleep(
                     nanoseconds: UInt64(SharedConfig.Defaults.streamFinalTimeout * 1_000_000_000)
                 )
-#if DEBUG
-                print("[WhisperStreamClient] receiveMessages timed out")
-#endif
+                FileLogger.shared.warn(.network, "receiveMessages timed out",
+                                       payload: ["timeout": SharedConfig.Defaults.streamFinalTimeout])
                 throw WhisperError.timeout
             }
 
@@ -324,9 +311,7 @@ actor WhisperStreamClient {
         // Cancel any in-flight receive/send operations and close.
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
-#if DEBUG
-        print("[WhisperStreamClient] Disconnected")
-#endif
+        FileLogger.shared.info(.network, "Disconnected")
     }
 
     // MARK: - Decodable Helpers

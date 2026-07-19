@@ -8,7 +8,7 @@ struct RitorasApp: App {
     @State private var dictationRequest: DictationRequest?
 
     init() {
-        FileLogger.shared.info(.app, "Container app launched", payload: ["version": Bundle.main.infoDictionary?["CFBundleVersion" ?? "?"])
+        FileLogger.shared.info(.app, "Container app launched", payload: ["version": Bundle.main.infoDictionary?["CFBundleVersion"] ?? "?"])
     }
 
     var body: some Scene {
@@ -31,19 +31,22 @@ struct RitorasApp: App {
                 }
             }
             .onOpenURL { url in
-                print("📡 [RitorasApp] Received URL: \(url.absoluteString)")
+                FileLogger.shared.info(.app, "Received URL", payload: ["url": url.absoluteString])
 
                 guard url.scheme == SharedConfig.Defaults.urlScheme,
                       url.host == SharedConfig.Defaults.dictateURLPath else {
-                    print("📡 [RitorasApp] URL doesn't match ritoras://dictate — ignoring")
+                    FileLogger.shared.debug(.app, "URL doesn't match ritoras://dictate — ignoring",
+                                              payload: ["url": url.absoluteString])
                     return
                 }
 
                 if let id = parseId(from: url) {
-                    print("📡 [RitorasApp] Parsed dictation ID: \(id)")
+                    FileLogger.shared.info(.app, "Parsed dictation ID",
+                                           payload: ["id": id.uuidString, "url": url.absoluteString])
                     dictationRequest = DictationRequest(id: id)
                 } else {
-                    print("📡 [RitorasApp] Failed to parse ID from URL: \(url)")
+                    FileLogger.shared.warn(.app, "Failed to parse ID from URL",
+                                           payload: ["url": url.absoluteString])
                     // Don't present DictationView with random UUID
                 }
             }

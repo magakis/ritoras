@@ -63,12 +63,13 @@ final class DictationViewModel: ObservableObject {
     private func postResultToServer(status: String, text: String? = nil, errorMessage: String? = nil) {
         let config = SharedConfig.load()
         guard let server = config.servers.first else {
-            print("⚠️ postResultToServer: no server configured")
+            FileLogger.shared.warn(.network, "postResultToServer: no server configured")
             return
         }
         let baseURL = server.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: "\(baseURL)/dictation_result") else {
-            print("⚠️ postResultToServer: invalid URL")
+            FileLogger.shared.warn(.network, "postResultToServer: invalid URL",
+                                   payload: ["baseURL": baseURL])
             return
         }
 
@@ -88,16 +89,20 @@ final class DictationViewModel: ObservableObject {
         do {
             request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         } catch {
-            print("⚠️ postResultToServer: failed to serialize JSON: \(error)")
+            FileLogger.shared.error(.network, "postResultToServer: failed to serialize JSON",
+                                    payload: ["error": error.localizedDescription])
             return
         }
 
-        print("📡 postResultToServer: POSTing to \(url.absoluteString) status=\(status)")
+        FileLogger.shared.info(.network, "postResultToServer: POSTing",
+                               payload: ["url": url.absoluteString, "status": status])
         URLSession.shared.dataTask(with: request) { _, response, error in
             if let error = error {
-                print("⚠️ postResultToServer: error: \(error)")
+                FileLogger.shared.error(.network, "postResultToServer: error",
+                                        payload: ["error": error.localizedDescription])
             } else if let response = response as? HTTPURLResponse {
-                print("📡 postResultToServer: response \(response.statusCode)")
+                FileLogger.shared.info(.network, "postResultToServer: response",
+                                       payload: ["statusCode": response.statusCode])
             }
         }.resume()
     }
@@ -170,9 +175,7 @@ final class DictationViewModel: ObservableObject {
             }
 
         case .stream:
-            #if DEBUG
-            print("[DictationVM] start mode: stream")
-            #endif
+            FileLogger.shared.info(.transcription, "start mode: stream")
 
             livePartial = ""
 
@@ -192,14 +195,12 @@ final class DictationViewModel: ObservableObject {
                     do {
                         try await candidate.connect()
                         client = candidate
-                        #if DEBUG
-                        print("[DictationVM] Stream: connected to \(base)")
-                        #endif
+                        FileLogger.shared.info(.network, "Stream: connected to server",
+                                               payload: ["base": base])
                         break
                     } catch {
-                        #if DEBUG
-                        print("[DictationVM] Stream: server \(base) failed: \(error.localizedDescription)")
-                        #endif
+                        FileLogger.shared.warn(.network, "Stream: server failed",
+                                               payload: ["base": base, "error": error.localizedDescription])
                         lastError = error
                         await candidate.disconnect()
                         continue
@@ -209,30 +210,24 @@ final class DictationViewModel: ObservableObject {
                 guard let client = client else {
                     throw lastError ?? WhisperError.allServersFailed(config.servers)
                 }
-                #if DEBUG
-                print("[DictationVM] Stream: WebSocket connected")
-                #endif
+                FileLogger.shared.info(.network, "Stream: WebSocket connected")
                 streamClient = client
 
                 let recorder = StreamingAudioRecorder()
                 streamRecorder = recorder
 
                 try await recorder.start { [weak self] chunkId, samples in
-                    #if DEBUG
-                    print("[DictationVM] Stream: chunk \(chunkId) (\(samples.count) samples)")
-                    #endif
+                    FileLogger.shared.debug(.audio, "Stream: chunk produced",
+                                            payload: ["chunkId": chunkId, "sampleCount": samples.count])
                     guard let client = await self?.streamClient else { return }
                     try? await client.sendChunk(id: chunkId, samples: samples)
                 }
-                #if DEBUG
-                print("[DictationVM] Stream: recorder started")
-                #endif
+                FileLogger.shared.info(.audio, "Stream: recorder started")
 
                 UIApplication.shared.isIdleTimerDisabled = true
             } catch {
-                #if DEBUG
-                print("[DictationVM] Stream start error: \(error.localizedDescription)")
-                #endif
+                FileLogger.shared.error(.transcription, "Stream start error",
+                                        payload: ["error": error.localizedDescription])
                 await streamClient?.disconnect()
                 streamClient = nil
                 streamRecorder = nil
@@ -314,9 +309,7 @@ final class DictationViewModel: ObservableObject {
             }
 
         case .stream:
-            #if DEBUG
-            print("[DictationVM] stop mode: stream")
-            #endif
+            FileLogger.shared.info(.transcription, "stop mode: stream")
 
             guard let id = activeID else { return }
 
@@ -334,30 +327,25 @@ final class DictationViewModel: ObservableObject {
 
             do {
                 try await streamClient?.sendEnd()
-                #if DEBUG
-                print("[DictationVM] Stream: END sent, awaiting final")
-                #endif
+                FileLogger.shared.info(.network, "Stream: END sent, awaiting final")
 
                 let text = try await streamClient?.receiveMessages { [weak self] partial in
-                    #if DEBUG
-                    let preview = partial.prefix(60)
-                    print("[DictationVM] livePartial updated: \"\(preview)...\"")
-                    #endif
+                    FileLogger.shared.debug(.transcription, "livePartial updated",
+                                            payload: ["preview": String(partial.prefix(60)),
+                                                      "length": partial.count])
                     Task { @MainActor in
                         self?.livePartial = partial
                     }
                 } ?? ""
 
-                #if DEBUG
-                let preview = text.prefix(60)
-                print("[DictationVM] Stream final received: \"\(preview)...\"")
-                #endif
+                FileLogger.shared.info(.transcription, "Stream final received",
+                                       payload: ["preview": String(text.prefix(60)),
+                                                 "length": text.count])
 
                 guard activeID == id else { return }
 
-                #if DEBUG
-                print("[DictationVM] Stream success: delivering via all channels")
-                #endif
+                FileLogger.shared.info(.transcription, "Stream success: delivering via all channels",
+                                       payload: ["length": text.count, "preview": String(text.prefix(60))])
                 DictationPayload(id: id, status: .completed, text: text, timestamp: Date()).save()
                 writeToClipboard(status: "completed", text: text)
                 postResultToServer(status: "completed", text: text)
@@ -367,9 +355,8 @@ final class DictationViewModel: ObservableObject {
             } catch {
                 guard activeID == id else { return }
                 let message = error.localizedDescription
-                #if DEBUG
-                print("[DictationVM] Stream error: \(message)")
-                #endif
+                FileLogger.shared.error(.transcription, "Stream error",
+                                        payload: ["error": message])
                 DictationPayload(id: id, status: .error, errorMessage: message, timestamp: Date()).save()
                 writeToClipboard(status: "error", errorMessage: message)
                 postResultToServer(status: "error", errorMessage: message)
@@ -389,17 +376,13 @@ final class DictationViewModel: ObservableObject {
     }
 
     func cancel() async {
-        #if DEBUG
-        print("[DictationVM] cancel: stream teardown")
-        #endif
+        FileLogger.shared.info(.transcription, "cancel: stream teardown")
         await streamRecorder?.stop()
         await streamClient?.disconnect()
         streamClient = nil
         streamRecorder = nil
 
-        #if DEBUG
-        print("[DictationVM] cancel: batch teardown")
-        #endif
+        FileLogger.shared.info(.transcription, "cancel: batch teardown")
         UIApplication.shared.isIdleTimerDisabled = false
         await recorder?.cleanup()
         recorder = nil
