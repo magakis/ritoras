@@ -38,6 +38,7 @@ struct SettingsView: View {
             dictationSection
             keyboardSection
             historySection
+            diagnosticsSection
             infoSection
         }
         .navigationTitle("Ritoras Settings")
@@ -163,6 +164,16 @@ struct SettingsView: View {
         Section {
             NavigationLink("Transcription History") {
                 HistoryView()
+            }
+        }
+    }
+
+    // MARK: - Diagnostics Section
+
+    private var diagnosticsSection: some View {
+        Section {
+            NavigationLink("Debug Log") {
+                DebugLogView()
             }
         }
     }

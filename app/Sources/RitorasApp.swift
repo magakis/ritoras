@@ -7,6 +7,10 @@ struct RitorasApp: App {
     @AppStorage("onboardingCompleted") private var onboardingCompleted = false
     @State private var dictationRequest: DictationRequest?
 
+    init() {
+        FileLogger.shared.info(.app, "Container app launched", payload: ["version": Bundle.main.infoDictionary?["CFBundleVersion" ?? "?"])
+    }
+
     var body: some Scene {
         WindowGroup {
             Group {
