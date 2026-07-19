@@ -108,11 +108,14 @@ final class EmojiPanelView: UIView {
         return button
     }()
     private let collectionView: UICollectionView
-    private let categoryToolbar: UIView = {
-        let view = UIView()
-        view.translatesAutoresizingMaskIntoConstraints = false
-        view.backgroundColor = .clear
-        return view
+    private let categoryToolbar: UIStackView = {
+        let stack = UIStackView()
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.axis = .horizontal
+        stack.distribution = .fillEqually
+        stack.alignment = .center
+        stack.spacing = 0
+        return stack
     }()
     private let abcButton: UIButton = {
         let button = UIButton(type: .system)
@@ -216,7 +219,6 @@ final class EmojiPanelView: UIView {
     /// Point size for the emoji-toggle key's SF Symbol on the letter keyboard.
     /// Slightly larger than modeKeyPointSize so the smiley reads as a primary affordance.
     static let emojiToggleIconPointSize: CGFloat = 20
-    private static let highlightTag = 999
     /// Ordered category ids matching the toolbar icon button order.
     private static let categoryOrder: [String] = [
         "people", "nature", "foods", "activity",
@@ -386,45 +388,32 @@ final class EmojiPanelView: UIView {
         categoryToolbar.backgroundColor = .clear
         addSubview(categoryToolbar)
 
+        // Match the search-pill horizontal insets (leading 8, trailing 8).
         NSLayoutConstraint.activate([
             categoryToolbar.bottomAnchor.constraint(equalTo: bottomAnchor),
-            categoryToolbar.leadingAnchor.constraint(equalTo: leadingAnchor),
-            categoryToolbar.trailingAnchor.constraint(equalTo: trailingAnchor),
+            categoryToolbar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            categoryToolbar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             categoryToolbar.heightAnchor.constraint(equalToConstant: 44),
         ])
 
         let iconConfig = UIImage.SymbolConfiguration(pointSize: Self.toolbarIconPointSize, weight: .regular)
 
-        // 1. ABC — dismiss to keyboard (pinned to leading edge)
+        // 1. ABC — dismiss to keyboard
         abcButton.setTitleColor(Self.modeKeyTextColor, for: .normal)
         abcButton.titleLabel?.font = .systemFont(ofSize: Self.modeKeyPointSize, weight: .regular)
         abcButton.addTarget(self, action: #selector(abcTapped), for: .touchUpInside)
-        categoryToolbar.addSubview(abcButton)
+        categoryToolbar.addArrangedSubview(abcButton)
 
-        // 2-10. Scrollable category icons in the middle
-        let categoryScrollView = UIScrollView()
-        categoryScrollView.translatesAutoresizingMaskIntoConstraints = false
-        categoryScrollView.showsHorizontalScrollIndicator = false
-        categoryToolbar.addSubview(categoryScrollView)
-
-        let categoryStackView = UIStackView()
-        categoryStackView.translatesAutoresizingMaskIntoConstraints = false
-        categoryStackView.axis = .horizontal
-        categoryStackView.distribution = .fill
-        categoryStackView.alignment = .center
-        categoryStackView.spacing = 0
-        categoryScrollView.addSubview(categoryStackView)
-
-        // Recents (clock)
+        // 2. Recents (clock)
         recentsButton.setImage(
             UIImage(systemName: Self.recentsIconName, withConfiguration: iconConfig),
             for: .normal
         )
         recentsButton.tintColor = Self.modeKeyTextColor
         recentsButton.addTarget(self, action: #selector(recentsTapped), for: .touchUpInside)
-        categoryStackView.addArrangedSubview(recentsButton)
+        categoryToolbar.addArrangedSubview(recentsButton)
 
-        // Eight category icon buttons
+        // 3-10. Eight category icon buttons
         for (catId, cat) in zip(Self.categoryOrder, EmojiData.categories) {
             let button = UIButton(type: .system)
             button.translatesAutoresizingMaskIntoConstraints = false
@@ -436,11 +425,11 @@ final class EmojiPanelView: UIView {
             button.tintColor = Self.modeKeyTextColor
             button.accessibilityIdentifier = cat.name
             button.addTarget(self, action: #selector(categoryIconTapped(_:)), for: .touchUpInside)
-            categoryStackView.addArrangedSubview(button)
+            categoryToolbar.addArrangedSubview(button)
             categoryIconButtons.append(button)
         }
 
-        // 11. Backspace (pinned to trailing edge)
+        // 11. Backspace
         backspaceButton.setImage(
             UIImage(systemName: Self.backspaceIconName, withConfiguration: iconConfig),
             for: .normal
@@ -450,44 +439,16 @@ final class EmojiPanelView: UIView {
         backspaceButton.addTarget(self, action: #selector(backspaceTouchUp), for: .touchUpInside)
         backspaceButton.addTarget(self, action: #selector(backspaceTouchUp), for: .touchUpOutside)
         backspaceButton.addTarget(self, action: #selector(backspaceTouchUp), for: .touchCancel)
-        categoryToolbar.addSubview(backspaceButton)
-
-        let buttonWidth: CGFloat = 40
-        NSLayoutConstraint.activate([
-            // ABC button pinned to leading edge
-            abcButton.leadingAnchor.constraint(equalTo: categoryToolbar.leadingAnchor),
-            abcButton.topAnchor.constraint(equalTo: categoryToolbar.topAnchor),
-            abcButton.bottomAnchor.constraint(equalTo: categoryToolbar.bottomAnchor),
-            abcButton.widthAnchor.constraint(equalToConstant: buttonWidth),
-
-            // Backspace button pinned to trailing edge
-            backspaceButton.trailingAnchor.constraint(equalTo: categoryToolbar.trailingAnchor),
-            backspaceButton.topAnchor.constraint(equalTo: categoryToolbar.topAnchor),
-            backspaceButton.bottomAnchor.constraint(equalTo: categoryToolbar.bottomAnchor),
-            backspaceButton.widthAnchor.constraint(equalToConstant: buttonWidth),
-
-            // Scroll view fills the middle
-            categoryScrollView.leadingAnchor.constraint(equalTo: abcButton.trailingAnchor),
-            categoryScrollView.trailingAnchor.constraint(equalTo: backspaceButton.leadingAnchor),
-            categoryScrollView.topAnchor.constraint(equalTo: categoryToolbar.topAnchor),
-            categoryScrollView.bottomAnchor.constraint(equalTo: categoryToolbar.bottomAnchor),
-
-            // Stack view pinned to scroll view's content layout guide
-            categoryStackView.leadingAnchor.constraint(equalTo: categoryScrollView.contentLayoutGuide.leadingAnchor),
-            categoryStackView.trailingAnchor.constraint(equalTo: categoryScrollView.contentLayoutGuide.trailingAnchor),
-            categoryStackView.topAnchor.constraint(equalTo: categoryScrollView.frameLayoutGuide.topAnchor),
-            categoryStackView.bottomAnchor.constraint(equalTo: categoryScrollView.frameLayoutGuide.bottomAnchor),
-            categoryStackView.heightAnchor.constraint(equalTo: categoryScrollView.frameLayoutGuide.heightAnchor),
-        ])
+        categoryToolbar.addArrangedSubview(backspaceButton)
 
         updateTabSelection()
     }
 
     private func updateTabSelection() {
-        // Remove existing highlight from all toolbar buttons
-        recentsButton.subviews.first(where: { $0.tag == Self.highlightTag })?.removeFromSuperview()
+        // Clear highlight on all toolbar buttons
+        recentsButton.backgroundColor = .clear
         for button in categoryIconButtons {
-            button.subviews.first(where: { $0.tag == Self.highlightTag })?.removeFromSuperview()
+            button.backgroundColor = .clear
         }
 
         // Determine which button should be highlighted
@@ -498,25 +459,13 @@ final class EmojiPanelView: UIView {
             targetButton = categoryIconButtons.first { $0.accessibilityIdentifier == selectedCategory }
         }
 
-        // Add circular highlight subview behind the icon
+        // Apply circular highlight via backgroundColor + cornerRadius.
+        // The SF Symbol imageView renders on top of backgroundColor natively —
+        // no subview juggling, no z-order races.
         if let button = targetButton {
-            let highlight = UIView()
-            highlight.tag = Self.highlightTag
-            highlight.backgroundColor = Self.categoryHighlightColor
-            highlight.translatesAutoresizingMaskIntoConstraints = false
-            highlight.isUserInteractionEnabled = false
-            button.addSubview(highlight)
-            button.sendSubviewToBack(highlight)
-
-            NSLayoutConstraint.activate([
-                highlight.centerXAnchor.constraint(equalTo: button.centerXAnchor),
-                highlight.centerYAnchor.constraint(equalTo: button.centerYAnchor),
-                highlight.widthAnchor.constraint(equalToConstant: 32),
-                highlight.heightAnchor.constraint(equalToConstant: 32),
-            ])
-
-            highlight.layer.cornerRadius = 16
-            highlight.clipsToBounds = true
+            button.backgroundColor = Self.categoryHighlightColor
+            button.layer.cornerRadius = 22
+            button.layer.masksToBounds = true
         }
     }
 
