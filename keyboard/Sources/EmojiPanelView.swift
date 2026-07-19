@@ -195,6 +195,8 @@ final class EmojiPanelView: UIView {
     private static let columns: CGFloat = 8
     private static let spacing: CGFloat = 6
     private static let cellSize: CGFloat = 36
+    /// Canonical point size for all toolbar content (ABC text + SF Symbols).
+    private static let toolbarContentPointSize: CGFloat = 17
     private static let highlightTag = 999
     /// Ordered category ids matching the toolbar icon button order.
     private static let categoryOrder: [String] = [
@@ -378,10 +380,11 @@ final class EmojiPanelView: UIView {
                 ? UIColor(white: 0.9, alpha: 1)
                 : UIColor(white: 0.2, alpha: 1)
         }
-        let iconConfig = UIImage.SymbolConfiguration(pointSize: 20, weight: .regular)
+        let iconConfig = UIImage.SymbolConfiguration(pointSize: Self.toolbarContentPointSize, weight: .regular)
 
         // 1. ABC — dismiss to keyboard
         abcButton.setTitleColor(adaptiveTint, for: .normal)
+        abcButton.titleLabel?.font = .systemFont(ofSize: Self.toolbarContentPointSize, weight: .regular)
         abcButton.addTarget(self, action: #selector(abcTapped), for: .touchUpInside)
         categoryToolbar.addArrangedSubview(abcButton)
 
