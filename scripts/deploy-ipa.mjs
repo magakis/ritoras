@@ -593,12 +593,20 @@ async function serve() {
         const host = req.headers.host || (detected[0] ? `${detected[0].ip}:${port}` : `localhost:${port}`);
         const versions = listVersions();
         if (versions.length === 0) {
-          res.writeHead(200, { 'Content-Type': 'text/html' });
-          res.end('<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ritoras</title></head><body style="font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f5f5f7;color:#1d1d1f"><p>No builds available yet.</p></body></html>');
+          const fallbackHtml = '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ritoras</title></head><body style="font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f5f5f7;color:#1d1d1f"><p>No builds available yet.</p></body></html>';
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Content-Length': String(Buffer.byteLength(fallbackHtml)),
+          });
+          res.end(fallbackHtml);
           return;
         }
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(renderIndexPage(versions, host, syncState));
+        const pageHtml = renderIndexPage(versions, host, syncState);
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Content-Length': String(Buffer.byteLength(pageHtml)),
+        });
+        res.end(pageHtml);
       } else if (req.method === 'GET' && path.split('?')[0] === '/sync') {
         const wantJson = (req.headers.accept && req.headers.accept.includes('application/json')) || path.includes('json=1');
         const result = await doSync();
