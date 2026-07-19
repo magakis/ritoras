@@ -1,5 +1,4 @@
 import UIKit
-import os
 
 // MARK: - Keyboard State
 
@@ -473,10 +472,7 @@ class KeyboardView: UIView {
             guard let self = self else { return }
             let liveToken = self.delegate?.keyboardContextToken(self) ?? 0
             guard let suggestion = decideSuggestionTap(cache: self.suggestionCache, liveToken: liveToken, index: index) else {
-                #if DEBUG
-                os_log(.error, "[SuggestionCache] stale tap ignored: idx=%d token=%llu live=%llu",
-                       index, self.suggestionCache.token, liveToken)
-                #endif
+                FileLogger.shared.debug(.keyboard, "suggestion cache stale tap ignored", payload: ["idx": index, "cacheToken": self.suggestionCache.token, "liveToken": liveToken])
                 return
             }
             self.delegate?.keyboardView(self, didTapSuggestion: suggestion)

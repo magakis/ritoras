@@ -1,5 +1,4 @@
 import UIKit
-import os
 
 
 private enum BackspacePhase {
@@ -165,13 +164,10 @@ class KeyboardViewController: UIInputViewController {
                     trie: trie
                 )
                 if loaded < 82765 {
-                    os_log(.info,
-                           "PredictionEngine: loaded %d words (partial — memory threshold hit)",
-                           loaded)
+                    FileLogger.shared.info(.dictionary, "prediction engine loaded partial dictionary", payload: ["wordsLoaded": loaded])
                 }
             } catch {
-                os_log("PredictionEngine: failed to load dictionary: %{public}@",
-                       type: .error, error.localizedDescription)
+                FileLogger.shared.error(.dictionary, "prediction engine failed to load dictionary", payload: ["error": error.localizedDescription])
                 DispatchQueue.main.async {
                     self.isPredictionEngineReady = true
                     self.predictionEngine = PredictionEngine()

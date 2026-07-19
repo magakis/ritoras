@@ -1,6 +1,5 @@
 import Foundation
 import UIKit
-import os
 
 /// Persists user-accepted corrections to App Group UserDefaults and mirrors
 /// them to `UITextChecker` for the current process lifetime.
@@ -56,9 +55,9 @@ final class LearnedWordsStore {
         // Verify the write by reading back.
         let readback = defaults.array(forKey: storeKey) as? [String]
         if readback == nil {
-            os_log(.error, "LearnedWordsStore: UserDefaults write verification failed — key %{public}@ returned nil after set", storeKey)
+            FileLogger.shared.error(.dictionary, "learned words write verification failed", payload: ["key": storeKey])
         } else if readback!.count != array.count {
-            os_log(.error, "LearnedWordsStore: UserDefaults write count mismatch — wrote %d, read %d", array.count, readback!.count)
+            FileLogger.shared.error(.dictionary, "learned words write count mismatch", payload: ["wrote": array.count, "read": readback!.count])
         }
     }
 

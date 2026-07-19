@@ -1,5 +1,4 @@
 import Foundation
-import os
 
 /// Loads the bundled frequency dictionary into SymSpell and Trie.
 ///
@@ -136,9 +135,7 @@ enum WordListLoader {
                 if wordCount % 5000 == 0 {
                     let resident = getResidentBytes()
                     if resident > maxResidentBytes {
-                        os_log(.error,
-                               "WordListLoader: memory threshold exceeded (%llu bytes > %llu bytes) — aborting load after %d words",
-                               resident, maxResidentBytes, wordCount)
+                        FileLogger.shared.error(.dictionary, "memory threshold exceeded during word list load", payload: ["resident": resident, "maxBytes": maxResidentBytes, "wordsLoaded": wordCount])
                         return wordCount
                     }
                 }
