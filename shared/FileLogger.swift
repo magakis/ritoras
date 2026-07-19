@@ -7,6 +7,7 @@ enum LogComponent: String {
     case app = "ContainerApp"
     case transcription = "Transcription"
     case audio = "Audio"
+    case dictionary = "Dictionary"
     case network = "Network"
     case settings = "Settings"
     case lifecycle = "Lifecycle"
@@ -36,6 +37,7 @@ final class FileLogger {
 
     func log(_ level: LogLevel, _ component: LogComponent,
              _ message: String, payload: [String: Any]? = nil) {
+        if level == .debug, !SharedConfig.verboseLoggingEnabled() { return }
         let ts = dateFormatter.string(from: Date())
         var line = "\(ts) [\(level.rawValue.uppercased())] [\(component.rawValue)] \(message)"
         if let payload = payload,

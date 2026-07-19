@@ -9,6 +9,7 @@ class AppSettings: ObservableObject {
     @Published var autoCapitalizationEnabled: Bool = true
     @Published var autocorrectOnSpaceEnabled: Bool = true
     @Published var dictationMode: SharedConfig.DictationMode = .batch
+    @Published var verboseLogging: Bool = SharedConfig.Defaults.verboseLoggingDefault
 
     private var appGroupDefaults: UserDefaults?
     private var cancellables = Set<AnyCancellable>()
@@ -22,6 +23,7 @@ class AppSettings: ObservableObject {
         autoCapitalizationEnabled = SharedConfig.autoCapitalizationEnabled()
         autocorrectOnSpaceEnabled = SharedConfig.autocorrectOnSpaceEnabled()
         dictationMode = SharedConfig.dictationMode()
+        verboseLogging = SharedConfig.verboseLoggingEnabled()
 
         $servers.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving servers",
@@ -48,6 +50,11 @@ class AppSettings: ObservableObject {
                                    payload: ["value": newValue.rawValue])
             self?.saveDictationMode(newValue)
         }.store(in: &cancellables)
+        $verboseLogging.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving verboseLogging",
+                                   payload: ["value": newValue])
+            self?.saveVerboseLogging(newValue)
+        }.store(in: &cancellables)
     }
 
     /// Synchronous write to App Group — backs the explicit Save button.
@@ -63,6 +70,7 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(autoCapitalizationEnabled, forKey: SharedConfig.Defaults.autoCapitalizationEnabledKey)
         appGroupDefaults?.set(autocorrectOnSpaceEnabled, forKey: SharedConfig.Defaults.autocorrectOnSpaceEnabledKey)
         appGroupDefaults?.set(dictationMode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
+        appGroupDefaults?.set(verboseLogging, forKey: SharedConfig.Defaults.verboseLoggingKey)
     }
 
     private func saveServers(_ servers: [String]) {
@@ -87,11 +95,16 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(mode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
     }
 
+    private func saveVerboseLogging(_ enabled: Bool) {
+        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.verboseLoggingKey)
+    }
+
     func resetToDefaults() {
         servers = [SharedConfig.Defaults.baseUrl]
         timeoutSeconds = SharedConfig.Defaults.timeoutSeconds
         autoCapitalizationEnabled = SharedConfig.Defaults.autoCapitalizationEnabledDefault
         autocorrectOnSpaceEnabled = SharedConfig.Defaults.autocorrectOnSpaceEnabledDefault
         dictationMode = .batch
+        verboseLogging = SharedConfig.Defaults.verboseLoggingDefault
     }
 }

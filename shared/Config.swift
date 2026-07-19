@@ -110,6 +110,11 @@ struct SharedConfig {
         // Used by the Auto-Correction settings toggle in the container app.
         static let autocorrectOnSpaceEnabledKey = "autocorrectOnSpaceEnabled"
         static let autocorrectOnSpaceEnabledDefault = true
+
+        // MARK: - Verbose Logging
+
+        static let verboseLoggingKey = "verboseLogging"
+        static let verboseLoggingDefault = false
     }
 
     // MARK: - Dictation Mode
@@ -177,5 +182,17 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.autocorrectOnSpaceEnabledKey) as? Bool)
             ?? Defaults.autocorrectOnSpaceEnabledDefault
+    }
+
+    /// Reads the verbose-logging enabled flag from the App Group.
+    /// Used by FileLogger to gate `.debug`-level writes from both the host app
+    /// and the keyboard extension. Returns the default (`false`) when the App
+    /// Group is unavailable or the key is unset.
+    static func verboseLoggingEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.verboseLoggingDefault
+        }
+        return (defaults.object(forKey: Defaults.verboseLoggingKey) as? Bool)
+            ?? Defaults.verboseLoggingDefault
     }
 }
