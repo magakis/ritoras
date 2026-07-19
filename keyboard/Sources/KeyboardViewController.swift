@@ -47,7 +47,7 @@ class KeyboardViewController: UIInputViewController {
     private var uiMode: UIMode = .letters {
         didSet {
             keyboardView.apply(mode: uiMode)
-            keyboardView.refreshDebugOverlay(inputTarget: "\(inputTarget)")
+            keyboardView.refreshDebugOverlay(inputTarget: "\(inputTarget)", uiMode: uiMode)
         }
     }
 
@@ -56,7 +56,7 @@ class KeyboardViewController: UIInputViewController {
     enum InputTarget { case hostApp, emojiSearch }
     private var inputTarget: InputTarget = .hostApp {
         didSet {
-            keyboardView?.refreshDebugOverlay(inputTarget: "\(inputTarget)")
+            keyboardView?.refreshDebugOverlay(inputTarget: "\(inputTarget)", uiMode: uiMode)
         }
     }
 

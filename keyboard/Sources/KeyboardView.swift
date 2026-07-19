@@ -454,6 +454,22 @@ class KeyboardView: UIView {
     /// Active only in `.emojiSearch` mode — gives the emoji panel a fixed height of 80pt.
     private var emojiSearchPanelHeightConstraint: NSLayoutConstraint?
 
+    // MARK: - Diagnostic Log Ring Buffer
+
+    /// Bounded ring buffer of diagnostic log lines. Trimmed to `diagLogMax` entries.
+    private var diagLog: [String] = []
+    /// Maximum number of log entries kept in the ring buffer.
+    private let diagLogMax = 200
+    /// Timestamp formatter reused for every `appendDiag` call.
+    private let diagTimestampFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
+    /// Best-effort HTTP endpoint for streaming log lines to the dev machine.
+    /// Fire-and-forget; failures are silently ignored.
+    private let diagLogEndpoint = URL(string: "http://192.168.88.100:8766/log")
+
     // MARK: - Initialization
 
     override init(frame: CGRect) {
@@ -485,6 +501,7 @@ class KeyboardView: UIView {
             debugLabel.heightAnchor.constraint(equalToConstant: 14),
         ])
         bringSubviewToFront(debugLabel)
+        setupDebugLabelGesture()
 
         rebuildKeyRows()
         apply(mode: .letters)
@@ -827,7 +844,7 @@ class KeyboardView: UIView {
         if showEmojiPanel { reloadEmojiPanel() }
 
         bringSubviewToFront(debugLabel)
-        refreshDebugOverlay(inputTarget: "")
+        refreshDebugOverlay(inputTarget: "", uiMode: mode)
     }
 
     func apply(shift: ShiftState, layoutMode: KeyboardLayoutMode) {
@@ -859,8 +876,62 @@ class KeyboardView: UIView {
         emojiPanelView.reloadData()
     }
 
+    // MARK: - Diagnostic Log
+
+    /// Appends a timestamped line to the ring buffer, updates the overlay label,
+    /// and fire-and-forgets an HTTP POST to the dev machine endpoint.
+    private func appendDiag(_ message: String) {
+        let now = Date()
+        let ts = diagTimestampFormatter.string(from: now)
+        let line = "\(ts) | \(message)"
+        diagLog.append(line)
+        if diagLog.count > diagLogMax {
+            diagLog.removeFirst(diagLog.count - diagLogMax)
+        }
+        debugLabel.text = "[\(diagLog.count)] \(line)"
+
+        // Best-effort HTTP POST — fire and forget, never block UI
+        if let url = diagLogEndpoint {
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.httpBody = line.data(using: .utf8)
+            req.timeoutInterval = 2
+            URLSession.shared.dataTask(with: req) { _, _, _ in }.resume()
+        }
+    }
+
+    /// Wires a long-press gesture on `debugLabel` for copying the full log to the clipboard.
+    private func setupDebugLabelGesture() {
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(debugLabelLongPressed(_:)))
+        longPress.minimumPressDuration = 0.5
+        debugLabel.isUserInteractionEnabled = true
+        debugLabel.addGestureRecognizer(longPress)
+    }
+
+    @objc private func debugLabelLongPressed(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began else { return }
+        UIPasteboard.general.string = diagLog.joined(separator: "\n")
+
+        let count = diagLog.count
+        // Visual confirmation: flash background green
+        let originalBg = debugLabel.backgroundColor
+        debugLabel.backgroundColor = UIColor.green.withAlphaComponent(0.3)
+        debugLabel.text = "📋 Copied \(count) log lines — paste anywhere"
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.debugLabel.backgroundColor = originalBg
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            if let last = self?.diagLog.last {
+                self?.debugLabel.text = "[\(self?.diagLog.count ?? 0)] \(last)"
+            }
+        }
+    }
+
     /// TEMPORARY — refreshes the on-screen debug overlay. Will be stripped once diagnostic capture is complete.
-    func refreshDebugOverlay(inputTarget: String) {
-        debugLabel.text = "uiMode:\(uiMode) | inputTarget:\(inputTarget) | keyStack:\(keyStack.arrangedSubviews.count) | LRC.isHidden:\(letterRegionContainer.isHidden) | LRC.h:\(Int(letterRegionContainer.bounds.height))"
+    func refreshDebugOverlay(inputTarget: String, uiMode: UIMode) {
+        let msg = "uiMode:\(uiMode) | inputTarget:\(inputTarget) | keyStack:\(keyStack.arrangedSubviews.count) | LRC.isHidden:\(letterRegionContainer.isHidden) | LRC.h:\(Int(letterRegionContainer.bounds.height))"
+        appendDiag(msg)
     }
 }
