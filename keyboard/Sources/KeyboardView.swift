@@ -597,6 +597,14 @@ class KeyboardView: UIView {
                 buttons.append(button)
             }
 
+            // Bottom-row mode-switch key (first button: 123 / ABC) matches the emoji
+            // toolbar's ABC text size and color so both read consistently.
+            if isLastRow, let modeSwitch = buttons.first {
+                modeSwitch.titleLabel?.font = .systemFont(ofSize: EmojiPanelView.modeKeyPointSize, weight: .regular)
+                modeSwitch.backgroundColor = .clear
+                modeSwitch.setTitleColor(EmojiPanelView.modeKeyTextColor, for: .normal)
+            }
+
             // Row 2 (the backspace row, directly above the action row) is edge-anchored so
             // ⇧/#+=/123 and ⌫ land on identical pixel positions across all three layout modes.
             // The top two rows keep centered letter-pitch (staggered look); the action row fills proportionally.

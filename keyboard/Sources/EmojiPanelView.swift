@@ -50,6 +50,14 @@ final class EmojiPanelView: UIView {
             : UIColor(white: 0.92, alpha: 1.0)
     }
 
+    /// Text/icon tint for the emoji toolbar buttons (ABC, recents, categories, backspace).
+    /// Cross-referenced from KeyboardView for the mode-switch key's color.
+    static let modeKeyTextColor: UIColor = UIColor { tc in
+        tc.userInterfaceStyle == .dark
+            ? UIColor(white: 0.9, alpha: 1)
+            : UIColor(white: 0.2, alpha: 1)
+    }
+
     /// Maps each category id to its SF Symbol icon name.
     static let categoryIcons: [String: String] = [
         "people": "face.smiling",
@@ -105,7 +113,7 @@ final class EmojiPanelView: UIView {
         let button = UIButton(type: .system)
         button.translatesAutoresizingMaskIntoConstraints = false
         button.setTitle("ABC", for: .normal)
-        button.titleLabel?.font = .systemFont(ofSize: 16, weight: .medium)
+        button.titleLabel?.font = .systemFont(ofSize: EmojiPanelView.modeKeyPointSize, weight: .regular)
         return button
     }()
     private let recentsButton: UIButton = {
@@ -195,8 +203,11 @@ final class EmojiPanelView: UIView {
     private static let columns: CGFloat = 8
     private static let spacing: CGFloat = 6
     private static let cellSize: CGFloat = 36
-    /// Canonical point size for all toolbar content (ABC text + SF Symbols).
-    private static let toolbarContentPointSize: CGFloat = 17
+    /// Point size for text buttons in the emoji toolbar (ABC) and matching mode-switch
+    /// keys on the letter keyboard (e.g. the 123 button). Cross-referenced from KeyboardView.
+    static let modeKeyPointSize: CGFloat = 17
+    /// Point size for SF Symbol icons in the emoji category toolbar (clock, categories, backspace).
+    private static let toolbarIconPointSize: CGFloat = 14
     private static let highlightTag = 999
     /// Ordered category ids matching the toolbar icon button order.
     private static let categoryOrder: [String] = [
@@ -374,17 +385,11 @@ final class EmojiPanelView: UIView {
             categoryToolbar.heightAnchor.constraint(equalToConstant: 44),
         ])
 
-        // Adaptive text/icon tint matching existing panel style
-        let adaptiveTint = UIColor { tc in
-            tc.userInterfaceStyle == .dark
-                ? UIColor(white: 0.9, alpha: 1)
-                : UIColor(white: 0.2, alpha: 1)
-        }
-        let iconConfig = UIImage.SymbolConfiguration(pointSize: Self.toolbarContentPointSize, weight: .regular)
+        let iconConfig = UIImage.SymbolConfiguration(pointSize: Self.toolbarIconPointSize, weight: .regular)
 
         // 1. ABC — dismiss to keyboard
-        abcButton.setTitleColor(adaptiveTint, for: .normal)
-        abcButton.titleLabel?.font = .systemFont(ofSize: Self.toolbarContentPointSize, weight: .regular)
+        abcButton.setTitleColor(Self.modeKeyTextColor, for: .normal)
+        abcButton.titleLabel?.font = .systemFont(ofSize: Self.modeKeyPointSize, weight: .regular)
         abcButton.addTarget(self, action: #selector(abcTapped), for: .touchUpInside)
         categoryToolbar.addArrangedSubview(abcButton)
 
@@ -393,7 +398,7 @@ final class EmojiPanelView: UIView {
             UIImage(systemName: Self.recentsIconName, withConfiguration: iconConfig),
             for: .normal
         )
-        recentsButton.tintColor = adaptiveTint
+        recentsButton.tintColor = Self.modeKeyTextColor
         recentsButton.addTarget(self, action: #selector(recentsTapped), for: .touchUpInside)
         categoryToolbar.addArrangedSubview(recentsButton)
 
@@ -406,7 +411,7 @@ final class EmojiPanelView: UIView {
                 UIImage(systemName: iconName, withConfiguration: iconConfig),
                 for: .normal
             )
-            button.tintColor = adaptiveTint
+            button.tintColor = Self.modeKeyTextColor
             button.accessibilityIdentifier = cat.name
             button.addTarget(self, action: #selector(categoryIconTapped(_:)), for: .touchUpInside)
             categoryToolbar.addArrangedSubview(button)
@@ -418,7 +423,7 @@ final class EmojiPanelView: UIView {
             UIImage(systemName: Self.backspaceIconName, withConfiguration: iconConfig),
             for: .normal
         )
-        backspaceButton.tintColor = adaptiveTint
+        backspaceButton.tintColor = Self.modeKeyTextColor
         backspaceButton.addTarget(self, action: #selector(backspaceTouchDown), for: .touchDown)
         backspaceButton.addTarget(self, action: #selector(backspaceTouchUp), for: .touchUpInside)
         backspaceButton.addTarget(self, action: #selector(backspaceTouchUp), for: .touchUpOutside)
