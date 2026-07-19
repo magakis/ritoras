@@ -43,6 +43,28 @@ final class EmojiPanelView: UIView {
             : UIColor(white: 0.88, alpha: 1)
     }
 
+    /// Secondary background for search-pill, active-category highlight circle, etc.
+    static let panelSecondaryBackground: UIColor = UIColor { tc in
+        tc.userInterfaceStyle == .dark
+            ? UIColor(white: 0.17, alpha: 1.0)
+            : UIColor(white: 0.92, alpha: 1.0)
+    }
+
+    /// Maps each category id to its SF Symbol icon name.
+    static let categoryIcons: [String: String] = [
+        "people": "face.smiling",
+        "nature": "pawprint",
+        "foods": "fork.knife",
+        "activity": "figure.run",
+        "places": "car.fill",
+        "objects": "lightbulb",
+        "symbols": "heart",
+        "flags": "flag",
+    ]
+
+    static let recentsIconName = "clock"
+    static let backspaceIconName = "delete.left"
+
     // MARK: - Callbacks
 
     var onSelect: ((String) -> Void)?
@@ -50,16 +72,17 @@ final class EmojiPanelView: UIView {
     var onSearchActivate: (() -> Void)?
     var onSearchDismiss: (() -> Void)?
     var onSearchReturn: (() -> Void)?
+    var onBackspace: (() -> Void)?
 
     // MARK: - Subviews
 
-    private let headerView = UIView()
-    private let dismissButton: UIButton = {
-        let button = UIButton(type: .system)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.setTitle("ABC", for: .normal)
-        button.titleLabel?.font = .systemFont(ofSize: 16, weight: .medium)
-        return button
+    private let searchContainer: UIView = {
+        let view = UIView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.backgroundColor = EmojiPanelView.panelSecondaryBackground
+        view.layer.cornerRadius = 20
+        view.clipsToBounds = true
+        return view
     }()
     private let toneButton: UIButton = {
         let button = UIButton(type: .system)
@@ -69,8 +92,35 @@ final class EmojiPanelView: UIView {
         return button
     }()
     private let collectionView: UICollectionView
-    private let categoryBar = UIScrollView()
-    private var categoryButtons: [UIButton] = []
+    private let categoryToolbar: UIStackView = {
+        let stack = UIStackView()
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.axis = .horizontal
+        stack.distribution = .fillEqually
+        stack.alignment = .center
+        stack.spacing = 0
+        return stack
+    }()
+    private let abcButton: UIButton = {
+        let button = UIButton(type: .system)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.setTitle("ABC", for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 16, weight: .medium)
+        return button
+    }()
+    private let recentsButton: UIButton = {
+        let button = UIButton(type: .system)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.accessibilityIdentifier = "recents"
+        return button
+    }()
+    private var categoryIconButtons: [UIButton] = []
+    private let backspaceButton: UIButton = {
+        let button = UIButton(type: .system)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.accessibilityIdentifier = "backspace"
+        return button
+    }()
     /// `nil` means "Recents" is selected.
     private var selectedCategory: String?
     private var searchDebounceWorkItem: DispatchWorkItem?
@@ -114,12 +164,8 @@ final class EmojiPanelView: UIView {
         field.leftView = leftContainer
         field.leftViewMode = .always
 
-        // Translucent rounded background matching previous UISearchBar minimal style
-        field.backgroundColor = UIColor { tc in
-            tc.userInterfaceStyle == .dark
-                ? UIColor(white: 0.22, alpha: 1)
-                : UIColor(white: 0.82, alpha: 1)
-        }
+        // Transparent background — the searchContainer provides the chrome
+        field.backgroundColor = .clear
         field.textColor = UIColor { tc in
             tc.userInterfaceStyle == .dark ? .white : .black
         }
@@ -136,9 +182,6 @@ final class EmojiPanelView: UIView {
                     : UIColor(white: 0.4, alpha: 1)
             }]
         )
-
-        field.layer.cornerRadius = 8
-        field.clipsToBounds = true
         return field
     }()
 
@@ -152,6 +195,12 @@ final class EmojiPanelView: UIView {
     private static let columns: CGFloat = 8
     private static let spacing: CGFloat = 6
     private static let cellSize: CGFloat = 36
+    private static let highlightTag = 999
+    /// Ordered category ids matching the toolbar icon button order.
+    private static let categoryOrder: [String] = [
+        "people", "nature", "foods", "activity",
+        "places", "objects", "symbols", "flags",
+    ]
 
     // MARK: - Init
 
@@ -183,8 +232,8 @@ final class EmojiPanelView: UIView {
         layer.cornerRadius = 6
         clipsToBounds = true
 
-        setupHeader()
-        setupCategoryBar()
+        setupSearchPill()
+        setupCategoryToolbar()
         setupCollectionView()
 
         // Empty-state label
@@ -201,51 +250,38 @@ final class EmojiPanelView: UIView {
         updateTabSelection()
     }
 
-    private func setupHeader() {
-        headerView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(headerView)
+    private func setupSearchPill() {
+        addSubview(searchContainer)
 
-        // Dismiss button on left
-        dismissButton.setTitleColor(UIColor { tc in
-            tc.userInterfaceStyle == .dark ? UIColor(white: 0.9, alpha: 1) : UIColor(white: 0.2, alpha: 1)
-        }, for: .normal)
-        dismissButton.addTarget(self, action: #selector(dismissTapped), for: .touchUpInside)
+        // Embed searchField inside the pill
+        searchField.borderStyle = .none
+        searchField.backgroundColor = .clear
+        searchContainer.addSubview(searchField)
 
-        // Tone picker button on far right
+        // Tone button as trailing accessory inside the pill
         toneButton.tintColor = UIColor { tc in
             tc.userInterfaceStyle == .dark ? UIColor(white: 0.9, alpha: 1) : UIColor(white: 0.2, alpha: 1)
         }
         toneButton.menu = buildToneMenu()
         toneButton.showsMenuAsPrimaryAction = true
-
-        // Stack view with [dismissButton, searchField, toneButton]
-        let stack = UIStackView(arrangedSubviews: [dismissButton, searchField, toneButton])
-        stack.axis = .horizontal
-        stack.alignment = .fill
-        stack.distribution = .fill
-        stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        headerView.addSubview(stack)
+        searchContainer.addSubview(toneButton)
 
         NSLayoutConstraint.activate([
-            headerView.topAnchor.constraint(equalTo: topAnchor),
-            headerView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            headerView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            headerView.heightAnchor.constraint(equalToConstant: 36),
+            searchContainer.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            searchContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            searchContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            searchContainer.heightAnchor.constraint(equalToConstant: 40),
 
-            stack.topAnchor.constraint(equalTo: headerView.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: headerView.bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: headerView.leadingAnchor, constant: 8),
-            stack.trailingAnchor.constraint(equalTo: headerView.trailingAnchor, constant: -8),
+            searchField.topAnchor.constraint(equalTo: searchContainer.topAnchor),
+            searchField.bottomAnchor.constraint(equalTo: searchContainer.bottomAnchor),
+            searchField.leadingAnchor.constraint(equalTo: searchContainer.leadingAnchor, constant: 8),
+            searchField.trailingAnchor.constraint(equalTo: toneButton.leadingAnchor, constant: -4),
+
+            toneButton.trailingAnchor.constraint(equalTo: searchContainer.trailingAnchor, constant: -6),
+            toneButton.centerYAnchor.constraint(equalTo: searchContainer.centerYAnchor),
+            toneButton.widthAnchor.constraint(equalToConstant: 28),
+            toneButton.heightAnchor.constraint(equalToConstant: 28),
         ])
-
-        // Fixed-edge priorities — canonical [fixed][flexible][fixed]
-        dismissButton.setContentHuggingPriority(.required, for: .horizontal)
-        dismissButton.setContentCompressionResistancePriority(.required, for: .horizontal)
-        toneButton.setContentHuggingPriority(.required, for: .horizontal)
-        toneButton.setContentCompressionResistancePriority(.required, for: .horizontal)
-        searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        searchField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         // Wire search field delegate + editingChanged target
         searchField.delegate = self
@@ -262,10 +298,10 @@ final class EmojiPanelView: UIView {
         addSubview(collectionView)
 
         NSLayoutConstraint.activate([
-            collectionView.topAnchor.constraint(equalTo: categoryBar.bottomAnchor),
+            collectionView.topAnchor.constraint(equalTo: searchContainer.bottomAnchor, constant: 8),
             collectionView.leadingAnchor.constraint(equalTo: leadingAnchor),
             collectionView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            collectionView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            collectionView.bottomAnchor.constraint(equalTo: categoryToolbar.topAnchor),
         ])
     }
 
@@ -323,59 +359,115 @@ final class EmojiPanelView: UIView {
         collectionView.setContentOffset(.zero, animated: false)
     }
 
-    // MARK: - Category Bar
+    // MARK: - Category Toolbar
 
-    private func setupCategoryBar() {
-        categoryBar.translatesAutoresizingMaskIntoConstraints = false
-        categoryBar.showsHorizontalScrollIndicator = false
-        categoryBar.backgroundColor = .clear
-        addSubview(categoryBar)
-
-        let stack = UIStackView()
-        stack.axis = .horizontal
-        stack.distribution = .fill
-        stack.alignment = .fill
-        stack.spacing = 2
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        categoryBar.addSubview(stack)
+    private func setupCategoryToolbar() {
+        categoryToolbar.backgroundColor = .clear
+        addSubview(categoryToolbar)
 
         NSLayoutConstraint.activate([
-            categoryBar.topAnchor.constraint(equalTo: headerView.bottomAnchor),
-            categoryBar.leadingAnchor.constraint(equalTo: leadingAnchor),
-            categoryBar.trailingAnchor.constraint(equalTo: trailingAnchor),
-            categoryBar.heightAnchor.constraint(equalToConstant: 36),
-
-            stack.topAnchor.constraint(equalTo: categoryBar.contentLayoutGuide.topAnchor),
-            stack.leadingAnchor.constraint(equalTo: categoryBar.contentLayoutGuide.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: categoryBar.contentLayoutGuide.trailingAnchor),
-            stack.bottomAnchor.constraint(equalTo: categoryBar.contentLayoutGuide.bottomAnchor),
-            stack.heightAnchor.constraint(equalTo: categoryBar.frameLayoutGuide.heightAnchor),
+            categoryToolbar.bottomAnchor.constraint(equalTo: bottomAnchor),
+            categoryToolbar.leadingAnchor.constraint(equalTo: leadingAnchor),
+            categoryToolbar.trailingAnchor.constraint(equalTo: trailingAnchor),
+            categoryToolbar.heightAnchor.constraint(equalToConstant: 44),
         ])
 
-        let recentsButton = makeCategoryButton(title: "Recents")
-        stack.addArrangedSubview(recentsButton)
-
-        for cat in EmojiData.categories {
-            let button = makeCategoryButton(title: cat.name)
-            stack.addArrangedSubview(button)
+        // Adaptive text/icon tint matching existing panel style
+        let adaptiveTint = UIColor { tc in
+            tc.userInterfaceStyle == .dark
+                ? UIColor(white: 0.9, alpha: 1)
+                : UIColor(white: 0.2, alpha: 1)
         }
+        let iconConfig = UIImage.SymbolConfiguration(pointSize: 20, weight: .regular)
+
+        // 1. ABC — dismiss to keyboard
+        abcButton.setTitleColor(adaptiveTint, for: .normal)
+        abcButton.addTarget(self, action: #selector(abcTapped), for: .touchUpInside)
+        categoryToolbar.addArrangedSubview(abcButton)
+
+        // 2. Recents (clock)
+        recentsButton.setImage(
+            UIImage(systemName: Self.recentsIconName, withConfiguration: iconConfig),
+            for: .normal
+        )
+        recentsButton.tintColor = adaptiveTint
+        recentsButton.addTarget(self, action: #selector(recentsTapped), for: .touchUpInside)
+        categoryToolbar.addArrangedSubview(recentsButton)
+
+        // 3-10. Eight category icon buttons
+        for (catId, cat) in zip(Self.categoryOrder, EmojiData.categories) {
+            let button = UIButton(type: .system)
+            button.translatesAutoresizingMaskIntoConstraints = false
+            let iconName = Self.categoryIcons[catId]!
+            button.setImage(
+                UIImage(systemName: iconName, withConfiguration: iconConfig),
+                for: .normal
+            )
+            button.tintColor = adaptiveTint
+            button.accessibilityIdentifier = cat.name
+            button.addTarget(self, action: #selector(categoryIconTapped(_:)), for: .touchUpInside)
+            categoryToolbar.addArrangedSubview(button)
+            categoryIconButtons.append(button)
+        }
+
+        // 11. Backspace
+        backspaceButton.setImage(
+            UIImage(systemName: Self.backspaceIconName, withConfiguration: iconConfig),
+            for: .normal
+        )
+        backspaceButton.tintColor = adaptiveTint
+        backspaceButton.addTarget(self, action: #selector(backspaceTouchDown), for: .touchDown)
+        backspaceButton.addTarget(self, action: #selector(backspaceTouchUp), for: .touchUpInside)
+        backspaceButton.addTarget(self, action: #selector(backspaceTouchUp), for: .touchUpOutside)
+        backspaceButton.addTarget(self, action: #selector(backspaceTouchUp), for: .touchCancel)
+        categoryToolbar.addArrangedSubview(backspaceButton)
 
         updateTabSelection()
     }
 
-    private func makeCategoryButton(title: String) -> UIButton {
-        let button = UIButton(type: .system)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.setTitle(title, for: .normal)
-        button.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
-        button.contentEdgeInsets = UIEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
-        button.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
-        button.addTarget(self, action: #selector(categoryTapped(_:)), for: .touchUpInside)
-        categoryButtons.append(button)
-        return button
+    private func updateTabSelection() {
+        // Remove existing highlight from all toolbar buttons
+        recentsButton.subviews.first(where: { $0.tag == Self.highlightTag })?.removeFromSuperview()
+        for button in categoryIconButtons {
+            button.subviews.first(where: { $0.tag == Self.highlightTag })?.removeFromSuperview()
+        }
+
+        // Determine which button should be highlighted
+        let targetButton: UIButton?
+        if selectedCategory == nil {
+            targetButton = recentsButton
+        } else {
+            targetButton = categoryIconButtons.first { $0.accessibilityIdentifier == selectedCategory }
+        }
+
+        // Add circular highlight subview behind the icon
+        if let button = targetButton {
+            let highlight = UIView()
+            highlight.tag = Self.highlightTag
+            highlight.backgroundColor = Self.panelSecondaryBackground
+            highlight.translatesAutoresizingMaskIntoConstraints = false
+            highlight.isUserInteractionEnabled = false
+            button.insertSubview(highlight, at: 0)
+
+            NSLayoutConstraint.activate([
+                highlight.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+                highlight.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+                highlight.widthAnchor.constraint(equalToConstant: 32),
+                highlight.heightAnchor.constraint(equalToConstant: 32),
+            ])
+
+            highlight.layer.cornerRadius = 16
+            highlight.clipsToBounds = true
+        }
     }
 
-    @objc private func categoryTapped(_ sender: UIButton) {
+    // MARK: - Toolbar Tap Handlers
+
+    @objc private func abcTapped() {
+        onDismiss?()
+    }
+
+    @objc private func recentsTapped() {
         if !currentQuery.isEmpty {
             searchField.text = ""
             currentQuery = ""
@@ -383,49 +475,31 @@ final class EmojiPanelView: UIView {
             searchDebounceWorkItem = nil
             onSearchDismiss?()
         }
-        guard let index = categoryButtons.firstIndex(of: sender) else { return }
-
-        if index == 0 {
-            selectedCategory = nil
-        } else {
-            selectedCategory = EmojiData.categories[index - 1].name
-        }
-
+        selectedCategory = nil
         updateTabSelection()
         reloadData()
     }
 
-    private func updateTabSelection() {
-        for (index, button) in categoryButtons.enumerated() {
-            let isSelected: Bool
-            if index == 0 {
-                isSelected = selectedCategory == nil
-            } else {
-                isSelected = selectedCategory == EmojiData.categories[index - 1].name
-            }
-
-            button.backgroundColor = UIColor { tc in
-                if isSelected {
-                    tc.userInterfaceStyle == .dark
-                        ? UIColor(white: 0.30, alpha: 1)
-                        : UIColor(white: 0.80, alpha: 1)
-                } else {
-                    .clear
-                }
-            }
-
-            button.setTitleColor(UIColor { tc in
-                if isSelected {
-                    tc.userInterfaceStyle == .dark
-                        ? UIColor.white
-                        : UIColor.black
-                } else {
-                    tc.userInterfaceStyle == .dark
-                        ? UIColor(white: 0.6, alpha: 1)
-                        : UIColor(white: 0.4, alpha: 1)
-                }
-            }, for: .normal)
+    @objc private func categoryIconTapped(_ sender: UIButton) {
+        guard let categoryId = sender.accessibilityIdentifier else { return }
+        if !currentQuery.isEmpty {
+            searchField.text = ""
+            currentQuery = ""
+            searchDebounceWorkItem?.cancel()
+            searchDebounceWorkItem = nil
+            onSearchDismiss?()
         }
+        selectedCategory = categoryId
+        updateTabSelection()
+        reloadData()
+    }
+
+    @objc private func backspaceTouchDown() {
+        onBackspace?()
+    }
+
+    @objc private func backspaceTouchUp() {
+        // Phase 4 will wire begin/end pairing for repeat-delete
     }
 
     // MARK: - Tone Menu
@@ -448,14 +522,6 @@ final class EmojiPanelView: UIView {
 // MARK: - Actions
 
 extension EmojiPanelView {
-    @objc private func dismissTapped() {
-        if searchField.isFirstResponder {
-            onSearchDismiss?()
-        } else {
-            onDismiss?()
-        }
-    }
-
     @objc private func searchFieldEditingChanged() {
         searchDebounceWorkItem?.cancel()
         let query = searchField.text ?? ""

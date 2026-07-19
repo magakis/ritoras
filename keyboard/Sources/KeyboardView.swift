@@ -419,6 +419,11 @@ class KeyboardView: UIView {
         panel.onDismiss = { [weak self] in
             self?.apply(mode: .letters)
         }
+        panel.onBackspace = { [weak self] in
+            guard let self else { return }
+            self.delegate?.keyboardViewBackspaceDidBegin(self)
+            self.delegate?.keyboardViewBackspaceDidEnd(self)
+        }
         return panel
     }()
     private let bottomActionRow = UIView()
