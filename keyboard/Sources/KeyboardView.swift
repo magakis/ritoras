@@ -439,6 +439,21 @@ class KeyboardView: UIView {
     /// to the letter region's top edge, preventing overlap.
     private var emojiSearchOverlapConstraint: NSLayoutConstraint?
 
+    /// TEMPORARY debug overlay — displays keyboard state on-screen. Will be stripped once diagnostic capture is complete.
+    private let debugLabel: UILabel = {
+        let label = UILabel()
+        label.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        label.textColor = .systemRed
+        label.backgroundColor = UIColor(white: 0, alpha: 0.7)
+        label.textAlignment = .center
+        label.numberOfLines = 1
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
+    }()
+
+    /// Active only in `.emojiSearch` mode — gives the emoji panel a fixed height of 80pt.
+    private var emojiSearchPanelHeightConstraint: NSLayoutConstraint?
+
     // MARK: - Initialization
 
     override init(frame: CGRect) {
@@ -460,6 +475,16 @@ class KeyboardView: UIView {
         setupLetterRegion()
         setupEmojiPanel()
         setupConstraints()
+
+        // Debug overlay (temporary) — on top of all other views
+        addSubview(debugLabel)
+        NSLayoutConstraint.activate([
+            debugLabel.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            debugLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            debugLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            debugLabel.heightAnchor.constraint(equalToConstant: 14),
+        ])
+        bringSubviewToFront(debugLabel)
 
         rebuildKeyRows()
         apply(mode: .letters)
@@ -548,6 +573,11 @@ class KeyboardView: UIView {
         emojiSearchOverlapConstraint = emojiPanelView.bottomAnchor.constraint(equalTo: letterRegionContainer.topAnchor)
         emojiSearchOverlapConstraint?.priority = .required
         emojiSearchOverlapConstraint?.isActive = false
+
+        // Fixed height constraint for .emojiSearch mode — replaces overlap constraint
+        emojiSearchPanelHeightConstraint = emojiPanelView.heightAnchor.constraint(equalToConstant: 80)
+        emojiSearchPanelHeightConstraint?.priority = .required
+        emojiSearchPanelHeightConstraint?.isActive = false
     }
 
     // MARK: - Key Rows
@@ -765,7 +795,6 @@ class KeyboardView: UIView {
     }
 
     func apply(mode: UIMode) {
-        print("[diag] apply(mode: \(mode)) — suggestionBar.isHidden=\(suggestionBar.isHidden) letterRegionContainer.isHidden=\(letterRegionContainer.isHidden) bottomActionRow.isHidden=\(bottomActionRow.isHidden) emojiPanelView.isHidden=\(emojiPanelView.isHidden) letterRegionContainer.bounds=\(letterRegionContainer.bounds) keyStack.arrangedSubviews.count=\(keyStack.arrangedSubviews.count)")
         let showEmojiPanel = (mode == .emoji || mode == .emojiSearch)
         let showLetters    = (mode == .letters || mode == .emojiSearch)
         let showBottomRow  = showLetters
@@ -777,8 +806,10 @@ class KeyboardView: UIView {
         emojiPanelView.isHidden = !showEmojiPanel
         emojiKeyButton?.setTitle(showEmojiPanel ? "ABC" : "☺", for: .normal)
 
-        // Toggle the overlap constraint — active only in .emojiSearch
-        emojiSearchOverlapConstraint?.isActive = (mode == .emojiSearch)
+        // Fixed-height approach for .emojiSearch: deactivate the old overlap constraint,
+        // activate the deterministic panel height.
+        emojiSearchOverlapConstraint?.isActive = false
+        emojiSearchPanelHeightConstraint?.isActive = (mode == .emojiSearch)
 
         if mode == .emojiSearch {
             // Defensive: ensure keyStack has rows (today this is a no-op since keyStack
@@ -794,6 +825,9 @@ class KeyboardView: UIView {
         }
 
         if showEmojiPanel { reloadEmojiPanel() }
+
+        bringSubviewToFront(debugLabel)
+        refreshDebugOverlay(inputTarget: "")
     }
 
     func apply(shift: ShiftState, layoutMode: KeyboardLayoutMode) {
@@ -823,5 +857,10 @@ class KeyboardView: UIView {
 
     func reloadEmojiPanel() {
         emojiPanelView.reloadData()
+    }
+
+    /// TEMPORARY — refreshes the on-screen debug overlay. Will be stripped once diagnostic capture is complete.
+    func refreshDebugOverlay(inputTarget: String) {
+        debugLabel.text = "uiMode:\(uiMode) | inputTarget:\(inputTarget) | keyStack:\(keyStack.arrangedSubviews.count) | LRC.isHidden:\(letterRegionContainer.isHidden) | LRC.h:\(Int(letterRegionContainer.bounds.height))"
     }
 }
