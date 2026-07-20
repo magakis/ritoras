@@ -403,6 +403,7 @@ final class EmojiPanelView: UIView {
         abcButton.titleLabel?.font = .systemFont(ofSize: Self.modeKeyPointSize, weight: .regular)
         abcButton.addTarget(self, action: #selector(abcTapped), for: .touchUpInside)
         categoryToolbar.addArrangedSubview(abcButton)
+        abcButton.heightAnchor.constraint(equalTo: abcButton.widthAnchor).isActive = true
 
         // 2. Recents (clock)
         recentsButton.setImage(
@@ -412,6 +413,7 @@ final class EmojiPanelView: UIView {
         recentsButton.tintColor = Self.modeKeyTextColor
         recentsButton.addTarget(self, action: #selector(recentsTapped), for: .touchUpInside)
         categoryToolbar.addArrangedSubview(recentsButton)
+        recentsButton.heightAnchor.constraint(equalTo: recentsButton.widthAnchor).isActive = true
 
         // 3-10. Eight category icon buttons
         for (catId, cat) in zip(Self.categoryOrder, EmojiData.categories) {
@@ -427,6 +429,7 @@ final class EmojiPanelView: UIView {
             button.addTarget(self, action: #selector(categoryIconTapped(_:)), for: .touchUpInside)
             categoryToolbar.addArrangedSubview(button)
             categoryIconButtons.append(button)
+            button.heightAnchor.constraint(equalTo: button.widthAnchor).isActive = true
         }
 
         // 11. Backspace
@@ -440,6 +443,7 @@ final class EmojiPanelView: UIView {
         backspaceButton.addTarget(self, action: #selector(backspaceTouchUp), for: .touchUpOutside)
         backspaceButton.addTarget(self, action: #selector(backspaceTouchUp), for: .touchCancel)
         categoryToolbar.addArrangedSubview(backspaceButton)
+        backspaceButton.heightAnchor.constraint(equalTo: backspaceButton.widthAnchor).isActive = true
 
         updateTabSelection()
     }
