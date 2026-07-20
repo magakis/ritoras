@@ -502,27 +502,34 @@ private struct LogRow: View {
                     Text(isExpanded ? "⌄" : "›")
                         .foregroundStyle(.secondary)
                 }
-                if isExpanded, let payloadLines = PayloadFormatter.render(line.payload, scrubPII: scrubPII) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        ForEach(payloadLines) { pl in
-                            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                                Text(pl.key).foregroundStyle(.secondary)
-                                Text(pl.value).foregroundStyle(valueColor(pl.valueType))
-                            }
-                            .padding(.leading, 156)
-                        }
-                    }
-                    .padding(.top, 2)
-                } else if isExpanded {
-                    Text(line.raw)
-                        .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                        .padding(.leading, 156)
+                if isExpanded {
+                    expandedContent
                 }
             }
             .contentShape(Rectangle())
             .font(.system(.caption2, design: .monospaced))
         }
         .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var expandedContent: some View {
+        if let payloadLines = PayloadFormatter.render(line.payload, scrubPII: scrubPII) {
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(payloadLines) { pl in
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text(pl.key).foregroundStyle(.secondary)
+                        Text(pl.value).foregroundStyle(valueColor(pl.valueType))
+                    }
+                    .padding(.leading, 156)
+                }
+            }
+            .padding(.top, 2)
+        } else {
+            Text(line.raw)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .padding(.leading, 156)
+        }
     }
 }
