@@ -9,6 +9,8 @@ struct RitorasApp: App {
 
     init() {
         FileLogger.shared.info(.app, "Container app launched", payload: ["version": Bundle.main.infoDictionary?["CFBundleVersion"] ?? "?"])
+        MetricKitSubscriber.shared.start()
+        FileLogger.shared.info(.app, "MetricKit subscriber started")
     }
 
     var body: some Scene {
