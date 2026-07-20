@@ -42,49 +42,112 @@ struct WhisperResponse: Decodable {
 
 enum WhisperClient {
 
+    /// Low-latency URLSession tuned for foreground app-extension HTTP.
+    /// - `waitsForConnectivity = false`: fail fast so multi-server failover kicks in
+    ///   instead of waiting indefinitely for connectivity.
+    /// - `timeoutIntervalForResource = 60`: cap total request time (default is 7 days,
+    ///   which is wildly inappropriate for a foreground dictation request).
+    /// - `httpShouldUsePipelining = true`: removes a round-trip per request on HTTP/1.1.
+    /// - `requestCachePolicy = .reloadIgnoringLocalCacheData`: dictation POSTs are not
+    ///   cacheable; bypass cache lookup.
+    static let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.waitsForConnectivity = false
+        config.timeoutIntervalForRequest = SharedConfig.Defaults.timeoutSeconds
+        config.timeoutIntervalForResource = SharedConfig.Defaults.timeoutSeconds * 2
+        config.httpShouldUsePipelining = true
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config)
+    }()
+
     /// Transcribes the audio file at `audioURL` by iterating configured servers
     /// in order and returning the first successful result.
     ///
     /// - Parameters:
-    ///   - audioURL: Local file URL of the recorded audio (.m4a).
-    ///   - config:   Server configuration from `SharedConfig`.
+    ///   - audioURL:      Local file URL of the recorded audio (.m4a).
+    ///   - config:        Server configuration from `SharedConfig`.
+    ///   - correlationId: Optional UUID to correlate this request across processes.
     /// - Returns: The transcribed text string.
     /// - Throws: `WhisperError` if all servers fail.
     static func transcribe(
         audioURL: URL,
-        config: SharedConfig
+        config: SharedConfig,
+        correlationId: UUID? = nil
     ) async throws -> String {
         var failedServers: [String] = []
+        let t0 = Date()
 
-        for server in config.servers {
+        // Generate boundary ONCE and build multipart body ONCE — read the audio
+        // file a single time regardless of server count.
+        let boundary = "Boundary-\(UUID().uuidString)"
+        let body: Data
+        do {
+            let bodyBuildT0 = Date()
+            body = try buildBody(audioURL: audioURL, boundary: boundary)
+            FileLogger.shared.debug(.transcription, "multipart body build", payload: [
+                "elapsed_ms": Date().timeIntervalSince(bodyBuildT0) * 1000,
+                "bodyBytes": body.count
+            ])
+        } catch {
+            throw WhisperError.networkError(error)
+        }
+
+        for (serverIndex, server) in config.servers.enumerated() {
             let base = server.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             guard !base.isEmpty else {
                 failedServers.append(server)
                 continue
             }
 
-            let boundary = "Boundary-\(UUID().uuidString)"
+            let attemptElapsed = Date().timeIntervalSince(t0) * 1000
+            var attemptPayload: [String: Any] = [
+                "server_index": serverIndex,
+                "server": server,
+                "attempt_elapsed_ms": attemptElapsed,
+                "ts": Date().timeIntervalSince1970 * 1000
+            ]
+            if let id = correlationId { attemptPayload["id"] = id.uuidString }
+            FileLogger.shared.debug(.transcription, "transcribe attempt", payload: attemptPayload)
 
             do {
                 let request = try buildRequest(
                     baseURL: base,
-                    audioURL: audioURL,
+                    body: body,
                     boundary: boundary,
                     timeout: config.timeoutSeconds
                 )
 
+                let bodyBytes = request.httpBody?.count ?? 0
+                var postPayload: [String: Any] = [
+                    "bodyBytes": bodyBytes,
+                    "ts": Date().timeIntervalSince1970 * 1000
+                ]
+                if let id = correlationId { postPayload["id"] = id.uuidString }
+                FileLogger.shared.debug(.transcription, "HTTP POST /transcribe start", payload: postPayload)
+
+                let httpT0 = Date()
                 let (data, response): (Data, URLResponse)
                 do {
-                    (data, response) = try await URLSession.shared.data(for: request)
+                    (data, response) = try await Self.session.data(for: request)
                 } catch let error as URLError where error.code == .timedOut {
                     throw WhisperError.timeout
                 } catch {
                     throw WhisperError.networkError(error)
                 }
 
+                let httpElapsed = Date().timeIntervalSince(httpT0) * 1000
+
                 guard let httpResponse = response as? HTTPURLResponse else {
                     throw WhisperError.noResponse
                 }
+
+                var respPayload: [String: Any] = [
+                    "statusCode": httpResponse.statusCode,
+                    "elapsed_ms": httpElapsed,
+                    "ts": Date().timeIntervalSince1970 * 1000
+                ]
+                if let id = correlationId { respPayload["id"] = id.uuidString }
+                FileLogger.shared.debug(.transcription, "HTTP response", payload: respPayload)
 
                 guard httpResponse.statusCode == 200 else {
                     let bodyString = String(data: data, encoding: .utf8) ?? "(empty response)"
@@ -92,7 +155,11 @@ enum WhisperClient {
                 }
 
                 // Attempt JSON decode -> WhisperResponse
+                let decodeT0 = Date()
                 if let decoded = try? JSONDecoder().decode(WhisperResponse.self, from: data) {
+                    FileLogger.shared.debug(.transcription, "JSON decode", payload: [
+                        "elapsed_ms": Date().timeIntervalSince(decodeT0) * 1000
+                    ])
                     guard decoded.success else {
                         throw WhisperError.httpError(200, "Server returned success=false")
                     }
@@ -132,7 +199,7 @@ enum WhisperClient {
             request.httpMethod = "GET"
             request.timeoutInterval = timeout
 
-            if let (_, response) = try? await URLSession.shared.data(for: request),
+            if let (_, response) = try? await Self.session.data(for: request),
                let httpResponse = response as? HTTPURLResponse,
                httpResponse.statusCode == 200
             {
@@ -146,7 +213,7 @@ enum WhisperClient {
             request.httpMethod = "GET"
             request.timeoutInterval = timeout
 
-            if let (_, response) = try? await URLSession.shared.data(for: request),
+            if let (_, response) = try? await Self.session.data(for: request),
                let httpResponse = response as? HTTPURLResponse,
                httpResponse.statusCode < 500
             {
@@ -159,17 +226,9 @@ enum WhisperClient {
 
     // MARK: - Private Helpers
 
-    /// Builds a multipart/form-data URLRequest targeting a single server.
-    private static func buildRequest(
-        baseURL: String,
-        audioURL: URL,
-        boundary: String,
-        timeout: TimeInterval
-    ) throws -> URLRequest {
-        guard let url = URL(string: "\(baseURL)/transcribe") else {
-            throw WhisperError.invalidURL
-        }
-
+    /// Builds the multipart/form-data body for a transcription request.
+    /// Reads the audio file from disk exactly once.
+    private static func buildBody(audioURL: URL, boundary: String) throws -> Data {
         var body = Data()
 
         func append(_ string: String) {
@@ -185,6 +244,23 @@ enum WhisperClient {
 
         // Close boundary
         append("--\(boundary)--\r\n")
+
+        return body
+    }
+
+    /// Builds a multipart/form-data URLRequest targeting a single server.
+    /// The body must be pre-built via `buildBody(audioURL:boundary:)`. The same
+    /// boundary string that was passed to `buildBody` must be passed here so the
+    /// `Content-Type` header matches the body's boundary markers.
+    private static func buildRequest(
+        baseURL: String,
+        body: Data,
+        boundary: String,
+        timeout: TimeInterval
+    ) throws -> URLRequest {
+        guard let url = URL(string: "\(baseURL)/transcribe") else {
+            throw WhisperError.invalidURL
+        }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
