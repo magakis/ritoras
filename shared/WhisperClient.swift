@@ -93,12 +93,6 @@ enum WhisperClient {
         }
 
         for (serverIndex, server) in config.servers.enumerated() {
-            let base = server.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard !base.isEmpty else {
-                failedServers.append(server)
-                continue
-            }
-
             let attemptElapsed = Date().timeIntervalSince(t0) * 1000
             var attemptPayload: [String: Any] = [
                 "server_index": serverIndex,
@@ -110,71 +104,14 @@ enum WhisperClient {
             FileLogger.shared.debug(.transcription, "transcribe attempt", payload: attemptPayload)
 
             do {
-                let request = try buildRequest(
-                    baseURL: base,
+                let text = try await transcribeAgainst(
+                    serverURL: server,
                     body: body,
                     boundary: boundary,
-                    timeout: config.timeoutSeconds
+                    timeout: config.timeoutSeconds,
+                    correlationId: correlationId
                 )
-
-                let bodyBytes = request.httpBody?.count ?? 0
-                var postPayload: [String: Any] = [
-                    "bodyBytes": bodyBytes,
-                    "ts": Date().timeIntervalSince1970 * 1000
-                ]
-                if let id = correlationId { postPayload["id"] = id.uuidString }
-                FileLogger.shared.debug(.transcription, "HTTP POST /transcribe start", payload: postPayload)
-
-                let httpT0 = Date()
-                let (data, response): (Data, URLResponse)
-                do {
-                    (data, response) = try await Self.session.data(for: request)
-                } catch let error as URLError where error.code == .timedOut {
-                    throw WhisperError.timeout
-                } catch {
-                    throw WhisperError.networkError(error)
-                }
-
-                let httpElapsed = Date().timeIntervalSince(httpT0) * 1000
-
-                guard let httpResponse = response as? HTTPURLResponse else {
-                    throw WhisperError.noResponse
-                }
-
-                var respPayload: [String: Any] = [
-                    "statusCode": httpResponse.statusCode,
-                    "elapsed_ms": httpElapsed,
-                    "ts": Date().timeIntervalSince1970 * 1000
-                ]
-                if let id = correlationId { respPayload["id"] = id.uuidString }
-                FileLogger.shared.debug(.transcription, "HTTP response", payload: respPayload)
-
-                guard httpResponse.statusCode == 200 else {
-                    let bodyString = String(data: data, encoding: .utf8) ?? "(empty response)"
-                    throw WhisperError.httpError(httpResponse.statusCode, bodyString)
-                }
-
-                // Attempt JSON decode -> WhisperResponse
-                let decodeT0 = Date()
-                if let decoded = try? JSONDecoder().decode(WhisperResponse.self, from: data) {
-                    FileLogger.shared.debug(.transcription, "JSON decode", payload: [
-                        "elapsed_ms": Date().timeIntervalSince(decodeT0) * 1000
-                    ])
-                    guard decoded.success else {
-                        throw WhisperError.httpError(200, "Server returned success=false")
-                    }
-                    return decoded.transcription
-                }
-
-                // Fallback: attempt plain text extraction.
-                if let text = String(data: data, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines),
-                    !text.isEmpty
-                {
-                    return text
-                }
-
-                throw WhisperError.decodingError("Response was neither valid JSON nor plain text.")
+                return text
             } catch {
                 failedServers.append(server)
                 continue
@@ -182,6 +119,43 @@ enum WhisperClient {
         }
 
         throw WhisperError.allServersFailed(failedServers)
+    }
+
+    /// Transcribes against a single, pre-selected server. Used when a health
+    /// probe has already identified the target server, avoiding the per-server
+    /// 30s timeout in the iterating transcribe. If this throws, callers should
+    /// fall back to the iterating transcribe(audioURL:config:) for safety.
+    /// - Parameters:
+    ///   - audioURL:      Local file URL of the recorded audio (.m4a).
+    ///   - serverURL:     The target server base URL.
+    ///   - correlationId: Optional UUID to correlate this request across processes.
+    /// - Returns: The transcribed text string.
+    /// - Throws: `WhisperError` if the single server attempt fails.
+    static func transcribe(
+        audioURL: URL,
+        serverURL: String,
+        correlationId: UUID? = nil
+    ) async throws -> String {
+        let boundary = "Boundary-\(UUID().uuidString)"
+        let body: Data
+        do {
+            let bodyBuildT0 = Date()
+            body = try buildBody(audioURL: audioURL, boundary: boundary)
+            FileLogger.shared.debug(.transcription, "multipart body build", payload: [
+                "elapsed_ms": Date().timeIntervalSince(bodyBuildT0) * 1000,
+                "bodyBytes": body.count
+            ])
+        } catch {
+            throw WhisperError.networkError(error)
+        }
+
+        return try await transcribeAgainst(
+            serverURL: serverURL,
+            body: body,
+            boundary: boundary,
+            timeout: SharedConfig.Defaults.timeoutSeconds,
+            correlationId: correlationId
+        )
     }
 
     /// Pings a server to check if it is reachable.
@@ -222,6 +196,42 @@ enum WhisperClient {
         }
 
         return false
+    }
+
+    /// Probes all servers in parallel and returns the highest-priority healthy one.
+    /// - Parameters:
+    ///   - servers: Candidate server URLs in priority order.
+    ///   - timeout: Per-server probe timeout (default from SharedConfig.Defaults).
+    /// - Returns: The first server (by input order) that responded healthy, or nil if none did.
+    static func selectFirstHealthyServer(
+        servers: [String],
+        timeout: TimeInterval = SharedConfig.Defaults.serverProbeTimeoutSeconds
+    ) async -> String? {
+        let candidates = servers
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+            .filter { !$0.isEmpty }
+        guard !candidates.isEmpty else { return nil }
+
+        let healthy: [String] = await withTaskGroup(of: String?.self) { group in
+            for server in candidates {
+                group.addTask {
+                    let ok = await Self.checkHealth(serverURL: server, timeout: timeout)
+                    return ok ? server : nil
+                }
+            }
+            var results: [String] = []
+            for await result in group {
+                if let r = result { results.append(r) }
+            }
+            return results
+        }
+        let selected = candidates.first { healthy.contains($0) }
+        FileLogger.shared.info(.network, "server selection", payload: [
+            "selected": selected ?? "none",
+            "candidates": candidates,
+            "healthy": healthy
+        ])
+        return selected
     }
 
     // MARK: - Private Helpers
@@ -269,5 +279,93 @@ enum WhisperClient {
         request.timeoutInterval = timeout
 
         return request
+    }
+
+    /// Attempts transcription against a single server. Both the iterating
+    /// `transcribe(audioURL:config:)` and the single-server overload delegate
+    /// here so the request-build and response-decode logic lives in one place.
+    /// - Parameters:
+    ///   - serverURL:     Target server base URL (trimmed internally).
+    ///   - body:          Pre-built multipart form body.
+    ///   - boundary:      Boundary string matching the body.
+    ///   - timeout:       Per-request timeout.
+    ///   - correlationId: Optional UUID for cross-process correlation.
+    /// - Returns: The transcribed text string.
+    /// - Throws: `WhisperError` on any failure.
+    private static func transcribeAgainst(
+        serverURL: String,
+        body: Data,
+        boundary: String,
+        timeout: TimeInterval,
+        correlationId: UUID?
+    ) async throws -> String {
+        let base = serverURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !base.isEmpty else { throw WhisperError.invalidURL }
+
+        let request = try buildRequest(
+            baseURL: base,
+            body: body,
+            boundary: boundary,
+            timeout: timeout
+        )
+
+        let bodyBytes = request.httpBody?.count ?? 0
+        var postPayload: [String: Any] = [
+            "bodyBytes": bodyBytes,
+            "ts": Date().timeIntervalSince1970 * 1000
+        ]
+        if let id = correlationId { postPayload["id"] = id.uuidString }
+        FileLogger.shared.debug(.transcription, "HTTP POST /transcribe start", payload: postPayload)
+
+        let httpT0 = Date()
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await Self.session.data(for: request)
+        } catch let error as URLError where error.code == .timedOut {
+            throw WhisperError.timeout
+        } catch {
+            throw WhisperError.networkError(error)
+        }
+
+        let httpElapsed = Date().timeIntervalSince(httpT0) * 1000
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw WhisperError.noResponse
+        }
+
+        var respPayload: [String: Any] = [
+            "statusCode": httpResponse.statusCode,
+            "elapsed_ms": httpElapsed,
+            "ts": Date().timeIntervalSince1970 * 1000
+        ]
+        if let id = correlationId { respPayload["id"] = id.uuidString }
+        FileLogger.shared.debug(.transcription, "HTTP response", payload: respPayload)
+
+        guard httpResponse.statusCode == 200 else {
+            let bodyString = String(data: data, encoding: .utf8) ?? "(empty response)"
+            throw WhisperError.httpError(httpResponse.statusCode, bodyString)
+        }
+
+        // Attempt JSON decode -> WhisperResponse
+        let decodeT0 = Date()
+        if let decoded = try? JSONDecoder().decode(WhisperResponse.self, from: data) {
+            FileLogger.shared.debug(.transcription, "JSON decode", payload: [
+                "elapsed_ms": Date().timeIntervalSince(decodeT0) * 1000
+            ])
+            guard decoded.success else {
+                throw WhisperError.httpError(200, "Server returned success=false")
+            }
+            return decoded.transcription
+        }
+
+        // Fallback: attempt plain text extraction.
+        if let text = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !text.isEmpty
+        {
+            return text
+        }
+
+        throw WhisperError.decodingError("Response was neither valid JSON nor plain text.")
     }
 }

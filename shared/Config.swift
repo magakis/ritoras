@@ -120,6 +120,19 @@ struct SharedConfig {
 
         static let verboseLoggingKey = "verboseLogging"
         static let verboseLoggingDefault = false
+
+        // MARK: - Server Selection (Health Probe)
+
+        /// Ephemeral App Group key holding the probe-selected server URL for the
+        /// current/next dictation. Written by the container app's DictationViewModel
+        /// on probe completion; read by the keyboard extension's poll path. Not a
+        /// durable user preference — overwritten by each probe, never cleared on
+        /// cancel (stale value is the best guess for the next dictation).
+        static let selectedServerKey = "selectedServer"
+
+        /// Per-server health-probe timeout. 3s balances false-negative risk on slow
+        /// LANs/Tailscale against the user's failure-tolerance for offline servers.
+        static let serverProbeTimeoutSeconds: TimeInterval = 3.0
     }
 
     // MARK: - Dictation Mode
@@ -210,5 +223,29 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.hapticsEnabledKey) as? Bool)
             ?? Defaults.hapticsEnabledDefault
+    }
+
+    /// Reads the probe-selected server URL for the current/next dictation.
+    /// Used by the keyboard extension to decide where to poll for results.
+    /// Returns nil when the App Group is unavailable or no probe has run yet.
+    /// The caller MUST validate the returned value is still in `servers` before
+    /// using it, in case the user removed the server from Settings after the probe.
+    static func selectedServer() -> String? {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return nil }
+        return defaults.string(forKey: Defaults.selectedServerKey)
+    }
+
+    /// Writes (or clears) the probe-selected server URL. Called by the container
+    /// app's DictationViewModel when the parallel health probe completes. Passing
+    /// nil removes the key.
+    /// NOTE: this is the only *writer* on SharedConfig — justified because
+    /// selectedServer is ephemeral runtime state, not a durable preference.
+    static func setSelectedServer(_ server: String?) {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return }
+        if let server = server {
+            defaults.set(server, forKey: Defaults.selectedServerKey)
+        } else {
+            defaults.removeObject(forKey: Defaults.selectedServerKey)
+        }
     }
 }

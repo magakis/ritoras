@@ -857,7 +857,14 @@ class KeyboardViewController: UIInputViewController {
     /// One-shot HTTP GET to the server for the current dictation result.
     private func pollServerForDictation() {
         let config = SharedConfig.load()
-        guard let server = config.servers.first else { return }
+        // Prefer the probe-selected server (written by the container app on recording
+        // start). Fall back to config.servers.first if the probe hasn't run, returned
+        // nil, or the selected server is no longer in the configured list (user
+        // removed it mid-dictation).
+        let selected = SharedConfig.selectedServer().flatMap { s -> String? in
+            config.servers.contains(s) ? s : nil
+        }
+        guard let server = selected ?? config.servers.first else { return }
         guard let url = URL(string: "\(server)/dictation_result/latest") else { return }
 
         let now = Date()
@@ -868,6 +875,10 @@ class KeyboardViewController: UIInputViewController {
             "elapsed_ms_since_last_poll": elapsedSinceLastPoll,
             "id": pendingRequestId?.uuidString ?? "nil",
             "ts": now.timeIntervalSince1970 * 1000
+        ])
+        FileLogger.shared.debug(.network, "poll target", payload: [
+            "server": server,
+            "source": selected != nil ? "probe" : "fallback_first"
         ])
 
         let task = WhisperClient.session.dataTask(with: url) { [weak self] data, response, error in

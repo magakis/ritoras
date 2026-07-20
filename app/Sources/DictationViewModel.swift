@@ -22,6 +22,9 @@ final class DictationViewModel: ObservableObject {
     private var streamRecorder: StreamingAudioRecorder?
     private var streamClient: WhisperStreamClient?
 
+    private var selectedServer: String?
+    private var serverSelectionTask: Task<String?, Never>?
+
     // MARK: - Clipboard Transport
 
     /// Writes the dictation result to the clipboard as a MULTI-TYPE pasteboard
@@ -63,11 +66,13 @@ final class DictationViewModel: ObservableObject {
     /// for results. Works even when the app is backgrounded (clipboard fails).
     private func postResultToServer(status: String, text: String? = nil, errorMessage: String? = nil) {
         let config = SharedConfig.load()
-        guard let server = config.servers.first else {
+        let candidate = SharedConfig.selectedServer()
+        let resolved = (config.servers.contains(candidate ?? "") ? candidate : nil) ?? config.servers.first
+        let server = resolved?.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let baseURL = server, !baseURL.isEmpty else {
             FileLogger.shared.warn(.network, "postResultToServer: no server configured")
             return
         }
-        let baseURL = server.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: "\(baseURL)/dictation_result") else {
             FileLogger.shared.warn(.network, "postResultToServer: invalid URL",
                                    payload: ["baseURL": baseURL])
@@ -113,6 +118,17 @@ final class DictationViewModel: ObservableObject {
         livePartial = ""
         phase = .recording
 
+        // Kick off parallel health probe — runs in background while mic
+        // permission is checked and recording starts.
+        selectedServer = nil
+        let probeConfig = SharedConfig.load()
+        serverSelectionTask = Task { [weak self] in
+            let selected = await WhisperClient.selectFirstHealthyServer(servers: probeConfig.servers)
+            SharedConfig.setSelectedServer(selected)
+            await MainActor.run { self?.selectedServer = selected }
+            return selected
+        }
+
         let ts = Date().timeIntervalSince1970 * 1000
         let mode = SharedConfig.dictationMode()
         FileLogger.shared.info(.transcription, "dictation start", payload: [
@@ -143,6 +159,9 @@ final class DictationViewModel: ObservableObject {
                 postResultToServer(status: "error", errorMessage: message)
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
                 phase = .error(message)
+                serverSelectionTask?.cancel()
+                serverSelectionTask = nil
+                selectedServer = nil
                 return
             }
         case .denied:
@@ -154,6 +173,9 @@ final class DictationViewModel: ObservableObject {
             postResultToServer(status: "error", errorMessage: message)
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
             phase = .error(message)
+            serverSelectionTask?.cancel()
+            serverSelectionTask = nil
+            selectedServer = nil
             return
         case .granted:
             break
@@ -193,26 +215,53 @@ final class DictationViewModel: ObservableObject {
             do {
                 try AudioSession.configure()
 
-                // Try servers in order with failover, mirroring batch (WhisperClient.transcribe).
-                // Empty / invalid URLs are skipped.
+                // Await probe result and try the selected server first.
+                // If unavailable or the probe-selected connection fails, iterate
+                // the remaining servers with the existing failover behaviour.
                 var client: WhisperStreamClient?
                 var lastError: Error?
-                for server in config.servers {
-                    let base = server.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                    guard !base.isEmpty else { continue }
-                    let candidate = WhisperStreamClient(baseURL: base)
-                    do {
-                        try await candidate.connect()
-                        client = candidate
-                        FileLogger.shared.info(.network, "Stream: connected to server",
-                                               payload: ["base": base])
-                        break
-                    } catch {
-                        FileLogger.shared.warn(.network, "Stream: server failed",
-                                               payload: ["base": base, "error": error.localizedDescription])
-                        lastError = error
-                        await candidate.disconnect()
-                        continue
+                let probeResult = await serverSelectionTask?.value
+
+                // Pre-trim once for efficient comparison and iteration.
+                let trimmedServers = config.servers.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }.filter { !$0.isEmpty }
+                var remainingServers = trimmedServers
+
+                if let selected = probeResult {
+                    let base = selected.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                    if !base.isEmpty, config.servers.contains(selected) {
+                        let candidate = WhisperStreamClient(baseURL: base)
+                        do {
+                            try await candidate.connect()
+                            client = candidate
+                            FileLogger.shared.info(.network, "Stream: connected to probe-selected server",
+                                                   payload: ["base": base])
+                        } catch {
+                            FileLogger.shared.warn(.network, "Stream: probe-selected server failed",
+                                                   payload: ["base": base, "error": error.localizedDescription])
+                            lastError = error
+                            await candidate.disconnect()
+                        }
+                        remainingServers = trimmedServers.filter { $0 != base }
+                    }
+                }
+
+                if client == nil {
+                    for server in remainingServers {
+                        guard !server.isEmpty else { continue }
+                        let candidate = WhisperStreamClient(baseURL: server)
+                        do {
+                            try await candidate.connect()
+                            client = candidate
+                            FileLogger.shared.info(.network, "Stream: connected to server",
+                                                   payload: ["base": server])
+                            break
+                        } catch {
+                            FileLogger.shared.warn(.network, "Stream: server failed",
+                                                   payload: ["base": server, "error": error.localizedDescription])
+                            lastError = error
+                            await candidate.disconnect()
+                            continue
+                        }
                     }
                 }
 
@@ -324,15 +373,31 @@ final class DictationViewModel: ObservableObject {
 
             do {
                 let audioBytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? UInt64 ?? 0
+
+                // Await probe result (may still be in flight for short recordings).
+                let probeResult = await serverSelectionTask?.value
+                let chosenServer = probeResult ?? config.servers.first
+
                 FileLogger.shared.info(.transcription, "upload start", payload: [
                     "id": id.uuidString,
                     "audioBytes": audioBytes,
                     "serverCount": config.servers.count,
-                    "server": config.servers.first ?? "",
+                    "server": probeResult ?? config.servers.first ?? "",
                     "ts": Date().timeIntervalSince1970 * 1000
                 ])
 
-                let text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
+                let text: String
+                if let server = chosenServer, config.servers.contains(server) {
+                    do {
+                        text = try await WhisperClient.transcribe(audioURL: url, serverURL: server, correlationId: activeID)
+                    } catch {
+                        FileLogger.shared.warn(.network, "single-server transcribe failed, falling back to iterating transcribe",
+                                               payload: ["server": server, "error": error.localizedDescription])
+                        text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
+                    }
+                } else {
+                    text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
+                }
                 guard activeID == id else { return }
 
                 let uploadElapsed = Date().timeIntervalSince(uploadT0) * 1000
@@ -518,6 +583,10 @@ final class DictationViewModel: ObservableObject {
         UIApplication.shared.isIdleTimerDisabled = false
         await recorder?.cleanup()
         recorder = nil
+
+        serverSelectionTask?.cancel()
+        serverSelectionTask = nil
+        selectedServer = nil
 
         if let id = activeID {
             DictationPayload(
