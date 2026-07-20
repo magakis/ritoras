@@ -3,7 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @State private var showOnboarding = false
-    @State private var showResetConfirmation = false
+    @State private var serversEditMode: EditMode = .inactive
     @State private var testStatuses: [Int: TestStatus] = [:]
     @FocusState private var focusedField: Int?
 
@@ -48,23 +48,6 @@ struct SettingsView: View {
                     Image(systemName: "questionmark.circle")
                 }
             }
-            ToolbarItem(placement: .navigationBarTrailing) {
-                HStack(spacing: 16) {
-                    EditButton()
-                    Button("Reset") {
-                        showResetConfirmation = true
-                    }
-                }
-            }
-        }
-        .alert("Reset to Defaults", isPresented: $showResetConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Reset", role: .destructive) {
-                settings.resetToDefaults()
-                testStatuses = [:]
-            }
-        } message: {
-            Text("This will reset all settings to their default values.")
         }
         .sheet(isPresented: $showOnboarding) {
             OnboardingView(onboardingCompleted: .constant(true))
@@ -78,26 +61,35 @@ struct SettingsView: View {
         Section {
             ForEach(settings.servers.indices, id: \.self) { index in
                 HStack(spacing: 8) {
+                    if serversEditMode == .active {
+                        Button {
+                            settings.servers.remove(at: index)
+                            testStatuses = [:]
+                        } label: {
+                            Image(systemName: "minus.circle.fill")
+                                .foregroundColor(.red)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+
                     TextField("Server URL", text: $settings.servers[index])
                         .textContentType(.URL)
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
                         .font(.body)
                         .focused($focusedField, equals: index)
-                }
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button {
-                        testServer(at: index)
-                    } label: {
-                        Label("Test", systemImage: testStatuses[index, default: .untested].iconName)
+
+                    if serversEditMode == .inactive {
+                        Button {
+                            testServer(at: index)
+                        } label: {
+                            Image(systemName: testStatuses[index, default: .untested].iconName)
+                                .foregroundColor(testStatuses[index, default: .untested].color)
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(testStatuses[index] == .testing)
                     }
-                    .tint(testStatuses[index, default: .untested].color)
-                    .disabled(testStatuses[index] == .testing)
                 }
-            }
-            .onDelete { offsets in
-                settings.servers.remove(atOffsets: offsets)
-                testStatuses = [:]
             }
             .onMove { offsets, destination in
                 settings.servers.move(fromOffsets: offsets, toOffset: destination)
@@ -108,10 +100,21 @@ struct SettingsView: View {
                 settings.servers.append("")
             }
         } header: {
-            Text("Whisper Servers")
+            HStack {
+                Text("Whisper Servers")
+                Spacer()
+                Button(serversEditMode == .active ? "Done" : "Edit") {
+                    withAnimation {
+                        serversEditMode = (serversEditMode == .active ? .inactive : .active)
+                    }
+                }
+                .buttonStyle(.borderless)
+                .foregroundColor(.blue)
+            }
         } footer: {
-            Text("Servers are tried in the order shown. If one fails, the next is attempted automatically. Swipe a server row left to test its connection.")
+            Text("Servers are tried in the order shown. If one fails, the next is attempted automatically. Tap Edit to delete or reorder; tap a server's test icon to check whether it's reachable.")
         }
+        .environment(\.editMode, $serversEditMode)
     }
 
     // MARK: - Dictation Section
