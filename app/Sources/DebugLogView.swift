@@ -391,8 +391,10 @@ struct DebugLogView: View {
     private var logLinesList: some View {
         ForEach(Array(filteredLines.enumerated()), id: \.element.id) { idx, line in
             if idx > 0, isDifferentDay(filteredLines[idx-1].timestamp, line.timestamp) {
-                daySeparatorView(for: line.timestamp)
-                    .listRowSeparator(.hidden)
+                if let ts = line.timestamp {
+                    daySeparatorView(for: ts)
+                        .listRowSeparator(.hidden)
+                }
             }
             logLineRow(line)
         }
