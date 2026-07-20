@@ -10,6 +10,7 @@ class AppSettings: ObservableObject {
     @Published var autocorrectOnSpaceEnabled: Bool = true
     @Published var dictationMode: SharedConfig.DictationMode = .batch
     @Published var verboseLogging: Bool = SharedConfig.Defaults.verboseLoggingDefault
+    @Published var hapticsEnabled: Bool = SharedConfig.Defaults.hapticsEnabledDefault
 
     private var appGroupDefaults: UserDefaults?
     private var cancellables = Set<AnyCancellable>()
@@ -24,6 +25,7 @@ class AppSettings: ObservableObject {
         autocorrectOnSpaceEnabled = SharedConfig.autocorrectOnSpaceEnabled()
         dictationMode = SharedConfig.dictationMode()
         verboseLogging = SharedConfig.verboseLoggingEnabled()
+        hapticsEnabled = SharedConfig.hapticsEnabled()
 
         $servers.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving servers",
@@ -55,6 +57,11 @@ class AppSettings: ObservableObject {
                                    payload: ["value": newValue])
             self?.saveVerboseLogging(newValue)
         }.store(in: &cancellables)
+        $hapticsEnabled.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving hapticsEnabled",
+                                   payload: ["value": newValue])
+            self?.saveHapticsEnabled(newValue)
+        }.store(in: &cancellables)
     }
 
     /// Synchronous write to App Group — backs the explicit Save button.
@@ -71,6 +78,7 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(autocorrectOnSpaceEnabled, forKey: SharedConfig.Defaults.autocorrectOnSpaceEnabledKey)
         appGroupDefaults?.set(dictationMode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
         appGroupDefaults?.set(verboseLogging, forKey: SharedConfig.Defaults.verboseLoggingKey)
+        appGroupDefaults?.set(hapticsEnabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
     }
 
     private func saveServers(_ servers: [String]) {
@@ -99,6 +107,10 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.verboseLoggingKey)
     }
 
+    private func saveHapticsEnabled(_ enabled: Bool) {
+        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
+    }
+
     func resetToDefaults() {
         servers = [SharedConfig.Defaults.baseUrl]
         timeoutSeconds = SharedConfig.Defaults.timeoutSeconds
@@ -106,5 +118,6 @@ class AppSettings: ObservableObject {
         autocorrectOnSpaceEnabled = SharedConfig.Defaults.autocorrectOnSpaceEnabledDefault
         dictationMode = .batch
         verboseLogging = SharedConfig.Defaults.verboseLoggingDefault
+        hapticsEnabled = SharedConfig.Defaults.hapticsEnabledDefault
     }
 }

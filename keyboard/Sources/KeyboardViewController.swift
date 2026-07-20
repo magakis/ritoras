@@ -72,9 +72,6 @@ class KeyboardViewController: UIInputViewController {
     private var backspaceNilContextRetries = 0
     private var backspaceStaleHasTextRetries = 0
 
-    // DIAGNOSTIC — strip after fix verification (Phase 3)
-    private let backspaceTapFeedback = UIImpactFeedbackGenerator(style: .light)
-
     // MARK: - Autocorrect-on-space
 
     private var wordOrigin = WordOriginTracker()
@@ -218,6 +215,7 @@ class KeyboardViewController: UIInputViewController {
         }
 
         setupKeyboardView()
+        HapticsManager.shared.reloadEnabledFromAppGroup()
         buildPredictionEngine()
         state = .idle
         FileLogger.shared.info(.keyboard, "viewDidLoad OK",
@@ -1106,10 +1104,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
     // MARK: - Backspace Long-Press
 
     func keyboardViewBackspaceDidBegin(_ view: KeyboardView) {
-        // DIAGNOSTIC — strip after fix verification (Phase 3)
-        backspaceTapFeedback.prepare()
-        backspaceTapFeedback.impactOccurred()
-
         backspaceTimer?.invalidate()
         backspaceTimer = nil
         backspaceSingleCharCount = 0
@@ -1432,6 +1426,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         // search field is a single-line input with no need for word-level deletion.
         if inputTarget == .emojiSearch {
             deleteTargetedBackward()
+            HapticsManager.shared.tapImpact()
             scheduleSuggestionRefresh()
             scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceCharRepeatInterval, repeats: true)
             return
@@ -1440,6 +1435,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         switch backspacePhase {
         case .charRepeat:
             deleteTargetedBackward()
+            HapticsManager.shared.tapImpact()
             backspaceSingleCharCount += 1
             scheduleSuggestionRefresh()
 
@@ -1502,6 +1498,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             for _ in 0..<n {
                 guard hasTextInCurrentTarget else { break }
                 deleteTargetedBackward()
+                HapticsManager.shared.tapImpact()
             }
             scheduleSuggestionRefresh()
             scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceWordRepeatInterval, repeats: false)
@@ -1552,6 +1549,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 "phase": String(describing: backspacePhase)
             ])
             deleteTargetedBackward()
+            HapticsManager.shared.tapImpact()
             backspaceSingleCharCount += 1
             scheduleSuggestionRefresh()
             backspacePhase = .charRepeat

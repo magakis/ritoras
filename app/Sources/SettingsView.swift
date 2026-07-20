@@ -153,8 +153,11 @@ struct SettingsView: View {
         Section {
             Toggle("Auto-Capitalization", isOn: $settings.autoCapitalizationEnabled)
             Toggle("Auto-Correction", isOn: $settings.autocorrectOnSpaceEnabled)
+            Toggle("Haptic Feedback", isOn: $settings.hapticsEnabled)
         } header: {
             Text("Keyboard")
+        } footer: {
+            Text("iOS's built-in Keyboard Feedback setting does not apply to custom keyboards. This toggle provides independent control.")
         }
     }
 

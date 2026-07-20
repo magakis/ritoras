@@ -674,6 +674,16 @@ class KeyboardView: UIView {
             sender.backspaceSuppressTap = false
             return
         }
+        switch sender.keyDefinition.action {
+        case .insertText, .space, .return:
+            HapticsManager.shared.tapImpact()
+        case .shift, .shiftLock,
+             .toggleNumber, .toggleLetters, .toggleSymbols,
+             .emoji, .globe:
+            HapticsManager.shared.tapSelection()
+        case .backspace, .mic:
+            break  // handled at dedicated touch-down sites
+        }
         delegate?.keyboardView(self, didPerform: sender.keyDefinition.action)
     }
 
@@ -686,6 +696,7 @@ class KeyboardView: UIView {
     @objc private func shiftLongPressed(_ gesture: UILongPressGestureRecognizer) {
         guard gesture.state == .began, let button = gesture.view as? KeyButton else { return }
         button.shiftLongPressDidFire = true
+        HapticsManager.shared.tapSelection()
         delegate?.keyboardView(self, didPerform: .shiftLock)
     }
 
@@ -693,6 +704,8 @@ class KeyboardView: UIView {
     /// to begin the repeat sequence (single delete immediately, repeated deletes in Phase 4).
     @objc private func backspaceTouchDown(_ sender: KeyButton) {
         sender.backspaceSuppressTap = true
+        HapticsManager.shared.prepareImpact()
+        HapticsManager.shared.tapImpact()
         delegate?.keyboardViewBackspaceDidBegin(self)
     }
 

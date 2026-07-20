@@ -111,6 +111,11 @@ struct SharedConfig {
         static let autocorrectOnSpaceEnabledKey = "autocorrectOnSpaceEnabled"
         static let autocorrectOnSpaceEnabledDefault = true
 
+        // MARK: - Haptics
+
+        static let hapticsEnabledKey = "hapticsEnabled"
+        static let hapticsEnabledDefault = true
+
         // MARK: - Verbose Logging
 
         static let verboseLoggingKey = "verboseLogging"
@@ -194,5 +199,16 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.verboseLoggingKey) as? Bool)
             ?? Defaults.verboseLoggingDefault
+    }
+
+    /// Reads the haptics enabled flag from the App Group.
+    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Returns the default (`true`) when the App Group is unavailable or the key is unset.
+    static func hapticsEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.hapticsEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.hapticsEnabledKey) as? Bool)
+            ?? Defaults.hapticsEnabledDefault
     }
 }

@@ -56,6 +56,7 @@ targets:
       - path: keyboard/Sources/AutoCapitalization
         excludes:
           - AutoCapTraits.swift
+      - path: keyboard/Sources/HapticsManager.swift
     dependencies:
       - target: Ritoras
     settings:
