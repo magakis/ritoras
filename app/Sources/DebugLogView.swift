@@ -146,7 +146,7 @@ struct DebugLogView: View {
     @State private var expandedKeys: Set<String> = []
 
     private var filteredLines: [LogLine] {
-        lines.filter { line in
+        Array(lines.filter { line in
             // 1. Level filter
             if let level = selectedFilter.level,
                line.level != level {
@@ -178,7 +178,7 @@ struct DebugLogView: View {
             }
 
             return true
-        }
+        }.reversed())
     }
 
     private var selectedOrFilteredLines: [LogLine] {
@@ -617,32 +617,34 @@ private struct LogRow: View {
 
     @ViewBuilder
     private var expandedContent: some View {
-        // Show the full untruncated message first
-        if let message = line.message {
-            Text(message)
-                .font(.system(.caption2, design: .monospaced, weight: .semibold))
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, 156)
-                .padding(.bottom, 2)
-        }
+        VStack(alignment: .leading, spacing: 1) {
+            fieldRow(label: "Category", value: line.component?.rawValue ?? "—")
+            fieldRow(label: "Level", value: line.level?.rawValue ?? "—")
+            fieldRow(label: "Message", value: line.message ?? "", multiline: true)
 
-        if let payloadLines = PayloadFormatter.render(line.payload, scrubPII: scrubPII) {
-            VStack(alignment: .leading, spacing: 1) {
+            if let payloadLines = PayloadFormatter.render(line.payload, scrubPII: scrubPII) {
+                Divider().padding(.vertical, 4)
                 ForEach(payloadLines) { pl in
-                    HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text(pl.key).foregroundStyle(.secondary)
-                        Text(pl.value).foregroundStyle(valueColor(pl.valueType))
-                    }
-                    .padding(.leading, 156)
+                    fieldRow(label: pl.key, value: pl.value, color: valueColor(pl.valueType))
                 }
             }
-            .padding(.top, 2)
-        } else {
-            Text(line.raw)
-                .font(.system(.caption2, design: .monospaced))
+        }
+        .padding(.leading, 16)
+        .padding(.top, 4)
+    }
+
+    @ViewBuilder
+    private func fieldRow(label: String, value: String, color: Color = .primary, multiline: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text("\(label):")
                 .foregroundStyle(.secondary)
-                .padding(.leading, 156)
+                .frame(width: 80, alignment: .trailing)
+                .fixedSize()
+            Text(value)
+                .foregroundStyle(color)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(multiline ? nil : 1)
+                .truncationMode(.tail)
         }
     }
 }
