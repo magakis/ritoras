@@ -17,6 +17,9 @@ or `http://100.x.y.z:5000` via Tailscale IP).
 
 The server runs on **port 5000** (not 8000) — see [Server details](#7-server-details).
 
+> **Synchronous, still supported.** This endpoint remains the primary batch
+> transcription endpoint and is unchanged from prior versions.
+
 ---
 
 ## 2. Request format
@@ -266,6 +269,9 @@ The streaming client spans three files:
 
 ## 10. Streaming mode (`/stream` WebSocket)
 
+> **Still supported.** This streaming endpoint remains the primary real-time
+> transcription endpoint and is unchanged from prior versions.
+
 ### Overview
 
 Ritoras uses the `/stream` WebSocket endpoint behind a user-facing
@@ -455,3 +461,256 @@ Expected output (the server echoes partial results per chunk, then the final):
 Note: `partial` transcriptions are unnormalized per-chunk Whisper output. Only
 the `final` is fully normalized through substitutions, time-format conversion,
 and text normalization — identical to the `POST /transcribe` pipeline.
+
+---
+
+## 11. Async transcription (recommended for new clients)
+
+```
+POST {BASE_URL}/transcriptions
+```
+
+### When to use async
+
+The synchronous `POST /transcribe` endpoint works well when the client can hold
+a connection open for the duration of the transcription. However, constrained
+environments — such as iOS keyboard extensions under the 48 MB Jetsam memory
+cap — may be terminated by the OS mid-request. The async pattern decouples
+upload from result retrieval so the client can submit audio and check back for
+the result later, even after a crash and relaunch.
+
+### Request
+
+#### Headers
+
+| Header | Value | Condition |
+|--------|-------|-----------|
+| `Content-Type` | `multipart/form-data; boundary={boundary}` | Always |
+| `Idempotency-Key` | `{UUID}` | Always — see §13 for contract details |
+
+No `Authorization` header is sent (same as `POST /transcribe`).
+
+#### Multipart body
+
+Identical to `POST /transcribe` — see [§2](#2-request-format). The field name is
+`audio`, the filename is `audio.m4a`, and the content type is `audio/mp4`.
+
+### Response (HTTP 202 Accepted)
+
+```json
+{
+    "job_id": "3a1b2c3d-4e5f-6789-abcd-ef0123456789",
+    "status_endpoint": "/jobs/3a1b2c3d-4e5f-6789-abcd-ef0123456789"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `job_id` | `string` (UUID) | Unique job identifier, also used as the path component of the status endpoint |
+| `status_endpoint` | `string` | Relative URL for `GET /jobs/{id}` — the client should poll this to retrieve the result |
+
+### Idempotency
+
+If a duplicate request with the same `Idempotency-Key` arrives within the
+retention window (10 minutes), the server returns HTTP 202 with the same
+`job_id` rather than re-transcribing. See [§13](#13-idempotency-key-contract)
+for the full contract.
+
+---
+
+## 12. Job status polling
+
+```
+GET {BASE_URL}/jobs/{job_id}
+```
+
+Poll this endpoint to retrieve the transcription result after submitting via
+`POST /transcriptions`. The `job_id` is obtained from the `status_endpoint`
+field in the async submission response.
+
+### Response (HTTP 200)
+
+```json
+{
+    "status": "ready",
+    "text": "This is the transcribed text. ",
+    "revision": 3
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | `string` | One of: `pending`, `transcribing`, `ready`, `failed` |
+| `text` | `string` or `null` | The transcribed text. `null` unless `status` is `ready`. |
+| `revision` | `integer` | Monotonically increasing counter bumped on every job update. Clients use this to detect stale reads — if `revision` hasn't changed, the cached response is still current. |
+
+### Status values
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | Job accepted but not yet picked up by a worker |
+| `transcribing` | Audio is being transcribed |
+| `ready` | Transcription complete. `text` is populated. |
+| `failed` | Transcription failed. `text` is `null`. |
+
+### Polling cadence
+
+- **While visible (UI on screen):** Poll every 500–1000 ms.
+- **Stop polling** once `status` is `ready` or `failed` (terminal states).
+- **Background recovery (crash relaunch):** Poll once at startup with a short
+  timeout. If `status` is `ready`, retrieve the result; otherwise abandon — the
+  job is likely too old or was a different session.
+
+### Error response (HTTP 404)
+
+```json
+{ "detail": "Job not found" }
+```
+
+Returned when the `job_id` does not correspond to any known or retained job.
+The client should treat this the same as an expired or never-existing job.
+
+### Job retention
+
+Jobs are retained for at least 10 minutes after reaching a terminal state
+(`ready` or `failed`). After that, the server may evict them. The
+`Idempotency-Key` retention window (see [§13](#13-idempotency-key-contract)) is
+independent and may extend beyond job retention to prevent duplicate
+submissions.
+
+---
+
+## 13. Idempotency-Key contract
+
+The `Idempotency-Key` header provides at-least-once semantics for
+`POST /transcriptions`.
+
+### Format
+
+A UUID string in canonical 8-4-4-4-12 lowercase hex format:
+
+```
+Idempotency-Key: 3a1b2c3d-4e5f-6789-abcd-ef0123456789
+```
+
+### Generation
+
+The client MUST generate the idempotency key **before** starting the upload.
+For Ritoras, the key is the `jobId` UUID produced by
+`shared/TranscriptionInbox.swift` — the same identifier used for cross-target
+delivery. This ensures that a retry after a crash reuses the same key and does
+not double-transcribe.
+
+### Retention
+
+The server MUST retain the idempotency key for **at least 10 minutes** from the
+initial request. During this window:
+
+- A replay (same key, any identical audio) returns the **same `job_id`** as the
+  original response.
+- A replay with a key that has already been consumed but whose job is still
+  pending or transcribing returns the same `job_id`. The server does not start
+  a second transcription.
+- After the retention window expires, the server MAY forget the key and treat
+  the next request with that key as a new submission.
+
+### Replay response
+
+On key replay within the retention window, the server returns HTTP 202 with the
+original `job_id` and `status_endpoint`. The response body is identical to the
+original submission response — no re-transcription occurs.
+
+### Error on duplicate with different content
+
+If the same `Idempotency-Key` is used with **different** audio content within
+the retention window, the server SHOULD return HTTP 422 Unprocessable Entity.
+This signals a client bug (the key should be unique per payload), not a
+transient failure.
+
+---
+
+## 14. Deprecation notice
+
+### Endpoint
+
+```
+GET {BASE_URL}/dictation_result/latest
+```
+
+### What it does
+
+The keyboard extension currently polls this endpoint as a fallback transport
+when the primary app-group inbox delivery path does not produce a result in
+time. The container app writes dictation results to this endpoint after
+transcription completes (in both batch and stream modes), and the keyboard
+reads them via polling at ~500 ms intervals.
+
+### Response shape
+
+```json
+{
+    "status": "completed",
+    "text": "This is the transcribed text. ",
+    "timestamp": 1712345678.0
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `status` | `string` | One of: `completed`, `error`, `cancelled`, `transcribing`, `recording`, `none` |
+| `text` | `string` | The transcribed text (present when `status` is `completed`) |
+| `timestamp` | `double` | Epoch seconds of the result. Clients use this to ignore stale results. |
+| `errorMessage` | `string` or `null` | Present when `status` is `error`. |
+| `detail` | `string` or `null` | Present on 404 — value is `"Not Found"`. |
+
+If no result is available, the server returns HTTP 404 with
+`{"detail": "Not Found"}`.
+
+### Deprecation status
+
+**DEPRECATED**
+
+This endpoint is a polling-based transport that was introduced as a workaround
+before the app-group inbox was available. It will be **removed** in a future
+update (Phase 6 of the inbox migration).
+
+### Migration path
+
+New code must use the app-group inbox store
+(`shared/TranscriptionInbox.swift`) for cross-target delivery instead of this
+endpoint. The inbox provides push-style delivery without polling, works offline,
+and is not subject to network latency or server availability.
+
+### Timeline
+
+| Phase | Action |
+|-------|--------|
+| Phase 5 | This deprecation notice published |
+| Phase 6 | Client-side reliance on this endpoint removed. Keyboard stops polling `/dictation_result/latest`. |
+| Future (TBD) | Server-side endpoint removed |
+
+---
+
+## 15. Migration status
+
+The following table summarises the state of all documented server endpoints:
+
+| Endpoint | Type | Status | Used by |
+|----------|------|--------|---------|
+| `POST /transcribe` | Sync | Stable — primary batch endpoint | Container app (batch mode) |
+| `WS /stream` | Streaming | Stable — primary streaming endpoint | Container app (stream mode) |
+| `POST /transcriptions` + `GET /jobs/{id}` | Async (request-reply) | New — recommended for constrained clients and crash recovery | Not yet adopted by iOS client (planned for Phase 7) |
+| `GET /dictation_result/latest` | Sync polling | **DEPRECATED** — see §14 | Keyboard extension (fallback; to be removed in Phase 6) |
+
+### Key design rationale
+
+- **`POST /transcribe`** and **`WS /stream`** remain the primary endpoints for
+  the container app today. They are synchronous, well-tested, and unchanged.
+- **`POST /transcriptions`** + **`GET /jobs/{id}`** are optional async
+  endpoints. They are not yet used by any Ritoras client. They are documented
+  now so the server team can implement them in parallel. Future clients —
+  especially those that may be killed by the OS mid-request — should prefer this
+  pattern.
+- **`GET /dictation_result/latest`** is deprecated and will be removed once the
+  keyboard extension no longer relies on it (Phase 6). Do not build new
+  dependencies on this endpoint.
