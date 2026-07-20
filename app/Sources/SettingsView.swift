@@ -49,8 +49,11 @@ struct SettingsView: View {
                 }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button("Reset") {
-                    showResetConfirmation = true
+                HStack(spacing: 16) {
+                    EditButton()
+                    Button("Reset") {
+                        showResetConfirmation = true
+                    }
                 }
             }
         }
@@ -69,6 +72,7 @@ struct SettingsView: View {
     }
 
     // MARK: - Server Section
+    // Order is semantically meaningful — drives failover priority in WhisperClient.transcribe and probe priority in selectFirstHealthyServer.
 
     private var serverSection: some View {
         Section {
@@ -101,6 +105,10 @@ struct SettingsView: View {
             }
             .onDelete { offsets in
                 settings.servers.remove(atOffsets: offsets)
+                testStatuses = [:]
+            }
+            .onMove { offsets, destination in
+                settings.servers.move(fromOffsets: offsets, toOffset: destination)
                 testStatuses = [:]
             }
 
