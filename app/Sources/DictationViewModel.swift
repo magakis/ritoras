@@ -378,7 +378,7 @@ final class DictationViewModel: ObservableObject {
                 // Await probe result with 3s cap; fall back to iterating transcribe on timeout.
                 let probeResult: String?
                 if let task = serverSelectionTask {
-                    FileLogger.shared.debug(.network, "stop probe await start", payload: ["active_id": activeID.uuidString])
+                    FileLogger.shared.debug(.network, "stop probe await start", payload: ["active_id": activeID?.uuidString ?? "nil"])
                     probeResult = await withTaskGroup(of: String?.self) { group in
                         group.addTask { await task.value }
                         group.addTask {
@@ -446,7 +446,7 @@ final class DictationViewModel: ObservableObject {
                     "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000,
                     "ts": Date().timeIntervalSince1970 * 1000
                 ])
-                FileLogger.shared.debug(.network, "stop posting darwin", payload: ["active_id": activeID.uuidString, "elapsed_since_stop_start": Date().timeIntervalSince(stopStartTime) * 1000])
+                FileLogger.shared.debug(.network, "stop posting darwin", payload: ["active_id": activeID?.uuidString ?? "nil", "elapsed_since_stop_start": Date().timeIntervalSince(stopStartTime) * 1000])
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
                 FileLogger.shared.info(.transcription, "result delivered", payload: [
                     "id": id.uuidString, "channel": "darwin",
