@@ -62,7 +62,7 @@ private enum TimeRangeFilter: String, CaseIterable {
 private enum DateFormat {
     static let today: DateFormatter = {
         let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss.SSS"
+        f.dateFormat = "HH:mm:ss"
         return f
     }()
     static let older: DateFormatter = {
@@ -406,7 +406,14 @@ struct DebugLogView: View {
             isExpanded: expandedKeys.contains(line.raw),
             isSelected: selectedIDs.contains(line.id),
             scrubPII: scrubPII,
-            onToggle: { toggleExpand(line.raw) }
+            onToggle: { toggleExpand(line.raw) },
+            onLongPress: {
+                withAnimation {
+                    editMode = .active
+                    selectedIDs.insert(line.id)
+                }
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            }
         )
         .listRowBackground(
             selectedIDs.contains(line.id) ? Color.accentColor.opacity(0.2) : Color.clear
@@ -501,9 +508,10 @@ struct DebugLogView: View {
     @ViewBuilder
     private var copiedOverlay: some View {
         if showCopiedConfirmation {
-            Text("Copied")
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
+            Text("Copied \(selectedOrFilteredLines.count) entries")
+                .font(.system(.subheadline, design: .monospaced))
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
                 .background(Color.secondary.opacity(0.9))
                 .foregroundColor(.white)
                 .clipShape(Capsule())
@@ -536,8 +544,9 @@ struct DebugLogView: View {
             text = LogScrubber.scrub(text)
         }
         UIPasteboard.general.string = text
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
         withAnimation { showCopiedConfirmation = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
             withAnimation { showCopiedConfirmation = false }
         }
     }
@@ -569,21 +578,22 @@ private struct LogRow: View {
     let isSelected: Bool
     let scrubPII: Bool
     let onToggle: () -> Void
+    let onLongPress: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Text(timeFormatted(line.timestamp))
-                    .frame(width: 96, alignment: .leading)
+                    .frame(width: 80, alignment: .leading)
                     .foregroundStyle(.secondary)
                     .fixedSize()
                 Text(levelLabel(line.level))
-                    .frame(width: 40, alignment: .leading)
+                    .frame(width: 48, alignment: .leading)
                     .foregroundStyle(color(for: line.level))
                     .fontWeight(.semibold)
                     .fixedSize()
                 Text((line.component?.rawValue ?? "—").padding(toLength: 13, withPad: " ", startingAt: 0))
-                    .frame(width: 84, alignment: .leading)
+                    .frame(width: 110, alignment: .leading)
                     .foregroundStyle(.secondary.opacity(0.8))
                     .fixedSize()
                 Text(line.message ?? line.raw)
@@ -591,7 +601,6 @@ private struct LogRow: View {
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .textSelection(.enabled)
                 Spacer(minLength: 4)
                 Text(isExpanded ? "⌄" : "›")
                     .foregroundStyle(.secondary)
@@ -603,6 +612,7 @@ private struct LogRow: View {
         .contentShape(Rectangle())
         .font(.system(.caption2, design: .monospaced))
         .onTapGesture { onToggle() }
+        .onLongPressGesture(minimumDuration: 0.5) { onLongPress() }
     }
 
     @ViewBuilder
@@ -614,7 +624,6 @@ private struct LogRow: View {
                 .foregroundStyle(.primary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, 156)
-                .textSelection(.enabled)
                 .padding(.bottom, 2)
         }
 
@@ -622,8 +631,8 @@ private struct LogRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 ForEach(payloadLines) { pl in
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text(pl.key).foregroundStyle(.secondary).textSelection(.enabled)
-                        Text(pl.value).foregroundStyle(valueColor(pl.valueType)).textSelection(.enabled)
+                        Text(pl.key).foregroundStyle(.secondary)
+                        Text(pl.value).foregroundStyle(valueColor(pl.valueType))
                     }
                     .padding(.leading, 156)
                 }
@@ -634,7 +643,6 @@ private struct LogRow: View {
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .padding(.leading, 156)
-                .textSelection(.enabled)
         }
     }
 }
