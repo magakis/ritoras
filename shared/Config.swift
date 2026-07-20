@@ -249,3 +249,23 @@ struct SharedConfig {
         }
     }
 }
+
+// MARK: - Inbox / Outbox
+
+extension SharedConfig {
+    public enum Inbox {
+        /// Relative path from the app-group container root to the inbox directory.
+        public static let directoryName = "Shared/inbox"
+        /// Relative path from the app-group container root to the archive directory.
+        public static let archiveDirectoryName = "Shared/archive"
+        /// Relative path from the app-group container root to the state directory.
+        public static let stateDirectoryName = "Shared/state"
+        /// Name of the file that holds the monotonic revision counter.
+        public static let lastRevisionFileName = "last-revision"
+        /// Time-to-live for an in-flight record before it is considered stale
+        /// and automatically transitioned to `.failed` (5 minutes).
+        public static let staleRecordTTL: TimeInterval = 300
+        /// Number of most-recent archived records retained by `gcArchive`.
+        public static let archiveRetentionCount = 100
+    }
+}
