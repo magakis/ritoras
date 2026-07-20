@@ -172,20 +172,26 @@ public final class TranscriptionInbox {
         }
     }
 
-    /// Creates a new record in `.requested` status with the next available revision.
+    /// Creates a new transcription record directly in the given initial status.
     ///
-    /// - Parameter jobId: The unique identifier for this transcription job.
+    /// Use this when the first observable state is already known (e.g., the
+    /// container app enters `start(id:)` already knowing it's about to record).
+    /// Assigns the next monotonic revision.
+    ///
+    /// - Parameters:
+    ///   - jobId: The unique identifier for this transcription job.
+    ///   - status: The initial status for the record (e.g., `.recording`).
     /// - Returns: The newly created record.
     /// - Throws: File I/O errors.
     @discardableResult
-    public func createRequested(jobId: UUID) throws -> TranscriptionRecord {
+    public func create(jobId: UUID, status: TranscriptionStatus) throws -> TranscriptionRecord {
         try queue.sync {
             let revision = self._nextRevision()
             let now = Date()
             let record = TranscriptionRecord(
                 jobId: jobId,
                 revision: revision,
-                status: .requested,
+                status: status,
                 text: nil,
                 errorMessage: nil,
                 createdAt: now,
@@ -193,9 +199,19 @@ public final class TranscriptionInbox {
                 completedAt: nil
             )
             try self._upsert(record)
-            FileLogger.shared.info(.transcription, "createRequested jobId=\(jobId) revision=\(revision)")
+            FileLogger.shared.info(.transcription, "create jobId=\(jobId) status=\(status.rawValue) revision=\(revision)")
             return record
         }
+    }
+
+    /// Creates a new record in `.requested` status with the next available revision.
+    ///
+    /// - Parameter jobId: The unique identifier for this transcription job.
+    /// - Returns: The newly created record.
+    /// - Throws: File I/O errors.
+    @discardableResult
+    public func createRequested(jobId: UUID) throws -> TranscriptionRecord {
+        try create(jobId: jobId, status: .requested)
     }
 
     // MARK: - Readers
@@ -268,6 +284,18 @@ public final class TranscriptionInbox {
     /// This handles the case where the container app is killed mid-transcription
     /// — the inbox record would otherwise be stuck in `recording` / `transcribing`
     /// forever.
+    ///
+    /// ## Timestamp choice
+    /// Staleness is detected using `updatedAt` (not `createdAt`) because
+    /// `updatedAt` represents the last meaningful state transition. A record
+    /// stuck in `.recording` for an hour has `updatedAt == one_hour_ago` and is
+    /// correctly detected as stale. For a record that has never transitioned
+    /// (e.g., created in `.requested` and abandoned), `createdAt == updatedAt`,
+    /// so it is also correctly detected.
+    ///
+    /// Writers must NOT bump `updatedAt` without making real state progress
+    /// (e.g., no heartbeat-style updates that refresh the timestamp without
+    /// changing status). Doing so would defeat staleness detection.
     ///
     /// - Parameter ttl: Age threshold in seconds.
     /// - Throws: File I/O errors.

@@ -35,6 +35,21 @@ final class TranscriptionInboxTests: XCTestCase {
         XCTAssertNil(record.completedAt)
     }
 
+    func testCreateWithExplicitStatusReturnsThatStatus() throws {
+        let id = UUID()
+        let record = try inbox.create(jobId: id, status: .recording)
+        XCTAssertEqual(record.status, .recording)
+        XCTAssertEqual(record.revision, 1)
+        XCTAssertNil(record.completedAt)
+        XCTAssertEqual(record.createdAt.timeIntervalSince1970,
+                       record.updatedAt.timeIntervalSince1970,
+                       accuracy: 0.1)
+        let fileURL = inbox.inboxDirectoryURL
+            .appendingPathComponent("\(id.uuidString).json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path),
+                      "Record file should exist in the inbox directory")
+    }
+
     // MARK: - 2. Monotonic Revision Across Instances
 
     func testNextRevisionMonotonicAcrossInstances() throws {
@@ -218,6 +233,33 @@ final class TranscriptionInboxTests: XCTestCase {
         XCTAssertNotNil(record)
         XCTAssertEqual(record?.status, .requested) // unchanged
         XCTAssertNil(record?.errorMessage)
+    }
+
+    func testMarkStaleDetectsAbandonedRequestedRecord() throws {
+        let id = UUID()
+        // Create a record in .requested that was never transitioned.
+        // Both createdAt and updatedAt are set to 10 minutes ago.
+        let oldDate = Date().addingTimeInterval(-600)
+        let abandonedRecord = TranscriptionRecord(
+            jobId: id,
+            revision: 1,
+            status: .requested,
+            text: nil,
+            errorMessage: nil,
+            createdAt: oldDate,
+            updatedAt: oldDate,
+            completedAt: nil
+        )
+        try inbox.upsert(abandonedRecord)
+
+        try inbox.markStale(olderThan: 300) // 5-minute TTL
+
+        let record = inbox.read(jobId: id)
+        XCTAssertNotNil(record)
+        XCTAssertEqual(record?.status, .failed,
+                       "Abandoned .requested record should be marked as stale")
+        XCTAssertEqual(record?.errorMessage, "Stale: no update for 300 seconds")
+        XCTAssertNotNil(record?.completedAt)
     }
 
     // MARK: - 12. Archive If Both Consumed Moves File

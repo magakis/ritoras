@@ -122,16 +122,14 @@ final class DictationViewModel: ObservableObject {
     /// server POST, Darwin notification) so the inbox is the source of truth
     /// even if the view model is torn down mid-transition.
     /// Inbox failures are caught and logged — they must NOT block the dictation flow.
+    /// Note: Use `inbox.create(jobId:status:)` directly for the initial record
+    /// creation rather than passing `.requested` through this helper.
     private func writeInbox(jobId: UUID,
                             status: TranscriptionStatus,
                             text: String? = nil,
                             errorMessage: String? = nil) {
         do {
-            if status == .requested {
-                _ = try inbox.createRequested(jobId: jobId)
-            } else {
-                _ = try inbox.transition(jobId: jobId, to: status, text: text, errorMessage: errorMessage)
-            }
+            _ = try inbox.transition(jobId: jobId, to: status, text: text, errorMessage: errorMessage)
             FileLogger.shared.info(.app, "Inbox write", payload: [
                 "jobId": jobId.uuidString,
                 "status": status.rawValue
@@ -147,8 +145,19 @@ final class DictationViewModel: ObservableObject {
 
     func start(id: UUID) async {
         activeID = id
-        writeInbox(jobId: id, status: .requested)
-        writeInbox(jobId: id, status: .recording)
+        do {
+            _ = try inbox.create(jobId: id, status: .recording)
+            FileLogger.shared.info(.app, "Inbox write", payload: [
+                "jobId": id.uuidString,
+                "status": "recording"
+            ])
+        } catch {
+            FileLogger.shared.error(.app, "Inbox write failed", payload: [
+                "jobId": id.uuidString,
+                "status": "recording",
+                "error": String(describing: error)
+            ])
+        }
         livePartial = ""
         phase = .recording
 

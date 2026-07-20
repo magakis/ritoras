@@ -576,29 +576,51 @@ class KeyboardViewController: UIInputViewController {
                 // If another path (legacy) is already inserting text, skip inbox insertion
                 // to prevent double-insert. Still mark consumed and update UI.
                 if case .inserting = self.state {
-                    for record in unconsumed {
-                        try? self.inbox.markConsumed(jobId: record.jobId)
+                    let toMark = unconsumed
+                    let inboxRef = self.inbox
+                    DispatchQueue.global(qos: .utility).async {
+                        for record in toMark {
+                            do {
+                                try inboxRef.markConsumed(jobId: record.jobId)
+                            } catch {
+                                FileLogger.shared.error(.keyboard, "markConsumed failed for \(record.jobId): \(error)")
+                            }
+                        }
                     }
                     self.updateRecordingInProgressUI(inFlight: inFlight)
                     return
                 }
 
+                // Accumulate records that need consumed markers and write them on a
+                // background queue so file I/O does not block the main queue (reducing
+                // the theoretical race window between state check and marker write).
+                var toMark: [TranscriptionRecord] = []
                 for record in unconsumed {
                     switch record.status {
                     case .ready:
                         self.insertDictationResult(text: record.text ?? "")
+                        toMark.append(record)
                     case .failed:
                         self.state = .error(record.errorMessage ?? "Transcription failed")
+                        toMark.append(record)
                     case .cancelled:
                         self.state = .idle
+                        toMark.append(record)
                     default:
                         continue
                     }
+                }
 
-                    do {
-                        try self.inbox.markConsumed(jobId: record.jobId)
-                    } catch {
-                        FileLogger.shared.error(.keyboard, "markConsumed failed for \(record.jobId): \(error)")
+                if !toMark.isEmpty {
+                    let inboxRef = self.inbox
+                    DispatchQueue.global(qos: .utility).async {
+                        for record in toMark {
+                            do {
+                                try inboxRef.markConsumed(jobId: record.jobId)
+                            } catch {
+                                FileLogger.shared.error(.keyboard, "markConsumed failed for \(record.jobId): \(error)")
+                            }
+                        }
                     }
                 }
 
