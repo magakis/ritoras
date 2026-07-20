@@ -19,6 +19,7 @@ final class MetricKitSubscriber: NSObject, MXMetricManagerSubscriber {
     private static let fileName = "ritoras-metric-reports.jsonl"
     private static let maxReports = 50
     private static var _nextID: Int = 0
+    private static let idQueue = DispatchQueue(label: "ritoras.metrickit.id")
 
     private static let queue = DispatchQueue(label: "ritoras.metrickit", qos: .utility)
 
@@ -194,7 +195,9 @@ final class MetricKitSubscriber: NSObject, MXMetricManagerSubscriber {
     }
 
     private static func nextID() -> Int {
-        defer { _nextID += 1 }
-        return _nextID
+        idQueue.sync {
+            defer { _nextID += 1 }
+            return _nextID
+        }
     }
 }

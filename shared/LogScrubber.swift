@@ -37,7 +37,7 @@ enum LogScrubber {
         )
 
         let base64 = try! NSRegularExpression(
-            pattern: "[A-Za-z0-9+/]{40,}={0,2}"
+            pattern: "[A-Za-z0-9+/]{120,}={0,2}"
         )
 
         let cc = try! NSRegularExpression(
@@ -90,20 +90,17 @@ enum LogScrubber {
             guard range.location != NSNotFound, range.length > 0 else { return }
 
             let original = nsString.substring(with: range)
-            guard let comps = URLComponents(string: original),
-                  let host = comps.host,
-                  !host.isEmpty
-            else {
-                return
-            }
+            guard let comps = URLComponents(string: original) else { return }
 
             var stripped = ""
             if let scheme = comps.scheme, !scheme.isEmpty {
                 stripped += scheme + "://"
             }
-            stripped += host
-            if let port = comps.port {
-                stripped += ":\(port)"
+            if let host = comps.host, !host.isEmpty {
+                stripped += host
+                if let port = comps.port {
+                    stripped += ":\(port)"
+                }
             }
             stripped += comps.path
 

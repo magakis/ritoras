@@ -39,6 +39,7 @@ final class FileLogger {
 
     // ── os.Logger probe (Phase 3a) ───────────────────────────────────
     private static let probeLogger = Logger(subsystem: "com.ritoras.app", category: "probe")
+    private static let probeQueue = DispatchQueue(label: "ritoras.filelogger.probe")
     private static var probeEmitted = false
 
     private let resolvedURL: URL?
@@ -153,9 +154,11 @@ final class FileLogger {
             }
 
             // Phase 3a: emit os.Logger probe exactly once per process lifetime.
-            if !Self.probeEmitted {
-                Self.probeEmitted = true
-                Self.probeLogger.notice("ritoras probe: \(level.rawValue, privacy: .public) path reached for component \(component.rawValue, privacy: .public)")
+            Self.probeQueue.sync {
+                if !Self.probeEmitted {
+                    Self.probeEmitted = true
+                    Self.probeLogger.notice("ritoras probe: \(level.rawValue, privacy: .public) path reached for component \(component.rawValue, privacy: .public)")
+                }
             }
         case .debug, .info:
             queue.async(execute: write)
@@ -297,8 +300,19 @@ final class FileLogger {
             if let size = attrs[.size] as? Int64, size > maxBytes {
                 rotate(url: url)
             }
+        } catch let error as NSError where error.code == NSFileNoSuchFileError {
+            // First write — expected, no diagnostic needed.
         } catch {
-            // File doesn't exist yet — first write is expected; no diagnostic needed.
+            shared.recordDiagnostic("size check failed: \(error)")
+        }
+
+        // Check available disk space before attempting write
+        let parentDir = url.deletingLastPathComponent()
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: parentDir.path),
+           let free = attrs[.systemFreeSize] as? NSNumber,
+           free.int64Value < 1_000_000 {
+            shared.recordDiagnostic("skipping log write — disk space low: \(free.int64Value) bytes free")
+            return
         }
 
         // Atomic append: write to temp file then replace into place.
@@ -391,10 +405,11 @@ struct LogLine: Identifiable, Hashable {
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
+        hasher.combine(raw)
     }
 
     static func == (lhs: LogLine, rhs: LogLine) -> Bool {
-        lhs.id == rhs.id
+        lhs.id == rhs.id && lhs.raw == rhs.raw
     }
 }
 

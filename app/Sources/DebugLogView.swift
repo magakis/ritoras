@@ -10,13 +10,13 @@ private enum LevelFilter: String, CaseIterable {
     case warn = "Warn"
     case error = "Error"
 
-    var levelToken: String? {
+    var level: LogLevel? {
         switch self {
         case .all:   return nil
-        case .debug: return "[DEBUG]"
-        case .info:  return "[INFO]"
-        case .warn:  return "[WARN]"
-        case .error: return "[ERROR]"
+        case .debug: return .debug
+        case .info:  return .info
+        case .warn:  return .warn
+        case .error: return .error
         }
     }
 }
@@ -76,8 +76,8 @@ struct DebugLogView: View {
     private var filteredLines: [LogLine] {
         lines.filter { line in
             // 1. Level filter
-            if let token = selectedFilter.levelToken,
-               !line.raw.contains(" \(token) ") {
+            if let level = selectedFilter.level,
+               line.level != level {
                 return false
             }
 
