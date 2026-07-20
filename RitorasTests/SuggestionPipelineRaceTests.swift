@@ -87,4 +87,31 @@ final class SuggestionPipelineRaceTests: XCTestCase {
         // Token 0 but no displayed items — should still return nil (out of range).
         XCTAssertNil(decideSuggestionTap(cache: cache, liveToken: 0, index: 0))
     }
+
+    // MARK: - Display-time stale-write guard
+
+    func test_lookup_applied_when_tokens_match() {
+        // Tokens match → lookup should be applied.
+        XCTAssertTrue(shouldApplyLookupResult(capturedToken: 100, liveToken: 100))
+    }
+
+    func test_lookup_dropped_when_tokens_mismatch() {
+        // User typed more during lookup → tokens differ → drop stale result.
+        XCTAssertFalse(shouldApplyLookupResult(capturedToken: 100, liveToken: 999))
+    }
+
+    func test_lookup_applied_when_captured_token_zero() {
+        // Zero captured token disables the guard (backward-compat escape hatch).
+        XCTAssertTrue(shouldApplyLookupResult(capturedToken: 0, liveToken: 999))
+    }
+
+    func test_lookup_applied_when_both_tokens_zero() {
+        // Both zero: symmetric case, escape hatch fires.
+        XCTAssertTrue(shouldApplyLookupResult(capturedToken: 0, liveToken: 0))
+    }
+
+    func test_lookup_dropped_with_large_token_difference() {
+        // Captured token != 0 and differs from live token → drop.
+        XCTAssertFalse(shouldApplyLookupResult(capturedToken: UInt64.max, liveToken: 0))
+    }
 }

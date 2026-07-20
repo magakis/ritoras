@@ -1127,7 +1127,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         wordOrigin.markSuggestionTap()    // THE LOCK — prevents re-correction on next separator
         lastAutoCorrection = nil          // Suggestion tap invalidates any pending revert
         wordOrigin.resetToTyping()        // Trailing space starts a new word
-        // SYNC: post-tap refresh must be immediate so the next tap sees fresh state.
+        // Refresh is async; the token guard rejects any result whose captured state no longer matches.
         keyboardView.refreshSuggestions()
 
         // If the user accepted a suggestion that differs from their typed word,
@@ -1137,17 +1137,20 @@ extension KeyboardViewController: KeyboardViewDelegate {
         }
     }
 
-    func keyboardViewNeedsSuggestions(_ view: KeyboardView) -> [String] {
-        guard inputTarget == .hostApp else { return [] }
-        guard isPredictionEngineReady, let engine = predictionEngine else { return [] }
+    func keyboardViewSuggestionSnapshot(_ view: KeyboardView) -> SuggestionInputSnapshot? {
+        guard inputTarget == .hostApp else { return nil }
+        guard isPredictionEngineReady, predictionEngine != nil else { return nil }
         let context = textDocumentProxy.documentContextBeforeInput
         let extracted = CurrentWordExtractor.extract(from: context)
-        return engine.suggestions(
-            forCurrentWord: extracted.currentWord,
+        return SuggestionInputSnapshot(
+            currentWord: extracted.currentWord,
             lookupWord: extracted.lookupWord,
-            previousWord: extracted.previousWord,
-            limit: 3
+            previousWord: extracted.previousWord
         )
+    }
+
+    func keyboardViewPredictionEngine(_ view: KeyboardView) -> PredictionEngine? {
+        return predictionEngine
     }
 
     func keyboardContextToken(_ view: KeyboardView) -> UInt64 {

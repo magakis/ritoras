@@ -27,12 +27,21 @@ enum UIMode: Equatable {
     case emojiSearch
 }
 
+// MARK: - Suggestion Input Snapshot
+
+struct SuggestionInputSnapshot {
+    let currentWord: String
+    let lookupWord: String
+    let previousWord: String?
+}
+
 // MARK: - Delegate
 
 protocol KeyboardViewDelegate: AnyObject {
     func keyboardView(_ view: KeyboardView, didPerform action: KeyAction)
     func keyboardView(_ view: KeyboardView, didTapSuggestion text: String)
-    func keyboardViewNeedsSuggestions(_ view: KeyboardView) -> [String]
+    func keyboardViewSuggestionSnapshot(_ view: KeyboardView) -> SuggestionInputSnapshot?
+    func keyboardViewPredictionEngine(_ view: KeyboardView) -> PredictionEngine?
     func keyboardViewMicState(_ view: KeyboardView) -> KeyboardState
     func keyboardViewBackspaceDidBegin(_ view: KeyboardView)
     func keyboardViewBackspaceDidEnd(_ view: KeyboardView)
@@ -445,6 +454,13 @@ class KeyboardView: UIView {
     /// to the letter region's top edge, preventing overlap.
     private var emojiSearchOverlapConstraint: NSLayoutConstraint?
 
+    // Suggestion lookup concurrency (matching predictionBuildQueue pattern)
+    private let suggestionLookupQueue = DispatchQueue(
+        label: "com.ritoras.suggestion.lookup",
+        qos: .userInitiated
+    )
+    private var suggestionLookupWorkItem: DispatchWorkItem?
+
     // MARK: - Initialization
 
     override init(frame: CGRect) {
@@ -851,10 +867,46 @@ class KeyboardView: UIView {
     }
 
     func refreshSuggestions() {
-        let suggestions = delegate?.keyboardViewNeedsSuggestions(self) ?? []
         let token = delegate?.keyboardContextToken(self) ?? 0
-        suggestionCache.update(suggestions, token: token)
-        suggestionBar.update(with: suggestions)
+
+        guard let snapshot = delegate?.keyboardViewSuggestionSnapshot(self),
+              let engine = delegate?.keyboardViewPredictionEngine(self) else {
+            // Wrong target or engine not ready — clear synchronously, no hop needed.
+            suggestionLookupWorkItem?.cancel()
+            suggestionLookupWorkItem = nil
+            suggestionCache.update([], token: token)
+            suggestionBar.update(with: [])
+            return
+        }
+
+        // Cancel any in-flight lookup before issuing a new one.
+        // Guarantees at most one lookup in flight (48 MB Jetsam: no parallel
+        // SymSpell result sets).
+        suggestionLookupWorkItem?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            let suggestions = engine.suggestions(
+                forCurrentWord: snapshot.currentWord,
+                lookupWord: snapshot.lookupWord,
+                previousWord: snapshot.previousWord,
+                limit: 3
+            )
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                let liveToken = self.delegate?.keyboardContextToken(self) ?? 0
+                // Stale-result guard: if the user typed more while the lookup was
+                // in flight, the live token will differ from the captured one.
+                // Drop the stale result — it must not overwrite fresh state.
+                if !shouldApplyLookupResult(capturedToken: token, liveToken: liveToken) {
+                    return
+                }
+                self.suggestionCache.update(suggestions, token: token)
+                self.suggestionBar.update(with: suggestions)
+            }
+        }
+        suggestionLookupWorkItem = workItem
+        suggestionLookupQueue.async(execute: workItem)
     }
 
     func reloadEmojiPanel() {

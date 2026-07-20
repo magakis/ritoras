@@ -57,3 +57,15 @@ struct SuggestionDisplayCache {
 func decideSuggestionTap(cache: SuggestionDisplayCache, liveToken: UInt64, index: Int) -> String? {
     cache.suggestion(at: index, matchingLiveToken: liveToken)
 }
+
+/// Pure function: decides whether a background-computed suggestion result
+/// should be applied to the suggestion bar, based on whether the token
+/// captured at lookup-start still matches the live token at lookup-complete.
+/// A non-zero captured token that mismatches the live token means the user
+/// typed more while the lookup was in flight → drop the stale result.
+/// `capturedToken == 0` disables the guard (backward-compat escape hatch,
+/// same convention as `SuggestionDisplayCache.suggestion(at:matchingLiveToken:)`).
+func shouldApplyLookupResult(capturedToken: UInt64, liveToken: UInt64) -> Bool {
+    if capturedToken == 0 { return true }
+    return capturedToken == liveToken
+}
