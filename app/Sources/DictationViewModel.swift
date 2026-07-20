@@ -311,6 +311,7 @@ final class DictationViewModel: ObservableObject {
     }
 
     func stop() async {
+        let stopStartTime = Date()
         switch SharedConfig.dictationMode() {
         case .batch:
             guard let recorder = recorder, let id = activeID else { return }
@@ -374,9 +375,27 @@ final class DictationViewModel: ObservableObject {
             do {
                 let audioBytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? UInt64 ?? 0
 
-                // Await probe result (may still be in flight for short recordings).
-                let probeResult = await serverSelectionTask?.value
+                // Await probe result with 3s cap; fall back to iterating transcribe on timeout.
+                let probeResult: String?
+                if let task = serverSelectionTask {
+                    FileLogger.shared.debug(.network, "stop probe await start", payload: ["active_id": activeID.uuidString])
+                    probeResult = await withTaskGroup(of: String?.self) { group in
+                        group.addTask { await task.value }
+                        group.addTask {
+                            try? await Task.sleep(nanoseconds: 3_000_000_000)
+                            return nil
+                        }
+                        let first = await group.next()
+                        group.cancelAll()
+                        return first ?? nil
+                    }
+                } else {
+                    probeResult = nil
+                }
                 let chosenServer = probeResult ?? config.servers.first
+                FileLogger.shared.debug(.network, "stop probe await done", payload: ["probe_result": probeResult ?? "nil", "chosen": chosenServer ?? "nil"])
+                serverSelectionTask?.cancel()
+                serverSelectionTask = nil
 
                 FileLogger.shared.info(.transcription, "upload start", payload: [
                     "id": id.uuidString,
@@ -427,6 +446,7 @@ final class DictationViewModel: ObservableObject {
                     "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000,
                     "ts": Date().timeIntervalSince1970 * 1000
                 ])
+                FileLogger.shared.debug(.network, "stop posting darwin", payload: ["active_id": activeID.uuidString, "elapsed_since_stop_start": Date().timeIntervalSince(stopStartTime) * 1000])
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
                 FileLogger.shared.info(.transcription, "result delivered", payload: [
                     "id": id.uuidString, "channel": "darwin",
