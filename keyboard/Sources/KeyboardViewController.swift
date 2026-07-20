@@ -90,6 +90,11 @@ class KeyboardViewController: UIInputViewController {
     private var clipboardPollCount = 0
     private var confirmStopTimer: Timer?
 
+    // MARK: - Inbox (Phase 3 cross-process transport)
+
+    private lazy var inbox: TranscriptionInbox = TranscriptionInbox(consumer: .keyboard)
+    private var inboxWatcher: InboxWatcher?
+
     // Persisted across keyboard process restarts
     private var lastProcessedPayloadId: UUID? {
         get { UUID(uuidString: UserDefaults.standard.string(forKey: "ritoras_last_pid") ?? "") }
@@ -228,6 +233,15 @@ class KeyboardViewController: UIInputViewController {
         super.viewDidAppear(animated)
         keyboardView.updateFullAccess(hasFullAccess)
 
+        // Phase 3: Inbox-first transport — check for unconsumed records and start watcher
+        rescanInbox()
+        if inboxWatcher == nil {
+            inboxWatcher = InboxWatcher(directoryURL: inbox.inboxDirectoryURL) { [weak self] in
+                self?.rescanInbox()
+            }
+            inboxWatcher?.start()
+        }
+
         // Defensive: never resume in search mode after keyboard dismiss/reappear
         inputTarget = .hostApp
         if uiMode == .emojiSearch {
@@ -293,6 +307,8 @@ class KeyboardViewController: UIInputViewController {
         backspaceSingleCharCount = 0
         backspaceNilContextRetries = 0
         backspaceStaleHasTextRetries = 0
+        inboxWatcher?.stop()
+        inboxWatcher = nil
     }
 
     deinit {
@@ -309,6 +325,8 @@ class KeyboardViewController: UIInputViewController {
         backspaceTimer?.invalidate()
         backspaceNilContextRetries = 0
         backspaceStaleHasTextRetries = 0
+        inboxWatcher?.stop()
+        inboxWatcher = nil
     }
 
     // MARK: - Setup
@@ -465,15 +483,9 @@ class KeyboardViewController: UIInputViewController {
 
         // Register Darwin notification observer
         darwinToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinNotificationName) { [weak self] in
-            guard let self = self else { return }
-            // Read payload from file/UserDefaults on a background queue to avoid
-            // blocking the main thread on synchronous I/O.
-            DispatchQueue.global(qos: .userInitiated).async {
-                let payload = DictationPayload.current()
-                DispatchQueue.main.async {
-                    self.handleDictationCompleted(payload: payload)
-                }
-            }
+            // Darwin notification is now a hint to rescan the inbox.
+            // The inbox transport is the PRIMARY channel; legacy paths remain as fallback.
+            self?.rescanInbox()
         }
 
         // Start timeout timer
@@ -535,6 +547,83 @@ class KeyboardViewController: UIInputViewController {
             // Premature signal \u{2014} keep waiting
             startWaitingForDictation(id: id)
             return
+        }
+    }
+
+    // MARK: - Inbox Transport (Phase 3)
+
+    /// Scans the inbox for unconsumed terminal records and processes them.
+    /// Runs file I/O on a background queue, dispatches to main for text insertion.
+    /// Falls through to legacy paths if the inbox is empty or unavailable.
+    /// Idempotent — unconsumed records are marked consumed after processing.
+    private func rescanInbox() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+
+            // Mark stale in-flight records as failed (container-app-killed mitigation)
+            do {
+                try self.inbox.markStale(olderThan: SharedConfig.Inbox.staleRecordTTL)
+            } catch {
+                FileLogger.shared.error(.keyboard, "Inbox markStale failed: \(error)")
+            }
+
+            let unconsumed = self.inbox.listUnconsumed().sorted { $0.revision < $1.revision }
+            let inFlight = self.inbox.listInFlight()
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+
+                // If another path (legacy) is already inserting text, skip inbox insertion
+                // to prevent double-insert. Still mark consumed and update UI.
+                if case .inserting = self.state {
+                    for record in unconsumed {
+                        try? self.inbox.markConsumed(jobId: record.jobId)
+                    }
+                    self.updateRecordingInProgressUI(inFlight: inFlight)
+                    return
+                }
+
+                for record in unconsumed {
+                    switch record.status {
+                    case .ready:
+                        self.insertDictationResult(text: record.text ?? "")
+                    case .failed:
+                        self.state = .error(record.errorMessage ?? "Transcription failed")
+                    case .cancelled:
+                        self.state = .idle
+                    default:
+                        continue
+                    }
+
+                    do {
+                        try self.inbox.markConsumed(jobId: record.jobId)
+                    } catch {
+                        FileLogger.shared.error(.keyboard, "markConsumed failed for \(record.jobId): \(error)")
+                    }
+                }
+
+                self.updateRecordingInProgressUI(inFlight: inFlight)
+            }
+        }
+    }
+
+    /// Updates the keyboard UI based on in-flight transcription records.
+    /// Shows "recording in progress" (`.waiting`) when in-flight records exist
+    /// and the keyboard was idle; restores idle when in-flight is empty.
+    private func updateRecordingInProgressUI(inFlight: [TranscriptionRecord]) {
+        if inFlight.isEmpty {
+            // No in-flight records — restore idle if currently in a waiting state
+            switch state {
+            case .waiting, .waitingConfirm, .openingApp:
+                state = .idle
+            default:
+                break
+            }
+        } else {
+            // In-flight records exist — show "recording in progress" if idle
+            if case .idle = state {
+                state = .waiting
+            }
         }
     }
 
@@ -705,13 +794,8 @@ class KeyboardViewController: UIInputViewController {
         // Re-register the Darwin observer (it was torn down in viewWillDisappear).
         if darwinToken == nil {
             darwinToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinNotificationName) { [weak self] in
-                guard let self = self else { return }
-                DispatchQueue.global(qos: .userInitiated).async {
-                    let payload = DictationPayload.current()
-                    DispatchQueue.main.async {
-                        self.handleDictationCompleted(payload: payload)
-                    }
-                }
+                // Darwin notification is now a hint to rescan the inbox.
+                self?.rescanInbox()
             }
         }
 
