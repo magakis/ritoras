@@ -6,6 +6,7 @@ struct RitorasApp: App {
     @StateObject private var settings = AppSettings.shared
     @AppStorage("onboardingCompleted") private var onboardingCompleted = false
     @State private var dictationRequest: DictationRequest?
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         FileLogger.shared.info(.app, "Container app launched", payload: ["version": Bundle.main.infoDictionary?["CFBundleVersion"] ?? "?"])
@@ -31,6 +32,9 @@ struct RitorasApp: App {
                 if AVAudioSession.sharedInstance().recordPermission == .undetermined {
                     AVAudioSession.sharedInstance().requestRecordPermission { _ in }
                 }
+
+                InboxRecovery.shared.recoverMissedTranscriptions()
+                InboxRecovery.shared.startWatching()
             }
             .onOpenURL { url in
                 FileLogger.shared.info(.app, "Received URL", payload: ["url": url.absoluteString])
@@ -50,6 +54,19 @@ struct RitorasApp: App {
                     FileLogger.shared.warn(.app, "Failed to parse ID from URL",
                                            payload: ["url": url.absoluteString])
                     // Don't present DictationView with random UUID
+                }
+            }
+            .onChange(of: scenePhase) { newPhase in
+                switch newPhase {
+                case .active:
+                    if dictationRequest == nil {
+                        InboxRecovery.shared.recoverMissedTranscriptions()
+                    }
+                    InboxRecovery.shared.startWatching()
+                case .background, .inactive:
+                    InboxRecovery.shared.stopWatching()
+                @unknown default:
+                    break
                 }
             }
             .fullScreenCover(item: $dictationRequest) { request in

@@ -25,6 +25,8 @@ final class DictationViewModel: ObservableObject {
     private var selectedServer: String?
     private var serverSelectionTask: Task<String?, Never>?
 
+    private let inbox = TranscriptionInbox(consumer: .containerApp)
+
     // MARK: - Clipboard Transport
 
     /// Writes the dictation result to the clipboard as a MULTI-TYPE pasteboard
@@ -113,8 +115,40 @@ final class DictationViewModel: ObservableObject {
         }.resume()
     }
 
+    // MARK: - Inbox Transport
+
+    /// Writes the current state transition to the transcription inbox.
+    /// Must be called BEFORE any legacy writes (DictationPayload.save, clipboard,
+    /// server POST, Darwin notification) so the inbox is the source of truth
+    /// even if the view model is torn down mid-transition.
+    /// Inbox failures are caught and logged — they must NOT block the dictation flow.
+    private func writeInbox(jobId: UUID,
+                            status: TranscriptionStatus,
+                            text: String? = nil,
+                            errorMessage: String? = nil) {
+        do {
+            if status == .requested {
+                _ = try inbox.createRequested(jobId: jobId)
+            } else {
+                _ = try inbox.transition(jobId: jobId, to: status, text: text, errorMessage: errorMessage)
+            }
+            FileLogger.shared.info(.app, "Inbox write", payload: [
+                "jobId": jobId.uuidString,
+                "status": status.rawValue
+            ])
+        } catch {
+            FileLogger.shared.error(.app, "Inbox write failed", payload: [
+                "jobId": jobId.uuidString,
+                "status": status.rawValue,
+                "error": String(describing: error)
+            ])
+        }
+    }
+
     func start(id: UUID) async {
         activeID = id
+        writeInbox(jobId: id, status: .requested)
+        writeInbox(jobId: id, status: .recording)
         livePartial = ""
         phase = .recording
 
@@ -150,6 +184,7 @@ final class DictationViewModel: ObservableObject {
             }
             if !granted {
                 let message = "Microphone access denied. Enable it in Settings \u{2192} Ritoras."
+                writeInbox(jobId: id, status: .failed, errorMessage: message)
                 DictationPayload(
                     id: id, status: .error, errorMessage: message, timestamp: Date()
                 ).save()
@@ -164,6 +199,7 @@ final class DictationViewModel: ObservableObject {
             }
         case .denied:
             let message = "Microphone access denied. Enable it in Settings \u{2192} Ritoras."
+            writeInbox(jobId: id, status: .failed, errorMessage: message)
             DictationPayload(
                 id: id, status: .error, errorMessage: message, timestamp: Date()
             ).save()
@@ -194,6 +230,7 @@ final class DictationViewModel: ObservableObject {
                 UIApplication.shared.isIdleTimerDisabled = true
             } catch {
                 let message = error.localizedDescription
+                writeInbox(jobId: id, status: .failed, errorMessage: message)
                 DictationPayload(
                     id: id, status: .error, errorMessage: message, timestamp: Date()
                 ).save()
@@ -297,6 +334,7 @@ final class DictationViewModel: ObservableObject {
                 }
 
                 let message = error.localizedDescription
+                writeInbox(jobId: id, status: .failed, errorMessage: message)
                 DictationPayload(
                     id: id, status: .error, errorMessage: message, timestamp: Date()
                 ).save()
@@ -333,6 +371,7 @@ final class DictationViewModel: ObservableObject {
                                             payload: ["elapsed_ms": elapsed])
                 }
                 let message = "Recording was empty. Please try again."
+                writeInbox(jobId: id, status: .failed, errorMessage: message)
                 DictationPayload(
                     id: id, status: .error, errorMessage: message, timestamp: Date()
                 ).save()
@@ -344,6 +383,7 @@ final class DictationViewModel: ObservableObject {
             }
 
             phase = .transcribing
+            writeInbox(jobId: id, status: .transcribing)
             DictationPayload(id: id, status: .transcribing, timestamp: Date()).save()
             postResultToServer(status: "transcribing")
             UIApplication.shared.isIdleTimerDisabled = false
@@ -423,6 +463,7 @@ final class DictationViewModel: ObservableObject {
                 ])
 
                 let ucTime = Date()
+                writeInbox(jobId: id, status: .ready, text: text)
                 DictationPayload(id: id, status: .completed, text: text, timestamp: Date()).save()
                 FileLogger.shared.debug(.transcription, "result delivered", payload: [
                     "id": id.uuidString, "channel": "app_group",
@@ -455,6 +496,7 @@ final class DictationViewModel: ObservableObject {
                     "elapsed_ms": failedElapsed,
                     "error": message
                 ])
+                writeInbox(jobId: id, status: .failed, errorMessage: message)
                 DictationPayload(id: id, status: .error, errorMessage: message, timestamp: Date()).save()
                 writeToClipboard(status: "error", errorMessage: message)
                 postResultToServer(status: "error", errorMessage: message)
@@ -479,6 +521,7 @@ final class DictationViewModel: ObservableObject {
             ])
 
             phase = .transcribing
+            writeInbox(jobId: id, status: .transcribing)
             postResultToServer(status: "transcribing")
             UIApplication.shared.isIdleTimerDisabled = false
 
@@ -523,6 +566,7 @@ final class DictationViewModel: ObservableObject {
                 guard activeID == id else { return }
 
                 let ucTime = Date()
+                writeInbox(jobId: id, status: .ready, text: text)
                 DictationPayload(id: id, status: .completed, text: text, timestamp: Date()).save()
                 FileLogger.shared.debug(.transcription, "result delivered", payload: [
                     "id": id.uuidString, "channel": "app_group",
@@ -556,6 +600,7 @@ final class DictationViewModel: ObservableObject {
                     "elapsed_ms": failedElapsed,
                     "error": message
                 ])
+                writeInbox(jobId: id, status: .failed, errorMessage: message)
                 DictationPayload(id: id, status: .error, errorMessage: message, timestamp: Date()).save()
                 writeToClipboard(status: "error", errorMessage: message)
                 postResultToServer(status: "error", errorMessage: message)
@@ -591,6 +636,7 @@ final class DictationViewModel: ObservableObject {
         selectedServer = nil
 
         if let id = activeID {
+            writeInbox(jobId: id, status: .cancelled)
             DictationPayload(
                 id: id, status: .cancelled, timestamp: Date()
             ).save()
