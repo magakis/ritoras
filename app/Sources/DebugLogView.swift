@@ -22,17 +22,16 @@ private enum LevelFilter: String, CaseIterable {
 }
 
 struct DebugLogView: View {
-    @State private var logContents: String = ""
+    @State private var lines: [LogLine] = []
+    @State private var diagnostics: [String] = []
+    @State private var scrollAnchor: Int?
     @State private var showShareSheet = false
     @State private var selectedFilter: LevelFilter = .all
     @State private var showCopiedConfirmation = false
 
-    private var filteredContents: String {
-        guard let token = selectedFilter.levelToken else { return logContents }
-        return logContents
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { $0.contains(" \(token) ") }
-            .joined(separator: "\n")
+    private var filteredLines: [LogLine] {
+        guard let token = selectedFilter.levelToken else { return lines }
+        return lines.filter { $0.raw.contains(" \(token) ") }
     }
 
     var body: some View {
@@ -46,15 +45,46 @@ struct DebugLogView: View {
             .padding(.horizontal)
             .padding(.vertical, 8)
 
-            Group {
-                if filteredContents.isEmpty {
-                    Text("No log entries yet")
-                        .foregroundColor(.secondary)
-                } else {
-                    TextEditor(text: .constant(filteredContents))
-                        .font(.caption)
-                        .disableAutocorrection(true)
-                        .textSelection(.enabled)
+            Text(FileLogger.fileURL()?.path ?? "log destination unavailable")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundColor(.secondary)
+                .padding(.horizontal)
+                .padding(.vertical, 4)
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        if !diagnostics.isEmpty {
+                            ForEach(diagnostics.indices, id: \.self) { i in
+                                Text(diagnostics[i])
+                                    .font(.system(.caption2, design: .monospaced))
+                                    .foregroundColor(Color(.systemOrange))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 8).padding(.vertical, 2)
+                            }
+                            Divider().padding(.vertical, 4)
+                        }
+                        if filteredLines.isEmpty && diagnostics.isEmpty {
+                            Text("No log entries yet")
+                                .foregroundColor(.secondary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.top, 40)
+                        } else {
+                            ForEach(filteredLines) { line in
+                                Text(line.raw)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundColor(color(for: line.level))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 8).padding(.vertical, 1)
+                                    .id(line.id)
+                            }
+                        }
+                    }
+                }
+                .background(Color(.secondarySystemBackground))
+                .onChange(of: scrollAnchor) { _, newValue in
+                    guard let id = newValue else { return }
+                    withAnimation { proxy.scrollTo(id, anchor: .bottom) }
                 }
             }
         }
@@ -82,6 +112,9 @@ struct DebugLogView: View {
                 }
             }
         }
+        .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
+            refresh()
+        }
         .onAppear(perform: refresh)
         .sheet(isPresented: $showShareSheet) {
             if let url = FileLogger.fileURL() {
@@ -102,8 +135,20 @@ struct DebugLogView: View {
         }
     }
 
+    private func color(for level: LogLevel?) -> Color {
+        switch level {
+        case .debug: return .secondary
+        case .info:  return Color(.systemGreen)
+        case .warn:  return Color(.systemOrange)
+        case .error: return Color(.systemRed)
+        case nil:    return .primary
+        }
+    }
+
     private func refresh() {
-        logContents = FileLogger.contents() ?? ""
+        lines = FileLogger.parsedLines()
+        diagnostics = FileLogger.shared.recentDiagnostics()
+        if let last = filteredLines.last?.id { scrollAnchor = last }
     }
 
     private func clear() {
@@ -112,7 +157,7 @@ struct DebugLogView: View {
     }
 
     private func copyAll() {
-        UIPasteboard.general.string = filteredContents
+        UIPasteboard.general.string = filteredLines.map(\.raw).joined(separator: "\n")
         withAnimation { showCopiedConfirmation = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             withAnimation { showCopiedConfirmation = false }
