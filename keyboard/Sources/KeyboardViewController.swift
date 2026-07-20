@@ -403,8 +403,7 @@ class KeyboardViewController: UIInputViewController {
         pendingRequestStart = Date().timeIntervalSince1970
 
         FileLogger.shared.debug(.keyboard, "openContainerApp", payload: [
-            "id": id.uuidString,
-            "ts": Date().timeIntervalSince1970 * 1000
+            "id": id.uuidString
         ])
 
         // Build URL with id query param
@@ -461,8 +460,7 @@ class KeyboardViewController: UIInputViewController {
 
     private func startWaitingForDictation(id: UUID) {
         FileLogger.shared.debug(.keyboard, "darwin observer registered", payload: [
-            "id": id.uuidString,
-            "ts": Date().timeIntervalSince1970 * 1000
+            "id": id.uuidString
         ])
 
         // Register Darwin notification observer
@@ -494,8 +492,7 @@ class KeyboardViewController: UIInputViewController {
             ? (Date().timeIntervalSince1970 - pendingRequestStart) * 1000 : 0
         FileLogger.shared.info(.keyboard, "darwin received", payload: [
             "id": pendingRequestId?.uuidString ?? "nil",
-            "elapsed_ms_since_post": elapsedSincePost,
-            "ts": Date().timeIntervalSince1970 * 1000
+            "elapsed_ms_since_post": elapsedSincePost
         ])
         stopDictationTransports()
 
@@ -626,8 +623,7 @@ class KeyboardViewController: UIInputViewController {
                     "appGroupHit": didHitAppGroup,
                     "clipboardHit": didHitClipboard,
                     "elapsed_ms": elapsed,
-                    "id": id.uuidString,
-                    "ts": Date().timeIntervalSince1970 * 1000
+                    "id": id.uuidString
                 ])
 
                 // 1. App Group payload (file + UserDefaults) \u{2014} works on App Store builds.
@@ -767,8 +763,7 @@ class KeyboardViewController: UIInputViewController {
         FileLogger.shared.info(.keyboard, "insert", payload: [
             "id": pendingRequestId?.uuidString ?? "nil",
             "length": text.count,
-            "total_elapsed_ms": totalElapsed,
-            "ts": Date().timeIntervalSince1970 * 1000
+            "total_elapsed_ms": totalElapsed
         ])
 
         if inputTarget != .hostApp {
@@ -873,8 +868,7 @@ class KeyboardViewController: UIInputViewController {
         FileLogger.shared.debug(.keyboard, "server poll", payload: [
             "pollCount": serverPollCount,
             "elapsed_ms_since_last_poll": elapsedSinceLastPoll,
-            "id": pendingRequestId?.uuidString ?? "nil",
-            "ts": now.timeIntervalSince1970 * 1000
+            "id": pendingRequestId?.uuidString ?? "nil"
         ])
         FileLogger.shared.debug(.network, "poll target", payload: [
             "server": server,
@@ -910,8 +904,7 @@ class KeyboardViewController: UIInputViewController {
                 "statusCode": statusCode,
                 "elapsed_ms": pollElapsed,
                 "status": status,
-                "id": self.pendingRequestId?.uuidString ?? "nil",
-                "ts": Date().timeIntervalSince1970 * 1000
+                "id": self.pendingRequestId?.uuidString ?? "nil"
             ])
 
             // If the server returned {"detail":"Not Found"} (404), keep polling silently.

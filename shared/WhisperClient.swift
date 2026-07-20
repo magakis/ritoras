@@ -97,8 +97,7 @@ enum WhisperClient {
             var attemptPayload: [String: Any] = [
                 "server_index": serverIndex,
                 "server": server,
-                "attempt_elapsed_ms": attemptElapsed,
-                "ts": Date().timeIntervalSince1970 * 1000
+                "attempt_elapsed_ms": attemptElapsed
             ]
             if let id = correlationId { attemptPayload["id"] = id.uuidString }
             FileLogger.shared.debug(.transcription, "transcribe attempt", payload: attemptPayload)
@@ -311,8 +310,7 @@ enum WhisperClient {
 
         let bodyBytes = request.httpBody?.count ?? 0
         var postPayload: [String: Any] = [
-            "bodyBytes": bodyBytes,
-            "ts": Date().timeIntervalSince1970 * 1000
+            "bodyBytes": bodyBytes
         ]
         if let id = correlationId { postPayload["id"] = id.uuidString }
         FileLogger.shared.debug(.transcription, "HTTP POST /transcribe start", payload: postPayload)
@@ -335,8 +333,7 @@ enum WhisperClient {
 
         var respPayload: [String: Any] = [
             "statusCode": httpResponse.statusCode,
-            "elapsed_ms": httpElapsed,
-            "ts": Date().timeIntervalSince1970 * 1000
+            "elapsed_ms": httpElapsed
         ]
         if let id = correlationId { respPayload["id"] = id.uuidString }
         FileLogger.shared.debug(.transcription, "HTTP response", payload: respPayload)

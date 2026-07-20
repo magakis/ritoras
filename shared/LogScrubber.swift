@@ -20,7 +20,7 @@ enum LogScrubber {
         )
 
         let phone = try! NSRegularExpression(
-            pattern: "\\+?[0-9]{1,3}?[-.\\s]?\\(?[0-9]{1,4}?\\)?[-.\\s]?[0-9]{1,4}[-.\\s]?[0-9]{1,9}"
+            pattern: "(\\+[1-9][0-9]{6,14})|(\\([0-9]{3}\\)\\s?[0-9]{3}-[0-9]{4})|([0-9]{3}-[0-9]{3}-[0-9]{4})"
         )
 
         let ipv4 = try! NSRegularExpression(
@@ -46,11 +46,7 @@ enum LogScrubber {
 
         return [
             Rule(name: "email", regex: email, validate: nil),
-            Rule(name: "phone", regex: phone, validate: { match, nsString in
-                let substring = nsString.substring(with: match.range)
-                let digitCount = substring.reduce(0) { $0 + ($1.isNumber ? 1 : 0) }
-                return digitCount >= 7
-            }),
+            Rule(name: "phone", regex: phone, validate: nil),
             Rule(name: "ipv4", regex: ipv4, validate: nil),
             Rule(name: "ipv6", regex: ipv6, validate: nil),
             Rule(name: "jwt", regex: jwt, validate: nil),

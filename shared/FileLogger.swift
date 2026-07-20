@@ -34,8 +34,8 @@ final class FileLogger {
     }
 
     private static let fileName = "ritoras-debug.log"
-    private static let maxBytes: Int64 = 524_288           // 512 KB soft cap
-    private static let maxRolledFiles = 4
+    private static let maxBytes: Int64 = 1_048_576         // 1 MB soft cap
+    private static let maxRolledFiles = 6
 
     // ── os.Logger probe (Phase 3a) ───────────────────────────────────
     private static let probeLogger = Logger(subsystem: "com.ritoras.app", category: "probe")

@@ -239,6 +239,7 @@ struct DebugLogView: View {
                             Text(diagnostics[i])
                                 .font(.system(.caption2, design: .monospaced))
                                 .foregroundColor(Color(.systemOrange))
+                                .listRowBackground(Color.orange.opacity(0.08))
                         }
                     } header: {
                         Text("Diagnostics")
@@ -254,7 +255,7 @@ struct DebugLogView: View {
                 } else {
                     ForEach(filteredLines) { line in
                         Text(line.raw)
-                            .font(.system(.body, design: .monospaced))
+                            .font(.system(.caption2, design: .monospaced))
                             .foregroundStyle(color(for: line.level))
                             .listRowBackground(selectedIDs.contains(line.id) ? Color.accentColor.opacity(0.2) : Color.clear)
                             .tag(line.id)

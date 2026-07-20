@@ -129,12 +129,10 @@ final class DictationViewModel: ObservableObject {
             return selected
         }
 
-        let ts = Date().timeIntervalSince1970 * 1000
         let mode = SharedConfig.dictationMode()
         FileLogger.shared.info(.transcription, "dictation start", payload: [
             "id": id.uuidString,
-            "mode": mode == .stream ? "stream" : "batch",
-            "ts": ts
+            "mode": mode == .stream ? "stream" : "batch"
         ])
 
         // Save initial recording payload
@@ -295,7 +293,7 @@ final class DictationViewModel: ObservableObject {
                     AudioSession.deactivate()
                     let elapsed = Date().timeIntervalSince(deactivateStart) * 1000
                     FileLogger.shared.debug(.audio, "audio deactivate (background)",
-                                            payload: ["elapsed_ms": elapsed, "ts": Date().timeIntervalSince1970 * 1000])
+                                            payload: ["elapsed_ms": elapsed])
                 }
 
                 let message = error.localizedDescription
@@ -320,8 +318,7 @@ final class DictationViewModel: ObservableObject {
             let recordedDurationMs = recordingStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? 0
             FileLogger.shared.info(.transcription, "dictation stop (user requested)", payload: [
                 "id": id.uuidString,
-                "recordedDurationMs": recordedDurationMs,
-                "ts": Date().timeIntervalSince1970 * 1000
+                "recordedDurationMs": recordedDurationMs
             ])
 
             let audioURL = await recorder.stopRecording()
@@ -333,7 +330,7 @@ final class DictationViewModel: ObservableObject {
                     AudioSession.deactivate()
                     let elapsed = Date().timeIntervalSince(deactivateStart) * 1000
                     FileLogger.shared.debug(.audio, "audio deactivate (background)",
-                                            payload: ["elapsed_ms": elapsed, "ts": Date().timeIntervalSince1970 * 1000])
+                                            payload: ["elapsed_ms": elapsed])
                 }
                 let message = "Recording was empty. Please try again."
                 DictationPayload(
@@ -356,7 +353,7 @@ final class DictationViewModel: ObservableObject {
                 AudioSession.deactivate()
                 let elapsed = Date().timeIntervalSince(deactivateStart) * 1000
                 FileLogger.shared.debug(.audio, "audio deactivate (background)",
-                                        payload: ["elapsed_ms": elapsed, "ts": Date().timeIntervalSince1970 * 1000])
+                                        payload: ["elapsed_ms": elapsed])
             }
 
             let config = SharedConfig.load()
@@ -401,8 +398,7 @@ final class DictationViewModel: ObservableObject {
                     "id": id.uuidString,
                     "audioBytes": audioBytes,
                     "serverCount": config.servers.count,
-                    "server": probeResult ?? config.servers.first ?? "",
-                    "ts": Date().timeIntervalSince1970 * 1000
+                    "server": probeResult ?? config.servers.first ?? ""
                 ])
 
                 let text: String
@@ -423,35 +419,30 @@ final class DictationViewModel: ObservableObject {
                 FileLogger.shared.info(.transcription, "upload complete", payload: [
                     "id": id.uuidString,
                     "elapsed_ms": uploadElapsed,
-                    "textLength": text.count,
-                    "ts": Date().timeIntervalSince1970 * 1000
+                    "textLength": text.count
                 ])
 
                 let ucTime = Date()
                 DictationPayload(id: id, status: .completed, text: text, timestamp: Date()).save()
                 FileLogger.shared.debug(.transcription, "result delivered", payload: [
                     "id": id.uuidString, "channel": "app_group",
-                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000,
-                    "ts": Date().timeIntervalSince1970 * 1000
+                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
                 ])
                 writeToClipboard(status: "completed", text: text)
                 FileLogger.shared.debug(.transcription, "result delivered", payload: [
                     "id": id.uuidString, "channel": "clipboard",
-                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000,
-                    "ts": Date().timeIntervalSince1970 * 1000
+                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
                 ])
                 postResultToServer(status: "completed", text: text)
                 FileLogger.shared.debug(.transcription, "result delivered", payload: [
                     "id": id.uuidString, "channel": "server",
-                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000,
-                    "ts": Date().timeIntervalSince1970 * 1000
+                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
                 ])
                 FileLogger.shared.debug(.network, "stop posting darwin", payload: ["active_id": activeID?.uuidString ?? "nil", "elapsed_since_stop_start": Date().timeIntervalSince(stopStartTime) * 1000])
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
                 FileLogger.shared.info(.transcription, "result delivered", payload: [
                     "id": id.uuidString, "channel": "darwin",
-                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000,
-                    "ts": Date().timeIntervalSince1970 * 1000
+                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
                 ])
                 TranscriptionHistory.shared.add(text: text)
                 phase = .done(text)
@@ -462,8 +453,7 @@ final class DictationViewModel: ObservableObject {
                 FileLogger.shared.info(.transcription, "upload failed", payload: [
                     "id": id.uuidString,
                     "elapsed_ms": failedElapsed,
-                    "error": message,
-                    "ts": Date().timeIntervalSince1970 * 1000
+                    "error": message
                 ])
                 DictationPayload(id: id, status: .error, errorMessage: message, timestamp: Date()).save()
                 writeToClipboard(status: "error", errorMessage: message)
@@ -485,8 +475,7 @@ final class DictationViewModel: ObservableObject {
             let recordedDurationMs = recordingStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? 0
             FileLogger.shared.info(.transcription, "dictation stop (user requested)", payload: [
                 "id": id.uuidString,
-                "recordedDurationMs": recordedDurationMs,
-                "ts": Date().timeIntervalSince1970 * 1000
+                "recordedDurationMs": recordedDurationMs
             ])
 
             phase = .transcribing
@@ -508,8 +497,7 @@ final class DictationViewModel: ObservableObject {
                 FileLogger.shared.info(.network, "Stream: END sent, awaiting final")
 
                 FileLogger.shared.info(.transcription, "upload start", payload: [
-                    "id": id.uuidString,
-                    "ts": Date().timeIntervalSince1970 * 1000
+                    "id": id.uuidString
                 ])
 
                 let text = try await streamClient?.receiveMessages { [weak self] partial in
@@ -525,8 +513,7 @@ final class DictationViewModel: ObservableObject {
                 FileLogger.shared.info(.transcription, "upload complete", payload: [
                     "id": id.uuidString,
                     "elapsed_ms": uploadElapsed,
-                    "textLength": text.count,
-                    "ts": Date().timeIntervalSince1970 * 1000
+                    "textLength": text.count
                 ])
 
                 FileLogger.shared.info(.transcription, "Stream final received",
@@ -539,26 +526,22 @@ final class DictationViewModel: ObservableObject {
                 DictationPayload(id: id, status: .completed, text: text, timestamp: Date()).save()
                 FileLogger.shared.debug(.transcription, "result delivered", payload: [
                     "id": id.uuidString, "channel": "app_group",
-                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000,
-                    "ts": Date().timeIntervalSince1970 * 1000
+                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
                 ])
                 writeToClipboard(status: "completed", text: text)
                 FileLogger.shared.debug(.transcription, "result delivered", payload: [
                     "id": id.uuidString, "channel": "clipboard",
-                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000,
-                    "ts": Date().timeIntervalSince1970 * 1000
+                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
                 ])
                 postResultToServer(status: "completed", text: text)
                 FileLogger.shared.debug(.transcription, "result delivered", payload: [
                     "id": id.uuidString, "channel": "server",
-                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000,
-                    "ts": Date().timeIntervalSince1970 * 1000
+                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
                 ])
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
                 FileLogger.shared.info(.transcription, "result delivered", payload: [
                     "id": id.uuidString, "channel": "darwin",
-                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000,
-                    "ts": Date().timeIntervalSince1970 * 1000
+                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
                 ])
                 TranscriptionHistory.shared.add(text: text)
                 phase = .done(text)
@@ -571,8 +554,7 @@ final class DictationViewModel: ObservableObject {
                 FileLogger.shared.info(.transcription, "upload failed", payload: [
                     "id": id.uuidString,
                     "elapsed_ms": failedElapsed,
-                    "error": message,
-                    "ts": Date().timeIntervalSince1970 * 1000
+                    "error": message
                 ])
                 DictationPayload(id: id, status: .error, errorMessage: message, timestamp: Date()).save()
                 writeToClipboard(status: "error", errorMessage: message)
