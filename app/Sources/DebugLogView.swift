@@ -571,44 +571,53 @@ private struct LogRow: View {
     let onToggle: () -> Void
 
     var body: some View {
-        Button(action: onToggle) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(timeFormatted(line.timestamp))
-                        .frame(width: 96, alignment: .leading)
-                        .foregroundStyle(.secondary)
-                        .fixedSize()
-                    Text(levelLabel(line.level))
-                        .frame(width: 48, alignment: .leading)
-                        .foregroundStyle(color(for: line.level))
-                        .fontWeight(.semibold)
-                        .fixedSize()
-                    Text((line.component?.rawValue ?? "—").padding(toLength: 13, withPad: " ", startingAt: 0))
-                        .frame(width: 110, alignment: .leading)
-                        .foregroundStyle(.secondary.opacity(0.8))
-                        .fixedSize()
-                    Text(line.message ?? line.raw)
-                        .font(.system(.caption2, design: .monospaced, weight: .semibold))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .textSelection(.enabled)
-                    Spacer(minLength: 4)
-                    Text(isExpanded ? "⌄" : "›")
-                        .foregroundStyle(.secondary)
-                }
-                if isExpanded {
-                    expandedContent
-                }
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(timeFormatted(line.timestamp))
+                    .frame(width: 96, alignment: .leading)
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                Text(levelLabel(line.level))
+                    .frame(width: 40, alignment: .leading)
+                    .foregroundStyle(color(for: line.level))
+                    .fontWeight(.semibold)
+                    .fixedSize()
+                Text((line.component?.rawValue ?? "—").padding(toLength: 13, withPad: " ", startingAt: 0))
+                    .frame(width: 84, alignment: .leading)
+                    .foregroundStyle(.secondary.opacity(0.8))
+                    .fixedSize()
+                Text(line.message ?? line.raw)
+                    .font(.system(.caption2, design: .monospaced, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .textSelection(.enabled)
+                Spacer(minLength: 4)
+                Text(isExpanded ? "⌄" : "›")
+                    .foregroundStyle(.secondary)
             }
-            .contentShape(Rectangle())
-            .font(.system(.caption2, design: .monospaced))
+            if isExpanded {
+                expandedContent
+            }
         }
-        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .font(.system(.caption2, design: .monospaced))
+        .onTapGesture { onToggle() }
     }
 
     @ViewBuilder
     private var expandedContent: some View {
+        // Show the full untruncated message first
+        if let message = line.message {
+            Text(message)
+                .font(.system(.caption2, design: .monospaced, weight: .semibold))
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 156)
+                .textSelection(.enabled)
+                .padding(.bottom, 2)
+        }
+
         if let payloadLines = PayloadFormatter.render(line.payload, scrubPII: scrubPII) {
             VStack(alignment: .leading, spacing: 1) {
                 ForEach(payloadLines) { pl in
