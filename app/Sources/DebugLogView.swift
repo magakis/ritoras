@@ -57,6 +57,76 @@ private enum TimeRangeFilter: String, CaseIterable {
     case all = "All"
 }
 
+// MARK: - Shared Formatting
+
+private enum DateFormat {
+    static let today: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss.SSS"
+        return f
+    }()
+    static let older: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMM d HH:mm"
+        return f
+    }()
+    static let daySeparator: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMMM d, yyyy"
+        return f
+    }()
+}
+
+private func color(for level: LogLevel?) -> Color {
+    switch level {
+    case .debug: return .secondary
+    case .info:  return Color(.systemGreen)
+    case .warn:  return Color(.systemOrange)
+    case .error: return Color(.systemRed)
+    case nil:    return .primary
+    }
+}
+
+private func timeFormatted(_ date: Date?) -> String {
+    guard let date = date else { return "" }
+    if Calendar.current.isDateInToday(date) {
+        return DateFormat.today.string(from: date)
+    } else {
+        return DateFormat.older.string(from: date)
+    }
+}
+
+private func levelLabel(_ level: LogLevel?) -> String {
+    switch level {
+    case .debug: return "DEBUG"
+    case .info:  return "INFO"
+    case .warn:  return "WARN"
+    case .error: return "ERROR"
+    case nil:    return "     "
+    }
+}
+
+private func valueColor(_ type: PayloadValue) -> Color {
+    switch type {
+    case .number: return Color(.systemBlue)
+    case .bool:   return Color(.systemOrange)
+    case .string: return .primary
+    default:      return .secondary
+    }
+}
+
+private func isDifferentDay(_ a: Date?, _ b: Date?) -> Bool {
+    guard let a = a, let b = b else { return false }
+    return !Calendar.current.isDate(a, inSameDayAs: b)
+}
+
+private func daySeparatorView(for date: Date) -> some View {
+    Text("── \(DateFormat.daySeparator.string(from: date)) ──")
+        .font(.system(.caption2, design: .monospaced))
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, alignment: .center)
+}
+
 // MARK: - Debug Log View
 
 struct DebugLogView: View {
@@ -72,6 +142,8 @@ struct DebugLogView: View {
     @State private var crashReports: [MetricReport] = []
     @State private var showClearCrashConfirmation = false
     @State private var expandedReportID: Int? = nil
+    @State private var editMode: EditMode = .inactive
+    @State private var expandedKeys: Set<String> = []
 
     private var filteredLines: [LogLine] {
         lines.filter { line in
@@ -155,9 +227,10 @@ struct DebugLogView: View {
             .padding(.horizontal)
             .padding(.bottom, 4)
 
-            // Selection hint
-            if !selectedIDs.isEmpty {
-                Text("Selection active — refresh paused")
+            // Selection / expansion hint
+            if !selectedIDs.isEmpty || !expandedKeys.isEmpty {
+                Text(!selectedIDs.isEmpty ? "Selection active — refresh paused"
+                                          : "Row expanded — refresh paused")
                     .font(.caption2)
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
@@ -253,17 +326,27 @@ struct DebugLogView: View {
                         .frame(maxWidth: .infinity)
                         .listRowBackground(Color.clear)
                 } else {
-                    ForEach(filteredLines) { line in
-                        Text(line.raw)
-                            .font(.system(.caption2, design: .monospaced))
-                            .foregroundStyle(color(for: line.level))
-                            .listRowBackground(selectedIDs.contains(line.id) ? Color.accentColor.opacity(0.2) : Color.clear)
-                            .tag(line.id)
+                    ForEach(Array(filteredLines.enumerated()), id: \.element.id) { idx, line in
+                        if idx > 0, isDifferentDay(filteredLines[idx-1].timestamp, line.timestamp) {
+                            daySeparatorView(for: line.timestamp)
+                                .listRowSeparator(.hidden)
+                        }
+                        LogRow(
+                            line: line,
+                            isExpanded: expandedKeys.contains(line.raw),
+                            isSelected: selectedIDs.contains(line.id),
+                            scrubPII: scrubPII,
+                            onToggle: { toggleExpand(line.raw) }
+                        )
+                        .listRowBackground(
+                            selectedIDs.contains(line.id) ? Color.accentColor.opacity(0.2) : Color.clear
+                        )
+                        .tag(line.id)
                     }
                 }
             }
             .listStyle(.plain)
-            .environment(\.editMode, .constant(.active))
+            .environment(\.editMode, $editMode)
         }
         .navigationTitle("Debug Log")
         .navigationBarTitleDisplayMode(.inline)
@@ -273,6 +356,14 @@ struct DebugLogView: View {
                     Button(action: { showClearCrashConfirmation = true }) {
                         Image(systemName: "trash")
                     }
+                }
+            }
+            ToolbarItem(placement: .navigationBarLeading) {
+                Button {
+                    withAnimation { editMode = (editMode == .active ? .inactive : .active) }
+                    if editMode == .inactive { selectedIDs.removeAll() }
+                } label: {
+                    Image(systemName: editMode == .active ? "checkmark.circle.fill" : "checklist")
                 }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -316,7 +407,7 @@ struct DebugLogView: View {
             Text("This deletes all stored MetricKit crash reports. They cannot be recovered.")
         }
         .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
-            guard selectedIDs.isEmpty else { return }
+            guard selectedIDs.isEmpty, expandedKeys.isEmpty else { return }
             refresh()
         }
         .onAppear(perform: refresh)
@@ -331,16 +422,6 @@ struct DebugLogView: View {
                     .padding(.bottom, 24)
                     .transition(.opacity)
             }
-        }
-    }
-
-    private func color(for level: LogLevel?) -> Color {
-        switch level {
-        case .debug: return .secondary
-        case .info:  return Color(.systemGreen)
-        case .warn:  return Color(.systemOrange)
-        case .error: return Color(.systemRed)
-        case nil:    return .primary
         }
     }
 
@@ -367,6 +448,14 @@ struct DebugLogView: View {
         }
     }
 
+    private func toggleExpand(_ key: String) {
+        guard editMode == .inactive else { return }
+        withAnimation(.easeInOut(duration: 0.15)) {
+            if expandedKeys.contains(key) { expandedKeys.remove(key) }
+            else { expandedKeys.insert(key) }
+        }
+    }
+
     // MARK: - Crash Reports
 
     private func kindColor(_ kind: String) -> Color {
@@ -375,5 +464,65 @@ struct DebugLogView: View {
         case "hang":  return .orange
         default:      return .secondary
         }
+    }
+}
+
+// MARK: - Log Row
+
+private struct LogRow: View {
+    let line: LogLine
+    let isExpanded: Bool
+    let isSelected: Bool
+    let scrubPII: Bool
+    let onToggle: () -> Void
+
+    var body: some View {
+        Button(action: onToggle) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(timeFormatted(line.timestamp))
+                        .frame(width: 96, alignment: .leading)
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
+                    Text(levelLabel(line.level))
+                        .frame(width: 48, alignment: .leading)
+                        .foregroundStyle(color(for: line.level))
+                        .fontWeight(.semibold)
+                        .fixedSize()
+                    Text((line.component?.rawValue ?? "—").padding(toLength: 13, withPad: " ", startingAt: 0))
+                        .frame(width: 110, alignment: .leading)
+                        .foregroundStyle(.secondary.opacity(0.8))
+                        .fixedSize()
+                    Text(line.message ?? line.raw)
+                        .font(.system(.caption2, design: .monospaced, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 4)
+                    Text(isExpanded ? "⌄" : "›")
+                        .foregroundStyle(.secondary)
+                }
+                if isExpanded, let payloadLines = PayloadFormatter.render(line.payload, scrubPII: scrubPII) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        ForEach(payloadLines) { pl in
+                            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                                Text(pl.key).foregroundStyle(.secondary)
+                                Text(pl.value).foregroundStyle(valueColor(pl.valueType))
+                            }
+                            .padding(.leading, 156)
+                        }
+                    }
+                    .padding(.top, 2)
+                } else if isExpanded {
+                    Text(line.raw)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 156)
+                }
+            }
+            .contentShape(Rectangle())
+            .font(.system(.caption2, design: .monospaced))
+        }
+        .buttonStyle(.plain)
     }
 }
