@@ -592,6 +592,7 @@ private struct LogRow: View {
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                         .truncationMode(.tail)
+                        .textSelection(.enabled)
                     Spacer(minLength: 4)
                     Text(isExpanded ? "⌄" : "›")
                         .foregroundStyle(.secondary)
@@ -612,8 +613,8 @@ private struct LogRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 ForEach(payloadLines) { pl in
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Text(pl.key).foregroundStyle(.secondary)
-                        Text(pl.value).foregroundStyle(valueColor(pl.valueType))
+                        Text(pl.key).foregroundStyle(.secondary).textSelection(.enabled)
+                        Text(pl.value).foregroundStyle(valueColor(pl.valueType)).textSelection(.enabled)
                     }
                     .padding(.leading, 156)
                 }
@@ -624,6 +625,7 @@ private struct LogRow: View {
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .padding(.leading, 156)
+                .textSelection(.enabled)
         }
     }
 }
