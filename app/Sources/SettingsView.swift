@@ -5,6 +5,7 @@ struct SettingsView: View {
     @State private var showOnboarding = false
     @State private var showResetConfirmation = false
     @State private var testStatuses: [Int: TestStatus] = [:]
+    @FocusState private var focusedField: Int?
 
     enum TestStatus: Equatable {
         case untested
@@ -34,7 +35,6 @@ struct SettingsView: View {
     var body: some View {
         Form {
             serverSection
-            timeoutSection
             dictationSection
             keyboardSection
             historySection
@@ -78,28 +78,20 @@ struct SettingsView: View {
         Section {
             ForEach(settings.servers.indices, id: \.self) { index in
                 HStack(spacing: 8) {
-                    Button {
-                        settings.servers.remove(at: index)
-                        testStatuses = [:]
-                    } label: {
-                        Image(systemName: "minus.circle.fill")
-                            .foregroundColor(.red)
-                    }
-                    .buttonStyle(.borderless)
-
                     TextField("Server URL", text: $settings.servers[index])
                         .textContentType(.URL)
                         .textInputAutocapitalization(.never)
                         .keyboardType(.URL)
                         .font(.body)
-
+                        .focused($focusedField, equals: index)
+                }
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     Button {
                         testServer(at: index)
                     } label: {
-                        Image(systemName: testStatuses[index, default: .untested].iconName)
-                            .foregroundColor(testStatuses[index, default: .untested].color)
+                        Label("Test", systemImage: testStatuses[index, default: .untested].iconName)
                     }
-                    .buttonStyle(.borderless)
+                    .tint(testStatuses[index, default: .untested].color)
                     .disabled(testStatuses[index] == .testing)
                 }
             }
@@ -118,24 +110,7 @@ struct SettingsView: View {
         } header: {
             Text("Whisper Servers")
         } footer: {
-            Text("Servers are tried in the order shown. If one fails, the next is attempted automatically.")
-        }
-    }
-
-    // MARK: - Timeout Section
-
-    private var timeoutSection: some View {
-        Section {
-            VStack(alignment: .leading, spacing: 4) {
-                Stepper(
-                    "Timeout: \(Int(settings.timeoutSeconds))s",
-                    value: $settings.timeoutSeconds,
-                    in: 5...60,
-                    step: 1
-                )
-            }
-        } header: {
-            Text("Network")
+            Text("Servers are tried in the order shown. If one fails, the next is attempted automatically. Swipe a server row left to test its connection.")
         }
     }
 
@@ -229,7 +204,7 @@ struct SettingsView: View {
         Task {
             let healthy = await WhisperClient.checkHealth(
                 serverURL: server,
-                timeout: settings.timeoutSeconds
+                timeout: 3.0
             )
             await MainActor.run {
                 guard index < settings.servers.count else {
