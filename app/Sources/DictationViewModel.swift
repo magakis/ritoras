@@ -67,10 +67,21 @@ final class DictationViewModel: ObservableObject {
 
     /// Starts the localhost HTTP server if not already running. Idempotent.
     func startLocalhostServer() {
+        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+        FileLogger.shared.error(.app, "DIAGNOSTIC: startLocalhostServer() ENTERED")
+
+        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+        FileLogger.shared.error(.app, "DIAGNOSTIC: localhostServer is nil? \(localhostServer == nil)")
+
         guard localhostServer == nil else {
+            // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+            FileLogger.shared.error(.app, "DIAGNOSTIC: server already running, returning early")
             FileLogger.shared.debug(.network, "DictationViewModel: localhost server already running")
             return
         }
+
+        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+        FileLogger.shared.error(.app, "DIAGNOSTIC: constructing LocalhostServer...")
 
         let server = LocalhostServer(
             port: SharedConfig.Defaults.localhostServerPort,
@@ -88,12 +99,19 @@ final class DictationViewModel: ObservableObject {
             }
         )
 
+        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+        FileLogger.shared.error(.app, "DIAGNOSTIC: LocalhostServer constructed, calling start()...")
+
         do {
             try server.start()
             localhostServer = server
+            // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+            FileLogger.shared.error(.app, "DIAGNOSTIC: server.start() succeeded, stored in localhostServer")
             FileLogger.shared.info(.app, "DictationViewModel: localhost server started",
                                    payload: ["port": SharedConfig.Defaults.localhostServerPort])
         } catch {
+            // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+            FileLogger.shared.error(.app, "DIAGNOSTIC: server.start() THREW: \(error)")
             FileLogger.shared.error(.app, "DictationViewModel: failed to start localhost server",
                                     payload: ["error": error.localizedDescription])
         }

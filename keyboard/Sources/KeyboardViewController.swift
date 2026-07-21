@@ -573,7 +573,14 @@ class KeyboardViewController: UIInputViewController {
     /// Falls back to legacy server polling after 3 consecutive connection
     /// failures (container app not running).
     private func refreshStateFromLocalhost() async {
-        guard let id = pendingRequestId else { return }
+        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+        FileLogger.shared.warn(.keyboard, "DIAGNOSTIC: refreshStateFromLocalhost() ENTERED, pendingRequestId=\(String(describing: pendingRequestId))")
+
+        guard let id = pendingRequestId else {
+            // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+            FileLogger.shared.warn(.keyboard, "DIAGNOSTIC: refreshStateFromLocalhost exiting — no pendingRequestId")
+            return
+        }
         do {
             let snapshot = try await LocalhostClient.getState(id: id)
             consecutiveConnectionFailures = 0
@@ -614,6 +621,9 @@ class KeyboardViewController: UIInputViewController {
     /// Uses `DispatchSourceTimer` (negligible memory overhead) instead of
     /// `Timer` to avoid RunLoop coupling in the keyboard extension.
     private func startLocalhostPolling() {
+        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+        FileLogger.shared.warn(.keyboard, "DIAGNOSTIC: startLocalhostPolling() ENTERED")
+
         stopLocalhostPolling()
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
@@ -622,6 +632,8 @@ class KeyboardViewController: UIInputViewController {
         }
         timer.resume()
         localhostPollTimer = timer
+        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+        FileLogger.shared.warn(.keyboard, "DIAGNOSTIC: localhost poll timer scheduled")
     }
 
     private func stopLocalhostPolling() {

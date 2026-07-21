@@ -40,19 +40,35 @@ final class LocalhostServer {
     // MARK: - Lifecycle
 
     func start() throws {
+        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+        FileLogger.shared.error(.network, "DIAGNOSTIC: LocalhostServer.start() ENTERED, port=\(port)")
+
         guard listener == nil else {
+            // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+            FileLogger.shared.error(.network, "DIAGNOSTIC: listener already exists, returning")
             FileLogger.shared.info(.network, "LocalhostServer: already running",
                                    payload: ["port": port])
             return
         }
 
+        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+        FileLogger.shared.error(.network, "DIAGNOSTIC: configuring NWParameters...")
+
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
         params.requiredInterfaceType = .loopback
 
+        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+        FileLogger.shared.error(.network, "DIAGNOSTIC: constructing NWListener (port=\(port))...")
+
         listener = try NWListener(using: params, on: NWEndpoint.Port(integerLiteral: port))
 
+        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+        FileLogger.shared.error(.network, "DIAGNOSTIC: NWListener constructed successfully")
+
         listener?.stateUpdateHandler = { [weak self] state in
+            // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+            FileLogger.shared.error(.network, "DIAGNOSTIC: listener stateUpdateHandler fired: \(state)")
             switch state {
             case .ready:
                 let actual = self?.listener?.port?.rawValue ?? 0
@@ -69,10 +85,19 @@ final class LocalhostServer {
         }
 
         listener?.newConnectionHandler = { [weak self] connection in
+            // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+            FileLogger.shared.error(.network, "DIAGNOSTIC: newConnectionHandler fired")
             self?.handleConnection(connection)
         }
 
+        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+        FileLogger.shared.error(.network, "DIAGNOSTIC: calling listener.start(queue:)...")
+
         listener?.start(queue: queue)
+
+        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+        FileLogger.shared.error(.network, "DIAGNOSTIC: listener.start() returned, no throw")
+
         FileLogger.shared.info(.network, "LocalhostServer: start requested",
                                payload: ["port": port])
     }
@@ -91,6 +116,9 @@ final class LocalhostServer {
     // MARK: - Connection Handling
 
     private func handleConnection(_ connection: NWConnection) {
+        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
+        FileLogger.shared.error(.network, "DIAGNOSTIC: handleConnection() ENTERED")
+
         let connQueue = DispatchQueue(
             label: "com.ritoras.localhostserver.conn.\(UUID().uuidString.prefix(8))",
             qos: .utility
