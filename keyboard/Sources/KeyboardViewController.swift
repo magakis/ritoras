@@ -1223,9 +1223,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
             deleteTargetedBackward()
         }
         insertTargeted(text + " ")
-        wordOrigin.markSuggestionTap()    // THE LOCK — prevents re-correction on next separator
+        wordOrigin.markSuggestionTap()    // Lock persists until the next separator handler clears it
         lastAutoCorrection = nil          // Suggestion tap invalidates any pending revert
-        wordOrigin.resetToTyping()        // Trailing space starts a new word
         // Refresh is async; the token guard rejects any result whose captured state no longer matches.
         keyboardView.refreshSuggestions()
 
