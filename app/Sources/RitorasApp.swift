@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import Security
 
 @main
 struct RitorasApp: App {
@@ -10,6 +11,13 @@ struct RitorasApp: App {
 
     init() {
         FileLogger.shared.info(.app, "Container app launched", payload: ["version": Bundle.main.infoDictionary?["CFBundleVersion"] ?? "?"])
+        // ENTITLEMENT_PROBE — TEMPORARY DIAGNOSTIC, REMOVE AFTER VALIDATION
+        if let task = SecTaskCreateFromSelf(nil),
+           let groups = SecTaskCopyValueForEntitlement(task, "com.apple.security.application-groups" as CFString) as? [String] {
+            NSLog("ENTITLEMENT_PROBE target=app bundleId=\(Bundle.main.bundleIdentifier ?? "?") appGroups=\(groups)")
+        } else {
+            NSLog("ENTITLEMENT_PROBE target=app bundleId=\(Bundle.main.bundleIdentifier ?? "?") appGroups=nil-or-error")
+        }
         MetricKitSubscriber.shared.start()
         FileLogger.shared.info(.app, "MetricKit subscriber started")
     }

@@ -1,4 +1,5 @@
 import UIKit
+import Security
 
 
 private enum BackspacePhase {
@@ -213,6 +214,14 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+
+        // ENTITLEMENT_PROBE — TEMPORARY DIAGNOSTIC, REMOVE AFTER VALIDATION
+        if let task = SecTaskCreateFromSelf(nil),
+           let groups = SecTaskCopyValueForEntitlement(task, "com.apple.security.application-groups" as CFString) as? [String] {
+            NSLog("ENTITLEMENT_PROBE target=keyboard bundleId=\(Bundle.main.bundleIdentifier ?? "?") appGroups=\(groups)")
+        } else {
+            NSLog("ENTITLEMENT_PROBE target=keyboard bundleId=\(Bundle.main.bundleIdentifier ?? "?") appGroups=nil-or-error")
+        }
 
         NSSetUncaughtExceptionHandler { exception in
             let msg = "FATAL: \(exception.name.rawValue): \(exception.reason ?? "unknown")"
