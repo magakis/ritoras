@@ -59,6 +59,7 @@ struct RecoveryView: View {
 
     private func refreshRecords() {
         records = FailedJobStore.shared.list()
+        FileLogger.shared.debug(.app, "RecoveryView loaded", payload: ["recordCount": records.count])
     }
 
     private func startRetry(jobId: UUID) {

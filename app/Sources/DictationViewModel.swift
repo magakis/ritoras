@@ -590,18 +590,28 @@ final class DictationViewModel: ObservableObject {
                 postResultToServer(status: "error", errorMessage: message)
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
                 // Phase 4: preserve failed job for retry if audio exists.
-                if RecordingStore.shared.exists(jobId: id) {
+                FileLogger.shared.debug(.app, "transcription failed, checking audio for recovery", payload: [
+                    "jobId": id.uuidString,
+                    "audioPath": url.path,
+                    "audioExists": FileManager.default.fileExists(atPath: url.path)
+                ])
+                if FileManager.default.fileExists(atPath: url.path) {
                     let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
                     FailedJobStore.shared.append(FailedJobRecord(
                         jobId: id,
-                        audioFileName: "\(id.uuidString).m4a",
+                        audioFilePath: url.path,
                         errorMessage: message,
                         recordedDurationSeconds: duration,
                         createdAt: Date(),
                         retryCount: 0,
                         lastRetriedAt: nil))
                     FileLogger.shared.debug(.app, "failed-job record appended",
-                                            payload: ["jobId": id.uuidString, "durationSec": duration])
+                                            payload: ["jobId": id.uuidString, "durationSec": duration, "audioPath": url.path])
+                } else {
+                    FileLogger.shared.warn(.app, "failed-job record SKIPPED — audio file not found", payload: [
+                        "jobId": id.uuidString,
+                        "audioPath": url.path
+                    ])
                 }
                 phase = .error(message)
             }
@@ -702,20 +712,11 @@ final class DictationViewModel: ObservableObject {
                 writeToClipboard(status: "error", errorMessage: message)
                 postResultToServer(status: "error", errorMessage: message)
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-                // Phase 4: preserve failed job for retry if audio exists (batch only).
-                if RecordingStore.shared.exists(jobId: id) {
-                    let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
-                    FailedJobStore.shared.append(FailedJobRecord(
-                        jobId: id,
-                        audioFileName: "\(id.uuidString).m4a",
-                        errorMessage: message,
-                        recordedDurationSeconds: duration,
-                        createdAt: Date(),
-                        retryCount: 0,
-                        lastRetriedAt: nil))
-                    FileLogger.shared.debug(.app, "failed-job record appended",
-                                            payload: ["jobId": id.uuidString, "durationSec": duration])
-                }
+                // Phase 4: failed-job recovery is batch-only; stream mode does not
+                // preserve audio locally, so no file exists to retry.
+                FileLogger.shared.debug(.app, "transcription failed (stream), cannot recover — no local audio file", payload: [
+                    "jobId": id.uuidString
+                ])
                 phase = .error(message)
             }
 
@@ -755,16 +756,25 @@ final class DictationViewModel: ObservableObject {
             break
         }
 
-        guard let record = FailedJobStore.shared.list().first(where: { $0.jobId == jobId }),
-              let audioURL = RecordingStore.shared.url(for: jobId) else {
-            FileLogger.shared.debug(.app, "retry: no record or audio found",
+        guard let record = FailedJobStore.shared.list().first(where: { $0.jobId == jobId }) else {
+            FileLogger.shared.debug(.app, "retry: no record found",
                                     payload: ["jobId": jobId.uuidString])
             return
         }
 
+        let audioURL = URL(fileURLWithPath: record.audioFilePath)
+        guard FileManager.default.fileExists(atPath: audioURL.path) else {
+            FileLogger.shared.warn(.app, "retry: audio file no longer exists", payload: [
+                "jobId": jobId.uuidString,
+                "path": record.audioFilePath
+            ])
+            return
+        }
+
         FailedJobStore.shared.incrementRetry(jobId: jobId)
-        FileLogger.shared.debug(.app, "retry started",
+        FileLogger.shared.debug(.app, "retry: starting transcription",
                                 payload: ["jobId": jobId.uuidString,
+                                          "path": record.audioFilePath,
                                           "attempt": record.retryCount + 1])
 
         let config = SharedConfig.load()
@@ -797,15 +807,15 @@ final class DictationViewModel: ObservableObject {
 
             // Clean up — remove record and audio.
             FailedJobStore.shared.remove(jobId: jobId)
+            try? FileManager.default.removeItem(at: audioURL)
             RecordingStore.shared.delete(jobId: jobId)
 
-            FileLogger.shared.debug(.app, "retry succeeded",
+            FileLogger.shared.debug(.app, "retry succeeded, cleaning up",
                                     payload: ["jobId": jobId.uuidString])
         } catch {
-            FileLogger.shared.debug(.app, "retry failed",
+            FileLogger.shared.debug(.app, "retry failed, keeping record",
                                     payload: ["jobId": jobId.uuidString,
                                               "error": error.localizedDescription])
-            // Leave the record in place for another manual retry.
         }
     }
 

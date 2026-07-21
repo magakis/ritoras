@@ -4,12 +4,30 @@ import Foundation
 
 struct FailedJobRecord: Codable, Equatable {
     let jobId: UUID
-    let audioFileName: String
+    let audioFilePath: String
     let errorMessage: String
     let recordedDurationSeconds: Double
     let createdAt: Date
     var retryCount: Int
     var lastRetriedAt: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case jobId, audioFilePath, errorMessage, recordedDurationSeconds, createdAt, retryCount, lastRetriedAt
+    }
+}
+
+// Custom decoder for backward compatibility with old `audioFileName` key.
+extension FailedJobRecord {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        jobId = try container.decode(UUID.self, forKey: .jobId)
+        audioFilePath = try container.decodeIfPresent(String.self, forKey: .audioFilePath) ?? ""
+        errorMessage = try container.decode(String.self, forKey: .errorMessage)
+        recordedDurationSeconds = try container.decode(Double.self, forKey: .recordedDurationSeconds)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        retryCount = try container.decode(Int.self, forKey: .retryCount)
+        lastRetriedAt = try container.decodeIfPresent(Date.self, forKey: .lastRetriedAt)
+    }
 }
 
 // MARK: - FailedJobStore

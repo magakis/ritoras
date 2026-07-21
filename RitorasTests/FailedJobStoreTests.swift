@@ -8,7 +8,7 @@ final class FailedJobStoreTests: XCTestCase {
     private func makeRecord(jobId: UUID = UUID(), retryCount: Int = 0) -> FailedJobRecord {
         FailedJobRecord(
             jobId: jobId,
-            audioFileName: "\(jobId.uuidString).m4a",
+            audioFilePath: "\(jobId.uuidString).m4a",
             errorMessage: "Test error",
             recordedDurationSeconds: 120,
             createdAt: Date(),
@@ -41,7 +41,7 @@ final class FailedJobStoreTests: XCTestCase {
         let decoded = try JSONDecoder().decode(FailedJobRecord.self, from: data)
 
         XCTAssertEqual(decoded.jobId, jobId)
-        XCTAssertEqual(decoded.audioFileName, record.audioFileName)
+        XCTAssertEqual(decoded.audioFilePath, record.audioFilePath)
         XCTAssertEqual(decoded.errorMessage, "Test error")
         XCTAssertEqual(decoded.recordedDurationSeconds, 120, accuracy: 0.001)
         XCTAssertEqual(decoded.retryCount, 2)
@@ -159,7 +159,7 @@ final class FailedJobStoreTests: XCTestCase {
         let now = Date()
         let oldRecord = FailedJobRecord(
             jobId: oldId,
-            audioFileName: "\(oldId.uuidString).m4a",
+            audioFilePath: "\(oldId.uuidString).m4a",
             errorMessage: "Old error",
             recordedDurationSeconds: 10,
             createdAt: now.addingTimeInterval(-172_800), // 2 days ago
@@ -168,7 +168,7 @@ final class FailedJobStoreTests: XCTestCase {
         )
         let recentRecord = FailedJobRecord(
             jobId: recentId,
-            audioFileName: "\(recentId.uuidString).m4a",
+            audioFilePath: "\(recentId.uuidString).m4a",
             errorMessage: "Recent error",
             recordedDurationSeconds: 10,
             createdAt: now.addingTimeInterval(-3600), // 1 hour ago
@@ -198,12 +198,12 @@ final class FailedJobStoreTests: XCTestCase {
         let now = Date()
 
         let r1 = FailedJobRecord(
-            jobId: id1, audioFileName: "\(id1.uuidString).m4a",
+            jobId: id1, audioFilePath: "\(id1.uuidString).m4a",
             errorMessage: "e1", recordedDurationSeconds: 5,
             createdAt: now.addingTimeInterval(-60), retryCount: 0, lastRetriedAt: nil
         )
         let r2 = FailedJobRecord(
-            jobId: id2, audioFileName: "\(id2.uuidString).m4a",
+            jobId: id2, audioFilePath: "\(id2.uuidString).m4a",
             errorMessage: "e2", recordedDurationSeconds: 5,
             createdAt: now.addingTimeInterval(-120), retryCount: 0, lastRetriedAt: nil
         )

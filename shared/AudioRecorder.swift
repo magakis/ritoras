@@ -107,9 +107,10 @@ actor AudioRecorder {
         let tempURL = recordingsDir.appendingPathComponent("\(jobId.uuidString).m4a")
         currentFileURL = tempURL
 
-        FileLogger.shared.debug(.audio, "recording start", payload: [
+        FileLogger.shared.debug(.audio, "recording started", payload: [
+            "jobId": jobId.uuidString,
             "path": tempURL.path,
-            "jobId": jobId.uuidString
+            "isAppGroup": recordingsDir.path.contains(SharedConfig.Defaults.appGroupId)
         ])
 
         // 4. Whisper-friendly recording settings: 16 kHz mono AAC
