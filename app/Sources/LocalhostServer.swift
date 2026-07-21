@@ -27,7 +27,7 @@ final class LocalhostServer {
         listener?.port?.rawValue
     }
 
-    private static let maxHeaderSize = 8192
+    private static let maxRequestSize = 65536
 
     init(port: UInt16,
          stateProvider: @escaping () -> DictationStateSnapshot,
@@ -100,7 +100,7 @@ final class LocalhostServer {
         var requestData = Data()
 
         func readNext() {
-            let remaining = Self.maxHeaderSize - requestData.count
+            let remaining = Self.maxRequestSize - requestData.count
             guard remaining > 0 else {
                 let response = handleRequest(data: requestData)
                 sendResponse(response, on: connection)
@@ -121,7 +121,9 @@ final class LocalhostServer {
                     requestData.append(data)
                 }
 
-                if Self.isHeaderComplete(requestData) || isComplete || requestData.count >= Self.maxHeaderSize {
+                // Body-completeness check: if headers are done and we have enough
+                // body bytes, process the request. Otherwise keep reading.
+                if Self.isRequestComplete(requestData) || isComplete || requestData.count >= Self.maxRequestSize {
                     let response = self.handleRequest(data: requestData)
                     self.sendResponse(response, on: connection)
                 } else {
@@ -141,36 +143,64 @@ final class LocalhostServer {
 
     // MARK: - Header Detection
 
-    /// Returns `true` if `data` contains the HTTP header terminator `\r\n\r\n`.
-    private static func isHeaderComplete(_ data: Data) -> Bool {
+    /// Returns the byte offset of the first byte after `\r\n\r\n`, or `nil` if the
+    /// header terminator has not yet been fully received.
+    private static func findHeaderEnd(_ data: Data) -> Int? {
         data.withUnsafeBytes { ptr in
-            guard let base = ptr.baseAddress else { return false }
+            guard let base = ptr.baseAddress else { return nil }
             let count = data.count
-            guard count >= 4 else { return false }
+            guard count >= 4 else { return nil }
             for i in 0...(count - 4) {
                 if base[i] == 0x0D, base[i + 1] == 0x0A,
                    base[i + 2] == 0x0D, base[i + 3] == 0x0A {
-                    return true
+                    return i + 4 // position after \r\n\r\n
                 }
             }
-            return false
+            return nil
         }
+    }
+
+    /// Returns `true` when the HTTP request is fully received: headers complete
+    /// AND (no Content-Length OR body fully received).
+    private static func isRequestComplete(_ data: Data) -> Bool {
+        guard let headerEnd = findHeaderEnd(data) else { return false }
+        let bodyLength = parseContentLength(from: data, headerEnd: headerEnd)
+        let bodyReceived = data.count - headerEnd
+        return bodyReceived >= bodyLength
+    }
+
+    /// Parses the `Content-Length` header value from the header section.
+    /// Returns 0 if the header is absent or unparseable.
+    private static func parseContentLength(from data: Data, headerEnd: Int) -> Int {
+        guard headerEnd >= 4 else { return 0 }
+        let headerData = data[..<(headerEnd - 4)]
+        guard let headerStr = String(data: headerData, encoding: .utf8) else { return 0 }
+        let lines = headerStr.components(separatedBy: "\r\n")
+        for line in lines {
+            let lower = line.lowercased()
+            if lower.hasPrefix("content-length:") {
+                let value = line.dropFirst(15).trimmingCharacters(in: .whitespaces)
+                return Int(value) ?? 0
+            }
+        }
+        return 0
     }
 
     // MARK: - Request Handling
 
     private func handleRequest(data: Data) -> Data {
-        guard let raw = String(data: data, encoding: .utf8) else {
-            return Self.makeJSONResponse(status: 400, body: ["error": "Bad Request", "detail": "Non-UTF-8 request"])
-        }
-
-        // Locate header terminator
-        guard let headerEnd = raw.range(of: "\r\n\r\n") else {
+        // Locate header terminator via findHeaderEnd (works on raw Data)
+        guard let headerEndOffset = Self.findHeaderEnd(data) else {
             return Self.makeJSONResponse(status: 400, body: ["error": "Bad Request", "detail": "Missing header terminator"])
         }
 
-        let headerSection = String(raw[raw.startIndex..<headerEnd.lowerBound])
-        let lines = headerSection.components(separatedBy: "\r\n")
+        // Decode the header section (without the \r\n\r\n terminator)
+        let headerData = data[..<(headerEndOffset - 4)]
+        guard let headerStr = String(data: headerData, encoding: .utf8) else {
+            return Self.makeJSONResponse(status: 400, body: ["error": "Bad Request", "detail": "Non-UTF-8 request"])
+        }
+
+        let lines = headerStr.components(separatedBy: "\r\n")
 
         // Parse request line: METHOD path HTTP/1.1
         guard let requestLine = lines.first else {
@@ -184,6 +214,13 @@ final class LocalhostServer {
 
         let method = parts[0].uppercased()
         let rawPath = parts[1]
+
+        if method == "POST" {
+            guard rawPath == "/logs" else {
+                return Self.makeJSONResponse(status: 404, body: ["error": "not found", "path": rawPath])
+            }
+            return handlePostLogs(bodyData: data[headerEndOffset...])
+        }
 
         guard method == "GET" else {
             return Self.makeJSONResponse(status: 405, body: ["error": "Method Not Allowed", "method": method])
@@ -250,6 +287,33 @@ final class LocalhostServer {
             return Self.makeJSONResponse(status: 404, body: [
                 "error": "not found",
                 "path": rawPath
+            ])
+        }
+    }
+
+    // MARK: - POST /logs
+
+    /// Handles `POST /logs`: decodes a JSON array of `LogShipmentEntry` values
+    /// and writes each to the container app's `FileLogger` with the original
+    /// level, component, and message.
+    /// Returns 200 with `{"received": <count>}` on success, 400 on decode failure.
+    private func handlePostLogs(bodyData: Data) -> Data {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        do {
+            let wrapper = try decoder.decode([String: [LogShipmentEntry]].self, from: bodyData)
+            let entries = wrapper["entries"] ?? []
+            for entry in entries {
+                let level = LogLevel(rawValue: entry.level) ?? .info
+                let component = LogComponent(rawValue: entry.component) ?? .keyboard
+                let payload = entry.payload as [String: Any]?
+                FileLogger.shared.log(level, component, entry.message, payload: payload)
+            }
+            return Self.makeJSONResponse(status: 200, body: ["received": entries.count])
+        } catch {
+            return Self.makeJSONResponse(status: 400, body: [
+                "error": "Bad Request",
+                "detail": "Invalid JSON body"
             ])
         }
     }

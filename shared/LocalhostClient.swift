@@ -156,6 +156,27 @@ enum LocalhostClient {
         }
     }
 
+    /// Ships an array of log entries to the localhost server's `POST /logs`
+    /// endpoint. Fire-and-forget: errors are swallowed (connection refused,
+    /// timeout, malformed response — all silently dropped). Log shipping is
+    /// best-effort and never blocks the caller.
+    static func postLogs(_ entries: [LogShipmentEntry]) async {
+        guard !entries.isEmpty else { return }
+        let url = URL(string: "http://127.0.0.1:\(SharedConfig.Defaults.localhostServerPort)/logs")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        do {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let body = try encoder.encode(["entries": entries])
+            request.httpBody = body
+            _ = try await activeSession.data(for: request)
+        } catch {
+            // Swallow — log shipping is best-effort
+        }
+    }
+
     // MARK: - Error Mapping
 
     private static func mapURLError(_ error: URLError) -> LocalhostError {

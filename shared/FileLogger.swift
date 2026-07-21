@@ -45,6 +45,12 @@ final class FileLogger {
     private let resolvedURL: URL?
     private let usingFallbackDir: Bool
 
+    /// Optional broadcast hook invoked on every log call. Set by keyboard targets
+    /// to ship logs to the container app's DebugLogView via LocalhostServer.
+    /// MUST remain nil in the container app to prevent infinite loops
+    /// (server-received logs are written via this same FileLogger).
+    public static var broadcast: ((LogLevel, LogComponent, String, [String: Any]?) -> Void)?
+
     private static func resolveURL() -> (url: URL?, usingFallback: Bool) {
         if let container = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: SharedConfig.Defaults.appGroupId
@@ -163,6 +169,9 @@ final class FileLogger {
         case .debug, .info:
             queue.async(execute: write)
         }
+
+        // Broadcast hook (used by keyboard to ship logs to container app via localhost).
+        Self.broadcast?(level, component, message, payload)
     }
 
     static func clear() {

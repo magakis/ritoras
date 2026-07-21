@@ -216,6 +216,14 @@ class KeyboardViewController: UIInputViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        // Wire FileLogger broadcast to ship logs to container app via localhost.
+        // Set before any log calls so we capture everything from the start.
+        FileLogger.broadcast = { level, component, message, payload in
+            let entry = LogShipmentEntry(level: level, component: component, message: message, payload: payload)
+            KeyboardLogShipper.shared.append(entry)
+        }
+        KeyboardLogShipper.shared.start()
+
         // Log the resolved app-group identifier via FileLogger (post-resolution, safe to use FileLogger now).
         FileLogger.shared.info(.keyboard, "AppGroupResolver outcome", payload: [
             "resolvedIdentifier": SharedConfig.Defaults.appGroupId,
@@ -314,6 +322,8 @@ class KeyboardViewController: UIInputViewController {
     }
 
     deinit {
+        KeyboardLogShipper.shared.stop()
+        FileLogger.broadcast = nil
         darwinToken = nil
         darwinStateChangedToken = nil
         stopLocalhostPolling()
