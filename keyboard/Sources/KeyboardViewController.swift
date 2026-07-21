@@ -1442,15 +1442,13 @@ extension KeyboardViewController: KeyboardViewDelegate {
         }
     }
 
-    /// Returns true if the cursor is immediately after `<word> ` (the word followed by a single trailing space).
-    /// Used by revert-on-backspace to detect the immediate-after-autocorrect state.
-    /// Reads documentContextBeforeInput and checks it ends with `word + " "`.
-    /// Returns false if context is nil/empty or doesn't match.
+    /// Returns true if the cursor sits immediately after an autocorrect of `word`,
+    /// tolerating UITextProxy quirks (missing/multiple trailing whitespace).
+    /// Delegates to `BackspaceRevertMatcher` for the pure logic; see that type's
+    /// documentation for the matching contract and revert-path safety analysis.
     private func isCursorRightAfterTrailingSpaceFollowing(_ word: String) -> Bool {
         let context = textDocumentProxy.documentContextBeforeInput ?? ""
-        guard context.count > word.count + 1 else { return false }
-        let suffix = String(context.suffix(word.count + 1))
-        return suffix == word + " "
+        return BackspaceRevertMatcher.isCursorRightAfter(word: word, inContext: context)
     }
 
     /// Returns the text to insert so the document never has two consecutive spaces,
