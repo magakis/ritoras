@@ -5,7 +5,7 @@ import Foundation
 struct FailedJobRecord: Codable, Equatable {
     let jobId: UUID
     let audioFilePath: String
-    let errorMessage: String
+    var errorMessage: String
     let recordedDurationSeconds: Double
     let createdAt: Date
     var retryCount: Int
@@ -94,6 +94,14 @@ final class FailedJobStore: @unchecked Sendable {
         guard let index = records.firstIndex(where: { $0.jobId == jobId }) else { return }
         records[index].retryCount += 1
         records[index].lastRetriedAt = Date()
+        persist()
+    }
+
+    /// Updates the error message for the given `jobId`. No-op if not found.
+    func updateErrorMessage(jobId: UUID, message: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard let index = records.firstIndex(where: { $0.jobId == jobId }) else { return }
+        records[index].errorMessage = message
         persist()
     }
 

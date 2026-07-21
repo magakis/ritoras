@@ -802,44 +802,62 @@ final class DictationViewModel: ObservableObject {
 
         let config = SharedConfig.load()
         do {
-            let text = try await WhisperClient.transcribeAsync(
-                audioURL: audioURL, jobId: jobId, config: config, correlationId: jobId)
-
-            // Deliver to clipboard — mirror the writeToClipboard pattern
-            // but write directly since activeID is nil during recovery.
-            var payload: [String: Any] = [
-                "source": "ritoras",
-                "id": jobId.uuidString,
-                "status": "completed",
-                "text": text,
-                "timestamp": Date().timeIntervalSince1970,
-            ]
-            if let jsonData = try? JSONSerialization.data(withJSONObject: payload) {
-                UIPasteboard.general.setItems([
-                    ["org.ritoras.dictation": jsonData, "public.utf8-plain-text": text]
-                ], options: [:])
-            }
-
-            // Add to persistent text history.
-            TranscriptionHistory.shared.add(text: text)
-
-            // Store in resultStore so localhost server can serve it.
-            resultStore.set(DictationResultSnapshot(
-                id: jobId.uuidString, status: "completed", text: text,
-                errorMessage: nil, timestamp: Date()), for: jobId)
-
-            // Clean up — remove record and audio.
-            FailedJobStore.shared.remove(jobId: jobId)
-            try? FileManager.default.removeItem(at: audioURL)
-            RecordingStore.shared.delete(jobId: jobId)
-
-            FileLogger.shared.debug(.app, "retry succeeded, cleaning up",
-                                    payload: ["jobId": jobId.uuidString])
+            let text = try await WhisperClient.transcribe(
+                audioURL: audioURL, config: config, correlationId: jobId)
+            handleRetrySuccess(text: text, jobId: jobId, audioURL: audioURL)
+        } catch WhisperError.cancelled {
+            FileLogger.shared.debug(.app, "retry cancelled", payload: ["jobId": jobId.uuidString])
         } catch {
-            FileLogger.shared.debug(.app, "retry failed, keeping record",
-                                    payload: ["jobId": jobId.uuidString,
-                                              "error": error.localizedDescription])
+            handleRetryFailure(error: error, jobId: jobId)
         }
+    }
+
+    // MARK: - Retry Helpers
+
+    /// Handles a successful retry: delivers to clipboard, persists in history,
+    /// stores in resultStore, then cleans up audio file and failed-job record.
+    private func handleRetrySuccess(text: String, jobId: UUID, audioURL: URL) {
+        // Deliver to clipboard — mirror the writeToClipboard pattern
+        // but write directly since activeID is nil during recovery.
+        var payload: [String: Any] = [
+            "source": "ritoras",
+            "id": jobId.uuidString,
+            "status": "completed",
+            "text": text,
+            "timestamp": Date().timeIntervalSince1970,
+        ]
+        if let jsonData = try? JSONSerialization.data(withJSONObject: payload) {
+            UIPasteboard.general.setItems([
+                ["org.ritoras.dictation": jsonData, "public.utf8-plain-text": text]
+            ], options: [:])
+        }
+
+        // Add to persistent text history.
+        TranscriptionHistory.shared.add(text: text)
+
+        // Store in resultStore so localhost server can serve it.
+        resultStore.set(DictationResultSnapshot(
+            id: jobId.uuidString, status: "completed", text: text,
+            errorMessage: nil, timestamp: Date()), for: jobId)
+
+        // Clean up — delete audio file first, then remove the record.
+        try? FileManager.default.removeItem(at: audioURL)
+        RecordingStore.shared.delete(jobId: jobId)
+        FailedJobStore.shared.remove(jobId: jobId)
+
+        FileLogger.shared.debug(.app, "retry succeeded, cleaning up",
+                                payload: ["jobId": jobId.uuidString])
+    }
+
+    /// Handles a failed retry: logs the error and updates the record's
+    /// errorMessage so RecoveryView / DictationView shows the latest error.
+    private func handleRetryFailure(error: Error, jobId: UUID) {
+        let errorMessage = error.localizedDescription
+        FileLogger.shared.warn(.app, "retry failed", payload: [
+            "jobId": jobId.uuidString,
+            "error": errorMessage
+        ])
+        FailedJobStore.shared.updateErrorMessage(jobId: jobId, message: errorMessage)
     }
 
     func cancel() async {
