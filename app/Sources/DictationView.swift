@@ -206,7 +206,7 @@ struct DictationView: View {
             if hasSavedAudio {
                 VStack(spacing: 12) {
                     Button("Retry Transcription") {
-                        Task { await viewModel.retry(jobId: requestId) }
+                        Task { await viewModel.retryAsLiveDictation(jobId: requestId) }
                     }
                     .buttonStyle(.borderedProminent)
 

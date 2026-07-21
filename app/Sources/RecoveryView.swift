@@ -5,6 +5,8 @@ struct RecoveryView: View {
     @EnvironmentObject private var dictationViewModel: DictationViewModel
     @State private var records: [FailedJobRecord] = []
     @State private var retryingJobIds: Set<UUID> = []
+    @State private var toastMessage: String?
+    @State private var toastIsError = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -53,6 +55,17 @@ struct RecoveryView: View {
                 }
             }
         }
+        .overlay(alignment: .bottom) {
+            if let toast = toastMessage {
+                Text(toast)
+                    .padding()
+                    .background(toastIsError ? Color.red.opacity(0.8) : Color.green.opacity(0.8))
+                    .foregroundColor(.white)
+                    .cornerRadius(8)
+                    .padding(.bottom, 20)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
     }
 
     // MARK: - Actions
@@ -70,7 +83,19 @@ struct RecoveryView: View {
             await dictationViewModel.retry(jobId: jobId)
             await MainActor.run {
                 retryingJobIds.remove(jobId)
+                let stillExists = FailedJobStore.shared.list().contains(where: { $0.jobId == jobId })
+                if stillExists {
+                    toastMessage = "Retry failed — see updated error below"
+                    toastIsError = true
+                } else {
+                    toastMessage = "Transcribed — copied to clipboard"
+                    toastIsError = false
+                }
                 refreshRecords()
+                Task {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    await MainActor.run { toastMessage = nil }
+                }
             }
         }
     }

@@ -860,6 +860,89 @@ final class DictationViewModel: ObservableObject {
         FailedJobStore.shared.updateErrorMessage(jobId: jobId, message: errorMessage)
     }
 
+    // MARK: - Retry As Live Dictation
+
+    /// Retry a failed dictation from the error screen, going through the same
+    /// phase transitions as a live dictation. The user sees the transcribing UI.
+    func retryAsLiveDictation(jobId: UUID) async {
+        // Idempotency guard — prevent concurrent retries of the same job.
+        retryLock.lock()
+        if retryingJobIds.contains(jobId) {
+            retryLock.unlock()
+            FileLogger.shared.debug(.app, "retryAsLiveDictation skipped — already in flight",
+                                    payload: ["jobId": jobId.uuidString])
+            return
+        }
+        retryingJobIds.insert(jobId)
+        retryLock.unlock()
+
+        defer {
+            retryLock.lock()
+            retryingJobIds.remove(jobId)
+            retryLock.unlock()
+        }
+
+        // Look up the saved audio
+        guard let record = FailedJobStore.shared.list().first(where: { $0.jobId == jobId }),
+              FileManager.default.fileExists(atPath: record.audioFilePath) else {
+            FileLogger.shared.warn(.app, "retryAsLiveDictation: audio not found",
+                                   payload: ["jobId": jobId.uuidString])
+            phase = .error("Saved audio no longer available")
+            return
+        }
+
+        let audioURL = URL(fileURLWithPath: record.audioFilePath)
+        let config = SharedConfig.load()
+
+        // Transition to transcribing — user sees the loading UI
+        activeID = jobId
+        phase = .transcribing
+        postResultToServer(status: "transcribing")
+
+        do {
+            let text = try await WhisperClient.transcribe(
+                audioURL: audioURL, config: config, correlationId: jobId)
+
+            // Supersede guard — same pattern as stop()
+            guard activeID == jobId else { return }
+
+            // Deliver via the same path as stop()'s success
+            let ucTime = Date()
+            writeToClipboard(status: "completed", text: text)
+            FileLogger.shared.debug(.transcription, "retryAsLiveDictation result delivered", payload: [
+                "jobId": jobId.uuidString, "channel": "clipboard",
+                "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
+            ])
+            postResultToServer(status: "completed", text: text)
+            FileLogger.shared.debug(.transcription, "retryAsLiveDictation result delivered", payload: [
+                "jobId": jobId.uuidString, "channel": "server",
+                "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
+            ])
+            DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+            FileLogger.shared.info(.transcription, "retryAsLiveDictation result delivered", payload: [
+                "jobId": jobId.uuidString, "channel": "darwin",
+                "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
+            ])
+            TranscriptionHistory.shared.add(text: text)
+
+            // Clean up audio file and failed-job record
+            try? FileManager.default.removeItem(at: audioURL)
+            RecordingStore.shared.delete(jobId: jobId)
+            FailedJobStore.shared.remove(jobId: jobId)
+
+            phase = .done(text)
+            FileLogger.shared.debug(.app, "retryAsLiveDictation succeeded",
+                                   payload: ["jobId": jobId.uuidString])
+        } catch {
+            guard activeID == jobId else { return }
+            let message = error.localizedDescription
+            FailedJobStore.shared.updateErrorMessage(jobId: jobId, message: message)
+            phase = .error(message)
+            FileLogger.shared.warn(.app, "retryAsLiveDictation failed",
+                                  payload: ["jobId": jobId.uuidString, "error": message])
+        }
+    }
+
     func cancel() async {
         FileLogger.shared.info(.transcription, "cancel: stream teardown")
         await streamRecorder?.stop()
