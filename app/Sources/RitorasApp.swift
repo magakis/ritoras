@@ -16,9 +16,17 @@ struct RitorasApp: App {
            let xmlStart = raw.range(of: "<?xml"),
            let xmlEnd = raw.range(of: "</plist>") {
             let plist = String(raw[xmlStart.lowerBound..<xmlEnd.upperBound])
-            NSLog("ENTITLEMENT_PROBE target=app bundleId=\(Bundle.main.bundleIdentifier ?? "?") plist=\(plist)")
+            FileLogger.shared.info(.app, "ENTITLEMENT_PROBE", payload: [
+                "target": "app",
+                "bundleId": Bundle.main.bundleIdentifier ?? "?",
+                "plist": plist
+            ])
         } else {
-            NSLog("ENTITLEMENT_PROBE target=app bundleId=\(Bundle.main.bundleIdentifier ?? "?") status=no-mobileprovision-or-unparseable")
+            FileLogger.shared.info(.app, "ENTITLEMENT_PROBE", payload: [
+                "target": "app",
+                "bundleId": Bundle.main.bundleIdentifier ?? "?",
+                "status": "no-mobileprovision-or-unparseable"
+            ])
         }
         MetricKitSubscriber.shared.start()
         FileLogger.shared.info(.app, "MetricKit subscriber started")

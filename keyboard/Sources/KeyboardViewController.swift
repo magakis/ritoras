@@ -221,9 +221,17 @@ class KeyboardViewController: UIInputViewController {
            let xmlStart = raw.range(of: "<?xml"),
            let xmlEnd = raw.range(of: "</plist>") {
             let plist = String(raw[xmlStart.lowerBound..<xmlEnd.upperBound])
-            NSLog("ENTITLEMENT_PROBE target=keyboard bundleId=\(Bundle.main.bundleIdentifier ?? "?") plist=\(plist)")
+            FileLogger.shared.info(.keyboard, "ENTITLEMENT_PROBE", payload: [
+                "target": "keyboard",
+                "bundleId": Bundle.main.bundleIdentifier ?? "?",
+                "plist": plist
+            ])
         } else {
-            NSLog("ENTITLEMENT_PROBE target=keyboard bundleId=\(Bundle.main.bundleIdentifier ?? "?") status=no-mobileprovision-or-unparseable")
+            FileLogger.shared.info(.keyboard, "ENTITLEMENT_PROBE", payload: [
+                "target": "keyboard",
+                "bundleId": Bundle.main.bundleIdentifier ?? "?",
+                "status": "no-mobileprovision-or-unparseable"
+            ])
         }
 
         NSSetUncaughtExceptionHandler { exception in
