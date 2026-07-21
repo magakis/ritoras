@@ -4,6 +4,7 @@ import AVFoundation
 struct RitorasApp: App {
     @StateObject private var settings = AppSettings.shared
     @AppStorage("onboardingCompleted") private var onboardingCompleted = false
+    @StateObject private var dictationViewModel = DictationViewModel()
     @State private var dictationRequest: DictationRequest?
     @Environment(\.scenePhase) private var scenePhase
 
@@ -14,25 +15,6 @@ struct RitorasApp: App {
             "resolvedIdentifier": SharedConfig.Defaults.appGroupId,
             "bundleId": Bundle.main.bundleIdentifier ?? "?"
         ])
-        // ENTITLEMENT_PROBE — TEMPORARY DIAGNOSTIC, REMOVE AFTER VALIDATION
-        if let profileURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
-           let data = try? Data(contentsOf: profileURL),
-           let raw = String(data: data, encoding: .ascii),
-           let xmlStart = raw.range(of: "<?xml"),
-           let xmlEnd = raw.range(of: "</plist>") {
-            let plist = String(raw[xmlStart.lowerBound..<xmlEnd.upperBound])
-            FileLogger.shared.info(.app, "ENTITLEMENT_PROBE", payload: [
-                "target": "app",
-                "bundleId": Bundle.main.bundleIdentifier ?? "?",
-                "plist": plist
-            ])
-        } else {
-            FileLogger.shared.info(.app, "ENTITLEMENT_PROBE", payload: [
-                "target": "app",
-                "bundleId": Bundle.main.bundleIdentifier ?? "?",
-                "status": "no-mobileprovision-or-unparseable"
-            ])
-        }
         MetricKitSubscriber.shared.start()
         FileLogger.shared.info(.app, "MetricKit subscriber started")
     }
@@ -55,9 +37,6 @@ struct RitorasApp: App {
                 if AVAudioSession.sharedInstance().recordPermission == .undetermined {
                     AVAudioSession.sharedInstance().requestRecordPermission { _ in }
                 }
-
-                InboxRecovery.shared.recoverMissedTranscriptions()
-                InboxRecovery.shared.startWatching()
             }
             .onOpenURL { url in
                 FileLogger.shared.info(.app, "Received URL", payload: ["url": url.absoluteString])
@@ -73,6 +52,7 @@ struct RitorasApp: App {
                     FileLogger.shared.info(.app, "Parsed dictation ID",
                                            payload: ["id": id.uuidString, "url": url.absoluteString])
                     dictationRequest = DictationRequest(id: id)
+                    dictationViewModel.startLocalhostServer()
                 } else {
                     FileLogger.shared.warn(.app, "Failed to parse ID from URL",
                                            payload: ["url": url.absoluteString])
@@ -82,18 +62,16 @@ struct RitorasApp: App {
             .onChange(of: scenePhase) { newPhase in
                 switch newPhase {
                 case .active:
-                    if dictationRequest == nil {
-                        InboxRecovery.shared.recoverMissedTranscriptions()
-                    }
-                    InboxRecovery.shared.startWatching()
+                    break
                 case .background, .inactive:
-                    InboxRecovery.shared.stopWatching()
+                    break
                 @unknown default:
                     break
                 }
             }
             .fullScreenCover(item: $dictationRequest) { request in
                 DictationView(requestId: request.id)
+                    .environmentObject(dictationViewModel)
             }
         }
     }

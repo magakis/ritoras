@@ -90,10 +90,12 @@ class KeyboardViewController: UIInputViewController {
     private var clipboardPollCount = 0
     private var confirmStopTimer: Timer?
 
-    // MARK: - Inbox (Phase 3 cross-process transport)
+    // MARK: - Localhost Transport (Phase 2)
 
-    private lazy var inbox: TranscriptionInbox = TranscriptionInbox(consumer: .keyboard)
-    private var inboxWatcher: InboxWatcher?
+    private var localhostPollTimer: DispatchSourceTimer?
+    private var lastSeenPhase: String = ""
+    private var consecutiveConnectionFailures: Int = 0
+    private var darwinStateChangedToken: DarwinObserverToken?
 
     // Persisted across keyboard process restarts
     private var lastProcessedPayloadId: UUID? {
@@ -214,26 +216,6 @@ class KeyboardViewController: UIInputViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        // ENTITLEMENT_PROBE — TEMPORARY DIAGNOSTIC, REMOVE AFTER VALIDATION
-        if let profileURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
-           let data = try? Data(contentsOf: profileURL),
-           let raw = String(data: data, encoding: .ascii),
-           let xmlStart = raw.range(of: "<?xml"),
-           let xmlEnd = raw.range(of: "</plist>") {
-            let plist = String(raw[xmlStart.lowerBound..<xmlEnd.upperBound])
-            FileLogger.shared.info(.keyboard, "ENTITLEMENT_PROBE", payload: [
-                "target": "keyboard",
-                "bundleId": Bundle.main.bundleIdentifier ?? "?",
-                "plist": plist
-            ])
-        } else {
-            FileLogger.shared.info(.keyboard, "ENTITLEMENT_PROBE", payload: [
-                "target": "keyboard",
-                "bundleId": Bundle.main.bundleIdentifier ?? "?",
-                "status": "no-mobileprovision-or-unparseable"
-            ])
-        }
-
         // Log the resolved app-group identifier via FileLogger (post-resolution, safe to use FileLogger now).
         FileLogger.shared.info(.keyboard, "AppGroupResolver outcome", payload: [
             "resolvedIdentifier": SharedConfig.Defaults.appGroupId,
@@ -259,14 +241,9 @@ class KeyboardViewController: UIInputViewController {
         super.viewDidAppear(animated)
         keyboardView.updateFullAccess(hasFullAccess)
 
-        // Phase 3: Inbox-first transport — check for unconsumed records and start watcher
-        rescanInbox()
-        if inboxWatcher == nil {
-            inboxWatcher = InboxWatcher(directoryURL: inbox.inboxDirectoryURL) { [weak self] in
-                self?.rescanInbox()
-            }
-            inboxWatcher?.start()
-        }
+        // Localhost transport (primary under SideStore where app group is broken).
+        Task { await self.refreshStateFromLocalhost() }
+        startLocalhostPolling()
 
         // Defensive: never resume in search mode after keyboard dismiss/reappear
         inputTarget = .hostApp
@@ -333,12 +310,13 @@ class KeyboardViewController: UIInputViewController {
         backspaceSingleCharCount = 0
         backspaceNilContextRetries = 0
         backspaceStaleHasTextRetries = 0
-        inboxWatcher?.stop()
-        inboxWatcher = nil
+        stopLocalhostPolling()
     }
 
     deinit {
         darwinToken = nil
+        darwinStateChangedToken = nil
+        stopLocalhostPolling()
         waitTimer?.invalidate()
         pollTimer?.invalidate()
         clipboardPollTimer?.invalidate()
@@ -351,8 +329,6 @@ class KeyboardViewController: UIInputViewController {
         backspaceTimer?.invalidate()
         backspaceNilContextRetries = 0
         backspaceStaleHasTextRetries = 0
-        inboxWatcher?.stop()
-        inboxWatcher = nil
     }
 
     // MARK: - Setup
@@ -509,9 +485,13 @@ class KeyboardViewController: UIInputViewController {
 
         // Register Darwin notification observer
         darwinToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinNotificationName) { [weak self] in
-            // Darwin notification is now a hint to rescan the inbox.
-            // The inbox transport is the PRIMARY channel; legacy paths remain as fallback.
-            self?.rescanInbox()
+            Task { await self?.refreshStateFromLocalhost() }
+        }
+
+        // Register localhost state-changed observer
+        darwinStateChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinStateChangedNotificationName) { [weak self] in
+            // State-changed notification: poll localhost for updated state.
+            Task { await self?.refreshStateFromLocalhost() }
         }
 
         // Start timeout timer
@@ -534,8 +514,8 @@ class KeyboardViewController: UIInputViewController {
         ])
         stopDictationTransports()
 
-        // Try App Group first (works if properly signed)
-        guard let payload = preFetchedPayload ?? DictationPayload.current() else {
+        // Try pre-fetched payload first (works if properly signed)
+        guard let payload = preFetchedPayload else {
             // No payload yet — poll the server and keep polling.
             FileLogger.shared.debug(.keyboard, "handleDictationCompleted — no payload yet, falling back to server poll")
             pollServerForDictation()
@@ -576,102 +556,111 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
-    // MARK: - Inbox Transport (Phase 3)
+    // MARK: - Localhost Transport (Phase 2)
 
-    /// Scans the inbox for unconsumed terminal records and processes them.
-    /// Runs file I/O on a background queue, dispatches to main for text insertion.
-    /// Falls through to legacy paths if the inbox is empty or unavailable.
-    /// Idempotent — unconsumed records are marked consumed after processing.
-    private func rescanInbox() {
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self = self else { return }
-
-            // Mark stale in-flight records as failed (container-app-killed mitigation)
-            do {
-                try self.inbox.markStale(olderThan: SharedConfig.Inbox.staleRecordTTL)
-            } catch {
-                FileLogger.shared.error(.keyboard, "Inbox markStale failed: \(error)")
+    /// Polls the localhost server for the current dictation state. Called from
+    /// the polling timer and from the Darwin state-changed notification.
+    /// Falls back to legacy server polling after 3 consecutive connection
+    /// failures (container app not running).
+    private func refreshStateFromLocalhost() async {
+        guard let id = pendingRequestId else { return }
+        do {
+            let snapshot = try await LocalhostClient.getState(id: id)
+            consecutiveConnectionFailures = 0
+            guard let snapshot = snapshot else { return }
+            await MainActor.run {
+                self.lastSeenPhase = snapshot.phase
+                self.updateRecordingInProgressUI(phase: snapshot.phase)
             }
-
-            let unconsumed = self.inbox.listUnconsumed().sorted { $0.revision < $1.revision }
-            let inFlight = self.inbox.listInFlight()
-
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-
-                // If another path (legacy) is already inserting text, skip inbox insertion
-                // to prevent double-insert. Still mark consumed and update UI.
-                if case .inserting = self.state {
-                    let toMark = unconsumed
-                    let inboxRef = self.inbox
-                    DispatchQueue.global(qos: .utility).async {
-                        for record in toMark {
-                            do {
-                                try inboxRef.markConsumed(jobId: record.jobId)
-                            } catch {
-                                FileLogger.shared.error(.keyboard, "markConsumed failed for \(record.jobId): \(error)")
-                            }
+            if snapshot.phase == "done" || snapshot.phase == "error" {
+                // Terminal — fetch the result
+                do {
+                    if let result = try await LocalhostClient.getResult(id: id) {
+                        await MainActor.run {
+                            self.handleLocalhostResult(result)
                         }
                     }
-                    self.updateRecordingInProgressUI(inFlight: inFlight)
-                    return
+                } catch {
+                    FileLogger.shared.warn(.keyboard, "Failed to fetch result from localhost", payload: [
+                        "id": id.uuidString,
+                        "error": String(describing: error)
+                    ])
                 }
-
-                // Accumulate records that need consumed markers and write them on a
-                // background queue so file I/O does not block the main queue (reducing
-                // the theoretical race window between state check and marker write).
-                var toMark: [TranscriptionRecord] = []
-                for record in unconsumed {
-                    switch record.status {
-                    case .ready:
-                        self.insertDictationResult(text: record.text ?? "")
-                        toMark.append(record)
-                    case .failed:
-                        self.state = .error(record.errorMessage ?? "Transcription failed")
-                        toMark.append(record)
-                    case .cancelled:
-                        self.state = .idle
-                        toMark.append(record)
-                    default:
-                        continue
-                    }
-                }
-
-                if !toMark.isEmpty {
-                    let inboxRef = self.inbox
-                    DispatchQueue.global(qos: .utility).async {
-                        for record in toMark {
-                            do {
-                                try inboxRef.markConsumed(jobId: record.jobId)
-                            } catch {
-                                FileLogger.shared.error(.keyboard, "markConsumed failed for \(record.jobId): \(error)")
-                            }
-                        }
-                    }
-                }
-
-                self.updateRecordingInProgressUI(inFlight: inFlight)
             }
+        } catch LocalhostClient.LocalhostError.connectionRefused {
+            consecutiveConnectionFailures += 1
+            if consecutiveConnectionFailures >= 3 {
+                // Container app is dead — fall back to legacy server polling
+                stopLocalhostPolling()
+                startServerPolling()
+            }
+        } catch {
+            // Other errors — log and continue polling
+            FileLogger.shared.warn(.keyboard, "LocalhostClient error", payload: ["error": String(describing: error)])
         }
     }
 
-    /// Updates the keyboard UI based on in-flight transcription records.
-    /// Shows "recording in progress" (`.waiting`) when in-flight records exist
-    /// and the keyboard was idle; restores idle when in-flight is empty.
-    private func updateRecordingInProgressUI(inFlight: [TranscriptionRecord]) {
-        if inFlight.isEmpty {
-            // No in-flight records — restore idle if currently in a waiting state
-            switch state {
-            case .waiting, .waitingConfirm, .openingApp:
-                state = .idle
-            default:
-                break
+    /// Starts a 0.5s repeating timer that calls `refreshStateFromLocalhost`.
+    /// Uses `DispatchSourceTimer` (negligible memory overhead) instead of
+    /// `Timer` to avoid RunLoop coupling in the keyboard extension.
+    private func startLocalhostPolling() {
+        stopLocalhostPolling()
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
+        timer.setEventHandler { [weak self] in
+            Task { await self?.refreshStateFromLocalhost() }
+        }
+        timer.resume()
+        localhostPollTimer = timer
+    }
+
+    private func stopLocalhostPolling() {
+        localhostPollTimer?.cancel()
+        localhostPollTimer = nil
+    }
+
+    /// Processes a terminal `DictationResultSnapshot` received from the
+    /// localhost server. Idempotent: checks `lastProcessedTimestamp` to
+    /// prevent double-insertion.
+    @MainActor
+    private func handleLocalhostResult(_ result: DictationResultSnapshot) {
+        // Idempotency guard
+        let lastTimestamp = lastProcessedTimestamp
+        if result.timestamp.timeIntervalSince1970 <= lastTimestamp {
+            return  // already processed
+        }
+
+        switch result.status {
+        case "completed":
+            if let text = result.text, !text.isEmpty {
+                lastProcessedTimestamp = result.timestamp.timeIntervalSince1970
+                lastProcessedPayloadId = UUID(uuidString: result.id)
+                stopDictationTransports()
+                insertDictationResult(text: text)  // existing method
             }
-        } else {
-            // In-flight records exist — show "recording in progress" if idle
-            if case .idle = state {
-                state = .waiting
-            }
+        case "error":
+            lastProcessedTimestamp = result.timestamp.timeIntervalSince1970
+            lastProcessedPayloadId = UUID(uuidString: result.id)
+            stopDictationTransports()
+            state = .error(result.errorMessage ?? "Transcription failed")
+        default:
+            break
+        }
+    }
+
+    /// Updates the recording-in-progress UI based on the localhost phase string.
+    /// This is the Symptom 4 fix: transitions from `.idle` to `.waiting` when
+    /// the server reports "recording" or "transcribing", so the mic button
+    /// shows the active state without waiting for a localhost response.
+    private func updateRecordingInProgressUI(phase: String) {
+        switch phase {
+        case "recording", "transcribing":
+            state = .waiting  // unconditional — was guarded on .idle which never matched
+        case "idle", "done", "error":
+            // Don't change state here — handleLocalhostResult will handle terminal states
+            break
+        default:
+            break
         }
     }
 
@@ -733,7 +722,7 @@ class KeyboardViewController: UIInputViewController {
             let t0 = Date()
 
             // Read both stores on background (synchronous I/O: file + UserDefaults + UIPasteboard).
-            let appGroupPayload = DictationPayload.current()
+            let appGroupPayload: DictationPayload? = nil
             let clipPayload = KeyboardViewController.clipboardPayloadSync()
 
             let elapsed = Date().timeIntervalSince(t0) * 1000
@@ -842,10 +831,19 @@ class KeyboardViewController: UIInputViewController {
         // Re-register the Darwin observer (it was torn down in viewWillDisappear).
         if darwinToken == nil {
             darwinToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinNotificationName) { [weak self] in
-                // Darwin notification is now a hint to rescan the inbox.
-                self?.rescanInbox()
+                Task { await self?.refreshStateFromLocalhost() }
             }
         }
+
+        // Re-register the localhost state-changed observer.
+        if darwinStateChangedToken == nil {
+            darwinStateChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinStateChangedNotificationName) { [weak self] in
+                Task { await self?.refreshStateFromLocalhost() }
+            }
+        }
+
+        // Start localhost polling.
+        startLocalhostPolling()
 
         // Clipboard (primary under SideStore) + App Group payload.
         tryResolveFromStores(id: id) { [weak self] resolved in
@@ -864,10 +862,12 @@ class KeyboardViewController: UIInputViewController {
         serverPollTimer?.invalidate()
         clipboardPollTimer?.invalidate()
         darwinToken = nil
+        darwinStateChangedToken = nil
         confirmStopTimer?.invalidate()
         confirmStopTimer = nil
         serverPollWorkItem?.cancel()
         serverPollWorkItem = nil
+        stopLocalhostPolling()
     }
 
     /// Cancels the current dictation: stops all polling, clears the pending

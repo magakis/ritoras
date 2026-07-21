@@ -11,9 +11,28 @@ final class DictationViewModel: ObservableObject {
         case error(String)
     }
 
-    @Published var phase: DictationPhase = .recording
+    @Published var phase: DictationPhase = .recording {
+        didSet {
+            updateStateSnapshot()
+            DarwinNotifier.post(SharedConfig.Defaults.darwinStateChangedNotificationName)
+            storeTerminalResultIfNeeded()
+        }
+    }
     @Published private(set) var livePartial: String = ""
     @Published private(set) var activeModeLabel: String = ""
+
+    // MARK: - Localhost Server (Phase 1)
+
+    private var localhostServer: LocalhostServer?
+
+    /// Thread-safe guard for state snapshots read by the HTTP server's
+    /// background connection handlers. Nested with `completedResults`
+    /// writes in terminal-transition `didSet`.
+    private let stateLock = NSLock()
+    /// Snapshot updated on every `phase` change, safe for background reads.
+    private var safeStateSnapshot = DictationStateSnapshot(phase: "idle", activeID: nil, startedAt: nil)
+    /// Terminal results by job ID, populated on `.done` / `.error` transitions.
+    private var completedResults: [UUID: DictationResultSnapshot] = [:]
 
     private var recorder: AudioRecorder?
     private var activeID: UUID?
@@ -25,7 +44,96 @@ final class DictationViewModel: ObservableObject {
     private var selectedServer: String?
     private var serverSelectionTask: Task<String?, Never>?
 
-    private let inbox = TranscriptionInbox(consumer: .containerApp)
+    // MARK: - Localhost Server Helpers
+
+    /// Starts the localhost HTTP server if not already running. Idempotent.
+    func startLocalhostServer() {
+        guard localhostServer == nil else {
+            FileLogger.shared.debug(.network, "DictationViewModel: localhost server already running")
+            return
+        }
+
+        let server = LocalhostServer(
+            port: SharedConfig.Defaults.localhostServerPort,
+            stateProvider: { [weak self] in
+                guard let self = self else {
+                    return DictationStateSnapshot(phase: "idle", activeID: nil, startedAt: nil)
+                }
+                self.stateLock.lock()
+                let snapshot = self.safeStateSnapshot
+                self.stateLock.unlock()
+                return snapshot
+            },
+            resultProvider: { [weak self] id in
+                guard let self = self else { return nil }
+                self.stateLock.lock()
+                let result = self.completedResults[id]
+                self.stateLock.unlock()
+                return result
+            }
+        )
+
+        do {
+            try server.start()
+            localhostServer = server
+            FileLogger.shared.info(.app, "DictationViewModel: localhost server started",
+                                   payload: ["port": SharedConfig.Defaults.localhostServerPort])
+        } catch {
+            FileLogger.shared.error(.app, "DictationViewModel: failed to start localhost server",
+                                    payload: ["error": error.localizedDescription])
+        }
+    }
+
+    /// Snapshots the current `@MainActor` state into the lock-guarded
+    /// `safeStateSnapshot` so that background HTTP handlers can read it.
+    private func updateStateSnapshot() {
+        let phaseStr: String
+        switch phase {
+        case .recording:     phaseStr = "recording"
+        case .transcribing:  phaseStr = "transcribing"
+        case .done:          phaseStr = "done"
+        case .error:         phaseStr = "error"
+        }
+        let snapshot = DictationStateSnapshot(
+            phase: phaseStr,
+            activeID: activeID?.uuidString,
+            startedAt: recordingStartTime
+        )
+        stateLock.lock()
+        safeStateSnapshot = snapshot
+        stateLock.unlock()
+    }
+
+    /// Captures terminal results (`.done`, `.error`) into `completedResults`
+    /// so the localhost server can serve them via `/result`.
+    private func storeTerminalResultIfNeeded() {
+        guard let id = activeID else { return }
+        let result: DictationResultSnapshot?
+        switch phase {
+        case .done(let text):
+            result = DictationResultSnapshot(
+                id: id.uuidString,
+                status: "completed",
+                text: text,
+                errorMessage: nil,
+                timestamp: Date()
+            )
+        case .error(let msg):
+            result = DictationResultSnapshot(
+                id: id.uuidString,
+                status: "error",
+                text: nil,
+                errorMessage: msg,
+                timestamp: Date()
+            )
+        default:
+            result = nil
+        }
+        guard let result = result else { return }
+        stateLock.lock()
+        completedResults[id] = result
+        stateLock.unlock()
+    }
 
     // MARK: - Clipboard Transport
 
@@ -115,49 +223,8 @@ final class DictationViewModel: ObservableObject {
         }.resume()
     }
 
-    // MARK: - Inbox Transport
-
-    /// Writes the current state transition to the transcription inbox.
-    /// Must be called BEFORE any legacy writes (DictationPayload.save, clipboard,
-    /// server POST, Darwin notification) so the inbox is the source of truth
-    /// even if the view model is torn down mid-transition.
-    /// Inbox failures are caught and logged — they must NOT block the dictation flow.
-    /// Note: Use `inbox.create(jobId:status:)` directly for the initial record
-    /// creation rather than passing `.requested` through this helper.
-    private func writeInbox(jobId: UUID,
-                            status: TranscriptionStatus,
-                            text: String? = nil,
-                            errorMessage: String? = nil) {
-        do {
-            _ = try inbox.transition(jobId: jobId, to: status, text: text, errorMessage: errorMessage)
-            FileLogger.shared.info(.app, "Inbox write", payload: [
-                "jobId": jobId.uuidString,
-                "status": status.rawValue
-            ])
-        } catch {
-            FileLogger.shared.error(.app, "Inbox write failed", payload: [
-                "jobId": jobId.uuidString,
-                "status": status.rawValue,
-                "error": String(describing: error)
-            ])
-        }
-    }
-
     func start(id: UUID) async {
         activeID = id
-        do {
-            _ = try inbox.create(jobId: id, status: .recording)
-            FileLogger.shared.info(.app, "Inbox write", payload: [
-                "jobId": id.uuidString,
-                "status": "recording"
-            ])
-        } catch {
-            FileLogger.shared.error(.app, "Inbox write failed", payload: [
-                "jobId": id.uuidString,
-                "status": "recording",
-                "error": String(describing: error)
-            ])
-        }
         livePartial = ""
         phase = .recording
 
@@ -178,8 +245,6 @@ final class DictationViewModel: ObservableObject {
             "mode": mode == .stream ? "stream" : "batch"
         ])
 
-        // Save initial recording payload
-        DictationPayload(id: id, status: .recording, timestamp: Date()).save()
         writeToClipboard(status: "recording")
         postResultToServer(status: "recording")
 
@@ -193,10 +258,6 @@ final class DictationViewModel: ObservableObject {
             }
             if !granted {
                 let message = "Microphone access denied. Enable it in Settings \u{2192} Ritoras."
-                writeInbox(jobId: id, status: .failed, errorMessage: message)
-                DictationPayload(
-                    id: id, status: .error, errorMessage: message, timestamp: Date()
-                ).save()
                 writeToClipboard(status: "error", errorMessage: message)
                 postResultToServer(status: "error", errorMessage: message)
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
@@ -208,10 +269,6 @@ final class DictationViewModel: ObservableObject {
             }
         case .denied:
             let message = "Microphone access denied. Enable it in Settings \u{2192} Ritoras."
-            writeInbox(jobId: id, status: .failed, errorMessage: message)
-            DictationPayload(
-                id: id, status: .error, errorMessage: message, timestamp: Date()
-            ).save()
             writeToClipboard(status: "error", errorMessage: message)
             postResultToServer(status: "error", errorMessage: message)
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
@@ -239,10 +296,6 @@ final class DictationViewModel: ObservableObject {
                 UIApplication.shared.isIdleTimerDisabled = true
             } catch {
                 let message = error.localizedDescription
-                writeInbox(jobId: id, status: .failed, errorMessage: message)
-                DictationPayload(
-                    id: id, status: .error, errorMessage: message, timestamp: Date()
-                ).save()
                 writeToClipboard(status: "error", errorMessage: message)
                 postResultToServer(status: "error", errorMessage: message)
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
@@ -343,10 +396,6 @@ final class DictationViewModel: ObservableObject {
                 }
 
                 let message = error.localizedDescription
-                writeInbox(jobId: id, status: .failed, errorMessage: message)
-                DictationPayload(
-                    id: id, status: .error, errorMessage: message, timestamp: Date()
-                ).save()
                 writeToClipboard(status: "error", errorMessage: message)
                 postResultToServer(status: "error", errorMessage: message)
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
@@ -380,10 +429,6 @@ final class DictationViewModel: ObservableObject {
                                             payload: ["elapsed_ms": elapsed])
                 }
                 let message = "Recording was empty. Please try again."
-                writeInbox(jobId: id, status: .failed, errorMessage: message)
-                DictationPayload(
-                    id: id, status: .error, errorMessage: message, timestamp: Date()
-                ).save()
                 writeToClipboard(status: "error", errorMessage: message)
                 postResultToServer(status: "error", errorMessage: message)
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
@@ -392,8 +437,6 @@ final class DictationViewModel: ObservableObject {
             }
 
             phase = .transcribing
-            writeInbox(jobId: id, status: .transcribing)
-            DictationPayload(id: id, status: .transcribing, timestamp: Date()).save()
             postResultToServer(status: "transcribing")
             UIApplication.shared.isIdleTimerDisabled = false
             // Deactivate audio session on a background queue — do not block the upload.
@@ -472,12 +515,6 @@ final class DictationViewModel: ObservableObject {
                 ])
 
                 let ucTime = Date()
-                writeInbox(jobId: id, status: .ready, text: text)
-                DictationPayload(id: id, status: .completed, text: text, timestamp: Date()).save()
-                FileLogger.shared.debug(.transcription, "result delivered", payload: [
-                    "id": id.uuidString, "channel": "app_group",
-                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
-                ])
                 writeToClipboard(status: "completed", text: text)
                 FileLogger.shared.debug(.transcription, "result delivered", payload: [
                     "id": id.uuidString, "channel": "clipboard",
@@ -505,8 +542,6 @@ final class DictationViewModel: ObservableObject {
                     "elapsed_ms": failedElapsed,
                     "error": message
                 ])
-                writeInbox(jobId: id, status: .failed, errorMessage: message)
-                DictationPayload(id: id, status: .error, errorMessage: message, timestamp: Date()).save()
                 writeToClipboard(status: "error", errorMessage: message)
                 postResultToServer(status: "error", errorMessage: message)
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
@@ -530,7 +565,6 @@ final class DictationViewModel: ObservableObject {
             ])
 
             phase = .transcribing
-            writeInbox(jobId: id, status: .transcribing)
             postResultToServer(status: "transcribing")
             UIApplication.shared.isIdleTimerDisabled = false
 
@@ -575,12 +609,6 @@ final class DictationViewModel: ObservableObject {
                 guard activeID == id else { return }
 
                 let ucTime = Date()
-                writeInbox(jobId: id, status: .ready, text: text)
-                DictationPayload(id: id, status: .completed, text: text, timestamp: Date()).save()
-                FileLogger.shared.debug(.transcription, "result delivered", payload: [
-                    "id": id.uuidString, "channel": "app_group",
-                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
-                ])
                 writeToClipboard(status: "completed", text: text)
                 FileLogger.shared.debug(.transcription, "result delivered", payload: [
                     "id": id.uuidString, "channel": "clipboard",
@@ -609,8 +637,6 @@ final class DictationViewModel: ObservableObject {
                     "elapsed_ms": failedElapsed,
                     "error": message
                 ])
-                writeInbox(jobId: id, status: .failed, errorMessage: message)
-                DictationPayload(id: id, status: .error, errorMessage: message, timestamp: Date()).save()
                 writeToClipboard(status: "error", errorMessage: message)
                 postResultToServer(status: "error", errorMessage: message)
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
@@ -645,10 +671,6 @@ final class DictationViewModel: ObservableObject {
         selectedServer = nil
 
         if let id = activeID {
-            writeInbox(jobId: id, status: .cancelled)
-            DictationPayload(
-                id: id, status: .cancelled, timestamp: Date()
-            ).save()
             writeToClipboard(status: "cancelled")
             postResultToServer(status: "cancelled")
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)

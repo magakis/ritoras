@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 struct DictationView: View {
-    @StateObject private var viewModel = DictationViewModel()
+    @EnvironmentObject var viewModel: DictationViewModel
     @Environment(\.dismiss) private var dismiss
     let requestId: UUID
 
