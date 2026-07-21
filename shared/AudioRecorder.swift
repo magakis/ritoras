@@ -43,7 +43,11 @@ actor AudioRecorder {
 
     // MARK: - Start Recording
 
-    /// Starts recording speech to a temporary M4A/AAC file (16 kHz, mono).
+    /// Starts recording speech to a persistent M4A/AAC file (16 kHz, mono)
+    /// in the app-group container under the given job ID.
+    ///
+    /// The recording is written directly to `{app-group}/Shared/recordings/{jobId}.m4a`
+    /// so the audio survives process death and transcription failures.
     ///
     /// This method:
     /// 1. Checks microphone permission status (must be pre-granted by the container app).
@@ -55,10 +59,11 @@ actor AudioRecorder {
     /// 5. Calls `record()` with a single retry on failure: reconfigures the audio
     ///    session and retries once to handle the first-activation race.
     ///
+    /// - Parameter jobId: The dictation job ID. The file is named `{jobId}.m4a`.
     /// - Returns: The file URL of the recording in progress.
     /// - Throws: `AudioRecorderError` if permission is denied, session configuration
     ///   fails, or the recorder cannot start.
-    func startRecording() async throws -> URL {
+    func startRecording(jobId: UUID) async throws -> URL {
         guard recorder == nil else {
             throw AudioRecorderError.alreadyRecording
         }
@@ -85,11 +90,27 @@ actor AudioRecorder {
             throw AudioRecorderError.invalidSessionConfiguration(error)
         }
 
-        // 3. Create temp file URL
-        let tempDir = NSTemporaryDirectory()
-        let tempURL = URL(fileURLWithPath: tempDir)
-            .appendingPathComponent("ritoras-\(UUID().uuidString).m4a")
+        // 3. Resolve destination URL — write directly to the final path in the
+        //    app-group container so audio survives process death.
+        let appGroupID = SharedConfig.Defaults.appGroupId
+        let recordingsDir: URL
+        if let container = FileManager.default.containerURL(
+                forSecurityApplicationGroupIdentifier: appGroupID),
+           let dir = RecordingStore.shared.directoryURL {
+            recordingsDir = dir
+        } else {
+            // Fallback: rare, indicates entitlement issue. Log and use temp.
+            FileLogger.shared.warn(.audio, "app-group container unavailable; falling back to NSTemporaryDirectory")
+            recordingsDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        }
+        try? FileManager.default.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
+        let tempURL = recordingsDir.appendingPathComponent("\(jobId.uuidString).m4a")
         currentFileURL = tempURL
+
+        FileLogger.shared.debug(.audio, "recording start", payload: [
+            "path": tempURL.path,
+            "jobId": jobId.uuidString
+        ])
 
         // 4. Whisper-friendly recording settings: 16 kHz mono AAC
         let settings: [String: Any] = [
@@ -169,9 +190,13 @@ actor AudioRecorder {
               let fileSize = attributes[.size] as? UInt64,
               fileSize > 1024 else {
             try? FileManager.default.removeItem(at: url)
+            FileLogger.shared.debug(.audio, "recording stop: validation failed — file too short or missing",
+                                    payload: ["path": url.path])
             return nil
         }
 
+        FileLogger.shared.debug(.audio, "recording stop: validated",
+                                payload: ["path": url.path])
         return url
     }
 

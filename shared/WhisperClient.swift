@@ -8,8 +8,11 @@ enum WhisperError: Error, LocalizedError {
     case httpError(Int, String)
     case decodingError(String)
     case timeout
+    case cancelled
     case networkError(Error)
     case allServersFailed([String])
+    case asyncUnsupported
+    case jobFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -23,10 +26,16 @@ enum WhisperError: Error, LocalizedError {
             return "Failed to decode server response: \(detail)"
         case .timeout:
             return "Server unreachable. Check your connection and server address."
+        case .cancelled:
+            return "Transcription was cancelled."
         case .networkError(let error):
             return "Network error: \(error.localizedDescription)"
         case .allServersFailed(let servers):
             return "All \(servers.count) server(s) failed: \(servers.joined(separator: ", "))"
+        case .asyncUnsupported:
+            return "Server does not support async transcription."
+        case .jobFailed(let reason):
+            return "Transcription job failed: \(reason)"
         }
     }
 }
@@ -36,6 +45,26 @@ enum WhisperError: Error, LocalizedError {
 struct WhisperResponse: Decodable {
     let success: Bool
     let transcription: String
+}
+
+// MARK: - Async Transcription Models
+
+/// Response from POST /transcriptions (§11).
+struct AsyncSubmitResponse: Decodable {
+    let jobId: String
+    let statusEndpoint: String
+
+    enum CodingKeys: String, CodingKey {
+        case jobId = "job_id"
+        case statusEndpoint = "status_endpoint"
+    }
+}
+
+/// Response from GET /jobs/{id} (§12).
+struct JobStatusResponse: Decodable {
+    let status: String
+    let text: String?
+    let revision: Int?
 }
 
 // MARK: - Client
@@ -59,6 +88,10 @@ enum WhisperClient {
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: config)
     }()
+
+    /// Test seam — overrides the shared session when non-nil.
+    /// Set in test setUp, cleared in tearDown.
+    static var _testSession: URLSession?
 
     /// Transcribes the audio file at `audioURL` by iterating configured servers
     /// in order and returning the first successful result.
@@ -165,6 +198,7 @@ enum WhisperClient {
     ///            or any sub-500 status on the root endpoint as fallback.
     static func checkHealth(serverURL: String, timeout: TimeInterval = 5) async -> Bool {
         let base = serverURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let session = Self._testSession ?? Self.session
 
         // Try /health first
         if let url = URL(string: "\(base)/health") {
@@ -172,7 +206,7 @@ enum WhisperClient {
             request.httpMethod = "GET"
             request.timeoutInterval = timeout
 
-            if let (_, response) = try? await Self.session.data(for: request),
+            if let (_, response) = try? await session.data(for: request),
                let httpResponse = response as? HTTPURLResponse,
                httpResponse.statusCode == 200
             {
@@ -186,7 +220,7 @@ enum WhisperClient {
             request.httpMethod = "GET"
             request.timeoutInterval = timeout
 
-            if let (_, response) = try? await Self.session.data(for: request),
+            if let (_, response) = try? await session.data(for: request),
                let httpResponse = response as? HTTPURLResponse,
                httpResponse.statusCode < 500
             {
@@ -233,6 +267,317 @@ enum WhisperClient {
         return selected
     }
 
+    // MARK: - Async Transcription (Phase 3)
+
+    /// Submits a transcription job to the async endpoint.
+    /// - Parameters:
+    ///   - audioURL:      Local file URL of the recorded audio (.m4a).
+    ///   - serverURL:     The target server base URL.
+    ///   - body:          Pre-built multipart form body.
+    ///   - boundary:      Boundary string matching the body.
+    ///   - jobId:         UUID used as Idempotency-Key.
+    ///   - timeout:       Per-request timeout for the submit.
+    ///   - correlationId: Optional UUID for cross-process correlation.
+    /// - Returns: The parsed `AsyncSubmitResponse` with job_id and status_endpoint.
+    /// - Throws: `WhisperError.asyncUnsupported` on 404; `.networkError`, `.httpError`, etc.
+    private static func submitTranscription(
+        audioURL: URL,
+        serverURL: String,
+        body: Data,
+        boundary: String,
+        jobId: UUID,
+        timeout: TimeInterval,
+        correlationId: UUID?
+    ) async throws -> AsyncSubmitResponse {
+        let base = serverURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !base.isEmpty else { throw WhisperError.invalidURL }
+        guard let url = URL(string: "\(base)/transcriptions") else {
+            throw WhisperError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.setValue(jobId.uuidString.lowercased(), forHTTPHeaderField: "Idempotency-Key")
+        if let id = correlationId {
+            request.setValue(id.uuidString, forHTTPHeaderField: "X-Correlation-ID")
+        }
+        request.httpBody = body
+        request.timeoutInterval = timeout
+
+        let session = Self._testSession ?? Self.session
+        let bodyBytes = request.httpBody?.count ?? 0
+
+        FileLogger.shared.debug(.network, "async submit start", payload: [
+            "serverURL": base,
+            "bodyBytes": bodyBytes,
+            "jobId": jobId.uuidString,
+            "idempotencyKey": jobId.uuidString.lowercased()
+        ])
+
+        let httpT0 = Date()
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch let error as URLError where error.code == .timedOut {
+            throw WhisperError.timeout
+        } catch {
+            throw WhisperError.networkError(error)
+        }
+
+        let httpElapsed = Date().timeIntervalSince(httpT0) * 1000
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw WhisperError.noResponse
+        }
+
+        FileLogger.shared.debug(.network, "async submit response", payload: [
+            "statusCode": httpResponse.statusCode,
+            "elapsed_ms": httpElapsed
+        ])
+
+        switch httpResponse.statusCode {
+        case 202:
+            do {
+                let decoded = try JSONDecoder().decode(AsyncSubmitResponse.self, from: data)
+                FileLogger.shared.debug(.network, "async submit accepted", payload: [
+                    "jobId": decoded.jobId,
+                    "statusEndpoint": decoded.statusEndpoint
+                ])
+                return decoded
+            } catch {
+                throw WhisperError.decodingError("Failed to decode submit response: \(error.localizedDescription)")
+            }
+        case 404:
+            throw WhisperError.asyncUnsupported
+        default:
+            let bodyString = String(data: data, encoding: .utf8) ?? "(empty response)"
+            throw WhisperError.httpError(httpResponse.statusCode, bodyString)
+        }
+    }
+
+    /// Polls the job status endpoint for the current transcription result.
+    /// - Parameters:
+    ///   - statusEndpoint: Relative endpoint path from the submit response (e.g. "/jobs/{id}").
+    ///   - serverURL:      The target server base URL.
+    /// - Returns: The `JobStatusResponse` with status, optional text, and revision.
+    /// - Throws: `WhisperError.jobFailed` on terminal failure or 404; `.timeout`, `.networkError`, etc.
+    private static func pollJob(
+        statusEndpoint: String,
+        serverURL: String, 
+        correlationId: UUID?
+    ) async throws -> JobStatusResponse {
+        let base = serverURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !base.isEmpty else { throw WhisperError.invalidURL }
+        guard let url = URL(string: "\(base)\(statusEndpoint)") else {
+            throw WhisperError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = SharedConfig.AsyncTranscription.pollRequestTimeout
+        if let id = correlationId {
+            request.setValue(id.uuidString, forHTTPHeaderField: "X-Correlation-ID")
+        }
+
+        let session = Self._testSession ?? Self.session
+        FileLogger.shared.debug(.network, "poll job start", payload: [
+            "url": url.absoluteString
+        ])
+
+        let httpT0 = Date()
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch let error as URLError where error.code == .timedOut {
+            throw WhisperError.timeout
+        } catch {
+            throw WhisperError.networkError(error)
+        }
+
+        let httpElapsed = Date().timeIntervalSince(httpT0) * 1000
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw WhisperError.noResponse
+        }
+
+        FileLogger.shared.debug(.network, "poll job response", payload: [
+            "statusCode": httpResponse.statusCode,
+            "elapsed_ms": httpElapsed
+        ])
+
+        switch httpResponse.statusCode {
+        case 200:
+            do {
+                let decoded = try JSONDecoder().decode(JobStatusResponse.self, from: data)
+                FileLogger.shared.debug(.network, "poll job decoded", payload: [
+                    "status": decoded.status,
+                    "hasText": decoded.text != nil,
+                    "revision": decoded.revision ?? -1
+                ])
+                return decoded
+            } catch {
+                throw WhisperError.decodingError("Failed to decode job status: \(error.localizedDescription)")
+            }
+        case 404:
+            throw WhisperError.jobFailed("job evicted")
+        default:
+            let bodyString = String(data: data, encoding: .utf8) ?? "(empty response)"
+            throw WhisperError.httpError(httpResponse.statusCode, bodyString)
+        }
+    }
+
+    /// Transcribes audio using the async POST /transcriptions → GET /jobs/{id}
+    /// polling pattern. Suitable for long recordings where holding a synchronous
+    /// HTTP connection risks `URLError(.networkConnectionLost)` on app suspend.
+    ///
+    /// Uses `selectFirstHealthyServer` to pick a live server, submits via
+    /// `submitTranscription`, then polls until the job reaches a terminal state
+    /// or the deadline expires. Respects `Task.isCancelled` and the total deadline.
+    ///
+    /// - Parameters:
+    ///   - audioURL:      Local file URL of the recorded audio (.m4a).
+    ///   - jobId:         UUID for this dictation (used as Idempotency-Key).
+    ///   - config:        Server configuration from `SharedConfig`.
+    ///   - correlationId: Optional UUID to correlate this request across processes.
+    /// - Returns: The transcribed text string.
+    /// - Throws: `WhisperError.asyncUnsupported` if the server lacks /transcriptions;
+    ///           `.jobFailed` on transcription failure; `.timeout` on deadline.
+    static func transcribeAsync(
+        audioURL: URL,
+        jobId: UUID,
+        config: SharedConfig,
+        correlationId: UUID? = nil
+    ) async throws -> String {
+        FileLogger.shared.debug(.network, "transcribeAsync start", payload: [
+            "jobId": jobId.uuidString,
+            "serverCount": config.servers.count
+        ])
+
+        // 1. Pick a healthy server.
+        guard let serverURL = await selectFirstHealthyServer(servers: config.servers) else {
+            throw WhisperError.allServersFailed(config.servers)
+        }
+        FileLogger.shared.debug(.network, "transcribeAsync server selected", payload: [
+            "serverURL": serverURL
+        ])
+
+        // 2. Build multipart body once.
+        let boundary = "Boundary-\(UUID().uuidString)"
+        let body: Data
+        do {
+            let bodyBuildT0 = Date()
+            body = try buildBody(audioURL: audioURL, boundary: boundary)
+            FileLogger.shared.debug(.transcription, "async multipart body build", payload: [
+                "elapsed_ms": Date().timeIntervalSince(bodyBuildT0) * 1000,
+                "bodyBytes": body.count
+            ])
+        } catch {
+            throw WhisperError.networkError(error)
+        }
+
+        // 3. Submit transcription.
+        let submitResponse = try await submitTranscription(
+            audioURL: audioURL,
+            serverURL: serverURL,
+            body: body,
+            boundary: boundary,
+            jobId: jobId,
+            timeout: config.timeoutSeconds,
+            correlationId: correlationId
+        )
+        FileLogger.shared.debug(.network, "transcribeAsync submitted", payload: [
+            "jobId": submitResponse.jobId,
+            "statusEndpoint": submitResponse.statusEndpoint
+        ])
+
+        // 4. Poll loop.
+        let deadline = Date().addingTimeInterval(SharedConfig.AsyncTranscription.totalDeadline)
+        var pollCount = 0
+
+        while !Task.isCancelled {
+            let remaining = deadline.timeIntervalSinceNow
+            if remaining <= 0 {
+                FileLogger.shared.debug(.network, "transcribeAsync deadline exceeded", payload: [
+                    "pollCount": pollCount
+                ])
+                throw WhisperError.timeout
+            }
+
+            // Sleep with cancellation handling — Task.sleep throws on cancel.
+            do {
+                try await Task.sleep(nanoseconds: UInt64(SharedConfig.AsyncTranscription.pollInterval * 1_000_000_000))
+            } catch {
+                break // task was cancelled
+            }
+            guard !Task.isCancelled else { break }
+
+            pollCount += 1
+
+            let pollResult: JobStatusResponse
+            do {
+                pollResult = try await pollJob(
+                    statusEndpoint: submitResponse.statusEndpoint,
+                    serverURL: serverURL,
+                    correlationId: correlationId
+                )
+            } catch WhisperError.jobFailed {
+                throw // re-throw terminal failure
+            } catch WhisperError.timeout {
+                // Per-poll timeout — transient, retry
+                FileLogger.shared.debug(.network, "transcribeAsync poll timeout, retrying", payload: [
+                    "pollCount": pollCount
+                ])
+                continue
+            } catch {
+                // Transient network error — retry
+                FileLogger.shared.debug(.network, "transcribeAsync poll transient error, retrying", payload: [
+                    "pollCount": pollCount,
+                    "error": error.localizedDescription
+                ])
+                continue
+            }
+
+            switch pollResult.status {
+            case "ready":
+                guard let text = pollResult.text, !text.isEmpty else {
+                    throw WhisperError.decodingError("Job ready but text is empty")
+                }
+                FileLogger.shared.debug(.network, "transcribeAsync ready", payload: [
+                    "pollCount": pollCount,
+                    "textLength": text.count,
+                    "revision": pollResult.revision ?? -1
+                ])
+                return text
+
+            case "failed":
+                let reason = pollResult.text ?? "unknown error"
+                FileLogger.shared.debug(.network, "transcribeAsync failed", payload: [
+                    "reason": reason
+                ])
+                throw WhisperError.jobFailed(reason)
+
+            case "pending", "transcribing":
+                FileLogger.shared.debug(.network, "transcribeAsync poll", payload: [
+                    "status": pollResult.status,
+                    "pollCount": pollCount,
+                    "remainingSec": remaining
+                ])
+                continue
+
+            default:
+                FileLogger.shared.warn(.network, "transcribeAsync unknown status", payload: [
+                    "status": pollResult.status
+                ])
+                continue
+            }
+        }
+
+        // If we reach here, the task was cancelled.
+        FileLogger.shared.debug(.network, "transcribeAsync cancelled")
+        throw WhisperError.cancelled
+    }
+
     // MARK: - Private Helpers
 
     /// Builds the multipart/form-data body for a transcription request.
@@ -275,7 +620,9 @@ enum WhisperClient {
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
-        request.timeoutInterval = timeout
+        // Floor timeout at totalDeadline so legacy servers (no /transcriptions)
+        // get a long enough leash for one sync attempt.
+        request.timeoutInterval = max(timeout, SharedConfig.AsyncTranscription.totalDeadline)
 
         return request
     }
@@ -315,10 +662,11 @@ enum WhisperClient {
         if let id = correlationId { postPayload["id"] = id.uuidString }
         FileLogger.shared.debug(.transcription, "HTTP POST /transcribe start", payload: postPayload)
 
+        let session = Self._testSession ?? Self.session
         let httpT0 = Date()
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await Self.session.data(for: request)
+            (data, response) = try await session.data(for: request)
         } catch let error as URLError where error.code == .timedOut {
             throw WhisperError.timeout
         } catch {

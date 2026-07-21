@@ -22,7 +22,11 @@ struct SharedConfig {
         static let darwinStateChangedNotificationName = "com.ritoras.dictationStateChanged"
         static let localhostServerPort: UInt16 = 47321
         static let dictationPayloadKey = "dictation.payload"
-        static let dictationTimeoutSeconds: TimeInterval = 30
+        /// UX-guard timeout for the keyboard extension's return-to-idle.
+        /// Not a correctness timeout — the localhost fallback chain handles
+        /// keyboard return-to-idle. Set to AsyncTranscription.totalDeadline
+        /// so the keyboard stays alive long enough for async transcription.
+        static let dictationTimeoutSeconds: TimeInterval = AsyncTranscription.totalDeadline
         static let backspaceInitialRepeatDelay: TimeInterval = 0.5
         static let backspaceCharRepeatInterval: TimeInterval = 0.1
         static let backspaceCharsBeforeWordMode: Int = 22
@@ -146,6 +150,40 @@ struct SharedConfig {
         /// Per-server health-probe timeout. 3s balances false-negative risk on slow
         /// LANs/Tailscale against the user's failure-tolerance for offline servers.
         static let serverProbeTimeoutSeconds: TimeInterval = 3.0
+    }
+
+    // MARK: - Async Transcription
+
+    enum AsyncTranscription {
+        /// Recordings longer than this use the async POST /transcriptions path.
+        static let longAudioThresholdSeconds: TimeInterval = 30
+        /// Poll cadence while the job is in-flight (SERVER-CONTRACT §12 recommends 500–1000 ms).
+        static let pollInterval: TimeInterval = 1.0
+        /// Hard ceiling on total wait. Server retains jobs ≥10 min (§12); 15 min covers slow CPU + retry.
+        static let totalDeadline: TimeInterval = 900
+        /// Per-poll request timeout — short, because each poll is a tiny JSON GET.
+        static let pollRequestTimeout: TimeInterval = 10
+    }
+
+    // MARK: - Recording
+
+    enum Recording {
+        /// Relative path for recording audio files inside the app-group container.
+        static let directoryName = "Shared/recordings"
+        /// Delete recordings older than this (matched against file modification time).
+        /// 24h bounds worst-case disk usage.
+        static let retention: TimeInterval = 86_400
+    }
+
+    // MARK: - Recovery (Phase 4)
+
+    public enum Recovery {
+        /// Auto-retry failed-but-recoverable transcriptions on app launch. Opt-in.
+        public static let autoRetryOnLaunch = false
+        /// Maximum auto-retry attempts per failed record.
+        public static let maxAutoRetries = 2
+        /// Backoff between auto-retry attempts.
+        public static let retryBackoffSeconds: TimeInterval = 30
     }
 
     // MARK: - Dictation Mode

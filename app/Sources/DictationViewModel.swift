@@ -303,7 +303,7 @@ final class DictationViewModel: ObservableObject {
             do {
                 try AudioSession.configure()
                 let newRecorder = AudioRecorder()
-                _ = try await newRecorder.startRecording()
+                _ = try await newRecorder.startRecording(jobId: id)
                 recorder = newRecorder
                 recordingStartTime = Date()
                 UIApplication.shared.isIdleTimerDisabled = true
@@ -507,16 +507,35 @@ final class DictationViewModel: ObservableObject {
                 ])
 
                 let text: String
-                if let server = chosenServer, config.servers.contains(server) {
+                let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
+                if duration >= SharedConfig.AsyncTranscription.longAudioThresholdSeconds {
                     do {
-                        text = try await WhisperClient.transcribe(audioURL: url, serverURL: server, correlationId: activeID)
-                    } catch {
-                        FileLogger.shared.warn(.network, "single-server transcribe failed, falling back to iterating transcribe",
-                                               payload: ["server": server, "error": error.localizedDescription])
-                        text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
+                        text = try await WhisperClient.transcribeAsync(
+                            audioURL: url, jobId: id, config: config, correlationId: activeID)
+                        FileLogger.shared.debug(.network, "async transcription succeeded",
+                                                payload: ["durationSec": duration, "textLength": text.count])
+                    } catch WhisperError.asyncUnsupported {
+                        FileLogger.shared.info(.network, "async unsupported, falling back to sync",
+                                               payload: ["durationSec": duration])
+                        // Fall through to the sync path below.
+                        if let server = chosenServer, config.servers.contains(server) {
+                            text = try await WhisperClient.transcribe(audioURL: url, serverURL: server, correlationId: activeID)
+                        } else {
+                            text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
+                        }
                     }
                 } else {
-                    text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
+                    if let server = chosenServer, config.servers.contains(server) {
+                        do {
+                            text = try await WhisperClient.transcribe(audioURL: url, serverURL: server, correlationId: activeID)
+                        } catch {
+                            FileLogger.shared.warn(.network, "single-server transcribe failed, falling back to iterating transcribe",
+                                                   payload: ["server": server, "error": error.localizedDescription])
+                            text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
+                        }
+                    } else {
+                        text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
+                    }
                 }
                 guard activeID == id else { return }
 
@@ -545,7 +564,16 @@ final class DictationViewModel: ObservableObject {
                     "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
                 ])
                 TranscriptionHistory.shared.add(text: text)
+                // Audio delivered — clean up the recording file.
+                let deleteJobId = id
+                RecordingStore.shared.delete(jobId: deleteJobId)
+                FileLogger.shared.debug(.audio, "audio deleted on success",
+                                        payload: ["jobId": deleteJobId.uuidString])
                 phase = .done(text)
+            } catch WhisperError.cancelled {
+                // User cancelled — do not record as failure.
+                FileLogger.shared.debug(.app, "transcription cancelled",
+                                        payload: ["jobId": id.uuidString])
             } catch {
                 guard activeID == id else { return }
                 let message = error.localizedDescription
@@ -555,9 +583,26 @@ final class DictationViewModel: ObservableObject {
                     "elapsed_ms": failedElapsed,
                     "error": message
                 ])
+                // Audio preserved on disk for Phase 4 retry.
+                FileLogger.shared.debug(.audio, "audio preserved for retry",
+                                        payload: ["jobId": id.uuidString])
                 writeToClipboard(status: "error", errorMessage: message)
                 postResultToServer(status: "error", errorMessage: message)
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                // Phase 4: preserve failed job for retry if audio exists.
+                if RecordingStore.shared.exists(jobId: id) {
+                    let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
+                    FailedJobStore.shared.append(FailedJobRecord(
+                        jobId: id,
+                        audioFileName: "\(id.uuidString).m4a",
+                        errorMessage: message,
+                        recordedDurationSeconds: duration,
+                        createdAt: Date(),
+                        retryCount: 0,
+                        lastRetriedAt: nil))
+                    FileLogger.shared.debug(.app, "failed-job record appended",
+                                            payload: ["jobId": id.uuidString, "durationSec": duration])
+                }
                 phase = .error(message)
             }
 
@@ -639,6 +684,10 @@ final class DictationViewModel: ObservableObject {
                 ])
                 TranscriptionHistory.shared.add(text: text)
                 phase = .done(text)
+            } catch WhisperError.cancelled {
+                // User cancelled — do not record as failure.
+                FileLogger.shared.debug(.app, "transcription cancelled",
+                                        payload: ["jobId": id.uuidString])
             } catch {
                 guard activeID == id else { return }
                 let message = error.localizedDescription
@@ -653,6 +702,20 @@ final class DictationViewModel: ObservableObject {
                 writeToClipboard(status: "error", errorMessage: message)
                 postResultToServer(status: "error", errorMessage: message)
                 DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                // Phase 4: preserve failed job for retry if audio exists (batch only).
+                if RecordingStore.shared.exists(jobId: id) {
+                    let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
+                    FailedJobStore.shared.append(FailedJobRecord(
+                        jobId: id,
+                        audioFileName: "\(id.uuidString).m4a",
+                        errorMessage: message,
+                        recordedDurationSeconds: duration,
+                        createdAt: Date(),
+                        retryCount: 0,
+                        lastRetriedAt: nil))
+                    FileLogger.shared.debug(.app, "failed-job record appended",
+                                            payload: ["jobId": id.uuidString, "durationSec": duration])
+                }
                 phase = .error(message)
             }
 
@@ -664,6 +727,85 @@ final class DictationViewModel: ObservableObject {
             await streamClient?.disconnect()
             streamClient = nil
             streamRecorder = nil
+        }
+    }
+
+    // MARK: - Recovery (Phase 4)
+
+    /// Retries a failed transcription job from saved audio. Structurally
+    /// isolated from `activeID` — does NOT fire Darwin notifications,
+    /// does NOT call `postResultToServer`, and refuses to run while a
+    /// live dictation is in `.recording` or `.transcribing` phase.
+    func retry(jobId: UUID) async {
+        // HARD GUARD: never retry while a live dictation is in flight.
+        // phase may be .recording at startup before any dictation without
+        // an active recorder — that's the idle state, not "live". A live
+        // dictation only exists when an AudioRecorder or StreamingAudioRecorder
+        // is actively recording.
+        switch phase {
+        case .transcribing:
+            return  // definitely live
+        case .recording:
+            // .recording at startup (no recorder) is not live; only block
+            // if a recorder is actually active.
+            if recorder != nil || streamRecorder != nil {
+                return
+            }
+        default:
+            break
+        }
+
+        guard let record = FailedJobStore.shared.list().first(where: { $0.jobId == jobId }),
+              let audioURL = RecordingStore.shared.url(for: jobId) else {
+            FileLogger.shared.debug(.app, "retry: no record or audio found",
+                                    payload: ["jobId": jobId.uuidString])
+            return
+        }
+
+        FailedJobStore.shared.incrementRetry(jobId: jobId)
+        FileLogger.shared.debug(.app, "retry started",
+                                payload: ["jobId": jobId.uuidString,
+                                          "attempt": record.retryCount + 1])
+
+        let config = SharedConfig.load()
+        do {
+            let text = try await WhisperClient.transcribeAsync(
+                audioURL: audioURL, jobId: jobId, config: config, correlationId: jobId)
+
+            // Deliver to clipboard — mirror the writeToClipboard pattern
+            // but write directly since activeID is nil during recovery.
+            var payload: [String: Any] = [
+                "source": "ritoras",
+                "id": jobId.uuidString,
+                "status": "completed",
+                "text": text,
+                "timestamp": Date().timeIntervalSince1970,
+            ]
+            if let jsonData = try? JSONSerialization.data(withJSONObject: payload) {
+                UIPasteboard.general.setItems([
+                    ["org.ritoras.dictation": jsonData, "public.utf8-plain-text": text]
+                ], options: [:])
+            }
+
+            // Add to persistent text history.
+            TranscriptionHistory.shared.add(text: text)
+
+            // Store in resultStore so localhost server can serve it.
+            resultStore.set(DictationResultSnapshot(
+                id: jobId.uuidString, status: "completed", text: text,
+                errorMessage: nil, timestamp: Date()), for: jobId)
+
+            // Clean up — remove record and audio.
+            FailedJobStore.shared.remove(jobId: jobId)
+            RecordingStore.shared.delete(jobId: jobId)
+
+            FileLogger.shared.debug(.app, "retry succeeded",
+                                    payload: ["jobId": jobId.uuidString])
+        } catch {
+            FileLogger.shared.debug(.app, "retry failed",
+                                    payload: ["jobId": jobId.uuidString,
+                                              "error": error.localizedDescription])
+            // Leave the record in place for another manual retry.
         }
     }
 

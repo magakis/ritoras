@@ -17,6 +17,8 @@ struct RitorasApp: App {
         ])
         MetricKitSubscriber.shared.start()
         FileLogger.shared.info(.app, "MetricKit subscriber started")
+        // Phase 4: prune expired failed-job records on launch.
+        FailedJobStore.shared.pruneOlderThan(SharedConfig.Recording.retention)
     }
 
     var body: some Scene {
@@ -31,11 +33,28 @@ struct RitorasApp: App {
                 }
             }
             .environmentObject(settings)
+            .environmentObject(dictationViewModel)
             .task {
                 // Request microphone permission from the container app.
                 // The keyboard extension CANNOT show this dialog without being dismissed.
                 if AVAudioSession.sharedInstance().recordPermission == .undetermined {
                     AVAudioSession.sharedInstance().requestRecordPermission { _ in }
+                }
+            }
+            .task {
+                // Phase 4: auto-retry sweep (opt-in, default off).
+                guard SharedConfig.Recovery.autoRetryOnLaunch else { return }
+                let maxRetries = SharedConfig.Recovery.maxAutoRetries
+                let candidates = FailedJobStore.shared.list().filter {
+                    $0.retryCount < maxRetries
+                }
+                guard !candidates.isEmpty else { return }
+                FileLogger.shared.debug(.app, "auto-retry sweep starting",
+                                        payload: ["count": candidates.count])
+                for record in candidates {
+                    try? await Task.sleep(nanoseconds: UInt64(
+                        SharedConfig.Recovery.retryBackoffSeconds * 1_000_000_000))
+                    await dictationViewModel.retry(jobId: record.jobId)
                 }
             }
             .onOpenURL { url in

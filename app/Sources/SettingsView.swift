@@ -154,6 +154,9 @@ struct SettingsView: View {
             NavigationLink("Transcription History") {
                 HistoryView()
             }
+            NavigationLink("Failed Transcriptions") {
+                RecoveryView()
+            }
         }
     }
 
