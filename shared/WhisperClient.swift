@@ -521,8 +521,8 @@ enum WhisperClient {
                     serverURL: serverURL,
                     correlationId: correlationId
                 )
-            } catch WhisperError.jobFailed {
-                throw // re-throw terminal failure
+            } catch WhisperError.jobFailed(let message) {
+                throw WhisperError.jobFailed(message)
             } catch WhisperError.timeout {
                 // Per-poll timeout — transient, retry
                 FileLogger.shared.debug(.network, "transcribeAsync poll timeout, retrying", payload: [
