@@ -70,6 +70,14 @@ enum AutocorrectController {
         // Confidence threshold.
         guard candidate.score >= config.minConfidenceScore else { return .leaveAsIs }
 
+        // First-letter preservation. SymSpell ranks candidates by raw frequency with no
+        // first-letter constraint, so without this guard a typed "michael" can be "corrected"
+        // to a higher-frequency word starting with a different letter (e.g., "and"). The
+        // comparison is case-insensitive so "Teh" → "the" still fires.
+        guard let typedFirst = typedWord.lowercased().first,
+              let candidateFirst = candidate.text.lowercased().first,
+              typedFirst == candidateFirst else { return .leaveAsIs }
+
         // Apply case preservation.
         let cased = preserveCase(of: typedWord, appliedTo: candidate.text)
         return .correct(typedWord: typedWord, correction: cased)

@@ -128,33 +128,33 @@ final class AutocorrectControllerTests: XCTestCase {
         let result = AutocorrectController.evaluate(
             typedWord: "hello",
             origin: .typing,
-            topCorrection: makeSuggestion(text: "world", score: 0.85),
+            topCorrection: makeSuggestion(text: "hallo", score: 0.85),
             isLearned: false,
             isMisspelled: true
         )
-        XCTAssertEqual(result, .correct(typedWord: "hello", correction: "world"))
+        XCTAssertEqual(result, .correct(typedWord: "hello", correction: "hallo"))
     }
 
     func test_case_preservation_capitalized_typed() {
         let result = AutocorrectController.evaluate(
             typedWord: "Hello",
             origin: .typing,
-            topCorrection: makeSuggestion(text: "world", score: 0.85),
+            topCorrection: makeSuggestion(text: "hallo", score: 0.85),
             isLearned: false,
             isMisspelled: true
         )
-        XCTAssertEqual(result, .correct(typedWord: "Hello", correction: "World"))
+        XCTAssertEqual(result, .correct(typedWord: "Hello", correction: "Hallo"))
     }
 
     func test_case_preservation_uppercase_typed() {
         let result = AutocorrectController.evaluate(
             typedWord: "HELLO",
             origin: .typing,
-            topCorrection: makeSuggestion(text: "world", score: 0.85),
+            topCorrection: makeSuggestion(text: "hallo", score: 0.85),
             isLearned: false,
             isMisspelled: true
         )
-        XCTAssertEqual(result, .correct(typedWord: "HELLO", correction: "WORLD"))
+        XCTAssertEqual(result, .correct(typedWord: "HELLO", correction: "HALLO"))
     }
 
     func test_case_preservation_lowercase_typed_with_mixed_case_correction() {
@@ -163,11 +163,11 @@ final class AutocorrectControllerTests: XCTestCase {
         let result = AutocorrectController.evaluate(
             typedWord: "hello",
             origin: .typing,
-            topCorrection: makeSuggestion(text: "iPhone", score: 0.85),
+            topCorrection: makeSuggestion(text: "hotDog", score: 0.85),
             isLearned: false,
             isMisspelled: true
         )
-        XCTAssertEqual(result, .correct(typedWord: "hello", correction: "iphone"))
+        XCTAssertEqual(result, .correct(typedWord: "hello", correction: "hotdog"))
     }
 
     // MARK: - Custom Config
@@ -238,5 +238,40 @@ final class AutocorrectControllerTests: XCTestCase {
         XCTAssertEqual(tracker.current, .autocorrectApplied)
         tracker.resetToTyping()
         XCTAssertEqual(tracker.current, .typing)
+    }
+
+    // MARK: - First-Letter Preservation
+
+    func test_candidate_with_different_first_letter_returns_leaveAsIs() {
+        let result = AutocorrectController.evaluate(
+            typedWord: "michael",
+            origin: .typing,
+            topCorrection: makeSuggestion(text: "apple", score: 0.95),
+            isLearned: false,
+            isMisspelled: true
+        )
+        XCTAssertEqual(result, .leaveAsIs)
+    }
+
+    func test_candidate_with_matching_first_letter_still_corrects() {
+        let result = AutocorrectController.evaluate(
+            typedWord: "teh",
+            origin: .typing,
+            topCorrection: makeSuggestion(text: "the", score: 0.85),
+            isLearned: false,
+            isMisspelled: true
+        )
+        XCTAssertEqual(result, .correct(typedWord: "teh", correction: "the"))
+    }
+
+    func test_first_letter_check_is_case_insensitive() {
+        let result = AutocorrectController.evaluate(
+            typedWord: "Teh",
+            origin: .typing,
+            topCorrection: makeSuggestion(text: "the", score: 0.85),
+            isLearned: false,
+            isMisspelled: true
+        )
+        XCTAssertEqual(result, .correct(typedWord: "Teh", correction: "The"))
     }
 }
