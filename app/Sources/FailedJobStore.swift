@@ -36,7 +36,8 @@ extension FailedJobRecord {
 /// audio preserved on disk for retry. Read on demand — no observers, no IPC.
 ///
 /// Thread-safe via internal NSLock. Writes atomically to a single JSON file
-/// at `{app-group}/Shared/failed-jobs.json`.
+/// at `{application-support}/failed-jobs.json`. Uses Application Support
+/// (persistent, no entitlement needed, works under all installation methods).
 ///
 /// This type MUST live in `app/Sources/` (not `shared/`) so the keyboard
 /// target cannot link it — zero additional memory pressure on the extension.
@@ -52,15 +53,12 @@ final class FailedJobStore: @unchecked Sendable {
     // MARK: - File URL
 
     private var fileURL: URL? {
-        guard let container = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: SharedConfig.Defaults.appGroupId
-        ) else {
-            FileLogger.shared.warn(.app, "FailedJobStore: app-group container unavailable")
+        guard let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            FileLogger.shared.error(.app, "FailedJobStore: Application Support unavailable (should never happen)")
             return nil
         }
-        let dir = container.appendingPathComponent("Shared")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("failed-jobs.json")
+        return appSupport.appendingPathComponent("failed-jobs.json")
     }
 
     // MARK: - Public API

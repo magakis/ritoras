@@ -1,24 +1,26 @@
 import Foundation
 
-/// Manages recording audio files in the app-group container.
+/// Manages recording audio files in the Application Support directory.
 ///
-/// Files are stored at `{app-group}/Shared/recordings/{jobId}.m4a`.
-/// The directory is created lazily on first access.
+/// Files are stored at `{application-support}/Recordings/{jobId}.m4a`.
+/// The directory is created lazily on first access. Application Support is
+/// persistent (survives app suspension and process death) and works under
+/// all installation methods (App Store, SideStore, AltStore, Simulator).
 final class RecordingStore {
     static let shared = RecordingStore()
     private init() {}
 
-    /// The recordings directory URL, created lazily. Returns nil if the
-    /// app-group container is unavailable (misconfigured entitlement or
-    /// SideStore edge case).
+    /// The recordings directory URL, created lazily. Uses Application Support
+    /// (always available on iOS, no entitlement needed, survives process death).
+    /// Returns nil only if the Application Support directory itself is unavailable
+    /// (should never happen in practice).
     var directoryURL: URL? {
-        guard let container = FileManager.default.containerURL(
-            forSecurityApplicationGroupIdentifier: SharedConfig.Defaults.appGroupId
-        ) else {
-            FileLogger.shared.warn(.audio, "RecordingStore: app-group container unavailable")
+        guard let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            FileLogger.shared.error(.audio, "RecordingStore: Application Support unavailable (should never happen)")
             return nil
         }
-        let dir = container.appendingPathComponent(SharedConfig.Recording.directoryName)
+        let dir = appSupport.appendingPathComponent("Recordings")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }

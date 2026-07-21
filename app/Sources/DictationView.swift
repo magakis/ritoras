@@ -203,18 +203,45 @@ struct DictationView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
-            HStack(spacing: 16) {
-                Button("Cancel", role: .cancel) {
-                    dismiss()
-                }
-                .buttonStyle(.bordered)
+            if hasSavedAudio {
+                VStack(spacing: 12) {
+                    Button("Retry Transcription") {
+                        Task { await viewModel.retry(jobId: requestId) }
+                    }
+                    .buttonStyle(.borderedProminent)
 
-                Button("Try Again") {
-                    Task { await viewModel.start(id: requestId) }
+                    Button("Dismiss") {
+                        dismiss()
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("Start New Recording") {
+                        Task { await viewModel.start(id: requestId) }
+                    }
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
                 }
-                .buttonStyle(.borderedProminent)
+            } else {
+                HStack(spacing: 16) {
+                    Button("Cancel", role: .cancel) {
+                        dismiss()
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("Try Again") {
+                        Task { await viewModel.start(id: requestId) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
             }
         }
+    }
+
+    /// Whether a failed-job record with saved audio exists for the current
+    /// request ID. When true, the error screen offers "Retry Transcription"
+    /// instead of the generic "Try Again".
+    private var hasSavedAudio: Bool {
+        FailedJobStore.shared.list().contains(where: { $0.jobId == requestId })
     }
 
     // MARK: - Timer

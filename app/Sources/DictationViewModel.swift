@@ -63,6 +63,11 @@ final class DictationViewModel: ObservableObject {
     private var selectedServer: String?
     private var serverSelectionTask: Task<String?, Never>?
 
+    /// Idempotency guard: tracks job IDs currently being retried to prevent
+    /// concurrent retries of the same job (defense against retry loops).
+    private var retryingJobIds: Set<UUID> = []
+    private let retryLock = NSLock()
+
     // MARK: - Localhost Server Helpers
 
     /// Starts the localhost HTTP server if not already running. Idempotent.
@@ -754,6 +759,24 @@ final class DictationViewModel: ObservableObject {
             }
         default:
             break
+        }
+
+        // Idempotency guard — prevent concurrent retries of the same job.
+        // This stops programmatic retry loops dead regardless of their source.
+        retryLock.lock()
+        if retryingJobIds.contains(jobId) {
+            retryLock.unlock()
+            FileLogger.shared.debug(.app, "retry skipped — already in flight",
+                                    payload: ["jobId": jobId.uuidString])
+            return
+        }
+        retryingJobIds.insert(jobId)
+        retryLock.unlock()
+
+        defer {
+            retryLock.lock()
+            retryingJobIds.remove(jobId)
+            retryLock.unlock()
         }
 
         guard let record = FailedJobStore.shared.list().first(where: { $0.jobId == jobId }) else {

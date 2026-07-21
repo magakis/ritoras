@@ -44,9 +44,9 @@ actor AudioRecorder {
     // MARK: - Start Recording
 
     /// Starts recording speech to a persistent M4A/AAC file (16 kHz, mono)
-    /// in the app-group container under the given job ID.
+    /// in the Application Support directory under the given job ID.
     ///
-    /// The recording is written directly to `{app-group}/Shared/recordings/{jobId}.m4a`
+    /// The recording is written directly to `{application-support}/Recordings/{jobId}.m4a`
     /// so the audio survives process death and transcription failures.
     ///
     /// This method:
@@ -90,27 +90,21 @@ actor AudioRecorder {
             throw AudioRecorderError.invalidSessionConfiguration(error)
         }
 
-        // 3. Resolve destination URL — write directly to the final path in the
-        //    app-group container so audio survives process death.
-        let appGroupID = SharedConfig.Defaults.appGroupId
-        let recordingsDir: URL
-        if let container = FileManager.default.containerURL(
-                forSecurityApplicationGroupIdentifier: appGroupID),
-           let dir = RecordingStore.shared.directoryURL {
-            recordingsDir = dir
-        } else {
-            // Fallback: rare, indicates entitlement issue. Log and use temp.
-            FileLogger.shared.warn(.audio, "app-group container unavailable; falling back to NSTemporaryDirectory")
-            recordingsDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        // 3. Resolve destination URL — write directly to the persistent
+        //    Application Support directory so audio survives process death.
+        guard let recordingsDir = RecordingStore.shared.directoryURL else {
+            // Application Support should NEVER be unavailable. If it is, fail loudly.
+            FileLogger.shared.error(.audio, "Application Support unavailable — cannot record safely")
+            throw AudioRecorderError.recorderSetupFailed(
+                NSError(domain: "AudioRecorder", code: 0,
+                        userInfo: [NSLocalizedDescriptionKey: "storage unavailable"]))
         }
-        try? FileManager.default.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
         let tempURL = recordingsDir.appendingPathComponent("\(jobId.uuidString).m4a")
         currentFileURL = tempURL
 
         FileLogger.shared.debug(.audio, "recording started", payload: [
             "jobId": jobId.uuidString,
-            "path": tempURL.path,
-            "isAppGroup": recordingsDir.path.contains(SharedConfig.Defaults.appGroupId)
+            "path": tempURL.path
         ])
 
         // 4. Whisper-friendly recording settings: 16 kHz mono AAC
