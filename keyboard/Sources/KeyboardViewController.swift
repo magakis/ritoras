@@ -573,12 +573,7 @@ class KeyboardViewController: UIInputViewController {
     /// Falls back to legacy server polling after 3 consecutive connection
     /// failures (container app not running).
     private func refreshStateFromLocalhost() async {
-        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
-        FileLogger.shared.warn(.keyboard, "DIAGNOSTIC: refreshStateFromLocalhost() ENTERED, pendingRequestId=\(String(describing: pendingRequestId))")
-
         guard let id = pendingRequestId else {
-            // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
-            FileLogger.shared.warn(.keyboard, "DIAGNOSTIC: refreshStateFromLocalhost exiting — no pendingRequestId")
             return
         }
         do {
@@ -621,9 +616,6 @@ class KeyboardViewController: UIInputViewController {
     /// Uses `DispatchSourceTimer` (negligible memory overhead) instead of
     /// `Timer` to avoid RunLoop coupling in the keyboard extension.
     private func startLocalhostPolling() {
-        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
-        FileLogger.shared.warn(.keyboard, "DIAGNOSTIC: startLocalhostPolling() ENTERED")
-
         stopLocalhostPolling()
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
@@ -632,8 +624,6 @@ class KeyboardViewController: UIInputViewController {
         }
         timer.resume()
         localhostPollTimer = timer
-        // DIAGNOSTIC LOGGING — TEMPORARY, REMOVE AFTER DEBUGGING
-        FileLogger.shared.warn(.keyboard, "DIAGNOSTIC: localhost poll timer scheduled")
     }
 
     private func stopLocalhostPolling() {
@@ -1336,16 +1326,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
         guard hasTextInCurrentTarget else {
             backspacePhase = .staleHasTextRetry
             backspaceStaleHasTextRetries = 1
-            // DIAGNOSTIC — strip after fix verification (Phase 3)
-            FileLogger.shared.debug(.keyboard, "backspace didBegin-pre: stale hasText — entering .staleHasTextRetry", payload: [
-                "site": "didBegin-pre",
-                "hasText": hasTextInCurrentTarget,
-                "contextBeforeLen": textDocumentProxy.documentContextBeforeInput?.count as Any,
-                "proxyId": String(ObjectIdentifier(textDocumentProxy).hashValue, radix: 16),
-                "staleRetries": backspaceStaleHasTextRetries,
-                "nilCtxRetries": backspaceNilContextRetries,
-                "phase": String(describing: backspacePhase)
-            ])
             scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceStaleHasTextRetryInterval, repeats: false)
             return
         }
@@ -1357,16 +1337,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
         guard hasTextInCurrentTarget else {
             backspacePhase = .staleHasTextRetry
             backspaceStaleHasTextRetries = 1
-            // DIAGNOSTIC — strip after fix verification (Phase 3)
-            FileLogger.shared.debug(.keyboard, "backspace didBegin-post: stale hasText after initial delete — entering .staleHasTextRetry", payload: [
-                "site": "didBegin-post",
-                "hasText": hasTextInCurrentTarget,
-                "contextBeforeLen": textDocumentProxy.documentContextBeforeInput?.count as Any,
-                "proxyId": String(ObjectIdentifier(textDocumentProxy).hashValue, radix: 16),
-                "staleRetries": backspaceStaleHasTextRetries,
-                "nilCtxRetries": backspaceNilContextRetries,
-                "phase": String(describing: backspacePhase)
-            ])
             scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceStaleHasTextRetryInterval, repeats: false)
             return
         }
@@ -1591,16 +1561,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
         switch inputTarget {
         case .hostApp:
             guard textDocumentProxy.hasText else {
-                // DIAGNOSTIC — strip after fix verification (Phase 3)
-                FileLogger.shared.warn(.keyboard, "deleteTargetedBackward: inner guard aborted (stale hasText race)", payload: [
-                    "site": "deleteTargetedBackward-abort",
-                    "hasText": textDocumentProxy.hasText,
-                    "contextBeforeLen": textDocumentProxy.documentContextBeforeInput?.count as Any,
-                    "proxyId": String(ObjectIdentifier(textDocumentProxy).hashValue, radix: 16),
-                    "staleRetries": backspaceStaleHasTextRetries,
-                    "nilCtxRetries": backspaceNilContextRetries,
-                    "phase": String(describing: backspacePhase)
-                ])
                 return
             }
             textDocumentProxy.deleteBackward()
@@ -1629,16 +1589,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 backspaceStaleHasTextRetries = 0
                 return
             }
-            // DIAGNOSTIC — strip after fix verification (Phase 3)
-            FileLogger.shared.debug(.keyboard, "backspace tick-top: stale hasText — entering .staleHasTextRetry", payload: [
-                "site": "tick-top",
-                "hasText": hasTextInCurrentTarget,
-                "contextBeforeLen": textDocumentProxy.documentContextBeforeInput?.count as Any,
-                "proxyId": String(ObjectIdentifier(textDocumentProxy).hashValue, radix: 16),
-                "staleRetries": backspaceStaleHasTextRetries,
-                "nilCtxRetries": backspaceNilContextRetries,
-                "phase": String(describing: backspacePhase)
-            ])
             backspacePhase = .staleHasTextRetry
             scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceStaleHasTextRetryInterval, repeats: false)
             return
@@ -1670,16 +1620,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
                     backspaceStaleHasTextRetries = 0
                     return
                 }
-                // DIAGNOSTIC — strip after fix verification (Phase 3)
-                FileLogger.shared.debug(.keyboard, "backspace tick-charRepeat: stale hasText — entering .staleHasTextRetry", payload: [
-                    "site": "tick-charRepeat",
-                    "hasText": hasTextInCurrentTarget,
-                    "contextBeforeLen": textDocumentProxy.documentContextBeforeInput?.count as Any,
-                    "proxyId": String(ObjectIdentifier(textDocumentProxy).hashValue, radix: 16),
-                    "staleRetries": backspaceStaleHasTextRetries,
-                    "nilCtxRetries": backspaceNilContextRetries,
-                    "phase": String(describing: backspacePhase)
-                ])
                 backspacePhase = .staleHasTextRetry
                 scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceStaleHasTextRetryInterval, repeats: false)
                 return
@@ -1729,47 +1669,17 @@ extension KeyboardViewController: KeyboardViewDelegate {
             guard hasTextInCurrentTarget else {
                 backspaceStaleHasTextRetries += 1
                 if backspaceStaleHasTextRetries > SharedConfig.Defaults.backspaceStaleHasTextRetryLimit {
-                    // DIAGNOSTIC — strip after fix verification (Phase 3)
-                    FileLogger.shared.warn(.keyboard, "backspace retry: gave up after limit", payload: [
-                        "site": "tick-staleRetry-giveup",
-                        "hasText": hasTextInCurrentTarget,
-                        "contextBeforeLen": textDocumentProxy.documentContextBeforeInput?.count as Any,
-                        "proxyId": String(ObjectIdentifier(textDocumentProxy).hashValue, radix: 16),
-                        "staleRetries": backspaceStaleHasTextRetries,
-                        "nilCtxRetries": backspaceNilContextRetries,
-                        "phase": String(describing: backspacePhase)
-                    ])
                     backspaceTimer?.invalidate()
                     backspaceTimer = nil
                     backspacePhase = nil
                     backspaceStaleHasTextRetries = 0
                     return
                 }
-                // DIAGNOSTIC — strip after fix verification (Phase 3)
-                FileLogger.shared.debug(.keyboard, "backspace retry: still stale, scheduling retry \(backspaceStaleHasTextRetries)/\(SharedConfig.Defaults.backspaceStaleHasTextRetryLimit)", payload: [
-                    "site": "tick-staleRetry-retrying",
-                    "hasText": hasTextInCurrentTarget,
-                    "contextBeforeLen": textDocumentProxy.documentContextBeforeInput?.count as Any,
-                    "proxyId": String(ObjectIdentifier(textDocumentProxy).hashValue, radix: 16),
-                    "staleRetries": backspaceStaleHasTextRetries,
-                    "nilCtxRetries": backspaceNilContextRetries,
-                    "phase": String(describing: backspacePhase)
-                ])
                 scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceStaleHasTextRetryInterval, repeats: false)
                 return
             }
             // Recovered: do exactly what a normal .charRepeat tick does, then resume .charRepeat.
             backspaceStaleHasTextRetries = 0
-            // DIAGNOSTIC — strip after fix verification (Phase 3)
-            FileLogger.shared.debug(.keyboard, "backspace retry: recovered, resuming .charRepeat", payload: [
-                "site": "tick-staleRetry-recovering",
-                "hasText": hasTextInCurrentTarget,
-                "contextBeforeLen": textDocumentProxy.documentContextBeforeInput?.count as Any,
-                "proxyId": String(ObjectIdentifier(textDocumentProxy).hashValue, radix: 16),
-                "staleRetries": backspaceStaleHasTextRetries,
-                "nilCtxRetries": backspaceNilContextRetries,
-                "phase": String(describing: backspacePhase)
-            ])
             deleteTargetedBackward()
             HapticsManager.shared.tapImpact()
             backspaceSingleCharCount += 1
