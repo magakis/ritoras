@@ -50,15 +50,6 @@ final class LearnedWordsStore {
     private func persist() {
         let array = Array(cache)
         defaults.set(array, forKey: storeKey)
-        defaults.synchronize()
-
-        // Verify the write by reading back.
-        let readback = defaults.array(forKey: storeKey) as? [String]
-        if readback == nil {
-            FileLogger.shared.error(.dictionary, "learned words write verification failed", payload: ["key": storeKey])
-        } else if readback!.count != array.count {
-            FileLogger.shared.error(.dictionary, "learned words write count mismatch", payload: ["wrote": array.count, "read": readback!.count])
-        }
     }
 
     // MARK: - Public API
