@@ -32,7 +32,7 @@ final class DictationViewModel: ObservableObject {
     /// Snapshot updated on every `phase` change, safe for background reads.
     private var safeStateSnapshot = DictationStateSnapshot(phase: "idle", activeID: nil, startedAt: nil)
     /// Terminal results by job ID, populated on `.done` / `.error` transitions.
-    private var completedResults: [UUID: DictationResultSnapshot] = [:]
+    nonisolated private var completedResults: [UUID: DictationResultSnapshot] = [:]
 
     private var recorder: AudioRecorder?
     private var activeID: UUID?
