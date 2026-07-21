@@ -9,6 +9,11 @@ struct RitorasApp: App {
 
     init() {
         FileLogger.shared.info(.app, "Container app launched", payload: ["version": Bundle.main.infoDictionary?["CFBundleVersion"] ?? "?"])
+        // Log the resolved app-group identifier via FileLogger (post-resolution, safe to use FileLogger now).
+        FileLogger.shared.info(.app, "AppGroupResolver outcome", payload: [
+            "resolvedIdentifier": SharedConfig.Defaults.appGroupId,
+            "bundleId": Bundle.main.bundleIdentifier ?? "?"
+        ])
         // ENTITLEMENT_PROBE — TEMPORARY DIAGNOSTIC, REMOVE AFTER VALIDATION
         if let profileURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
            let data = try? Data(contentsOf: profileURL),

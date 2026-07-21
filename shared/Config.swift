@@ -4,7 +4,18 @@ struct SharedConfig {
     struct Defaults {
         static let baseUrl = "http://100.107.181.45:5000"
         static let timeoutSeconds: TimeInterval = 30.0
-        static let appGroupId = "group.com.ritoras.app"
+        /// The original (unsuffixed) app-group identifier declared in our entitlements.
+        /// Used as the base identifier for runtime resolution.
+        /// Under App Store / TrollStore / Simulator installs, this is the actual identifier.
+        /// Under SideStore, this gets team-suffixed at resign time.
+        static let originalAppGroupId = "group.com.ritoras.app"
+
+        /// Resolves the actual app-group identifier at runtime, accounting for
+        /// SideStore's resign-time identifier rewriting. Result is cached for the
+        /// lifetime of the process. All callers of `appGroupId` automatically benefit.
+        static var appGroupId: String {
+            AppGroupResolver.shared.resolve()
+        }
         static let urlScheme = "ritoras"
         static let dictateURLPath = "dictate"
         static let darwinNotificationName = "com.ritoras.dictationCompleted"
@@ -267,5 +278,135 @@ extension SharedConfig {
         public static let staleRecordTTL: TimeInterval = 300
         /// Number of most-recent archived records retained by `gcArchive`.
         public static let archiveRetentionCount = 100
+    }
+}
+
+// MARK: - AppGroupResolver
+
+/// Runtime resolver for the app-group identifier.
+///
+/// Under SideStore, the binary's app-group entitlement is rewritten at resign
+/// time from `group.com.ritoras.app` to `group.com.ritoras.app.<TeamID>`.
+/// Calling `FileManager.containerURL(forSecurityApplicationGroupIdentifier:)`
+/// with the original (unsuffixed) identifier returns nil under SideStore.
+///
+/// This resolver tries multiple strategies to find a working identifier:
+///   1. The original unsuffixed identifier (works on App Store / TrollStore / Simulator)
+///   2. A team-suffixed identifier constructed from the bundle ID's TeamID suffix
+///   3. The actual app-group string from `embedded.mobileprovision` (most authoritative)
+///
+/// The first strategy that returns a non-nil containerURL wins. The result is
+/// cached for the lifetime of the process.
+///
+/// IMPORTANT: This resolver uses NSLog (not FileLogger) internally because
+/// FileLogger itself depends on the resolved identifier. Using FileLogger here
+/// would cause infinite recursion.
+final class AppGroupResolver {
+    static let shared = AppGroupResolver()
+    private init() {}
+
+    private let lock = NSLock()
+    private var cached: String?
+
+    func resolve() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let cached = cached {
+            return cached
+        }
+
+        let original = SharedConfig.Defaults.originalAppGroupId
+        let result = performResolution(original: original)
+        cached = result
+        return result
+    }
+
+    private func performResolution(original: String) -> String {
+        let bundleId = Bundle.main.bundleIdentifier ?? "<nil>"
+
+        // Strategy 1: original unsuffixed identifier.
+        // Works on App Store, TrollStore, Simulator, and any environment that
+        // doesn't rewrite entitlements.
+        if FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: original) != nil {
+            NSLog("AppGroupResolver: strategy=original-identifier identifier=\(original) bundleId=\(bundleId)")
+            return original
+        }
+
+        // Strategy 2: construct team-suffixed identifier from bundle ID.
+        // Under SideStore, the bundle ID gets the TeamID appended (e.g.,
+        // com.ritoras.app.64GGL77Z3X). The same TeamID is appended to app-group
+        // identifiers in the same resign operation.
+        if let teamId = extractTeamIdFromBundleId(bundleId) {
+            let suffixed = "\(original).\(teamId)"
+            if FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: suffixed) != nil {
+                NSLog("AppGroupResolver: strategy=bundle-id-suffix identifier=\(suffixed) teamId=\(teamId) bundleId=\(bundleId)")
+                return suffixed
+            }
+            NSLog("AppGroupResolver: bundle-id-suffix attempted but containerURL nil identifier=\(suffixed) bundleId=\(bundleId)")
+        } else {
+            NSLog("AppGroupResolver: no TeamID suffix detected in bundleId=\(bundleId)")
+        }
+
+        // Strategy 3: read embedded.mobileprovision and extract the actual
+        // app-group string. This is the most authoritative source because it
+        // reads the binary's signed entitlements directly.
+        if let fromProvision = readFromMobileProvision() {
+            NSLog("AppGroupResolver: strategy=mobileprovision identifier=\(fromProvision) bundleId=\(bundleId)")
+            return fromProvision
+        }
+
+        // All strategies failed. Log loudly and return the original identifier
+        // so the app still functions (in degraded, pre-fix mode — same as today).
+        // The user will see this in the system log via NSLog.
+        NSLog("AppGroupResolver: ⚠️ ALL STRATEGIES FAILED — falling back to original identifier. bundleId=\(bundleId)")
+        return original
+    }
+
+    /// Extracts the TeamID suffix from a bundle ID.
+    /// SideStore rewrites `com.ritoras.app` → `com.ritoras.app.64GGL77Z3X`.
+    /// Returns the suffix (`64GGL77Z3X`) or nil if the bundle ID doesn't have
+    /// a suffix matching the expected pattern (uppercase alphanumeric).
+    private func extractTeamIdFromBundleId(_ bundleId: String) -> String? {
+        let parts = bundleId.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+        let suffix = String(parts.last!)
+        // TeamID is a 10-character alphanumeric string (uppercase letters + digits).
+        // Validate format to avoid false positives (e.g., a non-SideStore bundle
+        // that happens to have a 4th segment).
+        guard suffix.count >= 8 && suffix.count <= 12 else { return nil }
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+        guard suffix.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return nil }
+        return suffix
+    }
+
+    /// Reads `embedded.mobileprovision` from the app bundle and extracts the
+    /// app-group identifier. The file is CMS-signed but contains an XML plist
+    /// inside the binary wrapper. We use `.isoLatin1` encoding (which maps every
+    /// byte 1:1 — never fails on binary data, unlike `.ascii`).
+    /// Returns the first app-group identifier found, or nil if anything fails.
+    private func readFromMobileProvision() -> String? {
+        guard let profileURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+              let data = try? Data(contentsOf: profileURL),
+              let raw = String(data: data, encoding: .isoLatin1),
+              let xmlStart = raw.range(of: "<?xml"),
+              let xmlEnd = raw.range(of: "</plist>"),
+              let plistData = String(raw[xmlStart.lowerBound..<xmlEnd.upperBound]).data(using: .utf8),
+              let plist = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil) as? [String: Any],
+              let entitlements = plist["Entitlements"] as? [String: Any],
+              let appGroups = entitlements["com.apple.security.application-groups"] as? [String],
+              !appGroups.isEmpty else {
+            return nil
+        }
+
+        // Prefer the first identifier that actually resolves to a container.
+        // If none resolve (e.g., SideStore stripped the entitlement entirely),
+        // return the first string anyway — caller will see containerURL nil.
+        for group in appGroups {
+            if FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group) != nil {
+                return group
+            }
+        }
+        return appGroups.first
     }
 }

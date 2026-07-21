@@ -234,6 +234,12 @@ class KeyboardViewController: UIInputViewController {
             ])
         }
 
+        // Log the resolved app-group identifier via FileLogger (post-resolution, safe to use FileLogger now).
+        FileLogger.shared.info(.keyboard, "AppGroupResolver outcome", payload: [
+            "resolvedIdentifier": SharedConfig.Defaults.appGroupId,
+            "bundleId": Bundle.main.bundleIdentifier ?? "?"
+        ])
+
         NSSetUncaughtExceptionHandler { exception in
             let msg = "FATAL: \(exception.name.rawValue): \(exception.reason ?? "unknown")"
             var logs = UserDefaults.standard.array(forKey: "ritoras_logs") as? [String] ?? []
