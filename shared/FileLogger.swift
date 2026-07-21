@@ -1,9 +1,9 @@
 import Foundation
 import os
 
-enum LogLevel: String { case debug, info, warn, error }
+public enum LogLevel: String { case debug, info, warn, error }
 
-enum LogComponent: String {
+public enum LogComponent: String {
     case keyboard = "Keyboard"
     case app = "ContainerApp"
     case transcription = "Transcription"
