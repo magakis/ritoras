@@ -1,7 +1,5 @@
 import SwiftUI
 import AVFoundation
-import Security
-
 @main
 struct RitorasApp: App {
     @StateObject private var settings = AppSettings.shared
@@ -12,11 +10,15 @@ struct RitorasApp: App {
     init() {
         FileLogger.shared.info(.app, "Container app launched", payload: ["version": Bundle.main.infoDictionary?["CFBundleVersion"] ?? "?"])
         // ENTITLEMENT_PROBE — TEMPORARY DIAGNOSTIC, REMOVE AFTER VALIDATION
-        if let task = SecTaskCreateFromSelf(nil),
-           let groups = SecTaskCopyValueForEntitlement(task, "com.apple.security.application-groups" as CFString) as? [String] {
-            NSLog("ENTITLEMENT_PROBE target=app bundleId=\(Bundle.main.bundleIdentifier ?? "?") appGroups=\(groups)")
+        if let profileURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+           let data = try? Data(contentsOf: profileURL),
+           let raw = String(data: data, encoding: .ascii),
+           let xmlStart = raw.range(of: "<?xml"),
+           let xmlEnd = raw.range(of: "</plist>") {
+            let plist = String(raw[xmlStart.lowerBound..<xmlEnd.upperBound])
+            NSLog("ENTITLEMENT_PROBE target=app bundleId=\(Bundle.main.bundleIdentifier ?? "?") plist=\(plist)")
         } else {
-            NSLog("ENTITLEMENT_PROBE target=app bundleId=\(Bundle.main.bundleIdentifier ?? "?") appGroups=nil-or-error")
+            NSLog("ENTITLEMENT_PROBE target=app bundleId=\(Bundle.main.bundleIdentifier ?? "?") status=no-mobileprovision-or-unparseable")
         }
         MetricKitSubscriber.shared.start()
         FileLogger.shared.info(.app, "MetricKit subscriber started")
