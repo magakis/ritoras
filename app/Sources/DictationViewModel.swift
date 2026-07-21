@@ -2,6 +2,25 @@ import Foundation
 import AVFoundation
 import UIKit
 
+/// Thread-safe storage for completed dictation results. Shared between
+/// @MainActor view model code (writes) and LocalhostServer's @Sendable
+/// resultProvider closure (reads). Marked @unchecked Sendable because
+/// all access is serialized via internal NSLock.
+final class ResultStore: @unchecked Sendable {
+    private var results: [UUID: DictationResultSnapshot] = [:]
+    private let lock = NSLock()
+
+    func get(_ id: UUID) -> DictationResultSnapshot? {
+        lock.lock(); defer { lock.unlock() }
+        return results[id]
+    }
+
+    func set(_ result: DictationResultSnapshot, for id: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        results[id] = result
+    }
+}
+
 @MainActor
 final class DictationViewModel: ObservableObject {
     enum DictationPhase: Equatable {
@@ -26,13 +45,13 @@ final class DictationViewModel: ObservableObject {
     private var localhostServer: LocalhostServer?
 
     /// Thread-safe guard for state snapshots read by the HTTP server's
-    /// background connection handlers. Nested with `completedResults`
+    /// background connection handlers. Nested with `resultStore`
     /// writes in terminal-transition `didSet`.
     private let stateLock = NSLock()
     /// Snapshot updated on every `phase` change, safe for background reads.
     private var safeStateSnapshot = DictationStateSnapshot(phase: "idle", activeID: nil, startedAt: nil)
     /// Terminal results by job ID, populated on `.done` / `.error` transitions.
-    nonisolated private var completedResults: [UUID: DictationResultSnapshot] = [:]
+    private let resultStore = ResultStore()
 
     private var recorder: AudioRecorder?
     private var activeID: UUID?
@@ -65,11 +84,7 @@ final class DictationViewModel: ObservableObject {
                 return snapshot
             },
             resultProvider: { [weak self] id in
-                guard let self = self else { return nil }
-                self.stateLock.lock()
-                let result = self.completedResults[id]
-                self.stateLock.unlock()
-                return result
+                return self?.resultStore.get(id)
             }
         )
 
@@ -104,7 +119,7 @@ final class DictationViewModel: ObservableObject {
         stateLock.unlock()
     }
 
-    /// Captures terminal results (`.done`, `.error`) into `completedResults`
+    /// Captures terminal results (`.done`, `.error`) into `resultStore`
     /// so the localhost server can serve them via `/result`.
     private func storeTerminalResultIfNeeded() {
         guard let id = activeID else { return }
@@ -130,9 +145,7 @@ final class DictationViewModel: ObservableObject {
             result = nil
         }
         guard let result = result else { return }
-        stateLock.lock()
-        completedResults[id] = result
-        stateLock.unlock()
+        resultStore.set(result, for: id)
     }
 
     // MARK: - Clipboard Transport

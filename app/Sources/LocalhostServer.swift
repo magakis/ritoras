@@ -146,8 +146,8 @@ final class LocalhostServer {
     /// Returns the byte offset of the first byte after `\r\n\r\n`, or `nil` if the
     /// header terminator has not yet been fully received.
     private static func findHeaderEnd(_ data: Data) -> Int? {
-        data.withUnsafeBytes { ptr -> Int? in
-            guard let base = ptr.baseAddress else { return nil }
+        data.withUnsafeBytes { buffer -> Int? in
+            guard let base = buffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return nil }
             let count = data.count
             guard count >= 4 else { return nil }
             for i in 0...(count - 4) {
