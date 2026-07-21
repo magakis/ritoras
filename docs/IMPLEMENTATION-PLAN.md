@@ -509,3 +509,43 @@ recording → tap stop → stop recorder, get m4a URL (P6) → transcribing
 - [ ] In any text field, tap mic → speak → transcript inserts from the user's self-hosted Whisper over Tailscale.
 - [ ] Zero-cost: free Apple ID, public-repo CI, existing Whisper server + Tailscale.
 - [ ] Code is comprehensible and owned by the user (greenfield, no opaque fork).
+
+---
+
+## 7. Superseded: Phase 4 (App-Group Inbox Migration)
+
+The original Phase 4 design called for an **app-group inbox** (`shared/TranscriptionInbox.swift`)
+as the cross-process transport for dictation results. This was replaced by the
+**localhost HTTP IPC** architecture, which is more reliable under SideStore
+signing (SideStore rewrites entitlements, breaking app-group container access).
+
+### What changed
+
+| Original approach | Current approach |
+|---|---|
+| App Group shared container (UserDefaults + file coordination) | Localhost HTTP server on `127.0.0.1:47321` (`NWListener`) |
+| `TranscriptionInbox.swift` push-style delivery | `LocalhostServer` + `LocalhostClient` polling every 500 ms |
+| Darwin notification `com.ritoras.dictationCompleted` only | Both `com.ritoras.dictationCompleted` and `com.ritoras.dictationStateChanged` |
+| Clipboard as primary under SideStore | Clipboard as auxiliary fallback; localhost HTTP is primary |
+
+### Why the change
+
+1. **SideStore entitlement rewriting** — SideStore appends a TeamID suffix to
+   app-group identifiers (`group.com.ritoras.app` → `group.com.ritoras.app.<TeamID>`).
+   The `AppGroupResolver` workaround (trying original, suffixed, and
+   `embedded.mobileprovision` strategies) was fragile and failed under some
+   SideStore versions.
+2. **Latency** — localhost HTTP delivers results in ~1 ms vs ~50 ms for
+   clipboard and ~300–1200 ms for remote server polling.
+3. **No shared container requirement** — localhost IPC works on any signing
+   configuration (free Apple ID, SideStore, Developer Program) because it
+   requires only a TCP connection to `127.0.0.1`, which iOS never blocks.
+
+### File references
+
+The new architecture is fully documented in
+[`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md). The `AppGroupResolver` remains in
+`shared/Config.swift` for reading settings (server URL, dictation mode) but is
+no longer the primary transport for dictation results. The
+`TranscriptionInbox.swift` file still exists but is unused by the current
+transport paths.

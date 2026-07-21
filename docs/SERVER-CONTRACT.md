@@ -6,7 +6,33 @@
 
 ---
 
-## 1. Endpoint
+## 1. Localhost IPC (in-process)
+
+> **Primary in-flight transport for dictation state and results.**
+> Full architecture spec: [`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md).
+
+The container app runs a lightweight HTTP server on `127.0.0.1:47321` using
+Apple's Network framework. The keyboard extension polls this server for
+dictation state and result data. This replaces the broken app-group shared
+container (which SideStore resigning cannot provision).
+
+- Localhost IPC is the **primary transport** for all dictation results during
+  a live session (~1 ms latency).
+- Darwin notifications (`com.ritoras.dictationCompleted`,
+  `com.ritoras.dictationStateChanged`) trigger immediate localhost polling,
+  reducing wait time.
+- The **remote Whisper server** (`POST /dictation_result` + `GET /dictation_result/latest`) is the **fallback** when the container app is killed
+  mid-transcription and the result was already posted upstream.
+- The **clipboard** (`org.ritoras.dictation` pasteboard type) is an additional
+  fallback, used primarily under SideStore where the app-group container is
+  unavailable.
+
+For the complete architecture, endpoint reference, state machines, and
+troubleshooting guide, see [`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md).
+
+---
+
+## 2. Endpoint
 
 ```
 POST {BASE_URL}/transcribe
@@ -15,14 +41,14 @@ POST {BASE_URL}/transcribe
 `{BASE_URL}` is the user-configured server URL (e.g. `http://localhost:5000`
 or `http://100.x.y.z:5000` via Tailscale IP).
 
-The server runs on **port 5000** (not 8000) — see [Server details](#7-server-details).
+The server runs on **port 5000** (not 8000) — see [Server details](#8-server-details).
 
 > **Synchronous, still supported.** This endpoint remains the primary batch
 > transcription endpoint and is unchanged from prior versions.
 
 ---
 
-## 2. Request format
+## 3. Request format
 
 ### Headers
 
@@ -70,7 +96,7 @@ an OpenAI-compatible server.
 
 ---
 
-## 3. Response format
+## 4. Response format
 
 ### Success (HTTP 200)
 
@@ -113,7 +139,7 @@ surfaces the status code and response body to the user.
 
 ---
 
-## 4. Audio format
+## 5. Audio format
 
 Ritoras records audio using `AVAudioRecorder` with these settings:
 
@@ -142,7 +168,7 @@ After transcription, the server applies:
 
 ---
 
-## 5. App Transport Security (ATS)
+## 6. App Transport Security (ATS)
 
 ### The problem
 
@@ -182,7 +208,7 @@ WireGuard tunnel + TLS.
 
 ---
 
-## 6. Testing with curl
+## 7. Testing with curl
 
 Use this command to test your Whisper server independently of the iOS app:
 
@@ -201,7 +227,7 @@ No API key, no model parameter, no language parameter — just the audio file.
 
 ---
 
-## 7. Server details
+## 8. Server details
 
 | Property | Value |
 |----------|-------|
@@ -212,7 +238,7 @@ No API key, no model parameter, no language parameter — just the audio file.
 | Language | English (hardcoded, not configurable) |
 | Quantization | int8 |
 | Auth | None |
-| Stream endpoint | WebSocket `/stream` (real-time streaming, used by Ritoras in stream mode — see §10) |
+| Stream endpoint | WebSocket `/stream` (real-time streaming, used by Ritoras in stream mode — see §11) |
 
 ### File location
 
@@ -221,7 +247,7 @@ The server runs from `~/whisper/server-v2/` and is configured via
 
 ---
 
-## 8. Future: OpenAI-compatible server
+## 9. Future: OpenAI-compatible server
 
 If the user later switches to an OpenAI-compatible Whisper server (e.g.
 faster-whisper-server with `--openai-compat`, or the official OpenAI API),
@@ -231,7 +257,7 @@ fields are already preserved for this purpose.
 
 ---
 
-## 9. Client implementation reference
+## 10. Client implementation reference
 
 ### Batch mode (`/transcribe`)
 
@@ -263,11 +289,11 @@ The streaming client spans three files:
   machine running on an `AVAudioEngine` tap, emitting 16 kHz mono float32 PCM
   chunks per detected speech segment.
 - `shared/Config.swift` — `DictationMode` enum (`.batch` / `.stream`) and all
-  streaming tunables (see §10 for reference).
+  streaming tunables (see §11 for reference).
 
 ---
 
-## 10. Streaming mode (`/stream` WebSocket)
+## 11. Streaming mode (`/stream` WebSocket)
 
 > **Still supported.** This streaming endpoint remains the primary real-time
 > transcription endpoint and is unchanged from prior versions.
@@ -464,7 +490,7 @@ and text normalization — identical to the `POST /transcribe` pipeline.
 
 ---
 
-## 11. Async transcription (recommended for new clients)
+## 12. Async transcription (recommended for new clients)
 
 ```
 POST {BASE_URL}/transcriptions
@@ -486,13 +512,13 @@ the result later, even after a crash and relaunch.
 | Header | Value | Condition |
 |--------|-------|-----------|
 | `Content-Type` | `multipart/form-data; boundary={boundary}` | Always |
-| `Idempotency-Key` | `{UUID}` | Always — see §13 for contract details |
+| `Idempotency-Key` | `{UUID}` | Always — see §14 for contract details |
 
 No `Authorization` header is sent (same as `POST /transcribe`).
 
 #### Multipart body
 
-Identical to `POST /transcribe` — see [§2](#2-request-format). The field name is
+Identical to `POST /transcribe` — see [§3](#3-request-format). The field name is
 `audio`, the filename is `audio.m4a`, and the content type is `audio/mp4`.
 
 ### Response (HTTP 202 Accepted)
@@ -513,12 +539,12 @@ Identical to `POST /transcribe` — see [§2](#2-request-format). The field name
 
 If a duplicate request with the same `Idempotency-Key` arrives within the
 retention window (10 minutes), the server returns HTTP 202 with the same
-`job_id` rather than re-transcribing. See [§13](#13-idempotency-key-contract)
+`job_id` rather than re-transcribing. See [§14](#14-idempotency-key-contract)
 for the full contract.
 
 ---
 
-## 12. Job status polling
+## 13. Job status polling
 
 ```
 GET {BASE_URL}/jobs/{job_id}
@@ -574,13 +600,13 @@ The client should treat this the same as an expired or never-existing job.
 
 Jobs are retained for at least 10 minutes after reaching a terminal state
 (`ready` or `failed`). After that, the server may evict them. The
-`Idempotency-Key` retention window (see [§13](#13-idempotency-key-contract)) is
+`Idempotency-Key` retention window (see [§14](#14-idempotency-key-contract)) is
 independent and may extend beyond job retention to prevent duplicate
 submissions.
 
 ---
 
-## 13. Idempotency-Key contract
+## 14. Idempotency-Key contract
 
 The `Idempotency-Key` header provides at-least-once semantics for
 `POST /transcriptions`.
@@ -629,7 +655,7 @@ transient failure.
 
 ---
 
-## 14. Deprecation notice
+## 15. Deprecation notice
 
 ### Endpoint
 
@@ -640,10 +666,11 @@ GET {BASE_URL}/dictation_result/latest
 ### What it does
 
 The keyboard extension currently polls this endpoint as a fallback transport
-when the primary app-group inbox delivery path does not produce a result in
-time. The container app writes dictation results to this endpoint after
-transcription completes (in both batch and stream modes), and the keyboard
-reads them via polling at ~500 ms intervals.
+when the primary localhost IPC path ([`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md))
+does not produce a result (container app killed mid-transcription). The
+container app writes dictation results to this endpoint after transcription
+completes (in both batch and stream modes), and the keyboard reads them via
+polling at ~500 ms intervals.
 
 ### Response shape
 
@@ -671,15 +698,17 @@ If no result is available, the server returns HTTP 404 with
 **DEPRECATED**
 
 This endpoint is a polling-based transport that was introduced as a workaround
-before the app-group inbox was available. It will be **removed** in a future
-update (Phase 6 of the inbox migration).
+before the localhost IPC and clipboard transports were available. It will be
+**removed** in a future update once the keyboard extension no longer requires
+it.
 
 ### Migration path
 
-New code must use the app-group inbox store
-(`shared/TranscriptionInbox.swift`) for cross-target delivery instead of this
-endpoint. The inbox provides push-style delivery without polling, works offline,
-and is not subject to network latency or server availability.
+New code must use the localhost IPC transport (see
+[`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md)) for cross-target delivery instead
+of this endpoint. The localhost HTTP transport provides ~1 ms latency without
+polling, works offline, and is not subject to network latency or server
+availability.
 
 ### Timeline
 
@@ -691,7 +720,7 @@ and is not subject to network latency or server availability.
 
 ---
 
-## 15. Migration status
+## 16. Migration status
 
 The following table summarises the state of all documented server endpoints:
 
@@ -700,7 +729,7 @@ The following table summarises the state of all documented server endpoints:
 | `POST /transcribe` | Sync | Stable — primary batch endpoint | Container app (batch mode) |
 | `WS /stream` | Streaming | Stable — primary streaming endpoint | Container app (stream mode) |
 | `POST /transcriptions` + `GET /jobs/{id}` | Async (request-reply) | New — recommended for constrained clients and crash recovery | Not yet adopted by iOS client (planned for Phase 7) |
-| `GET /dictation_result/latest` | Sync polling | **DEPRECATED** — see §14 | Keyboard extension (fallback; to be removed in Phase 6) |
+| `GET /dictation_result/latest` | Sync polling | **DEPRECATED** — see §15 | Keyboard extension (fallback; to be removed in Phase 6) |
 
 ### Key design rationale
 
