@@ -260,6 +260,14 @@ enum EmojiRecents {
         }
         UserDefaults.standard.set(recents, forKey: storageKey)
     }
+
+    /// Returns true if the string contains at least one emoji scalar.
+    /// Used to guard the recents list against non-emoji strings (letters, punctuation)
+    /// that may arrive via the .insertText path during focus transitions.
+    static func isEmoji(_ s: String) -> Bool {
+        guard !s.isEmpty else { return false }
+        return s.unicodeScalars.contains { $0.properties.isEmoji }
+    }
 }
 
 // MARK: - EmojiSkinTone

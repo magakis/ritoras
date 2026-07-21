@@ -1142,7 +1142,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
     func keyboardView(_ view: KeyboardView, didPerform action: KeyAction) {
         switch action {
         case .insertText(let s):
-            if uiMode == .emoji {
+            if uiMode == .emoji && EmojiRecents.isEmoji(s) {
                 EmojiRecents.add(s)
             }
             let isTriggerPunct = SharedConfig.Defaults.autocorrectTriggerPunctuation.contains(s)
