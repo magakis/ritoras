@@ -79,36 +79,48 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(dictationMode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
         appGroupDefaults?.set(verboseLogging, forKey: SharedConfig.Defaults.verboseLoggingKey)
         appGroupDefaults?.set(hapticsEnabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
+        postSettingsChanged()
     }
 
     private func saveServers(_ servers: [String]) {
         if let data = try? JSONEncoder().encode(servers) {
             appGroupDefaults?.set(data, forKey: "servers")
         }
+        postSettingsChanged()
     }
 
     private func saveTimeoutSeconds(_ seconds: TimeInterval) {
         appGroupDefaults?.set(seconds, forKey: "timeoutSeconds")
+        postSettingsChanged()
     }
 
     private func saveAutoCapitalizationEnabled(_ enabled: Bool) {
         appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.autoCapitalizationEnabledKey)
+        postSettingsChanged()
     }
 
     private func saveAutocorrectOnSpaceEnabled(_ enabled: Bool) {
         appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.autocorrectOnSpaceEnabledKey)
+        postSettingsChanged()
     }
 
     private func saveDictationMode(_ mode: SharedConfig.DictationMode) {
         appGroupDefaults?.set(mode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
+        postSettingsChanged()
     }
 
     private func saveVerboseLogging(_ enabled: Bool) {
         appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.verboseLoggingKey)
+        postSettingsChanged()
     }
 
     private func saveHapticsEnabled(_ enabled: Bool) {
         appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
+        postSettingsChanged()
+    }
+
+    private func postSettingsChanged() {
+        DarwinNotifier.post(SharedConfig.Defaults.darwinSettingsChangedNotificationName)
     }
 
     func resetToDefaults() {

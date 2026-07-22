@@ -99,6 +99,10 @@ class KeyboardViewController: UIInputViewController {
     private var darwinStateChangedToken: DarwinObserverToken?
     private var localhostPollDeadline: Date = .distantFuture
 
+    // Settings cache (refreshed by Darwin notification from container app)
+    private let settingsCache = KeyboardSettingsCache()
+    private var darwinSettingsChangedToken: DarwinObserverToken?
+
     // Persisted across keyboard process restarts
     private var lastProcessedPayloadId: UUID? {
         get { UUID(uuidString: UserDefaults.standard.string(forKey: "ritoras_last_pid") ?? "") }
@@ -261,6 +265,14 @@ class KeyboardViewController: UIInputViewController {
 
         setupKeyboardView()
         HapticsManager.shared.reloadEnabledFromAppGroup()
+        settingsCache.refresh()
+        darwinSettingsChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinSettingsChangedNotificationName) { [weak self] in
+            guard let self = self else { return }
+            self.settingsCache.refresh()
+            DispatchQueue.main.async {
+                HapticsManager.shared.reloadEnabledFromAppGroup()
+            }
+        }
         buildPredictionEngine()
         state = .idle
         FileLogger.shared.info(.keyboard, "viewDidLoad OK",
@@ -348,6 +360,7 @@ class KeyboardViewController: UIInputViewController {
         FileLogger.broadcast = nil
         darwinToken = nil
         darwinStateChangedToken = nil
+        darwinSettingsChangedToken = nil
         stopLocalhostPolling()
         waitTimer?.invalidate()
         pollTimer?.invalidate()
@@ -1527,7 +1540,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
     private func recomputeAutoCap() {
         guard inputTarget == .hostApp else { return }
         // User-facing master toggle (default ON). Read from the App Group on every recompute.
-        guard SharedConfig.autoCapitalizationEnabled() else {
+        guard settingsCache.autoCapitalization else {
             autoCapActive = false
             lastAtSentenceStart = false
             lastRecomputedContext = nil
