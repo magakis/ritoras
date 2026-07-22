@@ -3,9 +3,8 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @State private var showOnboarding = false
-    @State private var serversEditMode: EditMode = .inactive
+    @State private var isEditingServers = false
     @State private var testStatuses: [Int: TestStatus] = [:]
-    @FocusState private var focusedField: Int?
 
     enum TestStatus: Equatable {
         case untested
@@ -61,7 +60,7 @@ struct SettingsView: View {
         Section {
             ForEach(settings.servers.indices, id: \.self) { index in
                 HStack(spacing: 8) {
-                    if serversEditMode == .active {
+                    if isEditingServers {
                         Button {
                             settings.servers.remove(at: index)
                             testStatuses = [:]
@@ -72,14 +71,21 @@ struct SettingsView: View {
                         .buttonStyle(.borderless)
                     }
 
-                    TextField("Server URL", text: $settings.servers[index])
-                        .textContentType(.URL)
-                        .textInputAutocapitalization(.never)
-                        .keyboardType(.URL)
-                        .font(.body)
-                        .focused($focusedField, equals: index)
+                    if isEditingServers {
+                        TextField("Server URL", text: $settings.servers[index])
+                            .textContentType(.URL)
+                            .textInputAutocapitalization(.never)
+                            .keyboardType(.URL)
+                            .font(.body)
+                    } else {
+                        Text(settings.servers[index])
+                            .font(.body)
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
 
-                    if serversEditMode == .inactive {
+                    if !isEditingServers {
                         Button {
                             testServer(at: index)
                         } label: {
@@ -96,25 +102,31 @@ struct SettingsView: View {
                 testStatuses = [:]
             }
 
-            Button("Add Server") {
-                settings.servers.append("")
+            if isEditingServers {
+                Button("Add Server") {
+                    settings.servers.append("")
+                }
             }
         } header: {
             HStack {
                 Text("Whisper Servers")
                 Spacer()
-                Button(serversEditMode == .active ? "Done" : "Edit") {
+                Button(isEditingServers ? "Done" : "Edit") {
                     withAnimation {
-                        serversEditMode = (serversEditMode == .active ? .inactive : .active)
+                        if isEditingServers {
+                            settings.servers.removeAll { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                            testStatuses = [:]
+                        }
+                        isEditingServers.toggle()
                     }
                 }
                 .buttonStyle(.borderless)
                 .foregroundColor(.blue)
             }
         } footer: {
-            Text("Servers are tried in the order shown. If one fails, the next is attempted automatically. Tap Edit to delete or reorder; tap a server's test icon to check whether it's reachable.")
+            Text("Servers are tried in the order shown. Drag the grip on the right to reorder at any time. Tap Edit to add, change, or delete a server. Tap a server's test icon to check whether it's reachable.")
         }
-        .environment(\.editMode, $serversEditMode)
+        .environment(\.editMode, .constant(.active))
     }
 
     // MARK: - Dictation Section
