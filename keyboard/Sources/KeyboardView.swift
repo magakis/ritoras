@@ -68,6 +68,18 @@ private class KeyButton: UIButton {
     /// (prevents a duplicate backspace when Phase 4 handles it on touch-down).
     var backspaceSuppressTap = false
 
+    /// Called whenever isHighlighted transitions. KeyboardView uses this to show/hide
+    /// the character preview popup without needing touch-event wiring.
+    var onHighlightChange: ((KeyButton, Bool) -> Void)?
+
+    /// Apple-style key-press highlight: a dynamic color that adapts to
+    /// light/dark mode. Used when isHighlighted=true.
+    private static let highlightBackgroundColor = UIColor { tc in
+        tc.userInterfaceStyle == .dark
+            ? UIColor(white: 0.45, alpha: 1)
+            : UIColor(white: 0.62, alpha: 1)
+    }
+
     /// Thin underline shown beneath the shift icon when Caps Lock is engaged,
     /// matching the native iOS keyboard's caps-lock affordance.
     private let capsLockUnderline: UIView = {
@@ -77,6 +89,11 @@ private class KeyButton: UIButton {
         view.layer.cornerRadius = 1
         return view
     }()
+
+    /// The resting (non-pressed) background color. Restored when isHighlighted
+    /// transitions to false. Must be kept in sync whenever backgroundColor is
+    /// overridden outside of highlight (e.g. applyMicStyle).
+    private var restingBackgroundColor: UIColor = .clear
 
     init(definition: KeyDefinition) {
         self.keyDefinition = definition
@@ -96,11 +113,13 @@ private class KeyButton: UIButton {
         contentHorizontalAlignment = .center
         contentVerticalAlignment = .center
 
-        backgroundColor = UIColor { tc in
+        let resting = UIColor { tc in
             tc.userInterfaceStyle == .dark
                 ? UIColor(white: 0.28, alpha: 1)
                 : UIColor(white: 0.82, alpha: 1)
         }
+        backgroundColor = resting
+        restingBackgroundColor = resting
         setTitleColor(UIColor { tc in
             tc.userInterfaceStyle == .dark
                 ? UIColor.white
@@ -155,7 +174,9 @@ private class KeyButton: UIButton {
 
     override var isHighlighted: Bool {
         didSet {
-            alpha = isHighlighted ? 0.5 : 1.0
+            backgroundColor = isHighlighted ? Self.highlightBackgroundColor : restingBackgroundColor
+            alpha = 1.0
+            onHighlightChange?(self, isHighlighted)
         }
     }
 
@@ -201,6 +222,7 @@ private class KeyButton: UIButton {
         }
         if let color = color {
             self.backgroundColor = color
+            self.restingBackgroundColor = color
         }
     }
 }
@@ -440,11 +462,16 @@ class KeyboardView: UIView {
     }()
     private let bottomActionRow = UIView()
 
+    /// Single reusable character preview popup — recycled across key presses.
+    /// Never per-tap allocated. See 48 MB Jetsam constraint.
+    private lazy var keyPreview = KeyPreviewView()
+
     // Key references
     private weak var micKeyButton: KeyButton?
     private weak var emojiKeyButton: KeyButton?
     private weak var shiftKeyButton: KeyButton?
     private weak var bottomRowView: KeyboardRowView?
+    private var allKeyButtons: [KeyButton] = []
 
     // State tracking
     private var hasFullAccess = false
@@ -478,11 +505,17 @@ class KeyboardView: UIView {
 
     private func setupView() {
         backgroundColor = EmojiPanelView.panelBackground
+        // Allow the key preview popup to extend above/over sibling keys.
+        // Top-edge clipping at the UIWindow level is accepted.
+        clipsToBounds = false
 
         setupSuggestionBar()
         setupLetterRegion()
         setupEmojiPanel()
         setupConstraints()
+
+        addSubview(keyPreview)
+        bringSubviewToFront(keyPreview)
 
         rebuildKeyRows()
         apply(mode: .letters)
@@ -617,6 +650,26 @@ class KeyboardView: UIView {
                     break
                 }
 
+                // Wire character preview popup to highlight changes.
+                button.onHighlightChange = { [weak self] kb, highlighted in
+                    guard let self = self else { return }
+                    if highlighted {
+                        guard case .insertText = kb.keyDefinition.action,
+                              self.emojiPanelView.isHidden else { return }
+                        let glyph: String
+                        if self.currentShiftState != .lower, let shifted = kb.keyDefinition.shiftedLabel {
+                            glyph = shifted
+                        } else {
+                            glyph = kb.keyDefinition.label
+                        }
+                        let keyFrame = kb.convert(kb.bounds, to: self)
+                        self.keyPreview.show(for: glyph, anchoredAbove: keyFrame, in: self)
+                        self.bringSubviewToFront(self.keyPreview)
+                    } else {
+                        self.keyPreview.hide()
+                    }
+                }
+
                 buttons.append(button)
             }
 
@@ -664,6 +717,15 @@ class KeyboardView: UIView {
 
         // Re-apply shift labels
         updateKeyButtonLabels()
+
+        // Rebuild hit-test key cache
+        allKeyButtons = []
+        for case let rowView as KeyboardRowView in keyStack.arrangedSubviews {
+            allKeyButtons.append(contentsOf: rowView.keys)
+        }
+        if let bottomRow = bottomRowView {
+            allKeyButtons.append(contentsOf: bottomRow.keys)
+        }
     }
 
     private func updateKeyButtonLabels() {
@@ -731,6 +793,42 @@ class KeyboardView: UIView {
     /// Touch-up (including outside or cancelled) signals the controller to stop repeating.
     @objc private func backspaceTouchUp(_ sender: KeyButton) {
         delegate?.keyboardViewBackspaceDidEnd(self)
+    }
+
+    // MARK: - Hit Testing
+
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        guard isUserInteractionEnabled, !isHidden, alpha > 0.01 else { return nil }
+
+        if let hit = super.hitTest(point, with: event) { return hit }
+
+        // Only route to nearest key within the key region
+        guard point.y >= letterRegionContainer.frame.minY,
+              point.y <= bottomActionRow.frame.maxY else { return nil }
+
+        var nearestKey: KeyButton?
+        var nearestDistance: CGFloat = .greatestFiniteMagnitude
+
+        for key in allKeyButtons {
+            guard !key.isHidden, key.alpha > 0.01, key.isUserInteractionEnabled else { continue }
+            let frameInSelf = key.convert(key.bounds, to: self)
+            let dist = frameEdgeDistance(from: point, to: frameInSelf)
+            if dist < nearestDistance {
+                nearestDistance = dist
+                nearestKey = key
+            }
+        }
+
+        return nearestKey
+    }
+
+    /// Returns 0 if `point` is inside `rect`, else the Euclidean distance from
+    /// `point` to the nearest point on `rect`'s perimeter.
+    private func frameEdgeDistance(from point: CGPoint, to rect: CGRect) -> CGFloat {
+        let dx = max(rect.minX - point.x, 0, point.x - rect.maxX)
+        let dy = max(rect.minY - point.y, 0, point.y - rect.maxY)
+        if dx == 0 && dy == 0 { return 0 }
+        return hypot(dx, dy)
     }
 
     // MARK: - Public API
@@ -818,6 +916,9 @@ class KeyboardView: UIView {
         let showLetters    = (mode == .letters || mode == .emojiSearch)
         let showBottomRow  = showLetters
         let showSuggestBar = (mode == .letters)
+
+        // Dismiss key preview popup when switching to emoji mode.
+        if showEmojiPanel { keyPreview.hide() }
 
         suggestionBar.isHidden = !showSuggestBar
         letterRegionContainer.isHidden = !showLetters
