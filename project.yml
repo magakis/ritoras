@@ -58,6 +58,8 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: keyboard/RitorasKeyboard-BridgingHeader.h
         CLANG_CXX_LANGUAGE_STANDARD: "gnu++17"
         CLANG_CXX_LIBRARY: "libc++"
+        GCC_PREPROCESSOR_DEFINITIONS:
+          KENLM_MAX_ORDER=6
         USER_HEADER_SEARCH_PATHS:
           - "$(inherited)"
           - "third-party/kenlm"
@@ -100,3 +102,5 @@ targets:
           - "keyboard/Sources/Prediction/Trigram"
         CLANG_CXX_LANGUAGE_STANDARD: "gnu++17"
         CLANG_CXX_LIBRARY: "libc++"
+        GCC_PREPROCESSOR_DEFINITIONS:
+          KENLM_MAX_ORDER=6
