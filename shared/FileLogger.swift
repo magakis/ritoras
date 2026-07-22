@@ -52,10 +52,16 @@ final class FileLogger {
     /// (server-received logs are written via this same FileLogger).
     public static var broadcast: ((LogLevel, LogComponent, String, [String: Any]?) -> Void)?
 
+    /// TEST-ONLY: do not use in production. When set, forces `isKeyboardExtension`
+    /// to return true so that tests can exercise the flat-file write path regardless
+    /// of the test target's bundle identifier.
+    internal static var forceKeyboardModeForTesting = false
+
     /// True when running inside the keyboard extension process.
     /// Used to skip LogStore writes (48 MB Jetsam cap).
+    /// Overridden by `forceKeyboardModeForTesting` during tests.
     private static var isKeyboardExtension: Bool {
-        Bundle.main.bundleIdentifier?.hasSuffix(".keyboard") ?? false
+        forceKeyboardModeForTesting || Bundle.main.bundleIdentifier?.hasSuffix(".keyboard") ?? false
     }
 
     /// Recursively scrubs all String values in a payload dictionary,
@@ -168,8 +174,8 @@ final class FileLogger {
 
         let line = jsonString + "\n"
 
-        // Dual-write bridge (Phase 2): container app writes to BOTH flat file
-        // AND LogStore. Keyboard extension writes flat-file ONLY.
+        // Phase 4: container app writes to LogStore ONLY.
+        // Keyboard extension writes flat-file ONLY.
         if !Self.isKeyboardExtension {
             let scrubbedMessage = LogScrubber.scrub(message)
             let scrubbedPayload = Self.scrubPayload(payload)
@@ -186,30 +192,33 @@ final class FileLogger {
                 LogStore.shared.insert(level, component, scrubbedMessage,
                                        payload: scrubbedPayload, raw: scrubbedRaw)
             }
+        } else {
+            // Keyboard: flat-file write only.
+            let write = { Self.append(line) }
+
+            switch level {
+            case .warn, .error:
+                // Sync write for crash survivability.  Reuse the deadlock guard
+                // pattern from rotation: if already on the serial queue, execute
+                // inline to avoid deadlock.
+                if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+                    write()
+                } else {
+                    queue.sync(execute: write)
+                }
+            case .debug, .info:
+                queue.async(execute: write)
+            }
         }
 
-        let write = { Self.append(line) }
-
-        switch level {
-        case .warn, .error:
-            // Sync write for crash survivability.  Reuse the deadlock guard
-            // pattern from rotation: if already on the serial queue, execute
-            // inline to avoid deadlock.
-            if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
-                write()
-            } else {
-                queue.sync(execute: write)
-            }
-
-            // Phase 3a: emit os.Logger probe exactly once per process lifetime.
+        // Phase 3a: emit os.Logger probe exactly once per process lifetime.
+        if level == .warn || level == .error {
             Self.probeQueue.sync {
                 if !Self.probeEmitted {
                     Self.probeEmitted = true
                     Self.probeLogger.notice("ritoras probe: \(level.rawValue, privacy: .public) path reached for component \(component.rawValue, privacy: .public)")
                 }
             }
-        case .debug, .info:
-            queue.async(execute: write)
         }
 
         // Broadcast hook (used by keyboard to ship logs to container app via localhost).
@@ -217,31 +226,35 @@ final class FileLogger {
     }
 
     static func clear() {
-        shared.queue.sync {
-            guard let url = shared.resolvedURL else { return }
-            let dir = url.deletingLastPathComponent()
-            let base = Self.fileName
+        if Self.isKeyboardExtension {
+            shared.queue.sync {
+                guard let url = shared.resolvedURL else { return }
+                let dir = url.deletingLastPathComponent()
+                let base = Self.fileName
 
-            do {
-                try FileManager.default.removeItem(at: url)
-            } catch {
-                let nsError = error as NSError
-                if nsError.domain != NSCocoaErrorDomain || nsError.code != NSFileNoSuchFileError {
-                    shared.recordDiagnostic("clear remove failed: \(error)")
-                }
-            }
-
-            for i in 1...Self.maxRolledFiles {
-                let rolledURL = dir.appendingPathComponent("\(base).\(i)")
                 do {
-                    try FileManager.default.removeItem(at: rolledURL)
+                    try FileManager.default.removeItem(at: url)
                 } catch {
                     let nsError = error as NSError
                     if nsError.domain != NSCocoaErrorDomain || nsError.code != NSFileNoSuchFileError {
-                        shared.recordDiagnostic("clear remove .\(i) failed: \(error)")
+                        shared.recordDiagnostic("clear remove failed: \(error)")
+                    }
+                }
+
+                for i in 1...Self.maxRolledFiles {
+                    let rolledURL = dir.appendingPathComponent("\(base).\(i)")
+                    do {
+                        try FileManager.default.removeItem(at: rolledURL)
+                    } catch {
+                        let nsError = error as NSError
+                        if nsError.domain != NSCocoaErrorDomain || nsError.code != NSFileNoSuchFileError {
+                            shared.recordDiagnostic("clear remove .\(i) failed: \(error)")
+                        }
                     }
                 }
             }
+        } else {
+            LogStore.shared.clear()
         }
     }
 
@@ -252,7 +265,13 @@ final class FileLogger {
         }
     }
 
-    static func fileURL() -> URL? { shared.resolvedURL }
+    static func fileURL() -> URL? {
+        if Self.isKeyboardExtension {
+            return shared.resolvedURL
+        } else {
+            return LogStore.databaseURL
+        }
+    }
 
     static func parsedLines() -> [LogLine] {
         guard let content = contents() else { return [] }
@@ -260,31 +279,7 @@ final class FileLogger {
         return lines.enumerated().map { parseLine(String($0.element), id: $0.offset) }
     }
 
-    static func parsedLinesAllFiles() -> [LogLine] {
-        guard let dir = shared.resolvedURL?.deletingLastPathComponent() else { return [] }
-        let base = Self.fileName
-
-        var allLines: [String] = []
-
-        // Iterate oldest first: .log.4 → .log.3 → .log.2 → .log.1 → .log
-        for i in (1...Self.maxRolledFiles).reversed() {
-            let url = dir.appendingPathComponent("\(base).\(i)")
-            guard let content = try? String(contentsOf: url, encoding: .utf8) else { continue }
-            let fileLines = content.split(separator: "\n", omittingEmptySubsequences: false)
-            allLines.append(contentsOf: fileLines.map(String.init))
-        }
-
-        // Active file
-        if let url = shared.resolvedURL,
-           let content = try? String(contentsOf: url, encoding: .utf8) {
-            let fileLines = content.split(separator: "\n", omittingEmptySubsequences: false)
-            allLines.append(contentsOf: fileLines.map(String.init))
-        }
-
-        return allLines.enumerated().map { parseLine($0.element, id: $0.offset) }
-    }
-
-    private static func parseLine(_ raw: String, id: Int) -> LogLine {
+    static func parseLine(_ raw: String, id: Int) -> LogLine {
         // Try JSON-first — decodes the new JSON-lines format.
         if let data = raw.data(using: .utf8),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -303,7 +298,8 @@ final class FileLogger {
             let payload = obj["payload"] as? [String: Any]
 
             return LogLine(id: id, raw: raw, level: level, component: component,
-                           timestamp: timestamp, message: message, payload: payload)
+                           timestamp: timestamp, message: message, payload: payload,
+                           rowId: nil)
         }
 
         // Fallback: plain-text substring extraction (legacy format and init lines).
@@ -334,7 +330,8 @@ final class FileLogger {
         }
 
         return LogLine(id: id, raw: raw, level: level, component: component,
-                       timestamp: timestamp, message: nil, payload: nil)
+                       timestamp: timestamp, message: nil, payload: nil,
+                       rowId: nil)
     }
 
     // ── File I/O ────────────────────────────────────────────────────
@@ -454,7 +451,7 @@ struct LogLine: Identifiable, Hashable {
     let message: String?
     let payload: [String: Any]?
     /// SQLite row ID, populated by LogStore queries. FileLogger sets this to nil.
-    let rowId: Int64? = nil
+    let rowId: Int64?
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
