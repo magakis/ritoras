@@ -331,3 +331,94 @@ server is unavailable for that session. This is extremely unlikely on iOS
 | `keyboard/Sources/KeyboardView.swift` | KeyboardState enum (idle, openingApp, waiting, waitingConfirm, inserting, error) |
 | `RitorasTests/LocalhostServerTests.swift` | Server unit tests (port 0 for OS-assigned port, stub providers, health/state/result/404 routing) |
 | `RitorasTests/LocalhostClientTests.swift` | Client unit tests (MockURLProtocol, getState/getResult/healthCheck, error mapping, connection refused) |
+| `shared/LogStore.swift` | SQLite-backed log persistence (WAL mode, FTS5 full-text search, 100k-row rotation) |
+| `shared/LogStoreMigration.swift` | One-time import of existing flat-file logs into LogStore |
+| `RitorasTests/LogStoreTests.swift` | LogStore unit tests (insert, query, filter, paginate, rotate, concurrent safety) |
+| `RitorasTests/LogStoreMigrationTests.swift` | Migration unit tests (import, idempotency, resume, archival) |
+
+---
+
+## 12. Debug Log Persistence (SQLite)
+
+### Overview
+
+The debug logging system migrated from a flat-file-only design to a dual-path
+facade in Phase 4. Both the container app and the keyboard extension compile
+`shared/FileLogger.swift` and `shared/LogStore.swift`, but each target takes a
+different persistence path at runtime.
+
+### Container app (LogStore)
+
+The container app persists debug logs to a **SQLite database** at:
+
+```
+<container>/ritoras-debug.sqlite
+```
+
+or, when the app-group container is unavailable (SideStore):
+
+```
+<Documents>/ritoras-debug.sqlite
+```
+
+Key properties:
+
+- **WAL mode** — concurrent readers do not block writers.
+- **FTS5 full-text search** — the `message` column is indexed with the porter
+  stemmer + unicode61 tokenizer. All queries are sanitized to prevent FTS5
+  operator injection (each token is double-quote wrapped).
+- **100,000-row retention** — `rotateIfNeeded()` prunes the oldest rows when
+  the table exceeds 100,000 entries. A passive WAL checkpoint runs after
+  pruning.
+- **Update hook** — every INSERT/UPDATE/DELETE posts a
+  `.logStoreDidChange` notification on the main queue. `DebugLogView`
+  observes this to refresh automatically.
+- **PII scrubbing** — `FileLogger.log()` scrubs the message and payload
+  via `LogScrubber` before calling `LogStore.insert()`. The raw column
+  stores the scrubbed JSON line.
+
+### Keyboard extension (flat-file shipper buffer)
+
+The keyboard extension still writes flat files at:
+
+```
+<keyboard-Documents>/ritoras-debug.log
+```
+
+This is a **transient shipper buffer**, not a long-term store:
+
+- Capped at **1 MB** per active file, with up to **6 rolled files** (`.log.1`
+  through `.log.6`).
+- The keyboard ships these logs to the container app via `POST /logs` on the
+  localhost HTTP transport (see [Section 3](#3-endpoints)).
+- Once shipped, the container app calls `POST /logs/ack` and the keyboard
+  rotates its active file.
+
+### Under SideStore (broken app group)
+
+When the app-group container is unavailable (SideStore/AltStore resigning):
+
+- The **database** lives in the container app's per-process `Documents/`
+  directory.
+- The **keyboard flat files** live in the keyboard's per-process `Documents/`
+  directory.
+- These directories are sandboxed per-process — neither process can read the
+  other's files directly.
+- Logs cross the process boundary **only** via the HTTP shipper: keyboard
+  → `POST /logs` → container app's `LogStore.insert()`.
+
+### Migration (`LogStoreMigration`)
+
+On first launch after upgrading to a build with LogStore, flat-file logs
+are imported into the database:
+
+1. The migration enumerates flat files oldest-first: `.log.6` → `.log.1` → `.log`.
+2. Each file is streamed line-by-line and parsed via `FileLogger.parseLine()`.
+3. Parsed entries are batch-inserted into `LogStore` in a single transaction.
+4. After all files are imported, they are **archived** (moved to a
+   `ritoras-debug.archived-<timestamp>/` subdirectory), not deleted.
+5. The migration is gated on a `UserDefaults` flag (`ritoras.logstore.migratedV1`)
+   and supports resume: if interrupted mid-import, the last successfully
+   imported file is recorded, and the migration resumes from the next file
+   on the next launch.
+6. Idempotent: running again after completion is a no-op.

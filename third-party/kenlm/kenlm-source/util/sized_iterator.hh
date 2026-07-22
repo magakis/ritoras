@@ -127,7 +127,7 @@ inline void swap(SizedProxy first, SizedProxy second) {
 typedef ProxyIterator<SizedProxy> SizedIterator;
 
 // Useful wrapper for a comparison function i.e. sort.
-template <class Delegate, class Proxy = SizedProxy> class SizedCompare : public std::binary_function<const Proxy &, const Proxy &, bool> {
+template <class Delegate, class Proxy = SizedProxy> class SizedCompare {
   public:
     explicit SizedCompare(const Delegate &delegate = Delegate()) : delegate_(delegate) {}
 
@@ -154,7 +154,7 @@ template <unsigned Size> class JustPOD {
   unsigned char data[Size];
 };
 
-template <class Delegate, unsigned Size> class JustPODDelegate : std::binary_function<const JustPOD<Size> &, const JustPOD<Size> &, bool> {
+template <class Delegate, unsigned Size> class JustPODDelegate {
   public:
     explicit JustPODDelegate(const Delegate &compare) : delegate_(compare) {}
     bool operator()(const JustPOD<Size> &first, const JustPOD<Size> &second) const {

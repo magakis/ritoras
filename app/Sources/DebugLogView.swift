@@ -144,45 +144,13 @@ struct DebugLogView: View {
     @State private var expandedReportID: Int? = nil
     @State private var editMode: EditMode = .inactive
     @State private var expandedKeys: Set<String> = []
-
-    private var filteredLines: [LogLine] {
-        Array(lines.filter { line in
-            // 1. Level filter
-            if let level = selectedFilter.level,
-               line.level != level {
-                return false
-            }
-
-            // 2. Component filter
-            if let comp = componentFilter.logComponent,
-               line.component != comp {
-                return false
-            }
-
-            // 3. Search text (case-insensitive substring)
-            if !searchText.isEmpty,
-               !line.raw.localizedCaseInsensitiveContains(searchText) {
-                return false
-            }
-
-            // 4. Time range
-            switch timeRange {
-            case .fiveMin:
-                guard let ts = line.timestamp else { return false }
-                guard ts > Date().addingTimeInterval(-300) else { return false }
-            case .oneHour:
-                guard let ts = line.timestamp else { return false }
-                guard ts > Date().addingTimeInterval(-3600) else { return false }
-            case .all:
-                break
-            }
-
-            return true
-        }.reversed())
-    }
+    @State private var oldestLoadedId: Int64? = nil
+    @State private var newestSeenId: Int64? = nil
+    @State private var totalCount: Int = 0
+    private let pageSize = 200
 
     private var selectedOrFilteredLines: [LogLine] {
-        selectedIDs.isEmpty ? filteredLines : filteredLines.filter { selectedIDs.contains($0.id) }
+        selectedIDs.isEmpty ? lines : lines.filter { selectedIDs.contains($0.id) }
     }
 
     var body: some View {
@@ -206,9 +174,13 @@ struct DebugLogView: View {
         } message: {
             clearCrashConfirmationMessage
         }
-        .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .logStoreDidChange)) { _ in
             refreshGuard()
         }
+        .onChange(of: searchText) { _, _ in refresh() }
+        .onChange(of: selectedFilter) { _, _ in refresh() }
+        .onChange(of: componentFilter) { _, _ in refresh() }
+        .onChange(of: timeRange) { _, _ in refresh() }
         .onAppear(perform: refresh)
         .overlay(alignment: .bottom) {
             copiedOverlay
@@ -274,10 +246,16 @@ struct DebugLogView: View {
         List(selection: $selectedIDs) {
             crashReportsSection
             diagnosticsSection
-            if filteredLines.isEmpty && diagnostics.isEmpty && crashReports.isEmpty {
+            if lines.isEmpty && diagnostics.isEmpty && crashReports.isEmpty {
                 emptyStateRow
             } else {
                 logLinesList
+                if lines.count < totalCount {
+                    ProgressView()
+                        .frame(maxWidth: .infinity)
+                        .listRowSeparator(.hidden)
+                        .onAppear { loadMore() }
+                }
             }
         }
         .listStyle(.plain)
@@ -389,8 +367,8 @@ struct DebugLogView: View {
     }
 
     private var logLinesList: some View {
-        ForEach(Array(filteredLines.enumerated()), id: \.element.id) { idx, line in
-            if idx > 0, isDifferentDay(filteredLines[idx-1].timestamp, line.timestamp) {
+        ForEach(Array(lines.enumerated()), id: \.element.id) { idx, line in
+            if idx > 0, isDifferentDay(lines[idx-1].timestamp, line.timestamp) {
                 if let ts = line.timestamp {
                     daySeparatorView(for: ts)
                         .listRowSeparator(.hidden)
@@ -524,17 +502,33 @@ struct DebugLogView: View {
 
     private func refreshGuard() {
         guard selectedIDs.isEmpty, expandedKeys.isEmpty else { return }
-        refresh()
+        incrementalRefresh()
     }
 
     private func refresh() {
-        lines = FileLogger.parsedLinesAllFiles()
-        diagnostics = FileLogger.shared.recentDiagnostics()
+        let levels = levelFilterToSet()
+        let components = componentFilterToSet()
+        let since = timeRangeToSinceNs()
+        let search = searchText.isEmpty ? nil : searchText
+        lines = LogStore.shared.recent(
+            limit: pageSize,
+            levels: levels,
+            components: components,
+            sinceNs: since,
+            search: search)
+        newestSeenId = lines.first?.rowId
+        oldestLoadedId = lines.last?.rowId
+        totalCount = LogStore.shared.count(
+            levels: levels,
+            components: components,
+            sinceNs: since,
+            search: search)
+        diagnostics = LogStore.shared.recentDiagnostics()
         crashReports = MetricKitSubscriber.loadReports()
     }
 
     private func clear() {
-        FileLogger.clear()
+        LogStore.shared.clear()
         refresh()
     }
 
@@ -556,6 +550,66 @@ struct DebugLogView: View {
         withAnimation(.easeInOut(duration: 0.15)) {
             if expandedKeys.contains(key) { expandedKeys.remove(key) }
             else { expandedKeys.insert(key) }
+        }
+    }
+
+    // MARK: - Pagination
+
+    private func loadMore() {
+        guard let before = oldestLoadedId else { return }
+        let more = LogStore.shared.recent(
+            limit: pageSize, beforeId: before,
+            levels: levelFilterToSet(),
+            components: componentFilterToSet(),
+            sinceNs: timeRangeToSinceNs(),
+            search: searchText.isEmpty ? nil : searchText)
+        guard !more.isEmpty else { return }
+        lines.append(contentsOf: more)
+        oldestLoadedId = more.last?.rowId
+    }
+
+    private func incrementalRefresh() {
+        guard let newest = newestSeenId else { refresh(); return }
+        let newer = LogStore.shared.recent(
+            limit: pageSize, afterId: newest,
+            levels: levelFilterToSet(),
+            components: componentFilterToSet(),
+            sinceNs: timeRangeToSinceNs(),
+            search: searchText.isEmpty ? nil : searchText)
+        guard !newer.isEmpty else { return }
+        lines.insert(contentsOf: newer, at: 0)
+        newestSeenId = newer.first?.rowId
+        totalCount = LogStore.shared.count(
+            levels: levelFilterToSet(),
+            components: componentFilterToSet(),
+            sinceNs: timeRangeToSinceNs(),
+            search: searchText.isEmpty ? nil : searchText)
+    }
+
+    // MARK: - Filter Helpers
+
+    private func levelFilterToSet() -> Set<LogLevel>? {
+        switch selectedFilter {
+        case .all:   return nil
+        default:     return [selectedFilter.level!]
+        }
+    }
+
+    private func componentFilterToSet() -> Set<LogComponent>? {
+        switch componentFilter {
+        case .all:   return nil
+        default:     return [componentFilter.logComponent!]
+        }
+    }
+
+    private func timeRangeToSinceNs() -> Int64? {
+        switch timeRange {
+        case .fiveMin:
+            return Int64((Date().timeIntervalSince1970 - 300) * 1_000_000_000)
+        case .oneHour:
+            return Int64((Date().timeIntervalSince1970 - 3600) * 1_000_000_000)
+        case .all:
+            return nil
         }
     }
 

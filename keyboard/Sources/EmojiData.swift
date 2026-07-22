@@ -261,6 +261,16 @@ enum EmojiRecents {
         UserDefaults.standard.set(recents, forKey: storageKey)
     }
 
+    /// Removes an emoji from the recents list.
+    /// No-op if the emoji is not present.
+    static func remove(_ emoji: String) {
+        var recents = get()
+        if let index = recents.firstIndex(of: emoji) {
+            recents.remove(at: index)
+            UserDefaults.standard.set(recents, forKey: storageKey)
+        }
+    }
+
     /// Returns true if the string contains at least one emoji scalar.
     /// Used to guard the recents list against non-emoji strings (letters, punctuation)
     /// that may arrive via the .insertText path during focus transitions.

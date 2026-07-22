@@ -30,6 +30,12 @@ final class EmojiCell: UICollectionViewCell {
     func configure(with emoji: String) {
         emojiLabel.text = emoji
     }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        transform = .identity
+        alpha = 1.0
+    }
 }
 
 // MARK: - EmojiPanelView
@@ -142,6 +148,9 @@ final class EmojiPanelView: UIView {
     private var searchDebounceWorkItem: DispatchWorkItem?
     private var currentQuery: String = ""
     private let selectionFeedback = UISelectionFeedbackGenerator()
+    private var emojiLongPressWorkItem: DispatchWorkItem?
+    private var emojiLongPressIndexPath: IndexPath?
+    private var emojiLongPressRemoving = false
     private let emptyStateLabel: UILabel = {
         let label = UILabel()
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -326,6 +335,13 @@ final class EmojiPanelView: UIView {
             collectionView.trailingAnchor.constraint(equalTo: trailingAnchor),
             collectionView.bottomAnchor.constraint(equalTo: categoryToolbar.topAnchor),
         ])
+
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(emojiCellLongPressed(_:)))
+        longPress.minimumPressDuration = 0.5
+        longPress.allowableMovement = 10
+        longPress.cancelsTouchesInView = false
+        longPress.delaysTouchesBegan = false
+        collectionView.addGestureRecognizer(longPress)
     }
 
     // MARK: - Data
@@ -528,6 +544,90 @@ final class EmojiPanelView: UIView {
             }
         }
         return UIMenu(title: "", children: actions)
+    }
+
+    // MARK: - Emoji Cell Long-Press (Recents Removal)
+
+    @objc private func emojiCellLongPressed(_ gesture: UILongPressGestureRecognizer) {
+        // Recents-only: no-op in any other category tab
+        guard selectedCategory == nil else { return }
+
+        let location = gesture.location(in: collectionView)
+
+        switch gesture.state {
+        case .began:
+            // Don't trigger during active scrolling (deceleration from a flick)
+            guard !collectionView.isDecelerating else { return }
+            guard let indexPath = collectionView.indexPathForItem(at: location),
+                  let cell = collectionView.cellForItem(at: indexPath),
+                  indexPath.item < allEmojis.count else { return }
+
+            let emoji = allEmojis[indexPath.item]
+            emojiLongPressIndexPath = indexPath
+
+            // Haptic: start-of-hold acknowledgment
+            HapticsManager.shared.tapImpact()
+
+            // Visual: dim the cell to indicate hold in progress
+            cell.alpha = 0.6
+
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                guard self.selectedCategory == nil,
+                      self.emojiLongPressIndexPath == indexPath,
+                      indexPath.item < self.allEmojis.count,
+                      self.allEmojis[indexPath.item] == emoji,
+                      let cell = self.collectionView.cellForItem(at: indexPath) else { return }
+
+                // Mark removal in progress so .ended/.cancelled don't restore the cell
+                self.emojiLongPressRemoving = true
+
+                // Completion haptic
+                self.selectionFeedback.selectionChanged()
+
+                // Shrink and fade animation
+                UIView.animate(withDuration: 0.25, animations: {
+                    cell.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
+                    cell.alpha = 0
+                }, completion: { _ in
+                    EmojiRecents.remove(emoji)
+                    self.allEmojis.remove(at: indexPath.item)
+
+                    self.collectionView.performBatchUpdates({
+                        self.collectionView.deleteItems(at: [indexPath])
+                    })
+
+                    if self.allEmojis.isEmpty {
+                        self.emptyStateLabel.isHidden = false
+                        self.bringSubviewToFront(self.emptyStateLabel)
+                    }
+
+                    self.emojiLongPressIndexPath = nil
+                    self.emojiLongPressRemoving = false
+                })
+            }
+
+            emojiLongPressWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: workItem)
+
+        case .ended, .cancelled, .failed:
+            guard !emojiLongPressRemoving else { return }
+
+            emojiLongPressWorkItem?.cancel()
+            emojiLongPressWorkItem = nil
+
+            if let indexPath = emojiLongPressIndexPath,
+               let cell = collectionView.cellForItem(at: indexPath) {
+                UIView.animate(withDuration: 0.2) {
+                    cell.transform = .identity
+                    cell.alpha = 1.0
+                }
+            }
+            emojiLongPressIndexPath = nil
+
+        default:
+            break
+        }
     }
 }
 

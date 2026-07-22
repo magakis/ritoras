@@ -5,17 +5,44 @@ final class FileLoggerTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        // Clear LogStore for container-app path tests
+        LogStore.shared.clear()
+
+        // Clean flat files for keyboard-mode tests
+        FileLogger.forceKeyboardModeForTesting = true
         FileLogger.clear()
-        // Clean up temp file from atomic write so each test starts clean
         if let dir = FileLogger.fileURL()?.deletingLastPathComponent() {
             try? FileManager.default.removeItem(
                 at: dir.appendingPathComponent(".ritoras-debug-log.tmp"))
         }
+        FileLogger.forceKeyboardModeForTesting = false
+    }
+
+    override func tearDown() {
+        FileLogger.forceKeyboardModeForTesting = false
+        super.tearDown()
+    }
+
+    // MARK: - Container-app facade (LogStore path)
+
+    func test_logStore_path_writes_record() {
+        let payload: [String: Any] = ["key": "value"]
+        FileLogger.shared.log(.warn, .audio, "facade test message", payload: payload)
+
+        let lines = LogStore.shared.recent(limit: 10)
+        let match = lines.first { $0.message == "facade test message" }
+        XCTAssertNotNil(match, "Message should be stored in LogStore via FileLogger facade")
+        XCTAssertEqual(match?.level, .warn)
+        XCTAssertEqual(match?.component, .audio)
+        XCTAssertEqual(match?.payload?["key"] as? String, "value")
     }
 
     // MARK: - Rotation
 
     func test_rotation_triggers_at_threshold() throws {
+        FileLogger.forceKeyboardModeForTesting = true
+        defer { FileLogger.forceKeyboardModeForTesting = false }
+
         try XCTSkipIf(FileLogger.fileURL() == nil,
                       "No app group container available — skipping rotation test")
 
@@ -26,9 +53,9 @@ final class FileLoggerTests: XCTestCase {
         // Remove any pre-existing rolled file
         try? FileManager.default.removeItem(at: rolled1)
 
-        // Each line with a 5000-char message is ~5 KB.
-        // 512 KB / 5 KB ≈ 102 lines to exceed rotation threshold.  Write 150 to be safe.
-        let msg = String(repeating: "x", count: 5000)
+        // Each line with a 10_000-char message is ~10 KB.
+        // 1 MB / 10 KB ≈ 104 lines to exceed rotation threshold.  Write 150 to be safe.
+        let msg = String(repeating: "x", count: 10_000)
         for _ in 0..<150 {
             FileLogger.shared.log(.info, .keyboard, msg)
         }
@@ -41,6 +68,9 @@ final class FileLoggerTests: XCTestCase {
     }
 
     func test_multi_file_shift_chain() throws {
+        FileLogger.forceKeyboardModeForTesting = true
+        defer { FileLogger.forceKeyboardModeForTesting = false }
+
         try XCTSkipIf(FileLogger.fileURL() == nil,
                       "No app group container available — skipping rotation test")
 
@@ -48,31 +78,37 @@ final class FileLoggerTests: XCTestCase {
         let base = "ritoras-debug.log"
 
         // Clean up existing rolled files
-        for i in 1...5 {
+        for i in 1...7 {
             try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(base).\(i)"))
         }
 
-        // ~102 lines per rotation → 4 rotations = ~408 lines.  Write 600 for safety.
-        let msg = String(repeating: "x", count: 5000)
-        for _ in 0..<600 {
+        // ~104 lines per rotation → 5 rotations = ~520 lines.  Write 700 for safety.
+        let msg = String(repeating: "x", count: 10_000)
+        for _ in 0..<700 {
             FileLogger.shared.log(.info, .keyboard, msg)
         }
 
         // Sync point
         _ = FileLogger.contents()
 
-        let rolled4 = dir.appendingPathComponent("\(base).4")
         let rolled5 = dir.appendingPathComponent("\(base).5")
+        let rolled6 = dir.appendingPathComponent("\(base).6")
+        let rolled7 = dir.appendingPathComponent("\(base).7")
 
-        XCTAssertTrue(FileManager.default.fileExists(atPath: rolled4.path),
-                      ".log.4 should exist after 4 rotations")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: rolled5.path),
-                       ".log.5 should NOT exist (maxRolledFiles = 4)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: rolled5.path),
+                      ".log.5 should exist after 5+ rotations")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: rolled6.path),
+                      ".log.6 should exist and be the oldest retained file (maxRolledFiles = 6)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: rolled7.path),
+                       ".log.7 should NOT exist (maxRolledFiles = 6)")
     }
 
     // MARK: - JSON round-trip
 
     func test_json_line_round_trip() throws {
+        FileLogger.forceKeyboardModeForTesting = true
+        defer { FileLogger.forceKeyboardModeForTesting = false }
+
         try XCTSkipIf(FileLogger.fileURL() == nil,
                       "No app group container available — skipping round-trip test")
 
@@ -103,6 +139,9 @@ final class FileLoggerTests: XCTestCase {
     // MARK: - Plain-text back-compat
 
     func test_plain_text_back_compat() throws {
+        FileLogger.forceKeyboardModeForTesting = true
+        defer { FileLogger.forceKeyboardModeForTesting = false }
+
         try XCTSkipIf(FileLogger.fileURL() == nil,
                       "No app group container available — skipping back-compat test")
 
@@ -148,6 +187,9 @@ final class FileLoggerTests: XCTestCase {
     // MARK: - Level filter
 
     func test_level_filter() throws {
+        FileLogger.forceKeyboardModeForTesting = true
+        defer { FileLogger.forceKeyboardModeForTesting = false }
+
         try XCTSkipIf(FileLogger.fileURL() == nil,
                       "No app group container available — skipping level filter test")
 

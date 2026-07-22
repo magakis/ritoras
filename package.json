@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "xcodegen": "^2.2.0"
+  }
+}

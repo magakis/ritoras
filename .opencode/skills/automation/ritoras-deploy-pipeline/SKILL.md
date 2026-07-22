@@ -6,7 +6,7 @@ domain: "automation"
 source: "session-extraction"
 version: 1.0.0
 created: "2026-07-18"
-last_confirmed: "2026-07-18"
+last_confirmed: "2026-07-21"
 metadata:
   opencode:
     tags: [ios, keyboard, deploy, ipa, ci, sidestore, github-actions, swift, triage, commit]

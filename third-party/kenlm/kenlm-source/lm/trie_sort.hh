@@ -28,7 +28,7 @@ struct Config;
 
 namespace trie {
 
-class EntryCompare : public std::binary_function<const void*, const void*, bool> {
+class EntryCompare {
   public:
     explicit EntryCompare(unsigned char order) : order_(order) {}
 

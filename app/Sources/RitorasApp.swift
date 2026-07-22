@@ -42,6 +42,16 @@ struct RitorasApp: App {
                 }
             }
             .task {
+                // Phase 4: LogStore flat-file migration (one-time).
+                let taskId = UIApplication.shared.beginBackgroundTask(withName: "LogStoreMigration")
+                DispatchQueue.global(qos: .utility).async {
+                    LogStoreMigration.runIfNeeded()
+                    DispatchQueue.main.async {
+                        UIApplication.shared.endBackgroundTask(taskId)
+                    }
+                }
+            }
+            .task {
                 // Phase 4: auto-retry sweep (opt-in, default off).
                 guard SharedConfig.Recovery.autoRetryOnLaunch else { return }
                 let maxRetries = SharedConfig.Recovery.maxAutoRetries

@@ -101,7 +101,7 @@ template <class KeyIter, class ValueIter> class JointProxy {
     InnerIterator inner_;
 };
 
-template <class Proxy, class Less> class LessWrapper : public std::binary_function<const typename Proxy::value_type &, const typename Proxy::value_type &, bool> {
+template <class Proxy, class Less> class LessWrapper {
   public:
     explicit LessWrapper(const Less &less) : less_(less) {}
 
