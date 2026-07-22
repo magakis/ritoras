@@ -19,6 +19,7 @@ targets:
       - path: app
       - path: shared
     dependencies:
+      - sdk: SQLite3.framework
       - target: RitorasKeyboard
         embed: true
     settings:
@@ -35,6 +36,18 @@ targets:
     sources:
       - path: keyboard
       - path: shared
+      - path: third-party/kenlm/kenlm-source
+        excludes:
+          - "**/*test*"
+          - "**/*_test*"
+          - "**/builder/**"
+          - "**/filter/**"
+          - "**/main.cpp"
+          - "**/*_main.cc"
+          - "**/*_main.cpp"
+      - path: keyboard/Sources/Prediction/Trigram/kenlm_c.cpp
+    dependencies:
+      - sdk: SQLite3.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ritoras.app.keyboard
@@ -42,6 +55,13 @@ targets:
         PRODUCT_NAME: RitorasKeyboard
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_ENTITLEMENTS: keyboard/RitorasKeyboard.entitlements
+        SWIFT_OBJC_BRIDGING_HEADER: keyboard/RitorasKeyboard-BridgingHeader.h
+        CLANG_CXX_LANGUAGE_STANDARD: "gnu++17"
+        CLANG_CXX_LIBRARY: "libc++"
+        USER_HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "third-party/kenlm"
+          - "keyboard/Sources/Prediction/Trigram"
 
   RitorasTests:
     type: bundle.unit-test
@@ -57,9 +77,26 @@ targets:
         excludes:
           - AutoCapTraits.swift
       - path: keyboard/Sources/HapticsManager.swift
+      - path: keyboard/Sources/Prediction/Trigram/kenlm_c.cpp
+      - path: third-party/kenlm/kenlm-source
+        excludes:
+          - "**/*test*"
+          - "**/*_test*"
+          - "**/builder/**"
+          - "**/filter/**"
+          - "**/main.cpp"
+          - "**/*_main.cc"
+          - "**/*_main.cpp"
     dependencies:
       - target: Ritoras
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ritoras.app.tests
         PRODUCT_NAME: RitorasTests
+        SWIFT_OBJC_BRIDGING_HEADER: keyboard/RitorasKeyboard-BridgingHeader.h
+        USER_HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "third-party/kenlm"
+          - "keyboard/Sources/Prediction/Trigram"
+        CLANG_CXX_LANGUAGE_STANDARD: "gnu++17"
+        CLANG_CXX_LIBRARY: "libc++"

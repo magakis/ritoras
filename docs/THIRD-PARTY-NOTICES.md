@@ -187,3 +187,29 @@ d. Nothing in this Public License constitutes or may be interpreted as a limitat
 **Description:** The bigram frequency dictionary file `frequency_bigramdictionary_en_243_342.txt` at `keyboard/Sources/Prediction/Resources/frequency_bigramdictionary_en_243_342.txt` remains from the original SymSpell sample data (Apache 2.0). The unigram frequency dictionary (`frequency_dictionary_en_82_765.txt`) from the same source was replaced in Phase 3 with wordfreq-derived data (see wordfreq section above).
 
 **License:** Apache 2.0
+
+## KenLM
+
+**Source:** https://github.com/kpu/kenlm
+
+**Author:** Kenneth Heafield
+
+**Pinned SHA:** `4cb443e60b7bf2c0ddf3c745378f76cb59e254e5`
+
+**License:** LGPL-2.1+ (GNU Lesser General Public License, version 2.1 or later)
+
+**License file:** `third-party/kenlm/kenlm-source/LICENSE`
+
+**Description:** Language model toolkit. A query-only subset of KenLM is vendored at `third-party/kenlm/kenlm-source/` and linked into the RitorasKeyboard extension binary. It provides runtime trie-based 3-gram model querying (scoring, vocabulary lookup) via a Swift↔C bridge (`keyboard/Sources/Prediction/Trigram/kenlm_c.h` and `kenlm_c.cpp`).
+
+The KenLM tools (`lmplz`, `build_binary`, `query`) are built from source as build-time dependencies for model training. The binary model format (`.klm`) is read at runtime by the vendored query-only subset.
+
+### LGPL-2.1 Notice
+
+KenLM is free software: you can redistribute it and/or modify it under the terms of the GNU Lesser General Public License as published by the Free Software Foundation, either version 2.1 of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public License along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+**Distribution note:** Under LGPL-2.1+, users of the Ritoras app must be provided relinkable object files for KenLM upon request. Source code is available in this repository under `third-party/kenlm/kenlm-source/`. The trained model file (`trigram_en_v1.klm`) is a derived work produced by KenLM from Tatoeba training data. The model file format is documented by KenLM for interoperable use and does not itself constitute a derivative work of KenLM under copyright law.

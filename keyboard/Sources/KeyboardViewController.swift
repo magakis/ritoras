@@ -54,6 +54,7 @@ class KeyboardViewController: UIInputViewController {
     private var inputTarget: InputTarget = .hostApp
 
     private var predictionEngine: PredictionEngine?
+    private var trigramProvider: TrigramProvider?
     private var isPredictionEngineReady = false
     private let predictionBuildQueue = DispatchQueue(
         label: "com.ritoras.prediction.build",
@@ -177,6 +178,7 @@ class KeyboardViewController: UIInputViewController {
                 DispatchQueue.main.async {
                     self.isPredictionEngineReady = true
                     self.predictionEngine = PredictionEngine()
+                    self.scheduleTrigramLoad()
                 }
                 return
             }
@@ -187,25 +189,38 @@ class KeyboardViewController: UIInputViewController {
             // Create the Apple UITextChecker provider.
             let appleProvider = AppleSpellCheckerProvider()
 
-            // Create the BigramPredictor (lazy-loaded after a delay).
-            let bigramProvider = BigramPredictor(minCount: SharedConfig.Defaults.bigramMinCount)
-
             // Build the engine and register providers.
+            // TrigramProvider is deferred — see scheduleTrigramLoad() below.
             let engine = PredictionEngine()
             engine.addProvider(provider)
             engine.addProvider(appleProvider)
-            engine.addProvider(bigramProvider)
 
             DispatchQueue.main.async {
                 self.predictionEngine = engine
                 self.isPredictionEngineReady = true
                 FileLogger.shared.info(.keyboard, "PredictionEngine ready")
+                self.scheduleTrigramLoad()
+            }
+        }
+    }
 
-                // Lazy-load bigram map after a short delay for memory headroom.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                    bigramProvider.loadAsync {
-                        FileLogger.shared.info(.keyboard, "BigramPredictor ready")
-                    }
+    /// Creates the TrigramProvider and starts its warmup 500 ms after the
+    /// prediction engine's SymSpell/dictionary work completes, avoiding
+    /// memory contention during initialisation.
+    ///
+    /// The TrigramProvider is added to the engine's provider list asynchronously,
+    /// so the first ~500 ms–2 s of a keyboard session (before the KenLM model
+    /// loads) does not block the prediction pipeline.
+    private func scheduleTrigramLoad() {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self else { return }
+            let trigramProvider = TrigramProvider()
+            trigramProvider.warmup { [weak self] success in
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    self.predictionEngine?.addProvider(trigramProvider)
+                    self.trigramProvider = trigramProvider
+                    self.keyboardView.refreshSuggestions()
                 }
             }
         }
@@ -1281,7 +1296,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
         return SuggestionInputSnapshot(
             currentWord: extracted.currentWord,
             lookupWord: extracted.lookupWord,
-            previousWord: extracted.previousWord
+            previousWord: extracted.previousWord,
+            previousWord2: extracted.previousWord2
         )
     }
 
@@ -1433,7 +1449,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
         let top = engine.topCorrection(
             forCurrentWord: extracted.currentWord,
             lookupWord: extracted.lookupWord,
-            previousWord: extracted.previousWord
+            previousWord: extracted.previousWord,
+            previousWord2: extracted.previousWord2
         )
 
         let decision = AutocorrectController.evaluate(

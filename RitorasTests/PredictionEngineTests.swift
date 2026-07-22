@@ -103,25 +103,11 @@ final class PredictionEngineTests: XCTestCase {
 
     // MARK: - Next-Word Prediction Integration
 
-    func test_no_previous_word_returns_hardcoded_fallback() {
+    func test_next_word_prediction_empty_context_returns_fallback() {
         let engine = PredictionEngine()
         let result = engine.suggestions(forCurrentWord: "", lookupWord: "", previousWord: nil, limit: 3)
-        XCTAssertEqual(result, ["the", "I", "and"])
-    }
-
-    func test_next_word_prediction_returns_bigram_followers() {
-        let engine = PredictionEngine()
-        let predictor = BigramPredictor(minCount: 1)
-        predictor.loadFromLines([
-            "I am 100",
-            "I have 80",
-            "I think 60",
-        ])
-        engine.addProvider(predictor)
-
-        let result = engine.suggestions(forCurrentWord: "", lookupWord: "", previousWord: "I", limit: 3)
-        XCTAssertEqual(result, ["am", "have", "think"],
-                       "Engine should return top bigram followers for 'I' when currentWord is empty")
+        XCTAssertEqual(result, ["the", "I", "and"],
+                       "Engine should return fallback when no provider contributes")
     }
 
     // MARK: - topCorrection
@@ -132,10 +118,10 @@ final class PredictionEngineTests: XCTestCase {
         XCTAssertNil(result, "Engine with no providers should return nil")
     }
 
-    func test_topCorrection_returns_highest_scoring_non_bigram() {
+    func test_topCorrection_returns_highest_scoring_non_trigram() {
         let engine = PredictionEngine()
         let provider = MockProvider(suggestions: [
-            Suggestion(text: "teh", score: 0.9, source: .bigram),
+            Suggestion(text: "teh", score: 0.9, source: .trigram),
             Suggestion(text: "the", score: 0.85, source: .apple),
             Suggestion(text: "teh", score: 0.7, source: .symspell),
         ])

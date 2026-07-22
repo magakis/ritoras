@@ -86,16 +86,18 @@ struct SharedConfig {
         /// in `keyboard/Info.plist`.
         static let appleSpellCheckerLanguage = "en-US"
 
-        // MARK: - Bigram Prediction Tunables
+        // MARK: - Trigram Prediction Tunables
 
-        /// Minimum bigram count to include in the prediction map. Bigrams with
-        /// fewer occurrences are pruned to reduce memory pressure. 5 cuts to
-        /// ~80–120k entries (~4 MB).
-        static let bigramMinCount = 5
+        /// Weight for forward-compat interpolation (currently unused — empty-prefix
+        /// uses raw trigram, not interpolated).
+        static let trigramWeight: Double = 0.7
 
-        /// Score multiplier applied when a candidate from another provider is
-        /// also a common bigram follower of the previous word.
-        static let bigramBoostFactor = 1.3
+        /// Score multiplier applied when a mid-word candidate from another provider
+        /// is also a common trigram follower of the previous context.
+        static let trigramBoostFactor: Double = 1.4
+
+        /// Minimum score floor for trigram suggestions to avoid near-zero noise.
+        static let trigramReadyMinScore: Double = 0.05
 
         // MARK: - Memory Management
 

@@ -33,6 +33,7 @@ struct SuggestionInputSnapshot {
     let currentWord: String
     let lookupWord: String
     let previousWord: String?
+    let previousWord2: String?
 }
 
 // MARK: - Delegate
@@ -890,6 +891,7 @@ class KeyboardView: UIView {
                 forCurrentWord: snapshot.currentWord,
                 lookupWord: snapshot.lookupWord,
                 previousWord: snapshot.previousWord,
+                previousWord2: snapshot.previousWord2,
                 limit: 3
             )
             DispatchQueue.main.async { [weak self] in

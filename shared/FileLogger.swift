@@ -9,6 +9,7 @@ public enum LogComponent: String {
     case transcription = "Transcription"
     case audio = "Audio"
     case dictionary = "Dictionary"
+    case prediction = "Prediction"
     case network = "Network"
     case settings = "Settings"
     case lifecycle = "Lifecycle"
@@ -50,6 +51,27 @@ final class FileLogger {
     /// MUST remain nil in the container app to prevent infinite loops
     /// (server-received logs are written via this same FileLogger).
     public static var broadcast: ((LogLevel, LogComponent, String, [String: Any]?) -> Void)?
+
+    /// True when running inside the keyboard extension process.
+    /// Used to skip LogStore writes (48 MB Jetsam cap).
+    private static var isKeyboardExtension: Bool {
+        Bundle.main.bundleIdentifier?.hasSuffix(".keyboard") ?? false
+    }
+
+    /// Recursively scrubs all String values in a payload dictionary,
+    /// mirroring the pattern from PayloadFormatter.format(value:scrubPII:).
+    private static func scrubPayload(_ payload: [String: Any]?) -> [String: Any]? {
+        guard let payload = payload else { return nil }
+        return payload.reduce(into: [String: Any]()) { result, pair in
+            if let str = pair.value as? String {
+                result[pair.key] = LogScrubber.scrub(str)
+            } else if let dict = pair.value as? [String: Any] {
+                result[pair.key] = scrubPayload(dict)
+            } else {
+                result[pair.key] = pair.value
+            }
+        }
+    }
 
     private static func resolveURL() -> (url: URL?, usingFallback: Bool) {
         if let container = FileManager.default.containerURL(
@@ -145,6 +167,26 @@ final class FileLogger {
         }
 
         let line = jsonString + "\n"
+
+        // Dual-write bridge (Phase 2): container app writes to BOTH flat file
+        // AND LogStore. Keyboard extension writes flat-file ONLY.
+        if !Self.isKeyboardExtension {
+            let scrubbedMessage = LogScrubber.scrub(message)
+            let scrubbedPayload = Self.scrubPayload(payload)
+
+            var scrubbedDict = dict
+            scrubbedDict["msg"] = scrubbedMessage
+            if scrubbedPayload != nil {
+                scrubbedDict["payload"] = scrubbedPayload
+            }
+
+            if let scrubbedData = try? JSONSerialization.data(
+                withJSONObject: scrubbedDict, options: [.sortedKeys]
+            ), let scrubbedRaw = String(data: scrubbedData, encoding: .utf8) {
+                LogStore.shared.insert(level, component, scrubbedMessage,
+                                       payload: scrubbedPayload, raw: scrubbedRaw)
+            }
+        }
 
         let write = { Self.append(line) }
 
@@ -411,6 +453,8 @@ struct LogLine: Identifiable, Hashable {
     let timestamp: Date?
     let message: String?
     let payload: [String: Any]?
+    /// SQLite row ID, populated by LogStore queries. FileLogger sets this to nil.
+    let rowId: Int64? = nil
 
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)

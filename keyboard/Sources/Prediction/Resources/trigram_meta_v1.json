@@ -1,0 +1,27 @@
+{
+  "corpus": "Tatoeba English (CC-BY-2.0)",
+  "corpus_url": "https://tatoeba.org/en/downloads",
+  "license": "CC-BY-2.0",
+  "vocab_size": 20000,
+  "vocab_source": "keyboard/Sources/Prediction/Resources/frequency_dictionary_en_wordfreq_50k.txt (top 20k)",
+  "build_binary_flags": "trie -q 8 -b 7 -a 64",
+  "ngram_order": 3,
+  "smoothing": "modified_kneser_ney",
+  "pruning": "0 1 2",
+  "file_size_bytes": 3475971,
+  "sha256": "0c302eed7c6b128d75bb4f0a6aeb07143e5e49b3145bdad2dc5f81c5c5bbbcd6",
+  "arpa_sha256": "74fa4e0de3f44d1f34d135882a2cb85a094e1cfb4876838277289859fb455848",
+  "perplexity": 219.02737816502702,
+  "trained_at": "2026-07-21T18:38:52Z",
+  "kenlm_sha": "4cb443e60b7bf2c0ddf3c745378f76cb59e254e5",
+  "training_corpus_lines": 2026858,
+  "heldout_lines": 5000,
+  "ngram_order_counts": {
+    "1": 18944,
+    "2": 356151,
+    "3": 421354
+  },
+  "perplexity_excluding_oovs": 62.29,
+  "oov_count": 7009,
+  "heldout_tokens": 43531
+}

@@ -4,7 +4,7 @@ import Foundation
 /// the text document context before the cursor.
 enum CurrentWordExtractor {
 
-    /// The result of extracting word context from the document.
+        /// The result of extracting word context from the document.
     struct ExtractedContext {
         /// The last whitespace-delimited token, with trailing punctuation preserved (for display).
         let currentWord: String
@@ -13,6 +13,8 @@ enum CurrentWordExtractor {
         let lookupWord: String
         /// The second-to-last token, with trailing punctuation stripped (nil if none).
         let previousWord: String?
+        /// The third-to-last token, with trailing punctuation stripped (nil if fewer than 3 tokens).
+        let previousWord2: String?
     }
 
     /// Extracts the current word, lookup word, and previous word from the
@@ -25,7 +27,7 @@ enum CurrentWordExtractor {
     ///   `previousWord`: the second-to-last token, with trailing punctuation stripped (nil if none).
     static func extract(from context: String?) -> ExtractedContext {
         guard let context, !context.isEmpty else {
-            return ExtractedContext(currentWord: "", lookupWord: "", previousWord: nil)
+            return ExtractedContext(currentWord: "", lookupWord: "", previousWord: nil, previousWord2: nil)
         }
 
         // Check if cursor is at a word boundary (last char is whitespace).
@@ -41,7 +43,13 @@ enum CurrentWordExtractor {
             let currentWord = ""
             let lookupWord = ""
             let previousWord = stripTrailingPunctuation(from: tokens.last)
-            return ExtractedContext(currentWord: currentWord, lookupWord: lookupWord, previousWord: previousWord)
+            let previousWord2: String?
+            if tokens.count >= 2 {
+                previousWord2 = stripTrailingPunctuation(from: tokens[tokens.count - 2])
+            } else {
+                previousWord2 = nil
+            }
+            return ExtractedContext(currentWord: currentWord, lookupWord: lookupWord, previousWord: previousWord, previousWord2: previousWord2)
         } else {
             // Cursor is mid-word → completions of the current word.
             let currentWord = tokens.last ?? ""
@@ -54,7 +62,14 @@ enum CurrentWordExtractor {
                 previousWord = nil
             }
 
-            return ExtractedContext(currentWord: currentWord, lookupWord: lookupWord, previousWord: previousWord)
+            let previousWord2: String?
+            if tokens.count >= 3 {
+                previousWord2 = stripTrailingPunctuation(from: tokens[tokens.count - 3])
+            } else {
+                previousWord2 = nil
+            }
+
+            return ExtractedContext(currentWord: currentWord, lookupWord: lookupWord, previousWord: previousWord, previousWord2: previousWord2)
         }
     }
 

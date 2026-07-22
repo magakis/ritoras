@@ -30,18 +30,21 @@ final class PredictionEngine {
     ///   - currentWord: The word currently being typed (empty when after whitespace) — used for display.
     ///   - lookupWord: The word with trailing punctuation stripped — used for dictionary lookups.
     ///   - previousWord: The word before the current word (nil if no prior word).
+    ///   - previousWord2: The word two before the current word (nil if fewer than 2 prior words).
     ///   - limit: Maximum number of suggestions to return.
     /// - Returns: Sorted array of suggestion strings.
     func suggestions(
         forCurrentWord currentWord: String,
         lookupWord: String,
         previousWord: String? = nil,
+        previousWord2: String? = nil,
         limit: Int = 3
     ) -> [String] {
         let context = SuggestionContext(
             currentWord: currentWord,
             lookupWord: lookupWord,
             previousWord: previousWord,
+            previousWord2: previousWord2,
             isMidWord: !currentWord.isEmpty
         )
 
@@ -49,21 +52,22 @@ final class PredictionEngine {
         // EMPTY-PREFIX CASE: cursor is after whitespace
         // ──────────────────────────────────────────────
         if currentWord.isEmpty {
-            // In this case only BigramPredictor (and any future lexicon
-            // provider) can contribute — SymSpell and Apple return [] for
-            // empty words.
-            var bigramSuggestions: [Suggestion] = []
+            var pool: [Suggestion] = []
             for provider in providers {
                 let results = provider.suggest(for: context, limit: limit)
-                bigramSuggestions.append(contentsOf: results)
+                pool.append(contentsOf: results)
             }
 
-            // No results and no previous word → hardcoded top-3 fallback.
-            if bigramSuggestions.isEmpty, previousWord == nil {
-                return Self.defaultTopSuggestions
+            // Cold-start fallback: show defaults when no provider contributed
+            // (e.g. TrigramProvider not yet loaded) or there is no context.
+            if pool.isEmpty {
+                if previousWord == nil || !providers.contains(where: { ($0 as? TrigramProvider)?.isReady == true }) {
+                    return Self.defaultTopSuggestions
+                }
+                return []
             }
 
-            return bigramSuggestions
+            return pool
                 .sorted { $0.score > $1.score }
                 .prefix(limit)
                 .map { $0.text }
@@ -99,18 +103,18 @@ final class PredictionEngine {
             }
         }
 
-        // — Bigram re-rank —
-        // Boost candidates from non-bigram providers by bigramBoostFactor if
-        // they are common followers of the previous word.
+        // — Trigram re-rank —
+        // Boost candidates from non-trigram providers by trigramBoostFactor if
+        // they are common followers of the previous bigram context.
         if let prev = previousWord?.lowercased(), !prev.isEmpty {
-            if let bigram = providers.compactMap({ $0 as? BigramPredictor }).first,
-               let followers = bigram.followerWordSet(for: prev) {
+            if let trigram = providers.compactMap({ $0 as? TrigramProvider }).first,
+               let followers = trigram.followerWordSet(previousWord2: previousWord2, previousWord: previousWord) {
                 allSuggestions = allSuggestions.map { suggestion in
-                    guard suggestion.source != .bigram else { return suggestion }
+                    guard suggestion.source != .trigram else { return suggestion }
                     guard followers.contains(suggestion.text.lowercased()) else { return suggestion }
                     return Suggestion(
                         text: suggestion.text,
-                        score: min(suggestion.score * SharedConfig.Defaults.bigramBoostFactor, 1.0),
+                        score: min(suggestion.score * SharedConfig.Defaults.trigramBoostFactor, 1.0),
                         source: suggestion.source
                     )
                 }
@@ -140,27 +144,30 @@ final class PredictionEngine {
 
     // MARK: - Autocorrect Support
 
-    /// Returns the highest-scoring non-bigram suggestion for `lookupWord`,
-    /// or nil if no provider offers a correction. Used by AutocorrectController
-    /// to make confidence-gated replacement decisions on separator press.
+    /// Returns the highest-scoring suggestion for `lookupWord` (excluding the
+    /// typed word itself), or nil if no provider offers a correction. Used by
+    /// AutocorrectController to make confidence-gated replacement decisions on
+    /// separator press.
     ///
     /// Unlike `suggestions(...)`, this returns the full `Suggestion` (with score)
     /// rather than just the text, so callers can apply a confidence threshold.
-    /// Excludes `.bigram` source — bigrams predict the NEXT word, not corrections.
+    /// Excludes `.trigram` source — trigrams predict the NEXT word, not corrections.
     func topCorrection(
         forCurrentWord currentWord: String,
         lookupWord: String,
-        previousWord: String? = nil
+        previousWord: String? = nil,
+        previousWord2: String? = nil
     ) -> Suggestion? {
         guard !currentWord.isEmpty, !lookupWord.isEmpty else { return nil }
         let pool = mergedPool(
             forCurrentWord: currentWord,
             lookupWord: lookupWord,
-            previousWord: previousWord
+            previousWord: previousWord,
+            previousWord2: previousWord2
         )
         let lowerTyped = currentWord.lowercased()
         return pool
-            .filter { $0.source != .bigram && $0.text.lowercased() != lowerTyped }
+            .filter { $0.source != .trigram && $0.text.lowercased() != lowerTyped }
             .max { $0.score < $1.score }
     }
 
@@ -172,12 +179,14 @@ final class PredictionEngine {
         forCurrentWord currentWord: String,
         lookupWord: String,
         previousWord: String?,
+        previousWord2: String? = nil,
         limit: Int = SharedConfig.Defaults.providerResultLimit
     ) -> [Suggestion] {
         let context = SuggestionContext(
             currentWord: currentWord,
             lookupWord: lookupWord,
             previousWord: previousWord,
+            previousWord2: previousWord2,
             isMidWord: !currentWord.isEmpty
         )
         var allSuggestions: [Suggestion] = []

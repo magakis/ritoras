@@ -57,6 +57,67 @@ final class SymSpellMemorySpike: XCTestCase {
                                  "SymSpell index exceeds 25 MB memory budget (\(memoryMB) MB). Consider pruning.")
     }
 
+    /// Measure combined resident memory of SymSpell + Trigram + SideIndex.
+    ///
+    /// Target: ≤33 MB combined (leaving ~7 MB headroom under the 40 MB
+    /// practical Jetsam ceiling for UIKit/audio/IPC baseline).
+    func testCombinedSymSpellAndTrigramMemoryBaseline() throws {
+        let baseline = getResidentMemoryMB()
+
+        // 1. Build SymSpell (same pattern as testSymSpellMemoryBaseline).
+        let symSpell = SymSpell(maxEditDistance: 2, prefixLength: 7)
+
+        let bundle = Bundle(for: SymSpellMemorySpike.self)
+        let url = bundle.url(forResource: "frequency_dictionary_en_wordfreq_50k",
+                             withExtension: "txt")
+            ?? Bundle.main.url(forResource: "frequency_dictionary_en_wordfreq_50k",
+                               withExtension: "txt")
+        guard let fileURL = url else {
+            throw XCTSkip("frequency_dictionary_en_wordfreq_50k.txt not found")
+        }
+        let entries = try WordListLoader.load(from: fileURL)
+        for entry in entries {
+            symSpell.createDictionaryEntry(key: entry.word, count: entry.count)
+        }
+
+        // 2. Load KenLM model.
+        guard let modelPath = Bundle(for: SymSpellMemorySpike.self)
+            .path(forResource: "trigram_en_v1", ofType: "klm")
+            ?? Bundle.main.path(forResource: "trigram_en_v1", ofType: "klm") else {
+            throw XCTSkip("trigram_en_v1.klm not found in test bundle")
+        }
+        guard let model = kenlm_load(modelPath) else {
+            XCTFail("kenlm_load returned nil")
+            return
+        }
+        defer { kenlm_free(model) }
+
+        // 3. Warmup KenLM.
+        for _ in 0..<50 {
+            _ = kenlm_score_sentence(model, "i am looking very")
+        }
+
+        // 4. Load SideIndex.
+        guard let sideIndex = SideIndex() else {
+            XCTFail("SideIndex failed to load")
+            return
+        }
+
+        let loaded = getResidentMemoryMB()
+        let delta = loaded - baseline
+
+        print("--- Combined Memory (SymSpell + Trigram + SideIndex) ---")
+        print("Baseline:  \(String(format: "%.2f", baseline)) MB")
+        print("Loaded:    \(String(format: "%.2f", loaded)) MB")
+        print("Delta:     \(String(format: "%.2f", delta)) MB")
+        print("SymSpell dict entries:  \(symSpell.dictionary.count)")
+        print("SideIndex loaded:       \(sideIndex.isLoaded)")
+        print("--------------------------------------------------------")
+
+        XCTAssertLessThanOrEqual(delta, 33.0,
+            "Combined resident memory \(String(format: "%.2f", delta)) MB exceeds 33 MB budget")
+    }
+
     // MARK: - Memory Measurement
 
     /// Returns the current resident memory size of this process in megabytes.

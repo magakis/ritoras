@@ -32,6 +32,19 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             SYMROOT=build
 
+      - name: Test (iOS Simulator)
+        run: |
+          xcodebuild \
+            -project Ritoras.xcodeproj \
+            -scheme RitorasTests \
+            -destination 'platform=iOS Simulator,name=iPhone 16' \
+            -configuration Release \
+            test \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            SYMROOT=build
+
       - name: Verify keyboard Info.plist
         run: |
           PLIST="build/Release-iphoneos/Ritoras.app/PlugIns/RitorasKeyboard.appex/Info.plist"

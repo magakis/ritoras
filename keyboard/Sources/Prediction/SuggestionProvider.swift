@@ -12,6 +12,7 @@ struct SuggestionContext {
     let currentWord: String
     let lookupWord: String
     let previousWord: String?
+    let previousWord2: String? = nil
     let isMidWord: Bool
 }
 
@@ -26,6 +27,6 @@ struct Suggestion: Hashable {
         case symspell
         case apple
         case lexicon
-        case bigram
+        case trigram
     }
 }
