@@ -663,7 +663,7 @@ class KeyboardView: UIView {
                             glyph = kb.keyDefinition.label
                         }
                         let keyFrame = kb.convert(kb.bounds, to: self)
-                        self.keyPreview.show(for: glyph, anchoredAbove: keyFrame, in: self)
+                        self.keyPreview.show(for: glyph, anchoredAbove: keyFrame)
                         self.bringSubviewToFront(self.keyPreview)
                     } else {
                         self.keyPreview.hide()
@@ -800,26 +800,38 @@ class KeyboardView: UIView {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         guard isUserInteractionEnabled, !isHidden, alpha > 0.01 else { return nil }
 
-        if let hit = super.hitTest(point, with: event) { return hit }
+        let inKeyRegion = point.y >= letterRegionContainer.frame.minY &&
+                          point.y <= bottomActionRow.frame.maxY
 
-        // Only route to nearest key within the key region
-        guard point.y >= letterRegionContainer.frame.minY,
-              point.y <= bottomActionRow.frame.maxY else { return nil }
-
-        var nearestKey: KeyButton?
-        var nearestDistance: CGFloat = .greatestFiniteMagnitude
-
-        for key in allKeyButtons {
-            guard !key.isHidden, key.alpha > 0.01, key.isUserInteractionEnabled else { continue }
-            let frameInSelf = key.convert(key.bounds, to: self)
-            let dist = frameEdgeDistance(from: point, to: frameInSelf)
-            if dist < nearestDistance {
-                nearestDistance = dist
-                nearestKey = key
+        if inKeyRegion {
+            // Direct hit on a key button — fast path
+            if let hit = super.hitTest(point, with: event), hit is KeyButton {
+                return hit
             }
+
+            // Dead-zone elimination: find the nearest visible key
+            var nearestKey: KeyButton?
+            var nearestDistance: CGFloat = .greatestFiniteMagnitude
+            for key in allKeyButtons {
+                guard !key.isHidden, key.alpha > 0.01, key.isUserInteractionEnabled else { continue }
+                let frameInSelf = key.convert(key.bounds, to: self)
+                let dist = frameEdgeDistance(from: point, to: frameInSelf)
+                if dist < nearestDistance {
+                    nearestDistance = dist
+                    nearestKey = key
+                }
+            }
+
+            if let nearestKey = nearestKey {
+                return nearestKey
+            }
+
+            // No visible keys (e.g. emoji mode) — defer to normal hit-testing
+            return super.hitTest(point, with: event)
         }
 
-        return nearestKey
+        // Outside key region — normal hit-testing (suggestion bar, emoji panel, etc.)
+        return super.hitTest(point, with: event)
     }
 
     /// Returns 0 if `point` is inside `rect`, else the Euclidean distance from

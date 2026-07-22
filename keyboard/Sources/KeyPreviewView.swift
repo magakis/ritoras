@@ -1,18 +1,17 @@
 import UIKit
 
-/// A popup character preview — a rounded-rect bubble with a tapered stem
-/// pointing downward, used to show the pressed key's character above the key.
-/// One reusable instance, recycled across key presses (never per-tap allocation).
+/// A popup character preview — a simple rounded square above the pressed key
+/// showing the character. One reusable instance, recycled across key presses
+/// (never per-tap allocation).
 final class KeyPreviewView: UIView {
 
     // MARK: - Constants
 
-    private static let bubbleWidth: CGFloat = 32
-    private static let bubbleHeight: CGFloat = 61
-    private static let cornerRadius: CGFloat = 7
-    private static let stemWidth: CGFloat = 30
-    private static let stemHeight: CGFloat = 11
-    private static let glyphFontSize: CGFloat = 28
+    private static let cornerRadius: CGFloat = 6
+    private static let glyphFontSize: CGFloat = 24
+    private static let gapAboveKey: CGFloat = 4
+    private static let widthFactor: CGFloat = 1.1
+    private static let heightFactor: CGFloat = 1.15
 
     // MARK: - Subviews & Layers
 
@@ -57,7 +56,7 @@ final class KeyPreviewView: UIView {
         shapeLayer.lineWidth = 0.5
         layer.addSublayer(shapeLayer)
 
-        glyphLabel.font = .systemFont(ofSize: Self.glyphFontSize, weight: .bold)
+        glyphLabel.font = .systemFont(ofSize: Self.glyphFontSize, weight: .regular)
         glyphLabel.textAlignment = .center
         glyphLabel.textColor = dynamicTextColor
         addSubview(glyphLabel)
@@ -71,13 +70,8 @@ final class KeyPreviewView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         shapeLayer.frame = bounds
-        glyphLabel.frame = CGRect(
-            x: 0,
-            y: 0,
-            width: bounds.width,
-            height: bounds.height - Self.stemHeight
-        )
-        shapeLayer.path = bubblePath(in: bounds)
+        glyphLabel.frame = bounds
+        shapeLayer.path = UIBezierPath(roundedRect: bounds, cornerRadius: Self.cornerRadius).cgPath
     }
 
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -87,43 +81,17 @@ final class KeyPreviewView: UIView {
         glyphLabel.textColor = dynamicTextColor
     }
 
-    // MARK: - Path
-
-    /// Creates the combined bubble + stem path.
-    /// The bubble is a rounded rectangle at the top, the stem is a triangle
-    /// below it that tapers to a point, pointing down toward the key.
-    private func bubblePath(in rect: CGRect) -> CGPath {
-        let bubbleRect = CGRect(
-            x: 0,
-            y: 0,
-            width: rect.width,
-            height: rect.height - Self.stemHeight
-        )
-        let path = UIBezierPath(roundedRect: bubbleRect, cornerRadius: Self.cornerRadius)
-
-        let stemTop = bubbleRect.maxY
-        let centerX = rect.midX
-        let stemHalf = Self.stemWidth / 2
-
-        path.move(to: CGPoint(x: centerX - stemHalf, y: stemTop))
-        path.addLine(to: CGPoint(x: centerX, y: stemTop + Self.stemHeight))
-        path.addLine(to: CGPoint(x: centerX + stemHalf, y: stemTop))
-        path.close()
-
-        return path.cgPath
-    }
-
     // MARK: - Public API
 
-    /// Shows the popup above the given key frame, with the stem pointing down
-    /// at the key's top edge. Scales and fades in with a spring animation.
-    func show(for glyph: String, anchoredAbove keyFrameInHost: CGRect, in host: UIView) {
-        let ourWidth = Self.bubbleWidth
-        let ourHeight = Self.bubbleHeight + Self.stemHeight
-        let ourX = keyFrameInHost.midX - ourWidth / 2
-        let ourY = keyFrameInHost.minY - ourHeight
+    /// Shows the popup above the given key frame, centered horizontally and
+    /// positioned just above the key with a small gap.
+    func show(for glyph: String, anchoredAbove keyFrame: CGRect) {
+        let width = max(keyFrame.width * Self.widthFactor, 0)
+        let height = max(keyFrame.height * Self.heightFactor, 0)
+        let x = keyFrame.midX - width / 2
+        let y = keyFrame.minY - height - Self.gapAboveKey
 
-        frame = CGRect(x: ourX, y: ourY, width: ourWidth, height: ourHeight)
+        frame = CGRect(x: x, y: y, width: width, height: height)
         glyphLabel.text = glyph
 
         isHidden = false
