@@ -381,7 +381,7 @@ actor StreamingAudioRecorder {
         converterHolder: ConverterHolder,
         targetFormat: AVAudioFormat,
         vad: VADContext,
-        handler: ChunkHandler
+        handler: @escaping ChunkHandler
     ) {
         // --- Lazy converter construction / route-change rebuild ---
         // Log a warning if the format changed since the previous buffer.
