@@ -162,6 +162,7 @@ struct DebugLogView: View {
     @State private var pendingDeleteCount: Int = 0
     @State private var showDeleteFeedback = false
     @State private var deleteFeedbackText: String = ""
+    @State private var missedUpdates = false
     private let pageSize = 200
 
     private var selectedOrFilteredLines: [LogLine] {
@@ -170,9 +171,9 @@ struct DebugLogView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            pathDisplay
             levelFilter
             componentTimeFilter
+            searchField
             if !selectedIDs.isEmpty || !expandedKeys.isEmpty {
                 statusBanner
             }
@@ -181,7 +182,6 @@ struct DebugLogView: View {
         .navigationTitle("Debug Log")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
-        .searchable(text: $searchText, prompt: "Search logs")
         .confirmationDialog("Clear crash reports?",
                             isPresented: $showClearCrashConfirmation,
                             titleVisibility: .visible) {
@@ -210,6 +210,15 @@ struct DebugLogView: View {
         .onChange(of: selectedFilter) { _, _ in refresh() }
         .onChange(of: componentFilter) { _, _ in refresh() }
         .onChange(of: timeRange) { _, _ in refresh() }
+        .onChange(of: expandedKeys) { _, newKeys in
+            if newKeys.isEmpty { refreshGuard() }
+        }
+        .onChange(of: selectedIDs) { _, newIDs in
+            if newIDs.isEmpty { refreshGuard() }
+        }
+        .onChange(of: expandedReportID) { _, newValue in
+            if newValue == nil { refreshGuard() }
+        }
         .onAppear(perform: refresh)
         .overlay(alignment: .bottom) {
             if showCopiedConfirmation {
@@ -221,14 +230,6 @@ struct DebugLogView: View {
     }
 
     // MARK: - View Components
-
-    private var pathDisplay: some View {
-        Text(FileLogger.fileURL()?.path ?? "log destination unavailable")
-            .font(.system(.caption2, design: .monospaced))
-            .foregroundColor(.secondary)
-            .padding(.horizontal)
-            .padding(.vertical, 4)
-    }
 
     private var levelFilter: some View {
         Picker("Level", selection: $selectedFilter) {
@@ -263,6 +264,31 @@ struct DebugLogView: View {
         }
         .padding(.horizontal)
         .padding(.bottom, 4)
+    }
+
+    private var searchField: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundColor(.secondary)
+            TextField("Search logs", text: $searchText)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(.systemGray6))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal)
+        .padding(.vertical, 4)
     }
 
     private var statusBanner: some View {
@@ -319,9 +345,24 @@ struct DebugLogView: View {
             )
         ) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Raw Payload")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                HStack {
+                    Text("Raw Payload")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Button {
+                        copyCrashReport(report)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                    ShareLink(item: scrubPII ? LogScrubber.scrub(report.rawJSON) : report.rawJSON) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+                }
                 ScrollView(.horizontal) {
                     Text(LogScrubber.scrub(report.rawJSON))
                         .font(.system(.caption2, design: .monospaced))
@@ -575,8 +616,17 @@ struct DebugLogView: View {
     // MARK: - Actions
 
     private func refreshGuard() {
-        guard selectedIDs.isEmpty, expandedKeys.isEmpty else { return }
-        incrementalRefresh()
+        let paused = !selectedIDs.isEmpty || !expandedKeys.isEmpty || expandedReportID != nil
+        guard !paused else {
+            missedUpdates = true
+            return
+        }
+        if missedUpdates {
+            missedUpdates = false
+            refresh()
+        } else {
+            incrementalRefresh()
+        }
     }
 
     private func refresh() {
@@ -664,6 +714,16 @@ struct DebugLogView: View {
         if scrubPII {
             text = LogScrubber.scrub(text)
         }
+        UIPasteboard.general.string = text
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        withAnimation { showCopiedConfirmation = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            withAnimation { showCopiedConfirmation = false }
+        }
+    }
+
+    private func copyCrashReport(_ report: MetricReport) {
+        let text = scrubPII ? LogScrubber.scrub(report.rawJSON) : report.rawJSON
         UIPasteboard.general.string = text
         UINotificationFeedbackGenerator().notificationOccurred(.success)
         withAnimation { showCopiedConfirmation = true }
