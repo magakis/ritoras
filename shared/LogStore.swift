@@ -1,6 +1,11 @@
 import Foundation
 import SQLite3
 
+/// Tells sqlite3_bind_text to copy the bound string (safe under ARC).
+/// SQLITE_STATIC (nil) would assume the pointer stays valid until step/reset,
+/// but ARC may release the source NSString before sqlite3_step reads it.
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
 // MARK: - Notifications
 
 extension Notification.Name {
@@ -365,8 +370,8 @@ final class LogStore {
         let messageNS = message as NSString
         let rawNS = raw as NSString
 
-        sqlite3_bind_text(stmt, 3, componentNS.utf8String, -1, nil)  // SQLITE_STATIC
-        sqlite3_bind_text(stmt, 4, messageNS.utf8String, -1, nil)    // SQLITE_STATIC
+        sqlite3_bind_text(stmt, 3, componentNS.utf8String, -1, SQLITE_TRANSIENT)  // SQLITE_TRANSIENT
+        sqlite3_bind_text(stmt, 4, messageNS.utf8String, -1, SQLITE_TRANSIENT)    // SQLITE_TRANSIENT
 
         if let payload = payload,
            JSONSerialization.isValidJSONObject(payload),
@@ -374,12 +379,12 @@ final class LogStore {
                                                           options: [.sortedKeys]),
            let payloadStr = String(data: payloadData, encoding: .utf8) {
             let payloadNS = payloadStr as NSString
-            sqlite3_bind_text(stmt, 5, payloadNS.utf8String, -1, nil)  // SQLITE_STATIC
+            sqlite3_bind_text(stmt, 5, payloadNS.utf8String, -1, SQLITE_TRANSIENT)  // SQLITE_TRANSIENT
         } else {
             sqlite3_bind_null(stmt, 5)
         }
 
-        sqlite3_bind_text(stmt, 6, rawNS.utf8String, -1, nil)  // SQLITE_STATIC
+        sqlite3_bind_text(stmt, 6, rawNS.utf8String, -1, SQLITE_TRANSIENT)  // SQLITE_TRANSIENT
 
         let rc = sqlite3_step(stmt)
         if rc != SQLITE_DONE {
@@ -485,7 +490,7 @@ final class LogStore {
                 sqlite3_bind_int64(stmt, idx, val)
             case .text(let val):
                 let ns = val as NSString
-                sqlite3_bind_text(stmt, idx, ns.utf8String, -1, nil)   // SQLITE_STATIC
+                sqlite3_bind_text(stmt, idx, ns.utf8String, -1, SQLITE_TRANSIENT)   // SQLITE_TRANSIENT
             }
         }
 
@@ -607,7 +612,7 @@ final class LogStore {
                 sqlite3_bind_int64(stmt, idx, val)
             case .text(let val):
                 let ns = val as NSString
-                sqlite3_bind_text(stmt, idx, ns.utf8String, -1, nil)
+                sqlite3_bind_text(stmt, idx, ns.utf8String, -1, SQLITE_TRANSIENT)
             }
         }
 
@@ -673,6 +678,125 @@ final class LogStore {
 
         // Passive checkpoint
         exec("PRAGMA wal_checkpoint(PASSIVE);")
+    }
+
+    // MARK: - Delete
+
+    /// Deletes rows matching the given filters. Returns the number of rows deleted.
+    /// Uses the same filter logic as `recent()` — pass the same parameters to target the "visible" set.
+    func deleteFiltered(levels: Set<LogLevel>? = nil,
+                        components: Set<LogComponent>? = nil,
+                        sinceNs: Int64? = nil,
+                        search: String? = nil) -> Int {
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            return _deleteFiltered(levels: levels, components: components,
+                                   sinceNs: sinceNs, search: search)
+        } else {
+            return queue.sync {
+                self._deleteFiltered(levels: levels, components: components,
+                                     sinceNs: sinceNs, search: search)
+            }
+        }
+    }
+
+    private func _deleteFiltered(levels: Set<LogLevel>? = nil,
+                                  components: Set<LogComponent>? = nil,
+                                  sinceNs: Int64? = nil,
+                                  search: String? = nil) -> Int {
+        ensureOpen()
+        guard let db = db else { return 0 }
+
+        var sql = "DELETE FROM log WHERE 1=1"
+        var params: [QueryParam] = []
+
+        if let levels = levels, !levels.isEmpty {
+            let placeholders = levels.map { _ in "?" }.joined(separator: ",")
+            sql += " AND level IN (\(placeholders))"
+            for level in levels {
+                params.append(.int(Int32(Self.intFromLevel(level))))
+            }
+        }
+        if let components = components, !components.isEmpty {
+            let placeholders = components.map { _ in "?" }.joined(separator: ",")
+            sql += " AND component IN (\(placeholders))"
+            for comp in components {
+                params.append(.text(comp.rawValue))
+            }
+        }
+        if let sinceNs = sinceNs {
+            sql += " AND ts_ns >= ?"
+            params.append(.int64(sinceNs))
+        }
+        if let search = search, !search.isEmpty {
+            let sanitized = sanitizeFTS5(search)
+            sql += " AND id IN (SELECT rowid FROM log_fts WHERE message MATCH ?)"
+            params.append(.text(sanitized))
+        }
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt = stmt else {
+            recordDiagnostic("deleteFiltered prepare failed: \(String(cString: sqlite3_errmsg(db)))")
+            return 0
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        for (i, param) in params.enumerated() {
+            let idx = Int32(i + 1)
+            switch param {
+            case .int(let val):
+                sqlite3_bind_int(stmt, idx, val)
+            case .int64(let val):
+                sqlite3_bind_int64(stmt, idx, val)
+            case .text(let val):
+                let ns = val as NSString
+                sqlite3_bind_text(stmt, idx, ns.utf8String, -1, SQLITE_TRANSIENT)
+            }
+        }
+
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            recordDiagnostic("deleteFiltered step failed: \(String(cString: sqlite3_errmsg(db)))")
+            return 0
+        }
+
+        let count = Int(sqlite3_changes(db))
+        exec("PRAGMA wal_checkpoint(PASSIVE);")
+        return count
+    }
+
+    /// Deletes rows with ts_ns older than the given cutoff. Returns count deleted.
+    func deleteOlderThan(tsNs: Int64) -> Int {
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            return _deleteOlderThan(tsNs: tsNs)
+        } else {
+            return queue.sync {
+                self._deleteOlderThan(tsNs: tsNs)
+            }
+        }
+    }
+
+    private func _deleteOlderThan(tsNs: Int64) -> Int {
+        ensureOpen()
+        guard let db = db else { return 0 }
+
+        let sql = "DELETE FROM log WHERE ts_ns < ?"
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt = stmt else {
+            recordDiagnostic("deleteOlderThan prepare failed: \(String(cString: sqlite3_errmsg(db)))")
+            return 0
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        sqlite3_bind_int64(stmt, 1, tsNs)
+
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            recordDiagnostic("deleteOlderThan step failed: \(String(cString: sqlite3_errmsg(db)))")
+            return 0
+        }
+
+        let count = Int(sqlite3_changes(db))
+        exec("PRAGMA wal_checkpoint(PASSIVE);")
+        return count
     }
 }
 
