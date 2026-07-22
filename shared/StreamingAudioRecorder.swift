@@ -440,14 +440,15 @@ actor StreamingAudioRecorder {
         }
         let status = converter.convert(to: outputBuffer, error: &convError, withInputFrom: inputBlock)
         switch status {
+        case .haveData:
+            break
         case .error:
             let detail = convError.map { $0.localizedDescription } ?? "unknown error"
             FileLogger.shared.error(.audio, "Converter error: \(detail)")
             return
-        case .haveData, .endOfStream, .inputRanOut:
-            break
         @unknown default:
-            break
+            // .endOfStream or any future status — drop this buffer
+            return
         }
 
         let convertedLength = Int(outputBuffer.frameLength)
