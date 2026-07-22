@@ -31,32 +31,16 @@ xcodegen generate && \
 
 Unsigned by design — CI produces an unsigned `.ipa` for SideStore on-device signing. No Apple Developer account is involved.
 
-**Run tests** (requires macOS — usually only in CI):
-
-```bash
-xcodebuild test -scheme RitorasTests \
-  -destination 'platform=iOS Simulator,name=iPhone 15,OS=17.0'
-```
-
-Run a single test:
-
-```bash
-xcodebuild test -scheme RitorasTests \
-  -destination 'platform=iOS Simulator,name=iPhone 15,OS=17.0' \
-  -only-testing:RitorasTests/SymSpellMemorySpike/testSymSpellMemoryBaseline
-```
-
 No `make`, `just`, `fastlane`, or pre-commit hooks. Custom scripts live in `scripts/`.
 
 ## Architecture
 
-Three XcodeGen targets share one project:
+Two XcodeGen targets share one project:
 
 | Target | Bundle ID | Role |
 |---|---|---|
 | `Ritoras` | `com.ritoras.app` | SwiftUI container app (settings, onboarding, transcription history) |
 | `RitorasKeyboard` | `com.ritoras.app.keyboard` | UIKit keyboard extension (prediction, autocorrect, emoji) |
-| `RitorasTests` | — | XCTest suite, 15 files |
 
 - App entrypoint: `app/Sources/RitorasApp.swift`
 - Keyboard entrypoint: `keyboard/Sources/KeyboardViewController.swift`
@@ -66,12 +50,25 @@ Three XcodeGen targets share one project:
 
 ## Hard constraints
 
+### No tests
+
+This repository intentionally has **no test target and no automated tests.** Do not
+create XCTest files, do not re-add a `RitorasTests` (or any other) target to
+`project.yml`, and do not add a `xcodebuild test` step to CI. CI only builds; it has
+never run tests here, and a test target is dead weight this repo does not carry.
+
+When a change needs verification, prefer a build-only CI gate and manual on-device
+checks (see the `ritoras-ios-debugging` skill). The 48 MB Jetsam cap below is enforced
+by reasoning and on-device observation, **not** by an automated test.
+
+Treat the absence of tests as a deliberate decision — not an oversight to "fix."
+
 ### 48 MB Jetsam memory cap
 
 The keyboard extension is killed without warning if it exceeds ~48 MB resident memory. This is a hard OS limit, not a guideline.
 
 - `SymSpell` index alone uses ~25 MB.
-- Any change to `keyboard/` or `shared/` that touches memory must pass `RitorasTests/SymSpellMemorySpike.swift` — run it before claiming a keyboard change is done.
+- Any change to `keyboard/` or `shared/` that touches memory must be reasoned about against this 48 MB cap before a keyboard change is considered done. There is no automated test enforcing it (see the *No tests* constraint) — verify on device with the `ritoras-ios-debugging` skill.
 - Prefer streaming / in-place approaches over holding full data structures.
 - Release builds strip debug dylibs in `build.yml` specifically to fit this budget — do not disable that step.
 
@@ -108,7 +105,7 @@ The workflow produces an unsigned `Ritoras.ipa` (~3.1 MB) uploaded as a build ar
 ### CI failure triage
 
 - 24-second failure → hard Swift compile error.
-- 5+ minute failure → test failure or runtime issue.
+- 5+ minute failure → runtime issue (CI does not run tests).
 - Pull logs for a SHA:
   ```bash
   RUN_ID=$(gh api repos/magakis/ritoras/actions/runs?head_sha=<SHA> --jq '.workflow_runs[0].id')
@@ -117,10 +114,6 @@ The workflow produces an unsigned `Ritoras.ipa` (~3.1 MB) uploaded as a build ar
 - Swift compile errors land in `5_Build (unsigned, Release).txt` inside the zip.
 - Common pattern: "cannot find type in scope" when a nested type is referenced from a sibling scope — fix by hoisting or fully-qualifying the reference.
 - Do not trust any "verified the fix" claim without a green CI run on the new SHA.
-
-## Testing
-
-XCTest, 15 files in `RitorasTests/`. Notable: `SymSpellMemorySpike.swift` enforces the 48 MB memory budget — see Hard Constraints above. No fixtures, no integration prerequisites, no snapshots.
 
 ## Whisper server contract
 

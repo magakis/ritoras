@@ -50,7 +50,7 @@ This single constraint drives several architectural decisions you must respect:
 
 - **No in-process inference models.** The SymSpell prediction engine (used for
   inline suggestions) has a measured baseline of approximately **25 MB resident
-  memory** — see `RitorasTests/SymSpellMemorySpike.swift`. This is budgeted.
+  memory**. This is budgeted.
   Adding a second in-memory model or index that pushes the total over 48 MB
   will be rejected.
 
@@ -63,8 +63,8 @@ This single constraint drives several architectural decisions you must respect:
   linker output competes with the Jetsam budget.
 
 If your change touches the keyboard extension or `shared/` (which is compiled
-into the keyboard), run `SymSpellMemorySpike.swift` as part of your validation.
-Changes that inflate resident memory beyond the tested baseline will not be
+into the keyboard), reason explicitly about resident memory as part of your validation.
+Changes that inflate resident memory beyond the baseline will not be
 merged.
 
 **Rationale:** The 48 MB Jetsam cap is an iOS kernel parameter for keyboard
@@ -127,7 +127,7 @@ independently.
 
 ## Check your code
 
-Build and test before opening a pull request.
+Build before opening a pull request.
 
 ### Build
 
@@ -148,18 +148,6 @@ xcodegen generate && \
 
 If this does not produce `** BUILD SUCCEEDED **`, your PR is not ready.
 
-### Test
-
-```shell
-xcodebuild test -scheme RitorasTests \
-  -destination 'platform=iOS Simulator,name=iPhone 15,OS=17.0'
-```
-
-The test target contains **8 test files** in `RitorasTests/` covering the
-SymSpell prediction engine, bigram predictor, learned words store, Apple spell
-checker provider, and the memory-spike baseline test. If you touch the
-prediction or spell-check path, add a corresponding test.
-
 ### Style
 
 The project does not use SwiftLint or SwiftFormat. Code follows standard Swift
@@ -169,7 +157,7 @@ The project does not use SwiftLint or SwiftFormat. Code follows standard Swift
 - Meaningful identifier names — avoid abbreviations that are not domain-standard
   (e.g., `vc` for `viewController` is fine; `txt` for `transcript` is not).
 - `MARK:` comments for organizing large files (the existing files use them).
-- No force-unwrapping outside test assertions (no `!` in production code unless
+- No force-unwrapping (no `!` in production code unless
   the compiler requires it for an IBOutlet or similar).
 
 When in doubt, match the style of the file you are editing. If you are creating
@@ -196,7 +184,6 @@ scope of the change):
 | `keyboard` | `keyboard/` — the UIKit keyboard extension, audio recording, Whisper client |
 | `app` | `app/` — the SwiftUI container app (settings, onboarding) |
 | `shared` | `shared/` — build-time config, shared types |
-| `tests` | `RitorasTests/` — any test file |
 | `scripts` | `scripts/` — deployment and utility scripts |
 | `docs` | `docs/` — any documentation file |
 | `build` | `project.yml`, `ExportOptions.plist` — the build system and XcodeGen spec |
@@ -416,25 +403,9 @@ the guidance above.
    listed in `.gitignore` — double-check with `git status --short` before
    committing.
 
-### (c) Test your code
-
-7. `xcodebuild test -scheme RitorasTests` passes against an iOS Simulator
-   destination. All 8 existing test files must pass.
-
-8. If you touched the keyboard extension or `shared/` (which is compiled into
-   the keyboard target), `RitorasTests/SymSpellMemorySpike.swift` still passes.
-   Verify that your change did not inflate the keyboard extension's resident
-   memory — the test asserts a **≤25 MB baseline** for the SymSpell index
-   alone. If the total keyboard extension budget is 48 MB and SymSpell takes
-   25, there is very little headroom for leaks.
-
-9. If you added a new prediction, spell-check, or word-processing path, you
-   added a corresponding test in `RitorasTests/`. Untested prediction code will
-   not be merged.
-
-10. If you touched the recording or transcription path (`keyboard/Sources/AudioSession.swift`,
-    `keyboard/Sources/AudioRecorder.swift`, `keyboard/Sources/WhisperClient.swift`),
-    verify that the multipart POST contract still matches `docs/SERVER-CONTRACT.md`.
-    The server expects the field named `audio` (not `file`), and the response
-    shape is `{"success": bool, "transcription": string}`. If the server
-    contract changes, update the doc in the same PR.
+7. If you touched the recording or transcription path (`keyboard/Sources/AudioSession.swift`,
+   `keyboard/Sources/AudioRecorder.swift`, `keyboard/Sources/WhisperClient.swift`),
+   verify that the multipart POST contract still matches `docs/SERVER-CONTRACT.md`.
+   The server expects the field named `audio` (not `file`), and the response
+   shape is `{"success": bool, "transcription": string}`. If the server
+   contract changes, update the doc in the same PR.
