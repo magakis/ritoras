@@ -124,6 +124,50 @@ private final class VADContext: @unchecked Sendable {
     }
 }
 
+// MARK: - Converter Holder (Thread-safe via internal lock)
+
+/// Thread-safe holder for the shared `AVAudioConverter`, protected by
+/// `os_unfair_lock`. Mirrors the `VADContext` locking pattern so the
+/// converter can be read/written from `vadQueue` without actor-isolation
+/// violations or data races against `teardownEngine()`.
+private final class ConverterHolder: @unchecked Sendable {
+    private var unfairLock = os_unfair_lock()
+    private var converter: AVAudioConverter?
+
+    /// Returns the existing converter if its input format matches
+    /// `inputFormat`; otherwise builds a new `AVAudioConverter(from:to:)`,
+    /// stores it, and returns it. Returns `nil` if construction fails.
+    func getOrCreate(inputFormat: AVAudioFormat, outputFormat: AVAudioFormat) -> AVAudioConverter? {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+        if let existing = converter, existing.inputFormat == inputFormat {
+            return existing
+        }
+        guard let c = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+            converter = nil
+            return nil
+        }
+        converter = c
+        return c
+    }
+
+    /// Returns the current converter's input format, or `nil` if no
+    /// converter exists yet. Used only for diagnostic logging.
+    func currentInputFormat() -> AVAudioFormat? {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+        return converter?.inputFormat
+    }
+
+    /// Nils out the stored converter. Safe to call from any thread
+    /// (including the actor's `teardownEngine()`).
+    func invalidate() {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+        converter = nil
+    }
+}
+
 // MARK: - Streaming Audio Recorder
 
 /// Captures microphone audio via `AVAudioEngine`, runs an energy-based VAD
@@ -147,9 +191,9 @@ actor StreamingAudioRecorder {
     private var isRecording = false
     private var onChunk: ChunkHandler?
 
-    /// Reused audio converter for native → 16 kHz mono resampling.
-    /// Created once per `start()`; nil after `stop()`.
-    private var converter: AVAudioConverter?
+    /// Thread-safe holder for the lazy `AVAudioConverter`; access only
+    /// through its lock-protected methods (never actor-isolated `var`).
+    private let converterHolder = ConverterHolder()
 
     /// Tracks whether a tap is installed, enabling idempotent teardown.
     private var tapInstalled = false
@@ -244,22 +288,11 @@ actor StreamingAudioRecorder {
             )
         }
 
-        // 5. Build the converter ONCE (not realtime-safe; never per buffer)
-        guard let converter = AVAudioConverter(from: nativeFormat, to: targetFormat) else {
-            FileLogger.shared.error(.audio,
-                "CRASH-PROOF: Could not create converter from \(nativeFormat.sampleRate)Hz/\(nativeFormat.channelCount)ch to 16kHz/mono")
-            throw StreamingRecorderError.converterSetupFailed(
-                "Cannot convert \(nativeFormat.sampleRate)Hz \(nativeFormat.channelCount)ch → 16kHz mono"
-            )
-        }
-        self.converter = converter
-
         // Capture references for the closure (no actor self capture).
         let handler = onChunk
         let vad = self.vad
         let vadQueue = self.vadQueue
-        let nativeSampleRate = nativeFormat.sampleRate
-        let nativeChannelCount = Int(nativeFormat.channelCount)
+        let converterHolder = self.converterHolder
 
         // 6. Install tap with NATIVE format (REMOVES the format-mismatch crash)
         inputNode.installTap(
@@ -272,43 +305,58 @@ actor StreamingAudioRecorder {
                   let channelData = buffer.floatChannelData else {
                 FileLogger.shared.warn(.audio, "tap callback: invalid buffer",
                                        payload: ["frameLength": frameLength,
-                                                 "hasChannelData": buffer.floatChannelData != nil])
+                                                  "hasChannelData": buffer.floatChannelData != nil])
                 return
             }
 
-            // Capture the delivered buffer's actual sample rate (reflects current hardware route).
-            let deliveredSampleRate = buffer.format.sampleRate
+            // Capture the delivered buffer's format — this is the ground truth
+            // for what the hardware actually delivered.
+            let deliveredFormat = buffer.format
+            let deliveredSampleRate = deliveredFormat.sampleRate
+            let deliveredChannelCount = Int(deliveredFormat.channelCount)
+
+            // A degenerate delivered format (sampleRate 0) would produce
+            // NaN/Inf in the output capacity calculation — guard it out.
+            guard deliveredSampleRate > 0 else { return }
 
             // Copy all channel samples into a flat array (bounded, acceptable on audio thread)
             var samples = [Float]()
-            samples.reserveCapacity(frameLength * nativeChannelCount)
-            for ch in 0..<nativeChannelCount {
+            samples.reserveCapacity(frameLength * deliveredChannelCount)
+            for ch in 0..<deliveredChannelCount {
                 let ptr = UnsafeBufferPointer(start: channelData[ch], count: frameLength)
                 samples.append(contentsOf: ptr)
             }
 
             // Dispatch ALL heavy work (resampling, RMS, VAD, emission) to the serial queue
             vadQueue.async {
-                // Route-change guard: compare the delivered buffer's sample rate against
-                // the converter's fixed input rate. If they differ (e.g. headphones
-                // plugged in mid-session), drop the buffer. Next start() rebuilds the
-                // converter.
-                guard deliveredSampleRate == converter.inputFormat.sampleRate else {
-                    FileLogger.shared.warn(.audio,
-                        "Route change detected — delivered \(deliveredSampleRate)Hz but converter expects \(converter.inputFormat.sampleRate)Hz, dropping buffer")
+                // --- Lazy converter construction / route-change rebuild ---
+                // Log a warning if the format changed since the previous buffer.
+                let oldFormat = converterHolder.currentInputFormat()
+                guard let converter = converterHolder.getOrCreate(
+                    inputFormat: deliveredFormat,
+                    outputFormat: targetFormat
+                ) else {
+                    FileLogger.shared.error(.audio,
+                        "Failed to build AVAudioConverter from delivered format \(deliveredFormat)")
                     return
                 }
+                if let old = oldFormat, old != deliveredFormat {
+                    FileLogger.shared.warn(.audio,
+                        "Format change detected — rebuilt converter",
+                        payload: ["old": "\(old)", "new": "\(deliveredFormat)"])
+                }
 
-                // Build input AVAudioPCMBuffer from the copied flat array
+                // Build input AVAudioPCMBuffer using the delivered format
+                // (must be `isEqual:` to converter.inputFormat).
                 guard let inputBuffer = AVAudioPCMBuffer(
-                    pcmFormat: nativeFormat,
+                    pcmFormat: deliveredFormat,
                     frameCapacity: AVAudioFrameCount(frameLength)
                 ) else {
                     FileLogger.shared.error(.audio, "Failed to allocate converter input buffer")
                     return
                 }
                 inputBuffer.frameLength = AVAudioFrameCount(frameLength)
-                for ch in 0..<nativeChannelCount {
+                for ch in 0..<deliveredChannelCount {
                     let offset = ch * frameLength
                     let dst = inputBuffer.floatChannelData![ch]
                     for i in 0..<frameLength {
@@ -318,7 +366,7 @@ actor StreamingAudioRecorder {
 
                 // Allocate output buffer in target format (16 kHz mono float32)
                 let outputCapacity = AVAudioFrameCount(
-                    ceil(Double(frameLength) * 16000.0 / nativeSampleRate) + 4
+                    ceil(Double(frameLength) * 16000.0 / deliveredSampleRate) + 64
                 )
                 guard let outputBuffer = AVAudioPCMBuffer(
                     pcmFormat: targetFormat,
@@ -328,12 +376,23 @@ actor StreamingAudioRecorder {
                     return
                 }
 
-                // Convert native → 16 kHz mono
-                do {
-                    try converter.convert(to: outputBuffer, from: inputBuffer)
-                } catch {
-                    FileLogger.shared.error(.audio, "Converter error: \(error.localizedDescription)")
+                // Convert native → 16 kHz mono using the block-based API
+                // (the simple convert(to:from:) cannot perform sample-rate conversion,
+                // per Apple's AVAudioConverter.h and TN3136).
+                var convError: NSError?
+                let status = converter.convert(to: outputBuffer, error: &convError, withInputFrom: { _, inStatus in
+                    inStatus.pointee = .haveData
+                    return inputBuffer
+                })
+                switch status {
+                case .error:
+                    let detail = convError.map { $0.localizedDescription } ?? "unknown error"
+                    FileLogger.shared.error(.audio, "Converter error: \(detail)")
                     return
+                case .haveData, .endOfStream, .inputRanOut:
+                    break
+                @unknown default:
+                    break
                 }
 
                 let convertedLength = Int(outputBuffer.frameLength)
@@ -401,7 +460,7 @@ actor StreamingAudioRecorder {
             tapInstalled = false
         }
         engine.stop()
-        converter = nil
+        converterHolder.invalidate()
     }
 
     // MARK: - Stop
