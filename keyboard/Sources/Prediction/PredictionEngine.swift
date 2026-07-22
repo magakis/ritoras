@@ -98,19 +98,36 @@ final class PredictionEngine {
             }
         }
 
-        // — Trigram re-rank —
-        // Boost candidates from non-trigram providers by trigramBoostFactor if
-        // they are common followers of the previous bigram context.
-        if let prev = previousWord?.lowercased(), !prev.isEmpty {
-            if let trigram = providers.compactMap({ $0 as? TrigramProvider }).first,
-               let followers = trigram.followerWordSet(previousWord2: previousWord2, previousWord: previousWord) {
-                allSuggestions = allSuggestions.map { suggestion in
-                    guard suggestion.source != .trigram else { return suggestion }
-                    guard followers.contains(suggestion.text.lowercased()) else { return suggestion }
+        // — KenLM contextual scoring —
+        // Score every mid-word candidate with direct KenLM log-probability and
+        // blend with the SymSpell/Apple score. Replaces the old binary follower-set
+        // boost with true contextual probability for each candidate.
+        if let trigramProvider = providers.compactMap({ $0 as? TrigramProvider }).first(where: { $0.isReady }) {
+            // Phase 1: compute raw log probs for all candidates
+            var scored: [(suggestion: Suggestion, logProb: Double)] = []
+            for s in allSuggestions {
+                let lp = trigramProvider.rawLogProb(
+                    for: s.text,
+                    previousWord: previousWord,
+                    previousWord2: previousWord2
+                ) ?? -10.0
+                scored.append((s, lp))
+            }
+
+            // Phase 2: normalize log probs to [0, 1] relative to the pool
+            let logProbs = scored.map { $0.logProb }
+            if let maxLog = logProbs.max(), let minLog = logProbs.min() {
+                let range = max(maxLog - minLog, 0.001)
+                let blendWeight = SharedConfig.Defaults.kenlmBlendWeight
+
+                // Phase 3: blend SymSpell score with normalized KenLM score
+                allSuggestions = scored.map { item in
+                    let normalizedKenLM = (item.logProb - minLog) / range
+                    let blendedScore = (1.0 - blendWeight) * item.suggestion.score + blendWeight * normalizedKenLM
                     return Suggestion(
-                        text: suggestion.text,
-                        score: min(suggestion.score * SharedConfig.Defaults.trigramBoostFactor, 1.0),
-                        source: suggestion.source
+                        text: item.suggestion.text,
+                        score: blendedScore,
+                        source: item.suggestion.source
                     )
                 }
             }

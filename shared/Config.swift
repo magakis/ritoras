@@ -92,9 +92,10 @@ struct SharedConfig {
         /// uses raw trigram, not interpolated).
         static let trigramWeight: Double = 0.7
 
-        /// Score multiplier applied when a mid-word candidate from another provider
-        /// is also a common trigram follower of the previous context.
-        static let trigramBoostFactor: Double = 1.4
+        /// Blend weight for KenLM contextual scoring of mid-word candidates.
+        /// 0.0 = pure SymSpell/Apple scores, 1.0 = pure KenLM contextual probability.
+        /// Applied after min-max normalization of log probs across the candidate pool.
+        static let kenlmBlendWeight: Double = 0.5
 
         /// Minimum score floor for trigram suggestions to avoid near-zero noise.
         static let trigramReadyMinScore: Double = 0.05

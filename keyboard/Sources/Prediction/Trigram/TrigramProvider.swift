@@ -182,6 +182,33 @@ final class TrigramProvider: SuggestionProvider {
         }
     }
 
+    /// Returns the raw log10 probability of `candidate` given the preceding
+    /// words. Useful for scoring arbitrary candidates (from SymSpell/Apple)
+    /// against the language model without going through the side index.
+    ///
+    /// Returns nil if the provider is not `.ready` or if the candidate is empty.
+    /// The returned value is a log10 probability (always negative, typically -2
+    /// to -8).
+    func rawLogProb(for candidate: String,
+                    previousWord: String?,
+                    previousWord2: String?) -> Double? {
+        let snapshot = readState { state, model, _ in (state, model) }
+        guard snapshot.0 == .ready, let model = snapshot.1 else { return nil }
+
+        var sentence = ""
+        if let prev2 = previousWord2?.lowercased(), !prev2.isEmpty {
+            sentence += prev2 + " "
+        }
+        if let prev1 = previousWord?.lowercased(), !prev1.isEmpty {
+            sentence += prev1 + " "
+        }
+        sentence += candidate.lowercased()
+
+        return sentence.withCString { ptr in
+            kenlm_score_sentence(model, ptr)
+        }
+    }
+
     // MARK: - Helpers
 
     /// Returns the log10 probability of a word given a 2-word context, by
@@ -276,8 +303,9 @@ final class TrigramProvider: SuggestionProvider {
                 return Suggestion(text: word, score: normalized, source: .trigram)
             }
         } else {
-            // Mid-word case: filter followers by prefix, score each, apply
-            // 0.5 multiplier (mirroring BigramPredictor's mid-word discount).
+            // Mid-word case: filter followers by prefix, score each.
+            // Note: KenLM contextual blending for all candidates is handled in
+            // PredictionEngine — no additional discount needed here.
             let prefix = context.lookupWord.lowercased()
             let scored = followers
                 .filter { $0.hasPrefix(prefix) }
@@ -301,7 +329,7 @@ final class TrigramProvider: SuggestionProvider {
                         normalized = max(SharedConfig.Defaults.trigramReadyMinScore,
                                          min(1.0, exp((prob - maxProb) * Self.ln10)))
                     }
-                    return Suggestion(text: word, score: normalized * 0.5, source: .trigram)
+                    return Suggestion(text: word, score: normalized, source: .trigram)
                 }
         }
     }
