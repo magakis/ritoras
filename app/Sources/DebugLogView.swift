@@ -571,10 +571,11 @@ struct DebugLogView: View {
     private func incrementalRefresh() {
         guard let newest = newestSeenId else { refresh(); return }
         let newer = LogStore.shared.recent(
-            limit: pageSize, afterId: newest,
+            limit: pageSize,
             levels: levelFilterToSet(),
             components: componentFilterToSet(),
             sinceNs: timeRangeToSinceNs(),
+            afterId: newest,
             search: searchText.isEmpty ? nil : searchText)
         guard !newer.isEmpty else { return }
         lines.insert(contentsOf: newer, at: 0)
