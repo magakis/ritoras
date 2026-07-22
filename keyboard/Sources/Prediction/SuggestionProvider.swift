@@ -12,7 +12,7 @@ struct SuggestionContext {
     let currentWord: String
     let lookupWord: String
     let previousWord: String?
-    let previousWord2: String? = nil
+    let previousWord2: String?
     let isMidWord: Bool
 }
 
