@@ -19,7 +19,7 @@ targets:
       - path: app
       - path: shared
     dependencies:
-      - sdk: SQLite3.framework
+      - sdk: libsqlite3.tbd
       - target: RitorasKeyboard
         embed: true
     settings:
@@ -47,7 +47,7 @@ targets:
           - "**/*_main.cpp"
       - path: keyboard/Sources/Prediction/Trigram/kenlm_c.cpp
     dependencies:
-      - sdk: SQLite3.framework
+      - sdk: libsqlite3.tbd
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ritoras.app.keyboard
