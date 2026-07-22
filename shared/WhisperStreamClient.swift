@@ -41,7 +41,8 @@ actor WhisperStreamClient {
     ///
     /// - Parameter baseURL: Base URL of the Whisper server, e.g.
     ///   `"http://192.168.1.100:5000"`.
-    init(baseURL: String) {
+    /// - Returns: `nil` if the base URL cannot be parsed into a valid WebSocket URL.
+    init?(baseURL: String) {
         var urlString = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 
         // Rewrite scheme: http → ws, https → wss
@@ -53,15 +54,8 @@ actor WhisperStreamClient {
 
         urlString += "/stream"
 
-        if let parsed = URL(string: urlString) {
-            self.url = parsed
-        } else {
-            // Fallback: connect() will use this URL and throw .networkError
-            // when the WebSocket handshake inevitably fails.  The alternative
-            // would be to throw from init, but that would require a throwing
-            // init, which is not idiomatic for simple value construction.
-            self.url = URL(string: "ws://localhost:5000/stream")!
-        }
+        guard let parsed = URL(string: urlString) else { return nil }
+        self.url = parsed
     }
 
     // MARK: - Connection
@@ -295,7 +289,10 @@ actor WhisperStreamClient {
                 throw WhisperError.timeout
             }
 
-            let result = try await group.next()!
+            guard let result = try await group.next() else {
+                group.cancelAll()
+                throw WhisperError.timeout
+            }
             group.cancelAll()
             return result
         }

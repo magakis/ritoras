@@ -344,17 +344,22 @@ final class DictationViewModel: ObservableObject {
                 if let selected = probeResult {
                     let base = selected.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
                     if !base.isEmpty, config.servers.contains(selected) {
-                        let candidate = WhisperStreamClient(baseURL: base)
-                        do {
-                            try await candidate.connect()
-                            client = candidate
-                            FileLogger.shared.info(.network, "Stream: connected to probe-selected server",
+                        if let candidate = WhisperStreamClient(baseURL: base) {
+                            do {
+                                try await candidate.connect()
+                                client = candidate
+                                FileLogger.shared.info(.network, "Stream: connected to probe-selected server",
+                                                       payload: ["base": base])
+                            } catch {
+                                FileLogger.shared.warn(.network, "Stream: probe-selected server failed",
+                                                       payload: ["base": base, "error": error.localizedDescription])
+                                lastError = error
+                                await candidate.disconnect()
+                            }
+                        } else {
+                            lastError = WhisperError.networkError(URLError(.badURL))
+                            FileLogger.shared.warn(.network, "Stream: invalid probe-selected server URL",
                                                    payload: ["base": base])
-                        } catch {
-                            FileLogger.shared.warn(.network, "Stream: probe-selected server failed",
-                                                   payload: ["base": base, "error": error.localizedDescription])
-                            lastError = error
-                            await candidate.disconnect()
                         }
                         remainingServers = trimmedServers.filter { $0 != base }
                     }
@@ -363,7 +368,12 @@ final class DictationViewModel: ObservableObject {
                 if client == nil {
                     for server in remainingServers {
                         guard !server.isEmpty else { continue }
-                        let candidate = WhisperStreamClient(baseURL: server)
+                        guard let candidate = WhisperStreamClient(baseURL: server) else {
+                            FileLogger.shared.warn(.network, "Stream: invalid server URL",
+                                                   payload: ["base": server])
+                            lastError = WhisperError.networkError(URLError(.badURL))
+                            continue
+                        }
                         do {
                             try await candidate.connect()
                             client = candidate
