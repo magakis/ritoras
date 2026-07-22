@@ -325,103 +325,17 @@ actor StreamingAudioRecorder {
 
             // Dispatch ALL heavy work (resampling, RMS, VAD, emission) to the serial queue
             vadQueue.async {
-                // --- Lazy converter construction / route-change rebuild ---
-                // Log a warning if the format changed since the previous buffer.
-                let oldFormat = converterHolder.currentInputFormat()
-                guard let converter = converterHolder.getOrCreate(
-                    inputFormat: deliveredFormat,
-                    outputFormat: targetFormat
-                ) else {
-                    FileLogger.shared.error(.audio,
-                        "Failed to build AVAudioConverter from delivered format \(deliveredFormat)")
-                    return
-                }
-                if let old = oldFormat, old != deliveredFormat {
-                    FileLogger.shared.warn(.audio,
-                        "Format change detected — rebuilt converter",
-                        payload: ["old": "\(old)", "new": "\(deliveredFormat)"])
-                }
-
-                // Build input AVAudioPCMBuffer using the delivered format
-                // (must be `isEqual:` to converter.inputFormat).
-                guard let inputBuffer = AVAudioPCMBuffer(
-                    pcmFormat: deliveredFormat,
-                    frameCapacity: AVAudioFrameCount(frameLength)
-                ) else {
-                    FileLogger.shared.error(.audio, "Failed to allocate converter input buffer")
-                    return
-                }
-                inputBuffer.frameLength = AVAudioFrameCount(frameLength)
-                for ch in 0..<deliveredChannelCount {
-                    let offset = ch * frameLength
-                    let dst = inputBuffer.floatChannelData![ch]
-                    for i in 0..<frameLength {
-                        dst[i] = samples[offset + i]
-                    }
-                }
-
-                // Allocate output buffer in target format (16 kHz mono float32)
-                let outputCapacity = AVAudioFrameCount(
-                    ceil(Double(frameLength) * 16000.0 / deliveredSampleRate) + 64
+                Self.processTapBuffer(
+                    samples: samples,
+                    frameLength: frameLength,
+                    deliveredFormat: deliveredFormat,
+                    deliveredSampleRate: deliveredSampleRate,
+                    deliveredChannelCount: deliveredChannelCount,
+                    converterHolder: converterHolder,
+                    targetFormat: targetFormat,
+                    vad: vad,
+                    handler: handler
                 )
-                guard let outputBuffer = AVAudioPCMBuffer(
-                    pcmFormat: targetFormat,
-                    frameCapacity: outputCapacity
-                ) else {
-                    FileLogger.shared.error(.audio, "Failed to allocate converter output buffer")
-                    return
-                }
-
-                // Convert native → 16 kHz mono using the block-based API
-                // (the simple convert(to:from:) cannot perform sample-rate conversion,
-                // per Apple's AVAudioConverter.h and TN3136).
-                var convError: NSError?
-                let inputBlock: AVAudioConverterInputBlock = { _, inStatus in
-                    inStatus.pointee = .haveData
-                    return inputBuffer
-                }
-                let status = converter.convert(to: outputBuffer, error: &convError, withInputFrom: inputBlock)
-                switch status {
-                case .error:
-                    let detail = convError.map { $0.localizedDescription } ?? "unknown error"
-                    FileLogger.shared.error(.audio, "Converter error: \(detail)")
-                    return
-                case .haveData, .endOfStream, .inputRanOut:
-                    break
-                @unknown default:
-                    break
-                }
-
-                let convertedLength = Int(outputBuffer.frameLength)
-                guard convertedLength > 0 else { return }
-
-                // Extract converted float samples (always mono at 16 kHz)
-                let outputPtr = UnsafeBufferPointer(
-                    start: outputBuffer.floatChannelData![0],
-                    count: convertedLength
-                )
-                let convertedSamples = Array(outputPtr)
-
-                // RMS computation (off audio thread)
-                var sumSquares: Float = 0
-                for s in convertedSamples {
-                    sumSquares += s * s
-                }
-                let rms = sqrt(sumSquares / Float(convertedSamples.count))
-
-                // VAD processing (locks internally via os_unfair_lock)
-                // frameLength = post-conversion (16 kHz) — VAD tunables are in 16 kHz samples
-                let emission = vad.process(frame: convertedSamples, frameLength: convertedLength, rms: rms)
-
-                // Emit chunk if ready (Task created off the audio thread)
-                if let emission = emission {
-                    FileLogger.shared.debug(.audio, "vadQueue: emission",
-                                            payload: ["chunkId": emission.chunkId,
-                                                      "sampleCount": emission.samples.count])
-                    Task {
-                        await handler(emission.chunkId, emission.samples)
-                    }
-                }
             }
         }
         inputNode.installTap(
@@ -450,6 +364,122 @@ actor StreamingAudioRecorder {
                                          "silenceMs": SharedConfig.Defaults.streamVadSilenceMs,
                                          "minSpeechMs": SharedConfig.Defaults.streamVadMinSpeechMs,
                                          "maxChunkSeconds": SharedConfig.Defaults.streamMaxChunkSeconds])
+    }
+
+    // MARK: - Process Tap Buffer
+
+    /// Processes one buffer of captured audio on the vadQueue: lazily builds or
+    /// reuses an AVAudioConverter, resamples to 16 kHz mono, runs RMS + VAD,
+    /// and emits chunks via the handler. This is a static method so the type
+    /// checker can resolve it independently of the tap closure.
+    private static func processTapBuffer(
+        samples: [Float],
+        frameLength: Int,
+        deliveredFormat: AVAudioFormat,
+        deliveredSampleRate: Double,
+        deliveredChannelCount: Int,
+        converterHolder: ConverterHolder,
+        targetFormat: AVAudioFormat,
+        vad: VADContext,
+        handler: ChunkHandler
+    ) {
+        // --- Lazy converter construction / route-change rebuild ---
+        // Log a warning if the format changed since the previous buffer.
+        let oldFormat = converterHolder.currentInputFormat()
+        guard let converter = converterHolder.getOrCreate(
+            inputFormat: deliveredFormat,
+            outputFormat: targetFormat
+        ) else {
+            FileLogger.shared.error(.audio,
+                "Failed to build AVAudioConverter from delivered format \(deliveredFormat)")
+            return
+        }
+        if let old = oldFormat, old != deliveredFormat {
+            FileLogger.shared.warn(.audio,
+                "Format change detected — rebuilt converter",
+                payload: ["old": "\(old)", "new": "\(deliveredFormat)"])
+        }
+
+        // Build input AVAudioPCMBuffer using the delivered format
+        // (must be `isEqual:` to converter.inputFormat).
+        guard let inputBuffer = AVAudioPCMBuffer(
+            pcmFormat: deliveredFormat,
+            frameCapacity: AVAudioFrameCount(frameLength)
+        ) else {
+            FileLogger.shared.error(.audio, "Failed to allocate converter input buffer")
+            return
+        }
+        inputBuffer.frameLength = AVAudioFrameCount(frameLength)
+        for ch in 0..<deliveredChannelCount {
+            let offset = ch * frameLength
+            let dst = inputBuffer.floatChannelData![ch]
+            for i in 0..<frameLength {
+                dst[i] = samples[offset + i]
+            }
+        }
+
+        // Allocate output buffer in target format (16 kHz mono float32)
+        let outputCapacity = AVAudioFrameCount(
+            ceil(Double(frameLength) * 16000.0 / deliveredSampleRate) + 64
+        )
+        guard let outputBuffer = AVAudioPCMBuffer(
+            pcmFormat: targetFormat,
+            frameCapacity: outputCapacity
+        ) else {
+            FileLogger.shared.error(.audio, "Failed to allocate converter output buffer")
+            return
+        }
+
+        // Convert native → 16 kHz mono using the block-based API
+        // (the simple convert(to:from:) cannot perform sample-rate conversion,
+        // per Apple's AVAudioConverter.h and TN3136).
+        var convError: NSError?
+        let inputBlock: AVAudioConverterInputBlock = { _, inStatus in
+            inStatus.pointee = .haveData
+            return inputBuffer
+        }
+        let status = converter.convert(to: outputBuffer, error: &convError, withInputFrom: inputBlock)
+        switch status {
+        case .error:
+            let detail = convError.map { $0.localizedDescription } ?? "unknown error"
+            FileLogger.shared.error(.audio, "Converter error: \(detail)")
+            return
+        case .haveData, .endOfStream, .inputRanOut:
+            break
+        @unknown default:
+            break
+        }
+
+        let convertedLength = Int(outputBuffer.frameLength)
+        guard convertedLength > 0 else { return }
+
+        // Extract converted float samples (always mono at 16 kHz)
+        let outputPtr = UnsafeBufferPointer(
+            start: outputBuffer.floatChannelData![0],
+            count: convertedLength
+        )
+        let convertedSamples = Array(outputPtr)
+
+        // RMS computation (off audio thread)
+        var sumSquares: Float = 0
+        for s in convertedSamples {
+            sumSquares += s * s
+        }
+        let rms = sqrt(sumSquares / Float(convertedSamples.count))
+
+        // VAD processing (locks internally via os_unfair_lock)
+        // frameLength = post-conversion (16 kHz) — VAD tunables are in 16 kHz samples
+        let emission = vad.process(frame: convertedSamples, frameLength: convertedLength, rms: rms)
+
+        // Emit chunk if ready (Task created off the audio thread)
+        if let emission = emission {
+            FileLogger.shared.debug(.audio, "vadQueue: emission",
+                                    payload: ["chunkId": emission.chunkId,
+                                              "sampleCount": emission.samples.count])
+            Task {
+                await handler(emission.chunkId, emission.samples)
+            }
+        }
     }
 
     // MARK: - Teardown
