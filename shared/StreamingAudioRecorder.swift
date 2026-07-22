@@ -295,11 +295,7 @@ actor StreamingAudioRecorder {
         let converterHolder = self.converterHolder
 
         // 6. Install tap with NATIVE format (REMOVES the format-mismatch crash)
-        inputNode.installTap(
-            onBus: 0,
-            bufferSize: 4096,
-            format: nativeFormat
-        ) { buffer, _ in
+        let tapBlock: AVAudioNodeTapBlock = { buffer, _ in
             let frameLength = Int(buffer.frameLength)
             guard frameLength > 0,
                   let channelData = buffer.floatChannelData else {
@@ -380,10 +376,11 @@ actor StreamingAudioRecorder {
                 // (the simple convert(to:from:) cannot perform sample-rate conversion,
                 // per Apple's AVAudioConverter.h and TN3136).
                 var convError: NSError?
-                let status = converter.convert(to: outputBuffer, error: &convError, withInputFrom: { _, inStatus in
+                let inputBlock: AVAudioConverterInputBlock = { _, inStatus in
                     inStatus.pointee = .haveData
                     return inputBuffer
-                })
+                }
+                let status = converter.convert(to: outputBuffer, error: &convError, withInputFrom: inputBlock)
                 switch status {
                 case .error:
                     let detail = convError.map { $0.localizedDescription } ?? "unknown error"
@@ -427,6 +424,12 @@ actor StreamingAudioRecorder {
                 }
             }
         }
+        inputNode.installTap(
+            onBus: 0,
+            bufferSize: 4096,
+            format: nativeFormat,
+            block: tapBlock
+        )
         tapInstalled = true
 
         // 7. Prepare and start engine
