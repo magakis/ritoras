@@ -480,7 +480,7 @@ recording → tap stop → stop recorder, get m4a URL (P6) → transcribing
 2. Lower prefixLength from 7 to 6 → fewer deletes per word, ~15–20% smaller index.
 3. If still >40 MB after both prunes → **STOP and reassign** — the Swift overhead may be too high for the in-process Jetsam cap.
 
-**To measure:** run `xcodebuild test -scheme RitorasTests -destination 'platform=iOS Simulator,name=iPhone 15,OS=17.0' -configuration Release` and check the console output for "SymSpell Memory Spike" metrics.
+**To measure:** run `xcodebuild test -scheme RitorasTests -destination 'platform=iOS Simulator,name=iPhone 15,OS=17.0' -configuration Release` and check the console output for "SymSpell Memory Spike" metrics. _(Historical — the `RitorasTests` target was removed; measure resident memory on-device instead.)_
 
 ---
 

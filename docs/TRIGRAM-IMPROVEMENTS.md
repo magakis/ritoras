@@ -1,3 +1,5 @@
+> **Status: Superseded.** This repo no longer maintains tests or a test target (see `AGENTS.md` → *No tests*). Items below proposing to re-enable a CI Test step are no longer applicable.
+
 # Trigram Prediction — Improvement Roadmap
 
 **Last updated:** 2026-07-22

@@ -329,12 +329,7 @@ server is unavailable for that session. This is extremely unlikely on iOS
 | `shared/Config.swift` | Constants (`localhostServerPort`, `darwinNotificationName`, `darwinStateChangedNotificationName`) |
 | `shared/DarwinNotifier.swift` | Darwin notification post/observe helpers |
 | `keyboard/Sources/KeyboardView.swift` | KeyboardState enum (idle, openingApp, waiting, waitingConfirm, inserting, error) |
-| `RitorasTests/LocalhostServerTests.swift` | Server unit tests (port 0 for OS-assigned port, stub providers, health/state/result/404 routing) |
-| `RitorasTests/LocalhostClientTests.swift` | Client unit tests (MockURLProtocol, getState/getResult/healthCheck, error mapping, connection refused) |
-| `shared/LogStore.swift` | SQLite-backed log persistence (WAL mode, FTS5 full-text search, 100k-row rotation) |
-| `shared/LogStoreMigration.swift` | One-time import of existing flat-file logs into LogStore |
-| `RitorasTests/LogStoreTests.swift` | LogStore unit tests (insert, query, filter, paginate, rotate, concurrent safety) |
-| `RitorasTests/LogStoreMigrationTests.swift` | Migration unit tests (import, idempotency, resume, archival) |
+_Unit tests previously listed here were removed; this repo no longer maintains a test target (see AGENTS.md)._
 
 ---
 

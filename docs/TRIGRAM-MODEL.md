@@ -896,7 +896,7 @@ The `.github/workflows/build.yml` workflow:
 5. Verifies the keyboard extension is embedded
 6. Uploads `.ipa` and `.app` as build artifacts
 
-**There is no test step in CI.** The test target (`RitorasTests`) has 119
+**There is no test step in CI.** _(The `RitorasTests` target has since been removed entirely; see AGENTS.md No-tests policy.)_ The test target (`RitorasTests`) has 119
 pre-existing compilation errors that have been deferred. To run tests locally
 on macOS:
 
