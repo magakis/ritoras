@@ -85,6 +85,7 @@ class KeyboardViewController: UIInputViewController {
     private var waitTimer: Timer?
     private var errorResetWorkItem: DispatchWorkItem?
     private var suggestionRefreshWorkItem: DispatchWorkItem?
+    private var autocorrectWorkItem: DispatchWorkItem?
     private var pollTimer: Timer?
     private var pollCount = 0
     private var clipboardPollTimer: Timer?
@@ -1193,11 +1194,11 @@ extension KeyboardViewController: KeyboardViewDelegate {
             }
             let isTriggerPunct = SharedConfig.Defaults.autocorrectTriggerPunctuation.contains(s)
             let shouldAutoCorrect = isTriggerPunct && uiMode != .emoji
-            if shouldAutoCorrect {
-                applyAutocorrectIfNeeded()
-            }
             let text = applyShift(to: s)
             insertTargeted(text)
+            if shouldAutoCorrect {
+                requestAsyncAutocorrect(triggerChar: text)
+            }
             if shiftState == .upper {
                 shiftState = .lower
             }
@@ -1245,8 +1246,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
             shiftState = .locked
 
         case .space:
-            applyAutocorrectIfNeeded()
             insertTargeted(" ")
+            requestAsyncAutocorrect(triggerChar: " ")
             recomputeAutoCap()
             scheduleSuggestionRefresh()
             wordOrigin.resetToTyping()
@@ -1255,8 +1256,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
             if inputTarget == .emojiSearch {
                 keyboardView.emojiPanelView.onSearchReturn?()
             } else {
-                applyAutocorrectIfNeeded()
                 insertTargeted("\n")
+                requestAsyncAutocorrect(triggerChar: "\n")
                 recomputeAutoCap()
                 wordOrigin.resetToTyping()
                 scheduleSuggestionRefresh()
@@ -1438,74 +1439,123 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     // MARK: - Autocorrect-on-space
 
-    private func applyAutocorrectIfNeeded() {
+    /// Dispatches an async autocorrect evaluation on the prediction build queue.
+    ///
+    /// The trigger character (space / punct / return) has already been inserted
+    /// by the caller. This method captures a snapshot of the word context on
+    /// the main thread, runs spell-check + engine lookup + scoring off-main,
+    /// then re-validates on the main thread with a strict context guard before
+    /// applying the correction.
+    ///
+    /// Stale results (superseded by further typing, cursor movement, or
+    /// suggestion taps) are silently dropped by the application guard.
+    private func requestAsyncAutocorrect(triggerChar: String) {
+        // --- Synchronous early-return guards (same as today) ---
         guard inputTarget == .hostApp else { return }
-        // User-facing master toggle (read fresh every call, like autoCapitalizationEnabled).
-        guard SharedConfig.autocorrectOnSpaceEnabled() else { return }
+        guard settingsCache.autocorrectOnSpace else { return }
 
-        // Host-field gate (password/search/email/URL fields etc.)
         if AutoCorrectTraits.shouldSuppress(
             keyboardType: textDocumentProxy.keyboardType,
             autocorrectionType: textDocumentProxy.autocorrectionType,
             spellCheckingType: textDocumentProxy.spellCheckingType
         ) { return }
 
-        // Only re-evaluate words the user typed char-by-char.
         guard wordOrigin.current == .typing else { return }
 
-        let context = textDocumentProxy.documentContextBeforeInput ?? ""
-        let extracted = CurrentWordExtractor.extract(from: context)
+        // The trigger has already been inserted. Extract the typed word from
+        // context BEFORE the trigger char was appended.
+        let contextAfterInsert = textDocumentProxy.documentContextBeforeInput ?? ""
+        let contextBeforeTrigger = String(contextAfterInsert.dropLast())
+        let extracted = CurrentWordExtractor.extract(from: contextBeforeTrigger)
 
-        // Skip autocorrect when the word has surrounding punctuation (e.g., `hello"` or `"hello`).
         guard extracted.currentWord == extracted.lookupWord else { return }
-
         guard !extracted.lookupWord.isEmpty,
               let engine = predictionEngine,
               isPredictionEngineReady else { return }
 
-        let isMisspelled: Bool = {
-            let checker = UITextChecker()
-            let nsString = extracted.lookupWord as NSString
-            let range = NSRange(location: 0, length: nsString.length)
-            let misspelledRange = checker.rangeOfMisspelledWord(
-                in: extracted.lookupWord,
-                range: range,
-                startingAt: 0,
-                wrap: false,
-                language: "en-US"
+        // --- Snapshot on main thread (all Sendable) ---
+        let typedWord = extracted.lookupWord
+        let currentWord = extracted.currentWord
+        let previousWord = extracted.previousWord
+        let previousWord2 = extracted.previousWord2
+        let contextAtDispatch = contextAfterInsert  // ends with typedWord + triggerChar
+        let isLearned = LearnedWordsStore.shared.contains(typedWord)
+        let originAtDispatch = wordOrigin.current
+
+        // Defensive: the suffix must match what we expect.
+        guard contextAtDispatch.hasSuffix(typedWord + triggerChar) else { return }
+
+        // Cancel any in-flight autocorrect evaluation (bounds SymSpell
+        // concurrency and avoids wasted CPU).
+        autocorrectWorkItem?.cancel()
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+
+            // --- Off-main: pure compute only ---
+            let isMisspelled: Bool = {
+                let checker = UITextChecker()
+                let nsString = typedWord as NSString
+                let range = NSRange(location: 0, length: nsString.length)
+                let misspelledRange = checker.rangeOfMisspelledWord(
+                    in: typedWord,
+                    range: range,
+                    startingAt: 0,
+                    wrap: false,
+                    language: "en-US"
+                )
+                return misspelledRange.location != NSNotFound
+            }()
+
+            let top = engine.topCorrection(
+                forCurrentWord: currentWord,
+                lookupWord: typedWord,
+                previousWord: previousWord,
+                previousWord2: previousWord2
             )
-            return misspelledRange.location != NSNotFound
-        }()
 
-        let top = engine.topCorrection(
-            forCurrentWord: extracted.currentWord,
-            lookupWord: extracted.lookupWord,
-            previousWord: extracted.previousWord,
-            previousWord2: extracted.previousWord2
-        )
+            let decision = AutocorrectController.evaluate(
+                typedWord: typedWord,
+                origin: originAtDispatch,
+                topCorrection: top,
+                isLearned: isLearned,
+                isMisspelled: isMisspelled
+            )
 
-        let decision = AutocorrectController.evaluate(
-            typedWord: extracted.lookupWord,
-            origin: wordOrigin.current,
-            topCorrection: top,
-            isLearned: LearnedWordsStore.shared.contains(extracted.lookupWord),
-            isMisspelled: isMisspelled
-        )
+            // --- Back to main thread for guard + apply ---
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
 
-        switch decision {
-        case .correct(let typed, let correction):
-            // Delete the typed word and insert the correction.
-            // Same pattern as suggestion-tap handler (lines ~970-976).
-            let deleteCount = typed.count
-            for _ in 0..<deleteCount {
-                deleteTargetedBackward()
+                // Application guard: all three must hold or the result is stale.
+                guard AutocorrectApplicationGuard.shouldApply(
+                    snapshot: AutocorrectAsyncSnapshot(
+                        typedWord: typedWord,
+                        triggerChar: triggerChar
+                    ),
+                    liveContext: textDocumentProxy.documentContextBeforeInput ?? "",
+                    isHostApp: inputTarget == .hostApp,
+                    wordOrigin: wordOrigin.current
+                ) else { return }
+
+                switch decision {
+                case .correct(_, let correction):
+                    // Delete typedWord + triggerChar and re-insert correction + triggerChar.
+                    // Byte-identical to today's synchronous outcome: document ends with
+                    // `correction<triggerChar>` and cursor is at the end.
+                    let deleteCount = typedWord.count + triggerChar.count
+                    for _ in 0..<deleteCount {
+                        deleteTargetedBackward()
+                    }
+                    insertTargeted(correction + triggerChar)
+                    lastAutoCorrection = (typed: typedWord, replacement: correction)
+                case .leaveAsIs:
+                    lastAutoCorrection = nil
+                }
             }
-            insertTargeted(correction)
-            wordOrigin.markAutocorrectApplied()
-            lastAutoCorrection = (typed: typed, replacement: correction)
-        case .leaveAsIs:
-            lastAutoCorrection = nil
         }
+
+        autocorrectWorkItem = workItem
+        predictionBuildQueue.async(execute: workItem)
     }
 
     /// Returns true if the cursor sits immediately after an autocorrect of `word`,

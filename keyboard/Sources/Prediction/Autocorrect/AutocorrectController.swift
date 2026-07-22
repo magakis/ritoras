@@ -6,7 +6,7 @@ enum AutocorrectController {
 
     // MARK: - Decision
 
-    enum Decision: Equatable {
+    enum Decision: Equatable, Sendable {
         /// Autocorrect should replace `typedWord` with `correction`.
         case correct(typedWord: String, correction: String)
         /// Leave the typed word as-is.
