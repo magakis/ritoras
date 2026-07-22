@@ -270,14 +270,21 @@ final class LogStore {
 
     // MARK: - FTS5 query sanitization
 
-    /// Wraps each whitespace-separated token in double quotes to force
-    /// phrase matching and prevent FTS5 operator injection.
-    /// E.g. "OR error" → '"OR" "error"'.
+    /// Converts each whitespace-separated token into a prefix query for FTS5.
+    /// Strips FTS5 syntax characters and lowercases to prevent operator injection.
+    /// Example: "Whis client" → "whis* client*" (both must match as prefixes).
     private func sanitizeFTS5(_ query: String) -> String {
         query.split(separator: " ").map { token in
-            let clean = token.replacingOccurrences(of: "\"", with: "")
-            return "\"\(clean)\""
-        }.joined(separator: " ")
+            let clean = token.lowercased()
+                .replacingOccurrences(of: "\"", with: "")
+                .replacingOccurrences(of: "*", with: "")
+                .replacingOccurrences(of: "(", with: "")
+                .replacingOccurrences(of: ")", with: "")
+                .replacingOccurrences(of: ":", with: "")
+                .replacingOccurrences(of: "-", with: "")
+            guard !clean.isEmpty else { return "" }
+            return "\(clean)*"
+        }.filter { !$0.isEmpty }.joined(separator: " ")
     }
 
     // MARK: - Insert
