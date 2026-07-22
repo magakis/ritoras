@@ -212,12 +212,18 @@ class KeyboardViewController: UIInputViewController {
     /// so the first ~500 ms–2 s of a keyboard session (before the KenLM model
     /// loads) does not block the prediction pipeline.
     private func scheduleTrigramLoad() {
+        FileLogger.shared.warn(.keyboard, "scheduleTrigramLoad called")
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self = self else { return }
+            guard let self = self else {
+                FileLogger.shared.warn(.keyboard, "scheduleTrigramLoad: self deallocated before fire")
+                return
+            }
+            FileLogger.shared.warn(.keyboard, "scheduleTrigramLoad: creating TrigramProvider")
             let trigramProvider = TrigramProvider()
             trigramProvider.warmup { [weak self] success in
                 DispatchQueue.main.async {
                     guard let self = self else { return }
+                    FileLogger.shared.warn(.keyboard, "scheduleTrigramLoad: warmup completed success=\(success), registering provider")
                     self.predictionEngine?.addProvider(trigramProvider)
                     self.trigramProvider = trigramProvider
                     self.keyboardView.refreshSuggestions()

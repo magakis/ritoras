@@ -24,6 +24,10 @@ final class TrigramProvider: SuggestionProvider {
     /// ln(10) — converts log10 differences to natural-log domain for exp().
     private static let ln10 = log(10.0)
 
+    /// Tracks whether we have logged the first successful suggestion (one-time
+    /// diagnostic to confirm the end-to-end trigram → unigram path works).
+    private static var hasLoggedFirstSuggestion = false
+
     // MARK: - State
 
     enum LoadState {
@@ -76,7 +80,7 @@ final class TrigramProvider: SuggestionProvider {
         mutateState { state, _, _ in
             state = .loading
         }
-        FileLogger.shared.info(.prediction, "trigram load started")
+        FileLogger.shared.warn(.prediction, "trigram load started")
         performLoad(completion: completion)
     }
 
@@ -90,7 +94,7 @@ final class TrigramProvider: SuggestionProvider {
         mutateState { state, _, _ in
             state = .loading
         }
-        FileLogger.shared.info(.prediction, "trigram load started")
+        FileLogger.shared.warn(.prediction, "trigram load started")
         performLoad()
     }
 
@@ -145,7 +149,7 @@ final class TrigramProvider: SuggestionProvider {
                 let vocabSize = self.readState { _, model, _ in
                     model.map { kenlm_vocab_size($0) } ?? 0
                 }
-                FileLogger.shared.info(.prediction, "trigram ready (vocab=\(vocabSize))")
+                FileLogger.shared.warn(.prediction, "trigram ready (vocab=\(vocabSize))")
             } else {
                 let reason: String
                 if model == nil { reason = "kenlm_load returned nil" }
@@ -221,13 +225,32 @@ final class TrigramProvider: SuggestionProvider {
             return []
         }
 
-        guard let prev = context.previousWord?.lowercased(), !prev.isEmpty,
-              let prev2 = context.previousWord2?.lowercased(), !prev2.isEmpty else {
+        guard let prev = context.previousWord?.lowercased(), !prev.isEmpty else {
             return []
         }
 
-        let followers = index.followers(for: prev2, previousWord: prev)
+        // Try trigram context first (two preceding words)
+        var prev2 = ""
+        var followers: [String] = []
+        if let p2 = context.previousWord2?.lowercased(), !p2.isEmpty {
+            prev2 = p2
+            followers = index.followers(for: prev2, previousWord: prev)
+        }
+
+        // Fall back to unigram context (one preceding word) if trigram missed
+        // or no trigram context is available.
+        if followers.isEmpty {
+            followers = index.followersUnigram(for: prev)
+        }
+
         guard !followers.isEmpty else { return [] }
+
+        // One-time diagnostic: log the first successful suggestion context
+        if !Self.hasLoggedFirstSuggestion {
+            Self.hasLoggedFirstSuggestion = true
+            let logPrev2 = context.previousWord2?.lowercased() ?? "(nil)"
+            FileLogger.shared.warn(.prediction, "trigram first suggestion: \"\(logPrev2) \(prev)\" → \(followers.prefix(3))")
+        }
 
         if context.lookupWord.isEmpty {
             // Empty-prefix case: score all followers (or up to a reasonable

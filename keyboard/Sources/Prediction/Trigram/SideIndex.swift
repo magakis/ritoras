@@ -23,4 +23,11 @@ struct SideIndex {
         guard let prev2 = previousWord2, let prev1 = previousWord else { return [] }
         return entries["\(prev2.lowercased()) \(prev1.lowercased())"] ?? []
     }
+
+    /// Returns followers for a single previous word (bigram fallback when trigram
+    /// context is unavailable or misses). Looks up the lowercased word directly
+    /// in the side index, which now contains unigram entries alongside bigrams.
+    func followersUnigram(for previousWord: String) -> [String] {
+        return entries[previousWord.lowercased()] ?? []
+    }
 }
