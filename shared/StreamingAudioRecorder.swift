@@ -6,6 +6,8 @@ import os
 enum StreamingRecorderError: LocalizedError {
     case alreadyStreaming
     case engineStartFailed(Error)
+    case nativeFormatUnavailable(String)
+    case converterSetupFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +15,10 @@ enum StreamingRecorderError: LocalizedError {
             return "Streaming recorder is already running."
         case .engineStartFailed(let error):
             return "Failed to start audio engine: \(error.localizedDescription)"
+        case .nativeFormatUnavailable(let reason):
+            return "Audio input native format unavailable: \(reason)"
+        case .converterSetupFailed(let reason):
+            return "Failed to set up audio converter: \(reason)"
         }
     }
 }
@@ -141,6 +147,13 @@ actor StreamingAudioRecorder {
     private var isRecording = false
     private var onChunk: ChunkHandler?
 
+    /// Reused audio converter for native → 16 kHz mono resampling.
+    /// Created once per `start()`; nil after `stop()`.
+    private var converter: AVAudioConverter?
+
+    /// Tracks whether a tap is installed, enabling idempotent teardown.
+    private var tapInstalled = false
+
     /// Serial queue for audio processing off the real-time audio thread.
     private let vadQueue = DispatchQueue(label: "com.ritoras.streaming-vad", qos: .userInitiated)
 
@@ -199,7 +212,7 @@ actor StreamingAudioRecorder {
 
         self.onChunk = onChunk
 
-        // 3. Set up engine tap at 16 kHz mono float32
+        // 3. Build the 16 kHz mono target format (converter output)
         guard let targetFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: 16000,
@@ -215,24 +228,44 @@ actor StreamingAudioRecorder {
 
         let inputNode = engine.inputNode
 
-        // Verify the input node has a valid audio route
-        guard inputNode.outputFormat(forBus: 0).sampleRate > 0 else {
+        // 4. Get the input node's NATIVE format
+        let nativeFormat = inputNode.outputFormat(forBus: 0)
+        guard nativeFormat.sampleRate > 0 else {
             FileLogger.shared.error(.audio, "CRASH-PROOF: Audio input unavailable (no microphone route)")
             throw StreamingRecorderError.engineStartFailed(
                 NSError(domain: "StreamingAudioRecorder", code: 2,
                         userInfo: [NSLocalizedDescriptionKey: "Audio input unavailable (no microphone route)"])
             )
         }
+        guard nativeFormat.channelCount >= 1 else {
+            FileLogger.shared.error(.audio, "CRASH-PROOF: Audio input has no channels")
+            throw StreamingRecorderError.nativeFormatUnavailable(
+                "Input node has \(nativeFormat.channelCount) channels"
+            )
+        }
 
-        // Capture references for the @Sendable closure (no actor self capture).
+        // 5. Build the converter ONCE (not realtime-safe; never per buffer)
+        guard let converter = AVAudioConverter(from: nativeFormat, to: targetFormat) else {
+            FileLogger.shared.error(.audio,
+                "CRASH-PROOF: Could not create converter from \(nativeFormat.sampleRate)Hz/\(nativeFormat.channelCount)ch to 16kHz/mono")
+            throw StreamingRecorderError.converterSetupFailed(
+                "Cannot convert \(nativeFormat.sampleRate)Hz \(nativeFormat.channelCount)ch → 16kHz mono"
+            )
+        }
+        self.converter = converter
+
+        // Capture references for the closure (no actor self capture).
         let handler = onChunk
         let vad = self.vad
         let vadQueue = self.vadQueue
+        let nativeSampleRate = nativeFormat.sampleRate
+        let nativeChannelCount = Int(nativeFormat.channelCount)
 
+        // 6. Install tap with NATIVE format (REMOVES the format-mismatch crash)
         inputNode.installTap(
             onBus: 0,
             bufferSize: 4096,
-            format: targetFormat
+            format: nativeFormat
         ) { buffer, _ in
             let frameLength = Int(buffer.frameLength)
             guard frameLength > 0,
@@ -243,29 +276,86 @@ actor StreamingAudioRecorder {
                 return
             }
 
-            FileLogger.shared.debug(.audio, "tap callback: valid buffer",
-                                    payload: ["frameLength": frameLength])
+            // Capture the delivered buffer's actual sample rate (reflects current hardware route).
+            let deliveredSampleRate = buffer.format.sampleRate
 
-            let floatPtr = UnsafeBufferPointer(start: channelData[0], count: frameLength)
+            // Copy all channel samples into a flat array (bounded, acceptable on audio thread)
+            var samples = [Float]()
+            samples.reserveCapacity(frameLength * nativeChannelCount)
+            for ch in 0..<nativeChannelCount {
+                let ptr = UnsafeBufferPointer(start: channelData[ch], count: frameLength)
+                samples.append(contentsOf: ptr)
+            }
 
-            // Copy samples on the audio thread (bounded allocation, acceptable)
-            let samples = Array(floatPtr)
-
-            FileLogger.shared.debug(.audio, "tap callback: dispatching samples to vadQueue",
-                                    payload: ["sampleCount": samples.count])
-
-            // Dispatch ALL heavy work (RMS, VAD, chunk emission) to the serial
-            // queue — no locks, no closures-with-ARC, no Tasks on the audio thread.
+            // Dispatch ALL heavy work (resampling, RMS, VAD, emission) to the serial queue
             vadQueue.async {
+                // Route-change guard: compare the delivered buffer's sample rate against
+                // the converter's fixed input rate. If they differ (e.g. headphones
+                // plugged in mid-session), drop the buffer. Next start() rebuilds the
+                // converter.
+                guard deliveredSampleRate == converter.inputFormat.sampleRate else {
+                    FileLogger.shared.warn(.audio,
+                        "Route change detected — delivered \(deliveredSampleRate)Hz but converter expects \(converter.inputFormat.sampleRate)Hz, dropping buffer")
+                    return
+                }
+
+                // Build input AVAudioPCMBuffer from the copied flat array
+                guard let inputBuffer = AVAudioPCMBuffer(
+                    pcmFormat: nativeFormat,
+                    frameCapacity: AVAudioFrameCount(frameLength)
+                ) else {
+                    FileLogger.shared.error(.audio, "Failed to allocate converter input buffer")
+                    return
+                }
+                inputBuffer.frameLength = AVAudioFrameCount(frameLength)
+                for ch in 0..<nativeChannelCount {
+                    let offset = ch * frameLength
+                    let dst = inputBuffer.floatChannelData![ch]
+                    for i in 0..<frameLength {
+                        dst[i] = samples[offset + i]
+                    }
+                }
+
+                // Allocate output buffer in target format (16 kHz mono float32)
+                let outputCapacity = AVAudioFrameCount(
+                    ceil(Double(frameLength) * 16000.0 / nativeSampleRate) + 4
+                )
+                guard let outputBuffer = AVAudioPCMBuffer(
+                    pcmFormat: targetFormat,
+                    frameCapacity: outputCapacity
+                ) else {
+                    FileLogger.shared.error(.audio, "Failed to allocate converter output buffer")
+                    return
+                }
+
+                // Convert native → 16 kHz mono
+                do {
+                    try converter.convert(to: outputBuffer, from: inputBuffer)
+                } catch {
+                    FileLogger.shared.error(.audio, "Converter error: \(error.localizedDescription)")
+                    return
+                }
+
+                let convertedLength = Int(outputBuffer.frameLength)
+                guard convertedLength > 0 else { return }
+
+                // Extract converted float samples (always mono at 16 kHz)
+                let outputPtr = UnsafeBufferPointer(
+                    start: outputBuffer.floatChannelData![0],
+                    count: convertedLength
+                )
+                let convertedSamples = Array(outputPtr)
+
                 // RMS computation (off audio thread)
                 var sumSquares: Float = 0
-                for s in samples {
+                for s in convertedSamples {
                     sumSquares += s * s
                 }
-                let rms = sqrt(sumSquares / Float(samples.count))
+                let rms = sqrt(sumSquares / Float(convertedSamples.count))
 
                 // VAD processing (locks internally via os_unfair_lock)
-                let emission = vad.process(frame: samples, frameLength: frameLength, rms: rms)
+                // frameLength = post-conversion (16 kHz) — VAD tunables are in 16 kHz samples
+                let emission = vad.process(frame: convertedSamples, frameLength: convertedLength, rms: rms)
 
                 // Emit chunk if ready (Task created off the audio thread)
                 if let emission = emission {
@@ -278,13 +368,14 @@ actor StreamingAudioRecorder {
                 }
             }
         }
+        tapInstalled = true
 
-        // 4. Prepare and start engine
+        // 7. Prepare and start engine
         engine.prepare()
         do {
             try engine.start()
         } catch {
-            inputNode.removeTap(onBus: 0)
+            teardownEngine()
             self.onChunk = nil
             AudioSession.deactivate()
             throw StreamingRecorderError.engineStartFailed(error)
@@ -299,6 +390,20 @@ actor StreamingAudioRecorder {
                                          "maxChunkSeconds": SharedConfig.Defaults.streamMaxChunkSeconds])
     }
 
+    // MARK: - Teardown
+
+    /// Idempotent engine teardown: removes the tap (if installed) and stops the
+    /// engine. Safe to call multiple times; `removeTap` does not raise an
+    /// NSException when no tap is installed.
+    private func teardownEngine() {
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        engine.stop()
+        converter = nil
+    }
+
     // MARK: - Stop
 
     /// Stops streaming audio capture and flushes any in-progress accumulator
@@ -307,9 +412,8 @@ actor StreamingAudioRecorder {
         guard isRecording else { return }
         isRecording = false
 
-        // Remove tap first to guarantee no more callbacks are enqueued
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        // Tear down engine and tap idempotently
+        teardownEngine()
         AudioSession.deactivate()
 
         // Flush any in-progress accumulator. Route through vadQueue so it
