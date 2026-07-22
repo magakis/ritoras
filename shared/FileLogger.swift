@@ -64,21 +64,6 @@ final class FileLogger {
         forceKeyboardModeForTesting || Bundle.main.bundleIdentifier?.hasSuffix(".keyboard") ?? false
     }
 
-    /// Recursively scrubs all String values in a payload dictionary,
-    /// mirroring the pattern from PayloadFormatter.format(value:scrubPII:).
-    private static func scrubPayload(_ payload: [String: Any]?) -> [String: Any]? {
-        guard let payload = payload else { return nil }
-        return payload.reduce(into: [String: Any]()) { result, pair in
-            if let str = pair.value as? String {
-                result[pair.key] = LogScrubber.scrub(str)
-            } else if let dict = pair.value as? [String: Any] {
-                result[pair.key] = scrubPayload(dict)
-            } else {
-                result[pair.key] = pair.value
-            }
-        }
-    }
-
     private static func resolveURL() -> (url: URL?, usingFallback: Bool) {
         if let container = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: SharedConfig.Defaults.appGroupId
@@ -176,22 +161,10 @@ final class FileLogger {
 
         // Phase 4: container app writes to LogStore ONLY.
         // Keyboard extension writes flat-file ONLY.
+        // DB stores originals unscrubbed. Scrubbing happens at export (copy/share)
+        // in DebugLogView, controlled by the scrubPII toggle.
         if !Self.isKeyboardExtension {
-            let scrubbedMessage = LogScrubber.scrub(message)
-            let scrubbedPayload = Self.scrubPayload(payload)
-
-            var scrubbedDict = dict
-            scrubbedDict["msg"] = scrubbedMessage
-            if scrubbedPayload != nil {
-                scrubbedDict["payload"] = scrubbedPayload
-            }
-
-            if let scrubbedData = try? JSONSerialization.data(
-                withJSONObject: scrubbedDict, options: [.sortedKeys]
-            ), let scrubbedRaw = String(data: scrubbedData, encoding: .utf8) {
-                LogStore.shared.insert(level, component, scrubbedMessage,
-                                       payload: scrubbedPayload, raw: scrubbedRaw)
-            }
+            LogStore.shared.insert(level, component, message, payload: payload, raw: jsonString)
         } else {
             // Keyboard: flat-file write only.
             let write = { Self.append(line) }

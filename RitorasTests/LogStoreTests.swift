@@ -268,19 +268,17 @@ final class LogStoreTests: XCTestCase {
 
     // MARK: - PII scrubbing contract
 
-    func test_pii_scrubbing_contract() {
-        // Write through FileLogger (container-app path) — PII is scrubbed before
-        // LogStore.insert, so the stored message should be redacted.
+    func test_db_stores_unscrubbed_originals() {
+        // Write through FileLogger (container-app path) — the DB stores the
+        // original unscrubbed message. Scrubbing is applied only at export
+        // (copy/share) in DebugLogView, controlled by the scrubPII toggle.
         FileLogger.shared.info(.app, "contact user@example.com today for details")
 
         let lines = LogStore.shared.recent(limit: 10)
-        let match = lines.first { $0.message?.contains("[REDACTED:email]") ?? false }
-        XCTAssertNotNil(match, "PII-email should be scrubbed in LogStore message")
-        XCTAssertFalse(match?.message?.contains("user@example.com") ?? true,
-                       "Email value should not appear in stored message")
-        // Verify the raw column also contains scrubbed output
-        XCTAssertTrue(match?.raw.contains("[REDACTED:email]") ?? false,
-                       "Raw column should also contain scrubbed message")
+        let match = lines.first { $0.message?.contains("user@example.com") ?? false }
+        XCTAssertNotNil(match, "Email value should be preserved (unscrubbed) in stored message")
+        XCTAssertTrue(match?.raw.contains("user@example.com") ?? false,
+                       "Raw column should also contain the original unscrubbed data")
     }
 
     // MARK: - Update hook notification

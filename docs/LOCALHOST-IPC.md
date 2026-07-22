@@ -373,9 +373,9 @@ Key properties:
 - **Update hook** — every INSERT/UPDATE/DELETE posts a
   `.logStoreDidChange` notification on the main queue. `DebugLogView`
   observes this to refresh automatically.
-- **PII scrubbing** — `FileLogger.log()` scrubs the message and payload
-  via `LogScrubber` before calling `LogStore.insert()`. The raw column
-  stores the scrubbed JSON line.
+- **PII scrubbing at export** — The database stores original unscrubbed logs.
+  PII scrubbing is applied only at export time (copy/share) in `DebugLogView`,
+  controlled by the `scrubPII` toggle.
 
 ### Keyboard extension (flat-file shipper buffer)
 
