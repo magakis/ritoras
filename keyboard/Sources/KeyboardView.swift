@@ -72,6 +72,16 @@ private class KeyButton: UIButton {
     /// the character preview popup without needing touch-event wiring.
     var onHighlightChange: ((KeyButton, Bool) -> Void)?
 
+    /// Manually managed pressed state for dead-zone touches where hitTest routes
+    /// the touch to this key but isHighlighted doesn't fire because the touch is
+    /// outside the key's bounds. The container (KeyboardView) sets this in hitTest.
+    private(set) var isPressedViaHitTest = false {
+        didSet {
+            guard isPressedViaHitTest != oldValue else { return }
+            updatePressVisuals()
+        }
+    }
+
     /// Apple-style key-press highlight: a dynamic color that adapts to
     /// light/dark mode. Used when isHighlighted=true.
     private static let highlightBackgroundColor = UIColor { tc in
@@ -174,10 +184,29 @@ private class KeyButton: UIButton {
 
     override var isHighlighted: Bool {
         didSet {
-            backgroundColor = isHighlighted ? Self.highlightBackgroundColor : restingBackgroundColor
-            alpha = 1.0
-            onHighlightChange?(self, isHighlighted)
+            updatePressVisuals()
         }
+    }
+
+    /// Unified visual update that checks both standard isHighlighted and the
+    /// container-managed isPressedViaHitTest flag. This ensures dead-zone touches
+    /// (routed via hitTest but outside the key's bounds) still trigger the
+    /// highlight and onHighlightChange callback.
+    private func updatePressVisuals() {
+        let pressed = isHighlighted || isPressedViaHitTest
+        backgroundColor = pressed ? Self.highlightBackgroundColor : restingBackgroundColor
+        alpha = 1.0
+        onHighlightChange?(self, pressed)
+    }
+
+    /// Called by KeyboardView in hitTest when routing a dead-zone touch to this key.
+    func setPressedViaHitTest() {
+        isPressedViaHitTest = true
+    }
+
+    /// Called by KeyboardView when the touch ends (via keyTouchEnded).
+    func clearPressedViaHitTest() {
+        isPressedViaHitTest = false
     }
 
     /// Sets EITHER an SF Symbol image OR a text title — never both — based on the key's action.
@@ -471,6 +500,9 @@ class KeyboardView: UIView {
     private weak var emojiKeyButton: KeyButton?
     private weak var shiftKeyButton: KeyButton?
     private weak var bottomRowView: KeyboardRowView?
+    /// Tracks the key that was manually pressed via hitTest routing (dead-zone
+    /// touches). Cleared when the touch ends via keyTouchEnded.
+    private var hitTestPressedKey: KeyButton?
     private var allKeyButtons: [KeyButton] = []
 
     // State tracking
@@ -619,7 +651,9 @@ class KeyboardView: UIView {
             buttons.reserveCapacity(rowDefs.count)
             for def in rowDefs {
                 let button = KeyButton(definition: def)
-                button.addTarget(self, action: #selector(keyTapped(_:)), for: .touchUpInside)
+                button.addTarget(self, action: #selector(keyTapped(_:)), for: [.touchUpInside, .touchUpOutside])
+                // Clear hit-test pressed state when touch ends (regardless of location)
+                button.addTarget(self, action: #selector(keyTouchEnded(_:)), for: [.touchUpInside, .touchUpOutside, .touchCancel, .touchDragExit])
 
                 switch def.action {
                 case .mic:
@@ -795,6 +829,15 @@ class KeyboardView: UIView {
         delegate?.keyboardViewBackspaceDidEnd(self)
     }
 
+    /// Clears the hit-test pressed state when a touch ends, regardless of whether
+    /// it ended inside or outside the key bounds.
+    @objc private func keyTouchEnded(_ sender: KeyButton) {
+        sender.clearPressedViaHitTest()
+        if hitTestPressedKey === sender {
+            hitTestPressedKey = nil
+        }
+    }
+
     // MARK: - Hit Testing
 
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
@@ -823,6 +866,11 @@ class KeyboardView: UIView {
             }
 
             if let nearestKey = nearestKey {
+                // Clear previous manually-pressed key
+                hitTestPressedKey?.clearPressedViaHitTest()
+                // Set the new one
+                nearestKey.setPressedViaHitTest()
+                hitTestPressedKey = nearestKey
                 return nearestKey
             }
 
