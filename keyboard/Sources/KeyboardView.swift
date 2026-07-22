@@ -693,11 +693,11 @@ class KeyboardView: UIView {
         }
         switch sender.keyDefinition.action {
         case .insertText, .space, .return:
-            HapticsManager.shared.tapImpact()
+            DispatchQueue.main.async { HapticsManager.shared.tapImpact() }
         case .shift, .shiftLock,
              .toggleNumber, .toggleLetters, .toggleSymbols,
              .emoji, .globe:
-            HapticsManager.shared.tapSelection()
+            DispatchQueue.main.async { HapticsManager.shared.tapSelection() }
         case .backspace, .mic:
             break  // handled at dedicated touch-down sites
         }
@@ -721,8 +721,10 @@ class KeyboardView: UIView {
     /// to begin the repeat sequence (single delete immediately, repeated deletes in Phase 4).
     @objc private func backspaceTouchDown(_ sender: KeyButton) {
         sender.backspaceSuppressTap = true
-        HapticsManager.shared.prepareImpact()
-        HapticsManager.shared.tapImpact()
+        DispatchQueue.main.async {
+            HapticsManager.shared.prepareImpact()
+            HapticsManager.shared.tapImpact()
+        }
         delegate?.keyboardViewBackspaceDidBegin(self)
     }
 
