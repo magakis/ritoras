@@ -29,6 +29,7 @@ targets:
         PRODUCT_NAME: Ritoras
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_ENTITLEMENTS: app/Ritoras.entitlements
+        ENABLE_TESTABILITY: YES
 
   RitorasKeyboard:
     type: app-extension
