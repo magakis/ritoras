@@ -58,13 +58,8 @@ final class PredictionEngine {
                 pool.append(contentsOf: results)
             }
 
-            // Cold-start fallback: show defaults when no provider contributed
-            // (e.g. TrigramProvider not yet loaded) or there is no context.
             if pool.isEmpty {
-                if previousWord == nil || !providers.contains(where: { ($0 as? TrigramProvider)?.isReady == true }) {
-                    return Self.defaultTopSuggestions
-                }
-                return []
+                return Self.defaultTopSuggestions
             }
 
             return pool
