@@ -25,10 +25,7 @@ build/
 Package.resolved
 
 # OpenCode internal state
-.opencode/instincts/
-.opencode/commands/
-.opencode/node_modules/
-.opencode/learn-report.md
+.opencode/
 scratch/
 
 # Local tooling state
