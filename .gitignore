@@ -31,6 +31,12 @@ Package.resolved
 .opencode/learn-report.md
 scratch/
 
+# Local tooling state
+tmp-*.zip
+context-mode/
+.context-mode/
+.playwright-cli/
+
 # Xcode extras
 *.moved-aside
 *.xccheckout
