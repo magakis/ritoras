@@ -97,6 +97,7 @@ class KeyboardViewController: UIInputViewController {
     private var lastSeenPhase: String = ""
     private var consecutiveConnectionFailures: Int = 0
     private var darwinStateChangedToken: DarwinObserverToken?
+    private var localhostPollDeadline: Date = .distantFuture
 
     // Persisted across keyboard process restarts
     private var lastProcessedPayloadId: UUID? {
@@ -594,6 +595,16 @@ class KeyboardViewController: UIInputViewController {
     /// Falls back to legacy server polling after 3 consecutive connection
     /// failures (container app not running).
     private func refreshStateFromLocalhost() async {
+        if Date() >= localhostPollDeadline {
+            await MainActor.run {
+                self.stopDictationTransports()
+                self.pendingRequestId = nil
+                FileLogger.shared.warn(.keyboard, "Localhost polling timed out",
+                                       payload: ["timeoutSec": SharedConfig.Defaults.dictationTimeoutSeconds])
+                self.state = .error("Dictation timed out. Try again.")
+            }
+            return
+        }
         guard let id = pendingRequestId else {
             return
         }
@@ -638,6 +649,7 @@ class KeyboardViewController: UIInputViewController {
     /// `Timer` to avoid RunLoop coupling in the keyboard extension.
     private func startLocalhostPolling() {
         stopLocalhostPolling()
+        localhostPollDeadline = Date().addingTimeInterval(SharedConfig.Defaults.dictationTimeoutSeconds)
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
         timer.setEventHandler { [weak self] in

@@ -31,7 +31,7 @@ final class FileLogger {
         }
 
         let urlDesc = url?.path ?? "nil"
-        queue.async { Self.append("[init] resolvedURL=\(urlDesc) fallback=\(fallback)") }
+        queue.async { Self.append("[init] resolvedURL=\(urlDesc) fallback=\(fallback)", durable: false) }
     }
 
     private static let fileName = "ritoras-debug.log"
@@ -45,6 +45,9 @@ final class FileLogger {
 
     private let resolvedURL: URL?
     private let usingFallbackDir: Bool
+    private var writeHandle: FileHandle?
+    private var currentBytes: Int64 = 0
+    private var isRotating = false
 
     /// Optional broadcast hook invoked on every log call. Set by keyboard targets
     /// to ship logs to the container app's DebugLogView via LocalhostServer.
@@ -167,7 +170,7 @@ final class FileLogger {
             LogStore.shared.insert(level, component, message, payload: payload, raw: jsonString)
         } else {
             // Keyboard: flat-file write only.
-            let write = { Self.append(line) }
+            let write = { Self.append(line, durable: (level == .warn || level == .error)) }
 
             switch level {
             case .warn, .error:
@@ -201,6 +204,10 @@ final class FileLogger {
     static func clear() {
         if Self.isKeyboardExtension {
             shared.queue.sync {
+                try? shared.writeHandle?.close()
+                shared.writeHandle = nil
+                shared.currentBytes = 0
+
                 guard let url = shared.resolvedURL else { return }
                 let dir = url.deletingLastPathComponent()
                 let base = Self.fileName
@@ -309,22 +316,37 @@ final class FileLogger {
 
     // ── File I/O ────────────────────────────────────────────────────
 
-    private static func append(_ line: String) {
+    /// Opens (or returns the cached) write handle to the active log file.
+    /// Must be called on the serial queue.  Creates the file if missing,
+    /// seeks to end, and initializes `currentBytes` from the file's actual size.
+    private func ensureWriteHandle() -> FileHandle? {
+        if let handle = writeHandle { return handle }
+        guard let url = resolvedURL else {
+            recordDiagnostic("ensureWriteHandle failed: no URL")
+            return nil
+        }
+
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+
+        do {
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.seekToEnd()
+            writeHandle = handle
+            currentBytes = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64) ?? 0
+            return handle
+        } catch {
+            recordDiagnostic("ensureWriteHandle failed: \(error)")
+            return nil
+        }
+    }
+
+    private static func append(_ line: String, durable: Bool) {
+        guard !shared.isRotating else { return }
         guard let url = shared.resolvedURL else {
             shared.recordDiagnostic("append skipped: no URL")
             return
-        }
-
-        // Check size and rotate if needed
-        do {
-            let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
-            if let size = attrs[.size] as? Int64, size > maxBytes {
-                rotate(url: url)
-            }
-        } catch let error as NSError where error.code == NSFileNoSuchFileError {
-            // First write — expected, no diagnostic needed.
-        } catch {
-            shared.recordDiagnostic("size check failed: \(error)")
         }
 
         // Check available disk space before attempting write
@@ -336,30 +358,46 @@ final class FileLogger {
             return
         }
 
-        // Atomic append: write to temp file then replace into place.
-        // This guarantees the active file is never left in a partially-written
-        // state after a crash.
-        let tempURL = url.deletingLastPathComponent()
-            .appendingPathComponent(".ritoras-debug-log.tmp")
+        // Ensure write handle is open — populates currentBytes from actual file size
+        guard shared.ensureWriteHandle() != nil else {
+            shared.recordDiagnostic("append write failed: no handle")
+            return
+        }
+
+        // Check size using cached currentBytes and rotate if needed
+        if shared.currentBytes > maxBytes {
+            rotate(url: url)
+            // Rotation closed the handle; re-acquire for the active file
+            guard shared.ensureWriteHandle() != nil else {
+                shared.recordDiagnostic("append write failed: no handle after rotation")
+                return
+            }
+        }
+
+        guard let handle = shared.writeHandle else {
+            shared.recordDiagnostic("append write failed: handle nil before write")
+            return
+        }
 
         do {
-            var data = (try? Data(contentsOf: url)) ?? Data()
-            if let newData = line.data(using: .utf8) {
-                data.append(newData)
+            let data = Data(line.utf8)
+            try handle.write(contentsOf: data)
+            shared.currentBytes &+= Int64(data.count)
+            if durable {
+                try handle.synchronize()
             }
-            try data.write(to: tempURL, options: .atomic)
-            _ = try FileManager.default.replaceItemAt(url, withItemAt: tempURL,
-                                                       backupItemName: nil,
-                                                       options: [])
         } catch {
-            shared.recordDiagnostic("append atomic write failed: \(error)")
-            // Best-effort temp file cleanup
-            try? FileManager.default.removeItem(at: tempURL)
+            shared.recordDiagnostic("append write failed: \(error)")
         }
     }
 
     private static func rotate(url: URL) {
         let work = {
+            shared.isRotating = true
+            try? shared.writeHandle?.close()
+            shared.writeHandle = nil
+            shared.currentBytes = 0
+
             let dir = url.deletingLastPathComponent()
             let base = Self.fileName
 
@@ -403,6 +441,7 @@ final class FileLogger {
             }
 
             shared.recordDiagnostic("rotated: .log → .1, .\(Self.maxRolledFiles) evicted")
+            shared.isRotating = false
         }
 
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {

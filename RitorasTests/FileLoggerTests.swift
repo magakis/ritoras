@@ -208,4 +208,84 @@ final class FileLoggerTests: XCTestCase {
         XCTAssertEqual(warnLines.count, 1, "Should find exactly 1 warn line")
         XCTAssertEqual(warnLines.first?.message, "warn message")
     }
+
+    // MARK: - Append-only regression tests
+
+    func test_append_after_rotation_writes_to_active_file() throws {
+        FileLogger.forceKeyboardModeForTesting = true
+        defer { FileLogger.forceKeyboardModeForTesting = false }
+
+        try XCTSkipIf(FileLogger.fileURL() == nil,
+                      "No app group container available — skipping test")
+
+        FileLogger.clear()
+
+        let dir = FileLogger.fileURL()!.deletingLastPathComponent()
+        let base = "ritoras-debug.log"
+        let rolled1 = dir.appendingPathComponent("\(base).1")
+
+        // Remove any pre-existing rolled file
+        try? FileManager.default.removeItem(at: rolled1)
+
+        // Write enough data to trigger rotation (~1 MB)
+        let msg = String(repeating: "x", count: 10_000)
+        for _ in 0..<150 {
+            FileLogger.shared.log(.info, .keyboard, msg)
+        }
+
+        // Sync point
+        _ = FileLogger.contents()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: rolled1.path),
+                      "Rotation should have created .log.1")
+
+        // Append one fresh identifiable line
+        FileLogger.shared.log(.info, .keyboard, "FRESH_LINE_AFTER_ROTATION")
+        _ = FileLogger.contents()
+
+        // The fresh line MUST be in the active file
+        let content = FileLogger.contents() ?? ""
+        XCTAssertTrue(content.contains("FRESH_LINE_AFTER_ROTATION"),
+                      "Fresh line should appear in active log after rotation")
+
+        // The fresh line MUST NOT be in .log.1 (pre-rotation snapshot)
+        if FileManager.default.fileExists(atPath: rolled1.path) {
+            let rolledContent = try String(contentsOf: rolled1, encoding: .utf8)
+            XCTAssertFalse(rolledContent.contains("FRESH_LINE_AFTER_ROTATION"),
+                           "Fresh line should NOT appear in .log.1")
+        }
+    }
+
+    func test_append_is_additive_not_full_rewrite() throws {
+        FileLogger.forceKeyboardModeForTesting = true
+        defer { FileLogger.forceKeyboardModeForTesting = false }
+
+        try XCTSkipIf(FileLogger.fileURL() == nil,
+                      "No app group container available — skipping test")
+
+        FileLogger.clear()
+
+        // Write a large base (~500 KB)
+        let baseMsg = String(repeating: "y", count: 500_000)
+        FileLogger.shared.log(.info, .keyboard, baseMsg)
+        _ = FileLogger.contents() // sync point
+
+        let url = FileLogger.fileURL()!
+        let attrsBefore = try FileManager.default.attributesOfItem(atPath: url.path)
+        let sizeBefore = attrsBefore[.size] as! Int64
+
+        // Append one short line
+        FileLogger.shared.log(.info, .keyboard, "additive_test")
+        _ = FileLogger.contents() // sync point
+
+        let attrsAfter = try FileManager.default.attributesOfItem(atPath: url.path)
+        let sizeAfter = attrsAfter[.size] as! Int64
+
+        let growth = sizeAfter - sizeBefore
+        // Growth must be small (one log line ~100 bytes), not ~500 KB (full rewrite)
+        XCTAssertLessThan(growth, 1_000, "Growth should be roughly one log line (~100 bytes), not ~500 KB")
+        XCTAssertGreaterThan(growth, 0, "File size must increase after append")
+        // Crucially: new size must not be ~2× base (which would indicate full-rewrite)
+        XCTAssertLessThan(sizeAfter, sizeBefore * 2, "New size must not double (would indicate full-rewrite)")
+    }
 }
