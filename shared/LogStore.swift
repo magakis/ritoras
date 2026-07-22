@@ -6,6 +6,13 @@ import SQLite3
 /// but ARC may release the source NSString before sqlite3_step reads it.
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
+// MARK: - Error type
+
+enum LogStoreError: Error {
+    case openFailed(String)
+    case executeFailed(String)
+}
+
 // MARK: - Notifications
 
 extension Notification.Name {
@@ -43,6 +50,10 @@ final class LogStore {
 
     private var db: OpaquePointer?
     private let dbURL: URL?
+    /// Set `true` after one corruption-recovery attempt to prevent infinite loops.
+    private var didAttemptRecovery = false
+    /// Set `true` after WAL/SHM files have been protected (one-shot guard).
+    private var didApplyProtectionToWalShm = false
 
     // MARK: - Cached prepared statements (finalized in deinit)
 
@@ -141,12 +152,28 @@ final class LogStore {
             return
         }
 
+        // ── Corruption check ────────────────────────────────────
+        if !didAttemptRecovery, !quickCheckIsOk() {
+            nukeAndRebuild()
+            didAttemptRecovery = true
+
+            // Re-open — SQLITE_OPEN_CREATE will recreate the file
+            let rc2 = sqlite3_open_v2(url.path, &db, flags, nil)
+            guard rc2 == SQLITE_OK, db != nil else {
+                let msg = db.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+                recordDiagnostic("reopen after recovery failed (\(rc2)): \(msg)")
+                db = nil
+                return
+            }
+        }
+
         // ── Pragmas ──────────────────────────────────────────────
         exec("PRAGMA journal_mode=WAL;")       // persists in DB header, set once
         exec("PRAGMA synchronous=NORMAL;")
         exec("PRAGMA busy_timeout=5000;")
         exec("PRAGMA foreign_keys=ON;")
-        exec("PRAGMA mmap_size=268435456;")    // 256 MB — reader only (mmap is read-only in SQLite)
+        exec("PRAGMA mmap_size=0;")          // disabled — iOS can revoke mmap'd regions in app-group containers under memory pressure, producing malformed-page reads
+        exec("PRAGMA optimize;")             // FTS5 post-rebuild stability
 
         // ── DDL ──────────────────────────────────────────────────
         let createLog = """
@@ -183,6 +210,11 @@ final class LogStore {
         END;
         """)
 
+        // ── FTS rebuild notification ───────────────────────────
+        if !exec("INSERT INTO log_fts(log_fts) VALUES('rebuild');") {
+            recordDiagnostic("fts rebuild failed")
+        }
+
         // ── Update hook ──────────────────────────────────────────
         sqlite3_update_hook(db, Self._updateHookCallback, nil)
 
@@ -209,6 +241,28 @@ final class LogStore {
             let msg = errMsg.flatMap { String(cString: $0) } ?? "unknown error"
             recordDiagnostic("exec failed: \(msg)")
             if let errMsg = errMsg { sqlite3_free(errMsg) }
+
+            // Reactive corruption recovery — single retry, no loop
+            if !didAttemptRecovery {
+                let lower = msg.lowercased()
+                if lower.contains("malformed") || lower.contains("database disk image") {
+                    nukeAndRebuild()
+                    didAttemptRecovery = true
+
+                    self.db = nil            // force ensureOpen() to do full re-init
+                    ensureOpen()             // rebuilds schema + triggers + FTS + prepared statements + pragmas + file protection
+                    guard let db = self.db else { return false }
+
+                    // Single retry of the original SQL
+                    var retryErr: UnsafeMutablePointer<Int8>?
+                    let retryRC = sqlite3_exec(db, sql, nil, nil, &retryErr)
+                    if retryRC != SQLITE_OK {
+                        if let retryErr = retryErr { sqlite3_free(retryErr) }
+                    }
+                    return retryRC == SQLITE_OK
+                }
+            }
+
             return false
         }
         return true
@@ -231,6 +285,46 @@ final class LogStore {
                 try? FileManager.default.setAttributes(attrs, ofItemAtPath: path)
             }
         }
+    }
+
+    // MARK: - Corruption detection & recovery
+
+    /// Runs `PRAGMA quick_check` and returns `true` only when the result row
+    /// equals `"ok"`. Uses prepare/step/read (not `exec`) because `sqlite3_exec`
+    /// may report `SQLITE_OK` even when corruption is present.
+    /// - Note: Caller must guarantee `db` is non-nil.
+    private func quickCheckIsOk() -> Bool {
+        guard let db = db else { return false }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA quick_check;", -1, &stmt, nil) == SQLITE_OK,
+              let stmt = stmt else {
+            return false
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return false }
+        guard let cStr = sqlite3_column_text(stmt, 0) else { return false }
+        return String(cString: cStr) == "ok"
+    }
+
+    /// Destructive recovery: finalizes cached statements, closes the database
+    /// handle, deletes `.sqlite`/`-wal`/`-shm` files, and records a diagnostic.
+    /// The caller is responsible for re-opening via `sqlite3_open_v2`.
+    private func nukeAndRebuild() {
+        if let stmt = insertStmt {
+            sqlite3_finalize(stmt)
+            insertStmt = nil
+        }
+        if let db = db {
+            sqlite3_close(db)
+            self.db = nil
+        }
+        guard let url = dbURL else { return }
+        let paths = [url.path, url.path + "-wal", url.path + "-shm"]
+        for path in paths {
+            try? FileManager.default.removeItem(atPath: path)
+        }
+        recordDiagnostic("recovered from corruption — DB rebuilt")
     }
 
     // MARK: - Update hook callback
@@ -332,6 +426,11 @@ final class LogStore {
         if sqlite3_exec(db, "COMMIT", nil, nil, nil) != SQLITE_OK {
             recordDiagnostic("insert commit failed: \(String(cString: sqlite3_errmsg(db)))")
         }
+
+        if !didApplyProtectionToWalShm {
+            applyFileProtection()
+            didApplyProtectionToWalShm = true
+        }
     }
 
     private func _insertBatch(_ entries: [(LogLevel, LogComponent, String, [String: Any]?, String)]) {
@@ -352,7 +451,10 @@ final class LogStore {
             recordDiagnostic("batch commit failed: \(String(cString: sqlite3_errmsg(db)))")
         }
 
-        applyFileProtection()
+        if !didApplyProtectionToWalShm {
+            applyFileProtection()
+            didApplyProtectionToWalShm = true
+        }
     }
 
     /// Binds parameters, steps, resets, and clears. Returns SQLITE_OK on
@@ -630,19 +732,23 @@ final class LogStore {
     // MARK: - Clear
 
     /// Deletes all rows from the log table and rebuilds the FTS5 index.
-    func clear() {
+    func clear() throws {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
-            _clear()
+            try _clear()
         } else {
-            queue.sync { self._clear() }
+            try queue.sync { try self._clear() }
         }
     }
 
-    private func _clear() {
+    private func _clear() throws {
         ensureOpen()
         guard let db = db else { return }
-        exec("DELETE FROM log_fts;")
-        exec("DELETE FROM log;")
+        guard exec("DELETE FROM log;") else {
+            throw LogStoreError.executeFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        guard exec("INSERT INTO log_fts(log_fts) VALUES('rebuild');") else {
+            throw LogStoreError.executeFailed(String(cString: sqlite3_errmsg(db)))
+        }
     }
 
     // MARK: - Rotate
@@ -694,14 +800,14 @@ final class LogStore {
     func deleteFiltered(levels: Set<LogLevel>? = nil,
                         components: Set<LogComponent>? = nil,
                         sinceNs: Int64? = nil,
-                        search: String? = nil) -> Int {
+                        search: String? = nil) throws -> Int {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
-            return _deleteFiltered(levels: levels, components: components,
-                                   sinceNs: sinceNs, search: search)
+            return try _deleteFiltered(levels: levels, components: components,
+                                       sinceNs: sinceNs, search: search)
         } else {
-            return queue.sync {
-                self._deleteFiltered(levels: levels, components: components,
-                                     sinceNs: sinceNs, search: search)
+            return try queue.sync {
+                try self._deleteFiltered(levels: levels, components: components,
+                                         sinceNs: sinceNs, search: search)
             }
         }
     }
@@ -709,7 +815,7 @@ final class LogStore {
     private func _deleteFiltered(levels: Set<LogLevel>? = nil,
                                   components: Set<LogComponent>? = nil,
                                   sinceNs: Int64? = nil,
-                                  search: String? = nil) -> Int {
+                                  search: String? = nil) throws -> Int {
         ensureOpen()
         guard let db = db else { return 0 }
 
@@ -743,7 +849,7 @@ final class LogStore {
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt = stmt else {
             recordDiagnostic("deleteFiltered prepare failed: \(String(cString: sqlite3_errmsg(db)))")
-            return 0
+            throw LogStoreError.executeFailed(String(cString: sqlite3_errmsg(db)))
         }
         defer { sqlite3_finalize(stmt) }
 
@@ -762,7 +868,7 @@ final class LogStore {
 
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             recordDiagnostic("deleteFiltered step failed: \(String(cString: sqlite3_errmsg(db)))")
-            return 0
+            throw LogStoreError.executeFailed(String(cString: sqlite3_errmsg(db)))
         }
 
         let count = Int(sqlite3_changes(db))
@@ -771,17 +877,17 @@ final class LogStore {
     }
 
     /// Deletes rows with ts_ns older than the given cutoff. Returns count deleted.
-    func deleteOlderThan(tsNs: Int64) -> Int {
+    func deleteOlderThan(tsNs: Int64) throws -> Int {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
-            return _deleteOlderThan(tsNs: tsNs)
+            return try _deleteOlderThan(tsNs: tsNs)
         } else {
-            return queue.sync {
-                self._deleteOlderThan(tsNs: tsNs)
+            return try queue.sync {
+                try self._deleteOlderThan(tsNs: tsNs)
             }
         }
     }
 
-    private func _deleteOlderThan(tsNs: Int64) -> Int {
+    private func _deleteOlderThan(tsNs: Int64) throws -> Int {
         ensureOpen()
         guard let db = db else { return 0 }
 
@@ -790,7 +896,7 @@ final class LogStore {
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt = stmt else {
             recordDiagnostic("deleteOlderThan prepare failed: \(String(cString: sqlite3_errmsg(db)))")
-            return 0
+            throw LogStoreError.executeFailed(String(cString: sqlite3_errmsg(db)))
         }
         defer { sqlite3_finalize(stmt) }
 
@@ -798,7 +904,7 @@ final class LogStore {
 
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             recordDiagnostic("deleteOlderThan step failed: \(String(cString: sqlite3_errmsg(db)))")
-            return 0
+            throw LogStoreError.executeFailed(String(cString: sqlite3_errmsg(db)))
         }
 
         let count = Int(sqlite3_changes(db))

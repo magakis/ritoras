@@ -234,7 +234,7 @@ final class FileLogger {
                 }
             }
         } else {
-            LogStore.shared.clear()
+            try? LogStore.shared.clear()
         }
     }
 

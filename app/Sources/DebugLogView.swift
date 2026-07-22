@@ -162,6 +162,7 @@ struct DebugLogView: View {
     @State private var pendingDeleteCount: Int = 0
     @State private var showDeleteFeedback = false
     @State private var deleteFeedbackText: String = ""
+    @State private var deleteFeedbackIsError = false
     @State private var missedUpdates = false
     private let pageSize = 200
 
@@ -605,7 +606,7 @@ struct DebugLogView: View {
                 .font(.system(.subheadline, design: .monospaced))
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
-                .background(Color.secondary.opacity(0.9))
+                .background(deleteFeedbackIsError ? Color.red.opacity(0.9) : Color.secondary.opacity(0.9))
                 .foregroundColor(.white)
                 .clipShape(Capsule())
                 .padding(.bottom, 24)
@@ -652,37 +653,40 @@ struct DebugLogView: View {
     }
 
     private func clear() {
-        LogStore.shared.clear()
+        try? LogStore.shared.clear()
         refresh()
     }
 
     private func executeDelete(_ action: DeleteAction) {
-        let count: Int
-        switch action {
-        case .visible:
-            count = LogStore.shared.deleteFiltered(
-                levels: levelFilterToSet(),
-                components: componentFilterToSet(),
-                sinceNs: timeRangeToSinceNs(),
-                search: searchText.isEmpty ? nil : searchText)
-        case .olderThan1Day:
-            let cutoff = Int64((Date().addingTimeInterval(-86400)).timeIntervalSince1970 * 1_000_000_000)
-            count = LogStore.shared.deleteOlderThan(tsNs: cutoff)
-        case .olderThan1Week:
-            let cutoff = Int64((Date().addingTimeInterval(-604800)).timeIntervalSince1970 * 1_000_000_000)
-            count = LogStore.shared.deleteOlderThan(tsNs: cutoff)
-        case .olderThan1Month:
-            let cutoff = Int64((Date().addingTimeInterval(-2592000)).timeIntervalSince1970 * 1_000_000_000)
-            count = LogStore.shared.deleteOlderThan(tsNs: cutoff)
-        case .all:
-            LogStore.shared.clear()
-            count = -1
-        }
-        refresh()
-        if count >= 0 {
-            showDeleteFeedback(text: "Deleted \(count) logs")
-        } else {
-            showDeleteFeedback(text: "Deleted all logs")
+        do {
+            switch action {
+            case .visible:
+                let count = try LogStore.shared.deleteFiltered(
+                    levels: levelFilterToSet(),
+                    components: componentFilterToSet(),
+                    sinceNs: timeRangeToSinceNs(),
+                    search: searchText.isEmpty ? nil : searchText)
+                showDeleteFeedback(text: "Deleted \(count) logs", isError: false)
+            case .olderThan1Day:
+                let cutoff = Int64((Date().addingTimeInterval(-86400)).timeIntervalSince1970 * 1_000_000_000)
+                let count = try LogStore.shared.deleteOlderThan(tsNs: cutoff)
+                showDeleteFeedback(text: "Deleted \(count) logs", isError: false)
+            case .olderThan1Week:
+                let cutoff = Int64((Date().addingTimeInterval(-604800)).timeIntervalSince1970 * 1_000_000_000)
+                let count = try LogStore.shared.deleteOlderThan(tsNs: cutoff)
+                showDeleteFeedback(text: "Deleted \(count) logs", isError: false)
+            case .olderThan1Month:
+                let cutoff = Int64((Date().addingTimeInterval(-2592000)).timeIntervalSince1970 * 1_000_000_000)
+                let count = try LogStore.shared.deleteOlderThan(tsNs: cutoff)
+                showDeleteFeedback(text: "Deleted \(count) logs", isError: false)
+            case .all:
+                try LogStore.shared.clear()
+                showDeleteFeedback(text: "Deleted all logs", isError: false)
+            }
+            refresh()
+        } catch {
+            showDeleteFeedback(text: "Delete failed — database may be corrupted; recovering…", isError: true)
+            refresh()
         }
     }
 
@@ -701,8 +705,9 @@ struct DebugLogView: View {
         }
     }
 
-    private func showDeleteFeedback(text: String) {
+    private func showDeleteFeedback(text: String, isError: Bool = false) {
         deleteFeedbackText = text
+        deleteFeedbackIsError = isError
         withAnimation { showDeleteFeedback = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
             withAnimation { showDeleteFeedback = false }
