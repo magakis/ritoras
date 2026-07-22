@@ -847,6 +847,11 @@ class KeyboardView: UIView {
                           point.y <= bottomActionRow.frame.maxY
 
         if inKeyRegion {
+            // Skip nearest-key routing when letter region is hidden (emoji mode)
+            guard !letterRegionContainer.isHidden else {
+                return super.hitTest(point, with: event)
+            }
+
             // Direct hit on a key button — fast path
             if let hit = super.hitTest(point, with: event), hit is KeyButton {
                 return hit
