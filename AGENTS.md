@@ -50,6 +50,20 @@ Two XcodeGen targets share one project:
 
 ## Hard constraints
 
+### No build-fixer subagent
+
+Never dispatch the build-fixer subagent for this project. The orchestrator
+must always skip the default "end-of-session full build verification" step
+after coder phases complete.
+
+Reason: the development environment is Linux with no local Xcode or
+`xcodebuild` (see [Environment constraint](#environment-constraint-read-first)
+above). Build-fixer cannot function here — any failure report it produces
+is about the missing toolchain, not about broken code. Do not attempt to
+substitute a local build check.
+
+The only real build gate is GitHub Actions CI on push. Wait for that.
+
 ### No tests
 
 This repository intentionally has **no test target and no automated tests.** Do not
