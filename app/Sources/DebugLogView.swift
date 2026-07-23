@@ -65,6 +65,8 @@ private enum DeleteAction {
     case olderThan1Week
     case olderThan1Month
     case all
+    case crashReports
+    case everything
 }
 
 // MARK: - Shared Formatting
@@ -147,10 +149,9 @@ struct DebugLogView: View {
     @State private var componentFilter: ComponentFilter = .all
     @State private var searchText: String = ""
     @State private var timeRange: TimeRangeFilter = .all
-    @State private var showCopiedConfirmation = false
     @State private var scrubPII = true
     @State private var crashReports: [MetricReport] = []
-    @State private var showClearCrashConfirmation = false
+
     @State private var expandedReportID: Int? = nil
     @State private var editMode: EditMode = .inactive
     @State private var expandedKeys: Set<String> = []
@@ -159,7 +160,6 @@ struct DebugLogView: View {
     @State private var totalCount: Int = 0
     @State private var showDeleteConfirmation = false
     @State private var pendingDeleteAction: DeleteAction?
-    @State private var pendingDeleteCount: Int = 0
     @State private var showDeleteFeedback = false
     @State private var deleteFeedbackText: String = ""
     @State private var deleteFeedbackIsError = false
@@ -205,26 +205,44 @@ struct DebugLogView: View {
         .navigationTitle("Debug Log")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
-        .confirmationDialog("Clear crash reports?",
-                            isPresented: $showClearCrashConfirmation,
-                            titleVisibility: .visible) {
-            clearCrashConfirmationButtons
-        } message: {
-            clearCrashConfirmationMessage
-        }
-        .confirmationDialog("Delete Logs",
+        .confirmationDialog("Delete Data",
                             isPresented: $showDeleteConfirmation,
                             titleVisibility: .visible) {
-            if let action = pendingDeleteAction {
-                Button("Delete", role: .destructive) {
-                    executeDelete(action)
+            if !crashReports.isEmpty {
+                Button("Clear Crash Reports", role: .destructive) {
+                    pendingDeleteAction = .crashReports
+                    executeDelete(.crashReports)
                 }
-                Button("Cancel", role: .cancel) {}
             }
+            Button("Delete Visible Logs", role: .destructive) {
+                pendingDeleteAction = .visible
+                executeDelete(.visible)
+            }
+            Button("Delete Older Than 1 Day", role: .destructive) {
+                pendingDeleteAction = .olderThan1Day
+                executeDelete(.olderThan1Day)
+            }
+            Button("Delete Older Than 1 Week", role: .destructive) {
+                pendingDeleteAction = .olderThan1Week
+                executeDelete(.olderThan1Week)
+            }
+            Button("Delete Older Than 1 Month", role: .destructive) {
+                pendingDeleteAction = .olderThan1Month
+                executeDelete(.olderThan1Month)
+            }
+            Button("Delete All Logs", role: .destructive) {
+                pendingDeleteAction = .all
+                executeDelete(.all)
+            }
+            if !crashReports.isEmpty {
+                Button("Delete Everything", role: .destructive) {
+                    pendingDeleteAction = .everything
+                    executeDelete(.everything)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
         } message: {
-            if let action = pendingDeleteAction {
-                Text(deleteConfirmationMessage(for: action))
-            }
+            Text("Select what to delete. Deleted data cannot be recovered.")
         }
         .onChange(of: searchText) { _, _ in refresh() }
         .onChange(of: selectedFilter) { _, _ in refresh() }
@@ -249,9 +267,7 @@ struct DebugLogView: View {
             isViewVisible = false
         }
         .overlay(alignment: .bottom) {
-            if showCopiedConfirmation {
-                copiedOverlay
-            } else if showDeleteFeedback {
+            if showDeleteFeedback {
                 deleteFeedbackOverlay
             }
         }
@@ -522,13 +538,6 @@ struct DebugLogView: View {
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigationBarLeading) {
-            if !crashReports.isEmpty {
-                Button(action: { showClearCrashConfirmation = true }) {
-                    Image(systemName: "trash")
-                }
-            }
-        }
-        ToolbarItem(placement: .navigationBarLeading) {
             editModeButton
         }
         ToolbarItem(placement: .navigationBarTrailing) {
@@ -538,13 +547,12 @@ struct DebugLogView: View {
             shareButton
         }
         ToolbarItem(placement: .navigationBarTrailing) {
-            copyButton
-        }
-        ToolbarItem(placement: .navigationBarTrailing) {
             refreshButton
         }
         ToolbarItem(placement: .navigationBarTrailing) {
-            deleteMenu
+            Button(action: { showDeleteConfirmation = true }) {
+                Image(systemName: "trash")
+            }
         }
     }
 
@@ -569,76 +577,9 @@ struct DebugLogView: View {
         }
     }
 
-    private var copyButton: some View {
-        Button(action: copySelectedOrFiltered) {
-            Image(systemName: "doc.on.doc")
-        }
-    }
-
     private var refreshButton: some View {
         Button(action: refresh) {
             Image(systemName: "arrow.clockwise")
-        }
-    }
-
-    private var deleteMenu: some View {
-        Menu {
-            Button("Delete Visible Logs", role: .destructive) {
-                pendingDeleteCount = LogStore.shared.count(
-                    levels: levelFilterToSet(),
-                    components: componentFilterToSet(),
-                    sinceNs: timeRangeToSinceNs(),
-                    search: searchText.isEmpty ? nil : searchText)
-                pendingDeleteAction = .visible
-                showDeleteConfirmation = true
-            }
-            Button("Delete Older Than 1 Day", role: .destructive) {
-                pendingDeleteAction = .olderThan1Day
-                showDeleteConfirmation = true
-            }
-            Button("Delete Older Than 1 Week", role: .destructive) {
-                pendingDeleteAction = .olderThan1Week
-                showDeleteConfirmation = true
-            }
-            Button("Delete Older Than 1 Month", role: .destructive) {
-                pendingDeleteAction = .olderThan1Month
-                showDeleteConfirmation = true
-            }
-            Button("Delete All Logs", role: .destructive) {
-                pendingDeleteAction = .all
-                showDeleteConfirmation = true
-            }
-        } label: {
-            Label("Delete…", systemImage: "trash")
-        }
-    }
-
-    private var clearCrashConfirmationButtons: some View {
-        Group {
-            Button("Clear All", role: .destructive) {
-                MetricKitSubscriber.clear()
-                crashReports = []
-            }
-            Button("Cancel", role: .cancel) {}
-        }
-    }
-
-    private var clearCrashConfirmationMessage: some View {
-        Text("This deletes all stored MetricKit crash reports. They cannot be recovered.")
-    }
-
-    @ViewBuilder
-    private var copiedOverlay: some View {
-        if showCopiedConfirmation {
-            Text("Copied \(selectedOrFilteredLines.count) entries")
-                .font(.system(.subheadline, design: .monospaced))
-                .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-                .background(Color.secondary.opacity(0.9))
-                .foregroundColor(.white)
-                .clipShape(Capsule())
-                .padding(.bottom, 24)
-                .transition(.opacity)
         }
     }
 
@@ -751,26 +692,20 @@ struct DebugLogView: View {
             case .all:
                 try LogStore.shared.clear()
                 showDeleteFeedback(text: "Deleted all logs", isError: false)
+            case .crashReports:
+                MetricKitSubscriber.clear()
+                crashReports = []
+                showDeleteFeedback(text: "Cleared crash reports", isError: false)
+            case .everything:
+                MetricKitSubscriber.clear()
+                crashReports = []
+                try LogStore.shared.clear()
+                showDeleteFeedback(text: "Deleted crash reports and all logs", isError: false)
             }
             refresh()
         } catch {
             showDeleteFeedback(text: "Delete failed — database may be corrupted; recovering…", isError: true)
             refresh()
-        }
-    }
-
-    private func deleteConfirmationMessage(for action: DeleteAction) -> String {
-        switch action {
-        case .visible:
-            return "Delete \(pendingDeleteCount) visible logs? They cannot be recovered."
-        case .olderThan1Day:
-            return "Delete all logs older than 1 day? They cannot be recovered."
-        case .olderThan1Week:
-            return "Delete all logs older than 1 week? They cannot be recovered."
-        case .olderThan1Month:
-            return "Delete all logs older than 1 month? They cannot be recovered."
-        case .all:
-            return "Delete all logs? They cannot be recovered."
         }
     }
 
@@ -783,27 +718,10 @@ struct DebugLogView: View {
         }
     }
 
-    private func copySelectedOrFiltered() {
-        var text = selectedOrFilteredLines.map(\.raw).joined(separator: "\n")
-        if scrubPII {
-            text = LogScrubber.scrub(text)
-        }
-        UIPasteboard.general.string = text
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
-        withAnimation { showCopiedConfirmation = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-            withAnimation { showCopiedConfirmation = false }
-        }
-    }
-
     private func copyCrashReport(_ report: MetricReport) {
         let text = scrubPII ? LogScrubber.scrub(report.rawJSON) : report.rawJSON
         UIPasteboard.general.string = text
         UINotificationFeedbackGenerator().notificationOccurred(.success)
-        withAnimation { showCopiedConfirmation = true }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-            withAnimation { showCopiedConfirmation = false }
-        }
     }
 
     private func toggleExpand(_ key: String) {
