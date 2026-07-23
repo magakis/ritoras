@@ -399,7 +399,8 @@ final class DictationViewModel: ObservableObject {
                 let recorder = StreamingAudioRecorder()
                 streamRecorder = recorder
 
-                try await recorder.start { [weak self] chunkId, samples in
+                let wavURL = RecordingStore.shared.streamWavURL(for: id)
+                try await recorder.start(fileURL: wavURL) { [weak self] chunkId, samples in
                     FileLogger.shared.debug(.audio, "Stream: chunk produced",
                                             payload: ["chunkId": chunkId, "sampleCount": samples.count])
                     guard let client = await self?.streamClient else { return }
@@ -708,6 +709,9 @@ final class DictationViewModel: ObservableObject {
                     "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
                 ])
                 TranscriptionHistory.shared.add(text: text)
+                RecordingStore.shared.deleteStreamWav(for: id)
+                FileLogger.shared.debug(.audio, "stream wav deleted on success",
+                                        payload: ["jobId": id.uuidString])
                 phase = .done(text)
             } catch WhisperError.cancelled {
                 // User cancelled — do not record as failure.
@@ -715,24 +719,104 @@ final class DictationViewModel: ObservableObject {
                                         payload: ["jobId": id.uuidString])
             } catch {
                 guard activeID == id else { return }
-                let message = error.localizedDescription
+
                 let failedElapsed = Date().timeIntervalSince(uploadT0) * 1000
                 FileLogger.shared.error(.transcription, "Stream error",
-                                        payload: ["error": message])
-                FileLogger.shared.info(.transcription, "upload failed", payload: [
-                    "id": id.uuidString,
-                    "elapsed_ms": failedElapsed,
-                    "error": message
-                ])
-                writeToClipboard(status: "error", errorMessage: message)
-                postResultToServer(status: "error", errorMessage: message)
-                DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-                // Phase 4: failed-job recovery is batch-only; stream mode does not
-                // preserve audio locally, so no file exists to retry.
-                FileLogger.shared.debug(.app, "transcription failed (stream), cannot recover — no local audio file", payload: [
-                    "jobId": id.uuidString
-                ])
-                phase = .error(message)
+                                        payload: ["error": error.localizedDescription,
+                                                  "elapsed_ms": failedElapsed])
+
+                // Try batch fallback from the saved WAV file.
+                let wavURL = RecordingStore.shared.streamWavURL(for: id)
+                if let wavURL = wavURL, FileManager.default.fileExists(atPath: wavURL.path) {
+                    FileLogger.shared.debug(.audio, "stream fallback: WAV found, attempting batch transcribe",
+                                            payload: ["jobId": id.uuidString, "path": wavURL.path])
+                    do {
+                        let text = try await WhisperClient.transcribe(audioURL: wavURL, config: SharedConfig.load(), correlationId: id)
+                        // Clean up WAV before guard to prevent orphans on superseded session.
+                        RecordingStore.shared.deleteStreamWav(for: id)
+                        FileLogger.shared.debug(.audio, "stream wav deleted on fallback success",
+                                                payload: ["jobId": id.uuidString])
+                        guard activeID == id else { return }
+
+                        let ucTime = Date()
+                        writeToClipboard(status: "completed", text: text)
+                        FileLogger.shared.debug(.transcription, "result delivered (stream fallback)", payload: [
+                            "id": id.uuidString, "channel": "clipboard",
+                            "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
+                        ])
+                        postResultToServer(status: "completed", text: text)
+                        FileLogger.shared.debug(.transcription, "result delivered (stream fallback)", payload: [
+                            "id": id.uuidString, "channel": "server",
+                            "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
+                        ])
+                        DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                        FileLogger.shared.info(.transcription, "result delivered (stream fallback)", payload: [
+                            "id": id.uuidString, "channel": "darwin",
+                            "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
+                        ])
+                        TranscriptionHistory.shared.add(text: text)
+                        phase = .done(text)
+                    } catch {
+                        // Batch transcribe also failed.
+                        FileLogger.shared.warn(.transcription, "stream+batch fallback failed",
+                                               payload: ["jobId": id.uuidString, "error": error.localizedDescription])
+                        if !livePartial.isEmpty {
+                            RecordingStore.shared.deleteStreamWav(for: id)
+                            FileLogger.shared.debug(.audio, "stream wav deleted after fallback",
+                                                    payload: ["jobId": id.uuidString])
+                            guard activeID == id else { return }
+
+                            writeToClipboard(status: "completed", text: livePartial)
+                            postResultToServer(status: "completed", text: livePartial)
+                            DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                            TranscriptionHistory.shared.add(text: livePartial)
+                            FileLogger.shared.warn(.transcription, "stream+batch fallback failed — delivering live partial",
+                                                   payload: ["jobId": id.uuidString])
+                            phase = .done(livePartial)
+                        } else {
+                            // Enqueue for retry — KEEP the WAV on disk.
+                            let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
+                            let fallbackError = error.localizedDescription
+                            FailedJobStore.shared.append(FailedJobRecord(
+                                jobId: id,
+                                audioFilePath: wavURL.path,
+                                errorMessage: "stream+batch failed: \(fallbackError)",
+                                recordedDurationSeconds: duration,
+                                createdAt: Date(),
+                                retryCount: 0,
+                                lastRetriedAt: nil))
+                            FileLogger.shared.debug(.app, "failed-job record appended (stream fallback)",
+                                                    payload: ["jobId": id.uuidString, "durationSec": duration, "path": wavURL.path])
+                            writeToClipboard(status: "error", errorMessage: fallbackError)
+                            postResultToServer(status: "error", errorMessage: fallbackError)
+                            DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                            phase = .error(fallbackError)
+                        }
+                    }
+                } else {
+                    // No WAV file — degrade gracefully.
+                    FileLogger.shared.debug(.audio, "stream fallback: no WAV file found",
+                                            payload: ["jobId": id.uuidString])
+                    if !livePartial.isEmpty {
+                        guard activeID == id else { return }
+
+                        writeToClipboard(status: "completed", text: livePartial)
+                        postResultToServer(status: "completed", text: livePartial)
+                        DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                        TranscriptionHistory.shared.add(text: livePartial)
+                        FileLogger.shared.warn(.transcription, "stream failed (no WAV) — delivering live partial",
+                                               payload: ["jobId": id.uuidString])
+                        phase = .done(livePartial)
+                    } else {
+                        let message = error.localizedDescription
+                        writeToClipboard(status: "error", errorMessage: message)
+                        postResultToServer(status: "error", errorMessage: message)
+                        DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                        FileLogger.shared.debug(.app, "transcription failed (stream), no WAV to fall back to",
+                                                payload: ["jobId": id.uuidString])
+                        phase = .error(message)
+                    }
+                }
             }
 
             if backgroundTaskID != .invalid {
