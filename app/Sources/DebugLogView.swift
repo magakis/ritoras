@@ -168,6 +168,7 @@ struct DebugLogView: View {
     @State private var refreshGeneration = 0
     @State private var isLoading = false
     @State private var isViewVisible = false
+    @State private var lastRefreshTime: Date = .distantPast
     private let pageSize = 50
 
     private var selectedOrFilteredLines: [LogLine] {
@@ -224,10 +225,6 @@ struct DebugLogView: View {
             if let action = pendingDeleteAction {
                 Text(deleteConfirmationMessage(for: action))
             }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .logStoreDidChange)
-            .throttle(for: .milliseconds(500), scheduler: DispatchQueue.main, latest: true)) { _ in
-            refreshGuard()
         }
         .onChange(of: searchText) { _, _ in refresh() }
         .onChange(of: selectedFilter) { _, _ in refresh() }
@@ -355,6 +352,15 @@ struct DebugLogView: View {
                         .listRowSeparator(.hidden)
                         .onAppear { loadMore() }
                 }
+                Color.clear
+                    .frame(height: 0)
+                    .listRowSeparator(.hidden)
+                    .onAppear {
+                        let now = Date()
+                        guard now.timeIntervalSince(lastRefreshTime) > 1.0 else { return }
+                        lastRefreshTime = now
+                        refresh()
+                    }
             }
         }
         .listStyle(.plain)
@@ -603,7 +609,7 @@ struct DebugLogView: View {
                 showDeleteConfirmation = true
             }
         } label: {
-            Image(systemName: "trash")
+            Label("Delete…", systemImage: "trash")
         }
     }
 
