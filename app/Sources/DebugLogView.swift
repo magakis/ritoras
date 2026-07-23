@@ -167,7 +167,8 @@ struct DebugLogView: View {
     @State private var cachedShareText: String = ""
     @State private var refreshGeneration = 0
     @State private var isLoading = false
-    private let pageSize = 200
+    @State private var isViewVisible = false
+    private let pageSize = 50
 
     private var selectedOrFilteredLines: [LogLine] {
         selectedIDs.isEmpty ? lines : lines.filter { selectedIDs.contains($0.id) }
@@ -226,7 +227,13 @@ struct DebugLogView: View {
         .onChange(of: expandedReportID) { _, newValue in
             if newValue == nil { refreshGuard() }
         }
-        .onAppear(perform: refresh)
+        .onAppear {
+            isViewVisible = true
+            refresh()
+        }
+        .onDisappear {
+            isViewVisible = false
+        }
         .overlay(alignment: .bottom) {
             if showCopiedConfirmation {
                 copiedOverlay
@@ -630,7 +637,7 @@ struct DebugLogView: View {
     // MARK: - Actions
 
     private func refreshGuard() {
-        let paused = !selectedIDs.isEmpty || !expandedKeys.isEmpty || expandedReportID != nil
+        let paused = !isViewVisible || !selectedIDs.isEmpty || !expandedKeys.isEmpty || expandedReportID != nil
         guard !paused else {
             missedUpdates = true
             return
