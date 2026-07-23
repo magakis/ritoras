@@ -270,9 +270,6 @@ private class KeyboardRowView: UIView {
     // All current edge keys (⇧, #+=, 123, ⌫) declare widthWeight 1.5; do not change one without the others.
     private static let edgeKeyWidthWeight: CGFloat = 1.5
 
-    // DIAGNOSTIC: blank-keyboard investigation — remove after fix
-    private var hasLoggedFirstLayout = false
-
     enum LayoutMode {
         case letterPitch      // shared 10-key pitch, shorter rows centered (staggered QWERTY look) — rows 0,1
         case edgeAnchored     // first & last keys pinned to fixed geometry, middle keys fill the gap — row 2
@@ -310,26 +307,12 @@ private class KeyboardRowView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
-        guard !keys.isEmpty else {
-            FileLogger.shared.warn(.keyboard, "layoutSubviews skipped — keys empty")
-            return
-        }
+        guard !keys.isEmpty else { return }
 
         let width = bounds.width
         let height = bounds.height
         let n = CGFloat(keys.count)
         let totalSpacing = spacing * (n - 1)
-
-        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
-        if width == 0 || height == 0 {
-            FileLogger.shared.warn(.keyboard, "layoutSubviews zero bounds",
-                                   payload: ["w": Double(width), "h": Double(height), "keys": keys.count])
-        } else if !hasLoggedFirstLayout {
-            hasLoggedFirstLayout = true
-            FileLogger.shared.info(.keyboard, "layoutSubviews first valid layout",
-                                   payload: ["w": Double(width), "h": Double(height), "keys": keys.count])
-        }
 
         switch layoutMode {
         case .letterPitch:
@@ -399,14 +382,6 @@ private class KeyboardRowView: UIView {
             }
         }
 
-        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
-        for (i, key) in keys.enumerated() {
-            if key.frame.width == 0 || key.frame.height == 0 {
-                FileLogger.shared.warn(.keyboard, "key frame zero",
-                                       payload: ["index": i, "w": Double(key.frame.width),
-                                                 "h": Double(key.frame.height)])
-            }
-        }
     }
 }
 
@@ -573,10 +548,6 @@ class KeyboardView: UIView {
         // Top-edge clipping at the UIWindow level is accepted.
         clipsToBounds = false
 
-        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
-        FileLogger.shared.info(.keyboard, "setupView frame",
-                               payload: ["w": Double(frame.width), "h": Double(frame.height)])
-
         setupSuggestionBar()
         setupLetterRegion()
         setupEmojiPanel()
@@ -592,11 +563,6 @@ class KeyboardView: UIView {
         rebuildKeyRows()
         apply(mode: .letters)
 
-        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
-        let rowCount = keyStack.arrangedSubviews.count
-        FileLogger.shared.info(.keyboard, "setupView complete",
-                               payload: ["rows": rowCount, "totalKeys": allKeyButtons.count,
-                                         "mode": "letters"])
     }
 
     private func setupSuggestionBar() {
@@ -687,10 +653,6 @@ class KeyboardView: UIView {
     // MARK: - Key Rows
 
     private func rebuildKeyRows() {
-        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
-        FileLogger.shared.debug(.keyboard, "rebuildKeyRows start",
-                                payload: ["layoutMode": "\(currentLayoutMode)"])
-
         keyStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         bottomRowView?.removeFromSuperview()
         bottomRowView = nil
@@ -816,10 +778,6 @@ class KeyboardView: UIView {
             allKeyButtons.append(contentsOf: bottomRow.keys)
         }
 
-        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
-        let totalRows = keyStack.arrangedSubviews.count + (bottomRowView != nil ? 1 : 0)
-        FileLogger.shared.debug(.keyboard, "rebuildKeyRows complete",
-                                payload: ["rows": totalRows, "totalKeys": allKeyButtons.count])
     }
 
     private func updateKeyButtonLabels() {
@@ -1043,14 +1001,6 @@ class KeyboardView: UIView {
         let showBottomRow    = showLetters
         let showSuggestBar   = (mode == .letters || mode == .emojiSearch)
         let showOverlay      = inSearch
-
-        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
-        FileLogger.shared.info(.keyboard, "apply(mode:) called",
-                               payload: ["mode": "\(mode)",
-                                         "suggestionBarHidden": suggestionBar.isHidden,
-                                         "letterRegionHidden": letterRegionContainer.isHidden,
-                                         "bottomActionHidden": bottomActionRow.isHidden,
-                                         "emojiPanelHidden": emojiPanelView.isHidden])
 
         // Dismiss key preview popup when switching to emoji/emojiSearch mode.
         if inSearch || showEmojiPanel { keyPreview.hide() }
