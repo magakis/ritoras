@@ -720,8 +720,8 @@ random Jetsam kills during typing.
 
 ### Memory Monitoring
 
-The `WordListLoader.loadStreamed` function monitors resident memory during
-dictionary load and aborts if it exceeds `maxResidentBytesDuringLoad` (35 MB).
+The `WordListLoader.loadStreamed` function monitors phys_footprint (private dirty memory) during
+dictionary load and aborts if it exceeds `maxPhysFootprintDuringLoad` (40 MB).
 This prevents the SymSpell build from pushing the process over the limit during
 startup.
 

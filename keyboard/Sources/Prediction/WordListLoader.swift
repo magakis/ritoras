@@ -48,43 +48,16 @@ enum WordListLoader {
         return entries
     }
 
-    /// Loads the bundled dictionary and populates both a SymSpell index and a Trie.
-    /// - Parameters:
-    ///   - symSpell: The SymSpell instance to populate.
-    ///   - trie: The Trie instance to populate.
-    ///   - pruneBelow: Optional minimum frequency threshold for pruning (e.g., 50).
-    /// - Returns: Number of words loaded.
-    @discardableResult
-    static func loadInto(symSpell: SymSpell, trie: Trie, pruneBelow: Int64? = nil) throws -> Int {
-        guard let url = bundledURL() else {
-            throw WordListError.bundledFileNotFound
-        }
-        let entries = try load(from: url)
-
-        let filtered: [Entry]
-        if let minFreq = pruneBelow {
-            filtered = entries.filter { $0.count >= minFreq }
-        } else {
-            filtered = entries
-        }
-
-        for entry in filtered {
-            symSpell.createDictionaryEntry(key: entry.word, count: entry.count)
-        }
-        trie.bulkLoad(words: filtered.map { ($0.word, $0.count) })
-
-        return filtered.count
-    }
-
     /// Stream-loads the frequency dictionary line-by-line into SymSpell and Trie,
-    /// periodically checking resident memory. If memory exceeds `maxResidentBytes`,
-    /// the load is aborted with a warning and the partial vocabulary is kept.
+    /// periodically checking phys_footprint (private dirty memory). If memory
+    /// exceeds `maxPhysFootprintBytes`, the load is aborted with a warning and the
+    /// partial vocabulary is kept.
     ///
     /// - Parameters:
     ///   - url: URL to the .txt file.
     ///   - symSpell: The SymSpell instance to populate.
     ///   - trie: The Trie instance to populate.
-    ///   - maxResidentBytes: Memory threshold in bytes. Defaults to the shared config value.
+    ///   - maxPhysFootprintBytes: phys_footprint threshold in bytes. Defaults to the shared config value.
     ///   - pruneBelow: Optional minimum frequency threshold for pruning.
     /// - Returns: Number of words loaded.
     @discardableResult
@@ -92,7 +65,7 @@ enum WordListLoader {
         from url: URL,
         into symSpell: SymSpell,
         trie: Trie,
-        maxResidentBytes: UInt64 = SharedConfig.Defaults.maxResidentBytesDuringLoad,
+        maxPhysFootprintBytes: UInt64 = SharedConfig.Defaults.maxPhysFootprintDuringLoad,
         pruneBelow: Int64? = nil
     ) throws -> Int {
         guard let fileHandle = FileHandle(forReadingAtPath: url.path) else {
@@ -114,28 +87,34 @@ enum WordListLoader {
                 let lineData = buffer[..<newlineIndex]
                 buffer = buffer[(newlineIndex + 1)...]
 
-                guard let line = String(data: lineData, encoding: .utf8) else { continue }
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmed.isEmpty else { continue }
+                let didInsert: Bool = autoreleasepool {
+                    guard let line = String(data: lineData, encoding: .utf8) else { return false }
+                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { return false }
 
-                // Format: "word count"
-                guard let spaceIndex = trimmed.lastIndex(of: " ") else { continue }
-                let word = String(trimmed[..<spaceIndex])
-                let countStr = String(trimmed[trimmed.index(after: spaceIndex)...])
-                guard let count = Int64(countStr) else { continue }
+                    // Format: "word count"
+                    guard let spaceIndex = trimmed.lastIndex(of: " ") else { return false }
+                    let word = String(trimmed[..<spaceIndex])
+                    let countStr = String(trimmed[trimmed.index(after: spaceIndex)...])
+                    guard let count = Int64(countStr) else { return false }
 
-                // Apply frequency pruning if configured.
-                if let minFreq = pruneBelow, count < minFreq { continue }
+                    // Apply frequency pruning if configured.
+                    if let minFreq = pruneBelow, count < minFreq { return false }
 
-                symSpell.createDictionaryEntry(key: word, count: count)
-                trie.insert(word: word, frequency: count)
+                    symSpell.createDictionaryEntry(key: word, count: count)
+                    trie.insert(word: word, frequency: count)
+                    return true
+                }
+
+                guard didInsert else { continue }
+
                 wordCount += 1
 
                 // Periodic memory check every 5000 words.
                 if wordCount % 5000 == 0 {
-                    let resident = getResidentBytes()
-                    if resident > maxResidentBytes {
-                        FileLogger.shared.error(.dictionary, "memory threshold exceeded during word list load", payload: ["resident": resident, "maxBytes": maxResidentBytes, "wordsLoaded": wordCount])
+                    let physFootprint = getPhysFootprintBytes()
+                    if physFootprint > maxPhysFootprintBytes {
+                        FileLogger.shared.error(.dictionary, "memory threshold exceeded during word list load", payload: ["physFootprint": physFootprint, "maxPhysFootprint": maxPhysFootprintBytes, "wordsLoaded": wordCount])
                         return wordCount
                     }
                 }
@@ -147,20 +126,20 @@ enum WordListLoader {
 
     // MARK: - Memory Monitoring
 
-    /// Returns the current resident memory of this process in bytes,
+    /// Returns the phys_footprint (private dirty memory) of this process in bytes,
     /// or 0 if the Mach call fails.
-    static func getResidentBytes() -> UInt64 {
-        var info = mach_task_basic_info()
+    static func getPhysFootprintBytes() -> UInt64 {
+        var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(
-            MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size
+            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size
         )
         let result = withUnsafeMutablePointer(to: &info) { ptr in
             ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { intPtr in
-                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), intPtr, &count)
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), intPtr, &count)
             }
         }
         guard result == KERN_SUCCESS else { return 0 }
-        return info.resident_size
+        return info.phys_footprint
     }
 
     enum WordListError: Error, LocalizedError {

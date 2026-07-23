@@ -179,7 +179,7 @@ class KeyboardViewController: UIInputViewController {
                     into: symSpell,
                     trie: trie
                 )
-                if loaded < 82765 {
+                if loaded < 49000 {
                     FileLogger.shared.info(.dictionary, "prediction engine loaded partial dictionary", payload: ["wordsLoaded": loaded])
                 }
             } catch {

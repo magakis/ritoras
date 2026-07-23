@@ -117,11 +117,13 @@ struct SharedConfig {
 
         // MARK: - Memory Management
 
-        /// Maximum resident bytes allowed during dictionary load (default ~35 MB).
-        /// If the process exceeds this during `WordListLoader.loadStreamed`, the
-        /// load is aborted and a warning is logged. The engine still marks itself
-        /// ready with whatever partial vocabulary was loaded.
-        static let maxResidentBytesDuringLoad: UInt64 = 35 * 1024 * 1024
+        /// Maximum phys_footprint (private dirty memory) allowed during dictionary load.
+        /// Measured via task_vm_info.phys_footprint — same metric iOS Jetsam uses for the
+        /// 48 MB keyboard-extension cap. ~25 MB is SymSpell alone, so 40 MB gives headroom
+        /// while staying 8 MB under Jetsam. If exceeded during loadStreamed, the load is
+        /// aborted and a warning logged; the engine still marks itself ready with whatever
+        /// partial vocabulary was loaded.
+        static let maxPhysFootprintDuringLoad: UInt64 = 40 * 1024 * 1024
 
         // MARK: - Autocorrect-on-Space
 
