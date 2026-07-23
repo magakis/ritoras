@@ -202,12 +202,27 @@ struct SettingsView: View {
             Button("Show Onboarding Again") {
                 showOnboarding = true
             }
+            HStack {
+                Text("Version")
+                Spacer()
+                Text(appVersionDisplay)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .textSelection(.enabled)
+            }
         } header: {
             Text("About")
         }
     }
 
     // MARK: - Helpers
+
+    private var appVersionDisplay: String {
+        let info = Bundle.main.infoDictionary
+        let version = (info?["CFBundleShortVersionString"] as? String) ?? "?"
+        let build = (info?["CFBundleVersion"] as? String) ?? "?"
+        return "\(version) (\(build))"
+    }
 
     private func testServer(at index: Int) {
         guard index < settings.servers.count else { return }
