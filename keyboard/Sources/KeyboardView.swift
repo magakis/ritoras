@@ -270,6 +270,9 @@ private class KeyboardRowView: UIView {
     // All current edge keys (⇧, #+=, 123, ⌫) declare widthWeight 1.5; do not change one without the others.
     private static let edgeKeyWidthWeight: CGFloat = 1.5
 
+    // DIAGNOSTIC: blank-keyboard investigation — remove after fix
+    private var hasLoggedFirstLayout = false
+
     enum LayoutMode {
         case letterPitch      // shared 10-key pitch, shorter rows centered (staggered QWERTY look) — rows 0,1
         case edgeAnchored     // first & last keys pinned to fixed geometry, middle keys fill the gap — row 2
@@ -307,12 +310,26 @@ private class KeyboardRowView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        guard !keys.isEmpty else { return }
+        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
+        guard !keys.isEmpty else {
+            FileLogger.shared.warn(.keyboard, "layoutSubviews skipped — keys empty")
+            return
+        }
 
         let width = bounds.width
         let height = bounds.height
         let n = CGFloat(keys.count)
         let totalSpacing = spacing * (n - 1)
+
+        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
+        if width == 0 || height == 0 {
+            FileLogger.shared.warn(.keyboard, "layoutSubviews zero bounds",
+                                   payload: ["w": Double(width), "h": Double(height), "keys": keys.count])
+        } else if !hasLoggedFirstLayout {
+            hasLoggedFirstLayout = true
+            FileLogger.shared.info(.keyboard, "layoutSubviews first valid layout",
+                                   payload: ["w": Double(width), "h": Double(height), "keys": keys.count])
+        }
 
         switch layoutMode {
         case .letterPitch:
@@ -379,6 +396,15 @@ private class KeyboardRowView: UIView {
                 let w = unit * key.keyDefinition.widthWeight
                 key.frame = CGRect(x: x, y: 0, width: w, height: height)
                 x += w + spacing
+            }
+        }
+
+        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
+        for (i, key) in keys.enumerated() {
+            if key.frame.width == 0 || key.frame.height == 0 {
+                FileLogger.shared.warn(.keyboard, "key frame zero",
+                                       payload: ["index": i, "w": Double(key.frame.width),
+                                                 "h": Double(key.frame.height)])
             }
         }
     }
@@ -489,6 +515,13 @@ class KeyboardView: UIView {
         }
         return panel
     }()
+    /// Overlay for emoji search — visible only in .emojiSearch mode, above the
+    /// suggestion bar. Closures are wired by KeyboardViewController.
+    lazy var emojiSearchOverlay: EmojiSearchOverlay = {
+        let v = EmojiSearchOverlay()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        return v
+    }()
     private let bottomActionRow = UIView()
 
     /// Single reusable character preview popup — recycled across key presses.
@@ -510,9 +543,8 @@ class KeyboardView: UIView {
     private var currentShiftState: ShiftState = .lower
     private var currentLayoutMode: KeyboardLayoutMode = .letters
 
-    /// Active only in `.emojiSearch` mode — pins the emoji panel's bottom edge
-    /// to the letter region's top edge, preventing overlap.
-    private var emojiSearchOverlapConstraint: NSLayoutConstraint?
+    /// Height constraint for emojiSearchOverlay — 0 when hidden, overlayHeight when active.
+    private var emojiSearchOverlayHeightConstraint: NSLayoutConstraint?
 
     // Suggestion lookup concurrency (matching predictionBuildQueue pattern)
     private let suggestionLookupQueue = DispatchQueue(
@@ -541,16 +573,29 @@ class KeyboardView: UIView {
         // Top-edge clipping at the UIWindow level is accepted.
         clipsToBounds = false
 
+        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
+        FileLogger.shared.info(.keyboard, "setupView frame",
+                               payload: ["w": Double(frame.width), "h": Double(frame.height)])
+
         setupSuggestionBar()
         setupLetterRegion()
         setupEmojiPanel()
         setupConstraints()
+
+        addSubview(emojiSearchOverlay)
+        bringSubviewToFront(emojiSearchOverlay)
 
         addSubview(keyPreview)
         bringSubviewToFront(keyPreview)
 
         rebuildKeyRows()
         apply(mode: .letters)
+
+        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
+        let rowCount = keyStack.arrangedSubviews.count
+        FileLogger.shared.info(.keyboard, "setupView complete",
+                               payload: ["rows": rowCount, "totalKeys": allKeyButtons.count,
+                                         "mode": "letters"])
     }
 
     private func setupSuggestionBar() {
@@ -601,9 +646,19 @@ class KeyboardView: UIView {
         let emojiPanelBottom = emojiPanelView.bottomAnchor.constraint(equalTo: bottomAnchor)
         emojiPanelBottom.priority = .defaultHigh
 
+        // Create overlay height constraint (0 = hidden, overlayHeight when active)
+        emojiSearchOverlayHeightConstraint = emojiSearchOverlay.heightAnchor.constraint(equalToConstant: 0)
+
         NSLayoutConstraint.activate([
-            // SuggestionBar — top (hidden in emoji mode); flush with the top edge
-            suggestionBar.topAnchor.constraint(equalTo: topAnchor, constant: 0),
+            // Emoji search overlay — pinned to the very top; 0 when inactive
+            emojiSearchOverlay.topAnchor.constraint(equalTo: topAnchor),
+            emojiSearchOverlay.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            emojiSearchOverlay.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            emojiSearchOverlayHeightConstraint!,
+
+            // SuggestionBar — pinned to the overlay's bottom; when overlay height is 0
+            // this is equivalent to topAnchor, preserving the current layout.
+            suggestionBar.topAnchor.constraint(equalTo: emojiSearchOverlay.bottomAnchor, constant: 0),
             suggestionBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             suggestionBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             suggestionBar.heightAnchor.constraint(equalToConstant: 36),
@@ -626,16 +681,15 @@ class KeyboardView: UIView {
             bottomActionRow.bottomAnchor.constraint(equalTo: bottomAnchor),
             bottomActionRow.heightAnchor.constraint(equalToConstant: 48),
         ])
-
-        // Overlap constraint for .emojiSearch mode — pins panel bottom to letter region top
-        emojiSearchOverlapConstraint = emojiPanelView.bottomAnchor.constraint(equalTo: letterRegionContainer.topAnchor)
-        emojiSearchOverlapConstraint?.priority = .required
-        emojiSearchOverlapConstraint?.isActive = false
     }
 
     // MARK: - Key Rows
 
     private func rebuildKeyRows() {
+        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
+        FileLogger.shared.debug(.keyboard, "rebuildKeyRows start",
+                                payload: ["layoutMode": "\(currentLayoutMode)"])
+
         keyStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         bottomRowView?.removeFromSuperview()
         bottomRowView = nil
@@ -760,6 +814,11 @@ class KeyboardView: UIView {
         if let bottomRow = bottomRowView {
             allKeyButtons.append(contentsOf: bottomRow.keys)
         }
+
+        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
+        let totalRows = keyStack.arrangedSubviews.count + (bottomRowView != nil ? 1 : 0)
+        FileLogger.shared.debug(.keyboard, "rebuildKeyRows complete",
+                                payload: ["rows": totalRows, "totalKeys": allKeyButtons.count])
     }
 
     private func updateKeyButtonLabels() {
@@ -977,18 +1036,31 @@ class KeyboardView: UIView {
     }
 
     func apply(mode: UIMode) {
-        let showEmojiPanel = (mode == .emoji || mode == .emojiSearch)
-        let showLetters    = (mode == .letters || mode == .emojiSearch)
-        let showBottomRow  = showLetters
-        let showSuggestBar = (mode == .letters)
+        let inSearch         = (mode == .emojiSearch)
+        let showEmojiPanel   = (mode == .emoji)
+        let showLetters      = (mode == .letters || mode == .emojiSearch)
+        let showBottomRow    = showLetters
+        let showSuggestBar   = (mode == .letters || mode == .emojiSearch)
+        let showOverlay      = inSearch
 
-        // Dismiss key preview popup when switching to emoji mode.
-        if showEmojiPanel { keyPreview.hide() }
+        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
+        FileLogger.shared.info(.keyboard, "apply(mode:) called",
+                               payload: ["mode": "\(mode)",
+                                         "suggestionBarHidden": suggestionBar.isHidden,
+                                         "letterRegionHidden": letterRegionContainer.isHidden,
+                                         "bottomActionHidden": bottomActionRow.isHidden,
+                                         "emojiPanelHidden": emojiPanelView.isHidden])
+
+        // Dismiss key preview popup when switching to emoji/emojiSearch mode.
+        if inSearch || showEmojiPanel { keyPreview.hide() }
 
         suggestionBar.isHidden = !showSuggestBar
         letterRegionContainer.isHidden = !showLetters
         bottomActionRow.isHidden = !showBottomRow
         emojiPanelView.isHidden = !showEmojiPanel
+        emojiSearchOverlay.isHidden = !showOverlay
+        emojiSearchOverlayHeightConstraint?.constant = showOverlay ? EmojiSearchOverlay.overlayHeight : 0
+
         if showEmojiPanel {
             emojiKeyButton?.setTitle("ABC", for: .normal)
             emojiKeyButton?.setImage(nil, for: .normal)
@@ -998,10 +1070,8 @@ class KeyboardView: UIView {
             emojiKeyButton?.setTitle(nil, for: .normal)
         }
 
-        // Toggle the overlap constraint — active only in .emojiSearch
-        emojiSearchOverlapConstraint?.isActive = (mode == .emojiSearch)
-
-        if mode == .emojiSearch {
+        if inSearch {
+            emojiSearchOverlay.activate()
             // Defensive: ensure keyStack has rows (today this is a no-op since keyStack
             // is populated at startup, but protects against future regressions)
             if keyStack.arrangedSubviews.isEmpty {
@@ -1012,6 +1082,8 @@ class KeyboardView: UIView {
             // propagates fresh frames down to the KeyboardRowView instances.
             letterRegionContainer.setNeedsLayout()
             letterRegionContainer.layoutIfNeeded()
+        } else {
+            emojiSearchOverlay.deactivate()
         }
 
         if showEmojiPanel { reloadEmojiPanel() }

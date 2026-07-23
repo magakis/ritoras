@@ -45,6 +45,7 @@ class KeyboardViewController: UIInputViewController {
     private var uiMode: UIMode = .letters {
         didSet {
             keyboardView.apply(mode: uiMode)
+            updateKeyboardHeight(for: uiMode)
         }
     }
 
@@ -152,6 +153,8 @@ class KeyboardViewController: UIInputViewController {
     /// Builds the prediction engine (SymSpell + Trie) on a background queue.
     /// Sets `isPredictionEngineReady = true` on the main queue when done.
     private func buildPredictionEngine() {
+        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
+        FileLogger.shared.info(.prediction, "buildPredictionEngine start")
         isPredictionEngineReady = false
 
         predictionBuildQueue.async { [weak self] in
@@ -243,6 +246,9 @@ class KeyboardViewController: UIInputViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
+        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
+        FileLogger.shared.info(.lifecycle, "viewDidLoad start")
+
         // Wire FileLogger broadcast to ship logs to container app via localhost.
         // Set before any log calls so we capture everything from the start.
         FileLogger.broadcast = { level, component, message, payload in
@@ -291,7 +297,7 @@ class KeyboardViewController: UIInputViewController {
         // Defensive: never resume in search mode after keyboard dismiss/reappear
         inputTarget = .hostApp
         if uiMode == .emojiSearch {
-            keyboardView.emojiPanelView.searchField.resignFirstResponder()
+            keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
             uiMode = .emoji
         }
 
@@ -319,12 +325,22 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
+        FileLogger.shared.info(.lifecycle, "viewWillAppear")
         installOrUpdateHeightConstraint()
     }
 
     override func viewIsAppearing(_ animated: Bool) {
         super.viewIsAppearing(animated)
+        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
+        FileLogger.shared.info(.lifecycle, "viewIsAppearing")
         installOrUpdateHeightConstraint()
+    }
+
+    // DIAGNOSTIC: blank-keyboard investigation — remove after fix
+    override func didReceiveMemoryWarning() {
+        super.didReceiveMemoryWarning()
+        FileLogger.shared.warn(.lifecycle, "didReceiveMemoryWarning")
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -392,6 +408,11 @@ class KeyboardViewController: UIInputViewController {
             keyboardView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
+        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
+        FileLogger.shared.info(.keyboard, "setupKeyboardView bounds",
+                               payload: ["w": Double(keyboardView.bounds.width),
+                                         "h": Double(keyboardView.bounds.height)])
+
         // Wire emoji panel search callbacks
         keyboardView.emojiPanelView.onSearchActivate = { [weak self] in
             guard let self = self else { return }
@@ -403,15 +424,27 @@ class KeyboardViewController: UIInputViewController {
         keyboardView.emojiPanelView.onSearchDismiss = { [weak self] in
             guard let self = self else { return }
             self.inputTarget = .hostApp
-            self.keyboardView.emojiPanelView.searchField.resignFirstResponder()
+            self.keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
             self.uiMode = .emoji
         }
 
         keyboardView.emojiPanelView.onSearchReturn = { [weak self] in
             guard let self = self else { return }
             self.inputTarget = .hostApp
-            self.keyboardView.emojiPanelView.searchField.resignFirstResponder()
+            self.keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
             self.uiMode = .emoji
+        }
+
+        // Wire emoji search overlay callbacks
+        keyboardView.emojiSearchOverlay.onSelect = { [weak self] emoji in
+            guard let self else { return }
+            // Insert directly into host document (NOT via insertTargeted, which would
+            // route into the search field since inputTarget == .emojiSearch).
+            self.textDocumentProxy.insertText(emoji)
+            // EmojiRecents.add is already called inside the overlay on tap.
+        }
+        keyboardView.emojiSearchOverlay.onDismiss = { [weak self] in
+            self?.uiMode = .emoji   // exit to normal emoji panel (matches iOS reference flow)
         }
     }
 
@@ -421,6 +454,14 @@ class KeyboardViewController: UIInputViewController {
             heightConstraint?.priority = .defaultHigh
             heightConstraint?.isActive = true
         }
+    }
+
+    private func updateKeyboardHeight(for mode: UIMode) {
+        installOrUpdateHeightConstraint()
+        let base: CGFloat = 256
+        heightConstraint?.constant = (mode == .emojiSearch) ? base + EmojiSearchOverlay.overlayHeight : base
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
     }
 
     // MARK: - Mic Button
@@ -1281,7 +1322,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             case .emoji:        uiMode = .letters
             case .emojiSearch:
                 inputTarget = .hostApp
-                keyboardView.emojiPanelView.searchField.resignFirstResponder()
+                keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
                 uiMode = .emoji
             }
 
@@ -1644,14 +1685,14 @@ extension KeyboardViewController: KeyboardViewDelegate {
     private var hasTextInCurrentTarget: Bool {
         switch inputTarget {
         case .hostApp:     return textDocumentProxy.hasText
-        case .emojiSearch: return !(keyboardView.emojiPanelView.searchField.text?.isEmpty ?? true)
+        case .emojiSearch: return !(keyboardView.emojiSearchOverlay.searchField.text?.isEmpty ?? true)
         }
     }
 
     private func insertTargeted(_ text: String) {
         switch inputTarget {
         case .hostApp:     textDocumentProxy.insertText(text)
-        case .emojiSearch: keyboardView.emojiPanelView.searchField.insertText(text)
+        case .emojiSearch: keyboardView.emojiSearchOverlay.searchField.insertText(text)
         }
     }
 
@@ -1663,7 +1704,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             }
             textDocumentProxy.deleteBackward()
         case .emojiSearch:
-            keyboardView.emojiPanelView.searchField.deleteBackward()
+            keyboardView.emojiSearchOverlay.searchField.deleteBackward()
         }
     }
 
