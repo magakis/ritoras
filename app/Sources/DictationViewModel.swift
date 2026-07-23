@@ -690,7 +690,10 @@ final class DictationViewModel: ObservableObject {
                                        payload: ["preview": String(text.prefix(60)),
                                                  "length": text.count])
 
-                guard activeID == id else { return }
+                guard activeID == id else {
+                    await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
+                    return
+                }
 
                 let ucTime = Date()
                 writeToClipboard(status: "completed", text: text)
@@ -715,10 +718,14 @@ final class DictationViewModel: ObservableObject {
                 phase = .done(text)
             } catch WhisperError.cancelled {
                 // User cancelled — do not record as failure.
-                FileLogger.shared.debug(.app, "transcription cancelled",
+                RecordingStore.shared.deleteStreamWav(for: id)
+                FileLogger.shared.debug(.app, "transcription cancelled, wav deleted",
                                         payload: ["jobId": id.uuidString])
             } catch {
-                guard activeID == id else { return }
+                guard activeID == id else {
+                    await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
+                    return
+                }
 
                 let failedElapsed = Date().timeIntervalSince(uploadT0) * 1000
                 FileLogger.shared.error(.transcription, "Stream error",
@@ -736,7 +743,10 @@ final class DictationViewModel: ObservableObject {
                         RecordingStore.shared.deleteStreamWav(for: id)
                         FileLogger.shared.debug(.audio, "stream wav deleted on fallback success",
                                                 payload: ["jobId": id.uuidString])
-                        guard activeID == id else { return }
+                        guard activeID == id else {
+                            await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
+                            return
+                        }
 
                         let ucTime = Date()
                         writeToClipboard(status: "completed", text: text)
@@ -764,7 +774,10 @@ final class DictationViewModel: ObservableObject {
                             RecordingStore.shared.deleteStreamWav(for: id)
                             FileLogger.shared.debug(.audio, "stream wav deleted after fallback",
                                                     payload: ["jobId": id.uuidString])
-                            guard activeID == id else { return }
+                            guard activeID == id else {
+                                await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
+                                return
+                            }
 
                             writeToClipboard(status: "completed", text: livePartial)
                             postResultToServer(status: "completed", text: livePartial)
@@ -798,7 +811,10 @@ final class DictationViewModel: ObservableObject {
                     FileLogger.shared.debug(.audio, "stream fallback: no WAV file found",
                                             payload: ["jobId": id.uuidString])
                     if !livePartial.isEmpty {
-                        guard activeID == id else { return }
+                        guard activeID == id else {
+                            await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
+                            return
+                        }
 
                         writeToClipboard(status: "completed", text: livePartial)
                         postResultToServer(status: "completed", text: livePartial)
@@ -1035,6 +1051,19 @@ final class DictationViewModel: ObservableObject {
             FileLogger.shared.warn(.app, "retryAsLiveDictation failed",
                                   payload: ["jobId": jobId.uuidString, "error": message])
         }
+    }
+
+    /// Cleans up stream session resources: ends background task, disconnects
+    /// WebSocket, and nils out stream references. Idempotent — safe to call
+    /// multiple times or on already-cleaned-up sessions.
+    private func cleanupStreamSession(backgroundTaskID: inout UIBackgroundTaskIdentifier) async {
+        if backgroundTaskID != .invalid {
+            UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            backgroundTaskID = .invalid
+        }
+        await streamClient?.disconnect()
+        streamClient = nil
+        streamRecorder = nil
     }
 
     func cancel() async {
