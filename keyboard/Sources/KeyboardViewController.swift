@@ -399,31 +399,11 @@ class KeyboardViewController: UIInputViewController {
         super.viewWillDisappear(animated)
         FileLogger.shared.info(.keyboard, "viewWillDisappear")
 
-        // If we already know the target is wrong at disappearance time, clear
-        // everything including the Darwin observer — no point keeping observers
-        // alive to deliver into the wrong app.
-        if let targetId = dictationTargetId, pendingRequestId != nil {
-            let currentId = textDocumentProxy.documentIdentifier
-            if currentId != targetId {
-                FileLogger.shared.warn(.keyboard, "viewWillDisappear — target mismatch, discarding pending dictation",
-                                       payload: ["expected": targetId.uuidString, "actual": currentId.uuidString])
-                stopDictationTransports()
-                pendingRequestId = nil
-                dictationTargetId = nil
-                clearDeferredResult()
-                state = .idle
-                // Deliberately fall through to backspace cleanup below —
-                // stopDictationTransports() already cleared the dictation timers,
-                // but the backspace timer and phase reset are not covered by it.
-            }
-        }
-
         // Cancel timers so they don't fire across app switches.
-        // The Darwin observer is intentionally kept alive: dictation may match
-        // the current target, so it may complete on the server while the keyboard
-        // is hidden (e.g. user is recording in the container app), and we want
-        // the notification to land immediately when the keyboard reappears
-        // without waiting for server polling.
+        // The Darwin observer is intentionally kept alive: dictation may complete
+        // on the server while the keyboard is hidden (e.g. user is recording in
+        // the container app), and we want the notification to land immediately
+        // when the keyboard reappears without waiting for server polling.
         // The observer auto-unregisters in deinit; stale notifications after a
         // resolved dictation are filtered by pendingRequestId.
         waitTimer?.invalidate()
@@ -447,20 +427,6 @@ class KeyboardViewController: UIInputViewController {
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         FileLogger.shared.info(.keyboard, "viewDidDisappear")
-        // Defensive cleanup: if the keyboard has truly disappeared with a pending
-        // dictation whose target no longer matches, the user switched apps — discard.
-        if let targetId = dictationTargetId, pendingRequestId != nil {
-            let currentId = textDocumentProxy.documentIdentifier
-            if currentId != targetId {
-                FileLogger.shared.warn(.keyboard, "viewDidDisappear — target mismatch, discarding pending dictation",
-                                       payload: ["expected": targetId.uuidString, "actual": currentId.uuidString])
-                stopDictationTransports()
-                pendingRequestId = nil
-                dictationTargetId = nil
-                clearDeferredResult()
-                state = .idle
-            }
-        }
     }
 
     deinit {
@@ -792,22 +758,6 @@ class KeyboardViewController: UIInputViewController {
         } catch LocalhostClient.LocalhostError.connectionRefused {
             consecutiveConnectionFailures += 1
             if consecutiveConnectionFailures >= 3 {
-                // Container app is dead — check target before falling through
-                let discarded = await MainActor.run { () -> Bool in
-                    guard let targetId = self.dictationTargetId else { return false }
-                    let currentId = self.textDocumentProxy.documentIdentifier
-                    guard currentId != targetId else { return false }
-                    FileLogger.shared.warn(.keyboard, "refreshStateFromLocalhost — target mismatch after connection failures, discarding",
-                                           payload: ["expected": targetId.uuidString,
-                                                     "actual": currentId.uuidString])
-                    self.stopDictationTransports()
-                    self.pendingRequestId = nil
-                    self.dictationTargetId = nil
-                    self.clearDeferredResult()
-                    self.state = .idle
-                    return true
-                }
-                if discarded { return }
                 // Container app is dead — fall back to legacy server polling
                 stopLocalhostPolling()
                 startServerPolling()
@@ -1635,22 +1585,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
 
-        // Target-binding: if the text field changed during an active dictation,
-        // this dictation belongs to the previous field — discard it.
-        if let targetId = dictationTargetId, pendingRequestId != nil {
-            let currentId = textDocumentProxy.documentIdentifier
-            if currentId != targetId {
-                FileLogger.shared.warn(.keyboard, "textDidChange — target field changed, discarding pending dictation",
-                                       payload: ["expected": targetId.uuidString, "actual": currentId.uuidString])
-                stopDictationTransports()
-                pendingRequestId = nil
-                dictationTargetId = nil
-                clearDeferredResult()
-                state = .idle
-                return
-            }
-        }
-
         lastAutoCorrection = nil  // host text change invalidates any pending revert
         // SYNC: system-signaled textDidChange bypasses debounce so the suggestion bar
         // updates immediately — debounce here would feel laggy after external edits.
@@ -1676,22 +1610,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     override func selectionDidChange(_ textInput: UITextInput?) {
         super.selectionDidChange(textInput)
-
-        // Target-binding: if the selection changed and now points to a different
-        // text field during an active dictation, discard the pending dictation.
-        if let targetId = dictationTargetId, pendingRequestId != nil {
-            let currentId = textDocumentProxy.documentIdentifier
-            if currentId != targetId {
-                FileLogger.shared.warn(.keyboard, "selectionDidChange — target field changed, discarding pending dictation",
-                                       payload: ["expected": targetId.uuidString, "actual": currentId.uuidString])
-                stopDictationTransports()
-                pendingRequestId = nil
-                dictationTargetId = nil
-                clearDeferredResult()
-                state = .idle
-                return
-            }
-        }
 
         lastAutoCorrection = nil  // cursor move invalidates any pending revert
         backspaceNilContextRetries = 0
