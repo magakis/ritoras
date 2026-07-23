@@ -182,7 +182,24 @@ struct DebugLogView: View {
             if !selectedIDs.isEmpty || !expandedKeys.isEmpty {
                 statusBanner
             }
-            mainList
+            if lines.isEmpty && diagnostics.isEmpty && crashReports.isEmpty {
+                if isLoading {
+                    VStack {
+                        Spacer()
+                        ProgressView()
+                        Spacer()
+                    }
+                } else {
+                    VStack {
+                        Spacer()
+                        Text("No log entries yet")
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                }
+            } else {
+                mainList
+            }
         }
         .navigationTitle("Debug Log")
         .navigationBarTitleDisplayMode(.inline)
