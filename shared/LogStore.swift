@@ -173,7 +173,6 @@ final class LogStore {
         exec("PRAGMA busy_timeout=5000;")
         exec("PRAGMA foreign_keys=ON;")
         exec("PRAGMA mmap_size=0;")          // disabled — iOS can revoke mmap'd regions in app-group containers under memory pressure, producing malformed-page reads
-        exec("PRAGMA optimize;")             // FTS5 post-rebuild stability
 
         // ── DDL ──────────────────────────────────────────────────
         let createLog = """
@@ -209,11 +208,6 @@ final class LogStore {
           INSERT INTO log_fts(log_fts, rowid, message) VALUES('delete', old.id, old.message);
         END;
         """)
-
-        // ── FTS rebuild notification ───────────────────────────
-        if !exec("INSERT INTO log_fts(log_fts) VALUES('rebuild');") {
-            recordDiagnostic("fts rebuild failed")
-        }
 
         // ── Update hook ──────────────────────────────────────────
         sqlite3_update_hook(db, Self._updateHookCallback, nil)
