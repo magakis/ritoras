@@ -220,6 +220,8 @@ actor WhisperStreamClient {
             // Receive loop
             group.addTask {
                 do {
+                    var accumulated = ""
+
                     while true {
                         let message = try await task.receive()
 
@@ -237,11 +239,14 @@ actor WhisperStreamClient {
                                 case "partial":
                                     let msg = try JSONDecoder().decode(
                                         StreamPartial.self, from: data)
+                                    accumulated = accumulated.isEmpty
+                                        ? msg.transcription
+                                        : accumulated + " " + msg.transcription
                                     FileLogger.shared.debug(.network, "Received partial",
-                                                            payload: ["preview": String(msg.transcription.prefix(60)),
-                                                                      "length": msg.transcription.count,
+                                                            payload: ["preview": String(accumulated.prefix(60)),
+                                                                      "length": accumulated.count,
                                                                       "chunkId": msg.chunk_id as Any])
-                                    onPartial(msg.transcription)
+                                    onPartial(accumulated)
 
                                 case "final":
                                     let msg = try JSONDecoder().decode(
