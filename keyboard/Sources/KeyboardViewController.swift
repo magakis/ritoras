@@ -413,8 +413,8 @@ class KeyboardViewController: UIInputViewController {
                 clearDeferredResult()
                 state = .idle
                 // Deliberately fall through to backspace cleanup below —
-                // stopDictationTransports() already cleared the timers, but the
-                // backspace timer and phase reset are not covered by that method.
+                // stopDictationTransports() already cleared the dictation timers,
+                // but the backspace timer and phase reset are not covered by it.
             }
         }
 
@@ -1243,7 +1243,7 @@ class KeyboardViewController: UIInputViewController {
             stopDictationTransports()
             serverPollWorkItem?.cancel()
             serverPollWorkItem = nil
-            FileLogger.shared.warn(.keyboard, "Server polling timed out after ~33s (30 iterations)",
+            FileLogger.shared.warn(.keyboard, "Server polling timed out (30 iterations)",
                                    payload: ["pendingRequestId": pendingRequestId?.uuidString ?? "nil"])
             pendingRequestId = nil
             dictationTargetId = nil
