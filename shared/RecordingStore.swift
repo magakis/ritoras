@@ -44,6 +44,19 @@ final class RecordingStore {
         try? FileManager.default.removeItem(at: url)
     }
 
+    /// Returns the expected WAV stream file URL for the given job ID, or nil
+    /// if the directory is unavailable.
+    func streamWavURL(for jobId: UUID) -> URL? {
+        directoryURL?.appendingPathComponent("\(jobId.uuidString).stream.wav")
+    }
+
+    /// Deletes the WAV stream file for the given job ID. No-op if the file
+    /// does not exist or the directory is unavailable.
+    func deleteStreamWav(for jobId: UUID) {
+        guard let url = streamWavURL(for: jobId) else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+
     /// Deletes recording files whose modification time is older than the
     /// specified interval relative to `referenceDate`.
     func pruneOlderThan(_ interval: TimeInterval, relativeTo referenceDate: Date = Date()) {

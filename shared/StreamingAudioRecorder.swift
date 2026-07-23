@@ -168,6 +168,52 @@ private final class ConverterHolder: @unchecked Sendable {
     }
 }
 
+// MARK: - Disk Writer Holder (access via vadQueue serialization)
+
+/// Thread-safe holder for the WAV file writer used during streaming disk
+/// recording. All access is from `vadQueue` (serial), so no lock is needed.
+/// Writes every resampled buffer (including silence) to disk so the full
+/// session is available for batch transcription if the stream fails.
+/// On write error, logs once at `.error` and disables further writes;
+/// the network streaming path is unaffected.
+private final class DiskWriterHolder: @unchecked Sendable {
+    private var audioFile: AVAudioFile?
+    private var disabled = false
+
+    /// Opens a WAV file for writing with the given format settings.
+    /// Returns `false` on failure (sets the disabled flag internally).
+    func open(url: URL, settings: [String: Any]) -> Bool {
+        guard let file = try? AVAudioFile(forWriting: url, settings: settings) else {
+            audioFile = nil
+            disabled = true
+            return false
+        }
+        audioFile = file
+        disabled = false
+        return true
+    }
+
+    /// Writes one PCM buffer to disk. Safe to call from `vadQueue` only.
+    /// On write error, logs once and disables all future writes.
+    func write(from buffer: AVAudioPCMBuffer) {
+        guard let file = audioFile, !disabled else { return }
+        do {
+            try file.write(from: buffer)
+        } catch {
+            FileLogger.shared.error(.audio, "stream WAV write failed — disabling disk recording")
+            disabled = true
+            audioFile = nil
+        }
+    }
+
+    /// Closes the file (finalizes WAV header on dealloc). Safe to call
+    /// multiple times. Call from `vadQueue` after `vad.flush()`.
+    func close() {
+        audioFile = nil
+        disabled = true
+    }
+}
+
 // MARK: - Streaming Audio Recorder
 
 /// Captures microphone audio via `AVAudioEngine`, runs an energy-based VAD
@@ -194,6 +240,10 @@ actor StreamingAudioRecorder {
     /// Thread-safe holder for the lazy `AVAudioConverter`; access only
     /// through its lock-protected methods (never actor-isolated `var`).
     private let converterHolder = ConverterHolder()
+
+    /// Thread-safe holder for the WAV disk writer; accessed only from
+    /// `vadQueue` (serial) — no additional locking needed.
+    private let diskWriter = DiskWriterHolder()
 
     /// Tracks whether a tap is installed, enabling idempotent teardown.
     private var tapInstalled = false
@@ -229,7 +279,7 @@ actor StreamingAudioRecorder {
     ///   if mic access is unavailable; `AudioRecorder.AudioRecorderError.invalidSessionConfiguration`
     ///   if session setup fails; `StreamingRecorderError.engineStartFailed` if
     ///   the audio engine cannot start.
-    func start(onChunk: @escaping ChunkHandler) async throws {
+    func start(fileURL: URL? = nil, onChunk: @escaping ChunkHandler) async throws {
         guard !isRecording else {
             throw StreamingRecorderError.alreadyStreaming
         }
@@ -270,6 +320,13 @@ actor StreamingAudioRecorder {
             )
         }
 
+        // Optionally open disk WAV writer for continuous recording
+        if let wavURL = fileURL {
+            if !diskWriter.open(url: wavURL, settings: targetFormat.settings) {
+                FileLogger.shared.error(.audio, "stream WAV open failed — disk recording disabled")
+            }
+        }
+
         let inputNode = engine.inputNode
 
         // 4. Get the input node's NATIVE format
@@ -293,6 +350,7 @@ actor StreamingAudioRecorder {
         let vad = self.vad
         let vadQueue = self.vadQueue
         let converterHolder = self.converterHolder
+        let diskWriter = self.diskWriter
 
         // 6. Install tap with NATIVE format (REMOVES the format-mismatch crash)
         let tapBlock: AVAudioNodeTapBlock = { buffer, _ in
@@ -334,7 +392,8 @@ actor StreamingAudioRecorder {
                     converterHolder: converterHolder,
                     targetFormat: targetFormat,
                     vad: vad,
-                    handler: handler
+                    handler: handler,
+                    diskWriter: diskWriter
                 )
             }
         }
@@ -381,7 +440,8 @@ actor StreamingAudioRecorder {
         converterHolder: ConverterHolder,
         targetFormat: AVAudioFormat,
         vad: VADContext,
-        handler: @escaping ChunkHandler
+        handler: @escaping ChunkHandler,
+        diskWriter: DiskWriterHolder
     ) {
         // --- Lazy converter construction / route-change rebuild ---
         // Log a warning if the format changed since the previous buffer.
@@ -434,7 +494,13 @@ actor StreamingAudioRecorder {
         // (the simple convert(to:from:) cannot perform sample-rate conversion,
         // per Apple's AVAudioConverter.h and TN3136).
         var convError: NSError?
+        var consumed = false
         let inputBlock: AVAudioConverterInputBlock = { _, inStatus in
+            if consumed {
+                inStatus.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
             inStatus.pointee = .haveData
             return inputBuffer
         }
@@ -453,6 +519,10 @@ actor StreamingAudioRecorder {
 
         let convertedLength = Int(outputBuffer.frameLength)
         guard convertedLength > 0 else { return }
+
+        // Write every converted buffer to disk (incl. silence) so the full
+        // session is available for batch transcription if the stream fails.
+        diskWriter.write(from: outputBuffer)
 
         // Extract converted float samples (always mono at 16 kHz)
         let outputPtr = UnsafeBufferPointer(
@@ -513,9 +583,11 @@ actor StreamingAudioRecorder {
         // runs AFTER all pending process() blocks complete (serial ordering).
         let vadQueue = self.vadQueue
         let vad = self.vad
+        let diskWriter = self.diskWriter
         let emission: VADEmission? = await withCheckedContinuation { continuation in
             vadQueue.async {
                 let result = vad.flush()
+                diskWriter.close()
                 continuation.resume(returning: result)
             }
         }

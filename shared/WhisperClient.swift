@@ -591,8 +591,10 @@ enum WhisperClient {
 
         // File part
         append("--\(boundary)\r\n")
-        append("Content-Disposition: form-data; name=\"audio\"; filename=\"audio.m4a\"\r\n")
-        append("Content-Type: audio/mp4\r\n\r\n")
+        let ext = audioURL.pathExtension.lowercased()
+        let (filename, contentType) = ext == "wav" ? ("audio.wav", "audio/wav") : ("audio.m4a", "audio/mp4")
+        append("Content-Disposition: form-data; name=\"audio\"; filename=\"\(filename)\"\r\n")
+        append("Content-Type: \(contentType)\r\n\r\n")
         body.append(try Data(contentsOf: audioURL))
         append("\r\n")
 
