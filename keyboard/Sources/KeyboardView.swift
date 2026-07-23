@@ -580,10 +580,11 @@ class KeyboardView: UIView {
         setupSuggestionBar()
         setupLetterRegion()
         setupEmojiPanel()
-        setupConstraints()
 
         addSubview(emojiSearchOverlay)
         bringSubviewToFront(emojiSearchOverlay)
+
+        setupConstraints()
 
         addSubview(keyPreview)
         bringSubviewToFront(keyPreview)
