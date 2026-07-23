@@ -53,8 +53,8 @@ struct SharedConfig {
 
         /// RMS threshold for VAD speech detection. Higher = less sensitive.
         static let streamVadSpeechRms: Float = 0.02
-        /// Silence duration (ms) before a chunk is finalized.
-        static let streamVadSilenceMs: Int = 600
+        /// Silence duration (ms) before a chunk is finalized (~1.5 s).
+        static let streamVadSilenceMs: Int = 1500
         /// Minimum speech duration (ms) to accept a chunk.
         static let streamVadMinSpeechMs: Int = 300
         /// Maximum audio segment length before forced chunk finalization.
@@ -63,6 +63,8 @@ struct SharedConfig {
         static let streamWsConnectTimeout: TimeInterval = 8.0
         /// How long to wait for a final transcription after the last audio chunk.
         static let streamFinalTimeout: TimeInterval = 30.0
+        /// Application-level PING interval; must stay under nginx idle (~60s). Resets the server 600s recv timer and keeps NAT/nginx alive.
+        static let streamKeepaliveIntervalSeconds: TimeInterval = 25.0
 
         // MARK: - SymSpell / Prediction Tunables
 

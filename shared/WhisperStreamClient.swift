@@ -31,6 +31,9 @@ actor WhisperStreamClient {
     /// Shared URLSession (no custom delegate needed).
     private let session: URLSession = .shared
 
+    /// Periodic keepalive task that sends app-level PING frames while connected.
+    private var keepaliveTask: Task<Void, Never>?
+
     // MARK: - Initialization
 
     /// Creates a streaming client for the given base URL.
@@ -118,6 +121,19 @@ actor WhisperStreamClient {
             try await group.next()
             group.cancelAll()
         }
+
+        // Start the periodic keepalive loop. It must stay under nginx idle
+        // (~60s) and the server's 600s recv timeout.
+        keepaliveTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(SharedConfig.Defaults.streamKeepaliveIntervalSeconds * 1_000_000_000))
+                guard let self else { break }
+                do { try await self.sendPing() }
+                catch { await self.forceClose(); break }
+            }
+        }
+        FileLogger.shared.info(.network, "Keepalive loop started",
+                               payload: ["interval": SharedConfig.Defaults.streamKeepaliveIntervalSeconds])
     }
 
     // MARK: - Sending
@@ -300,11 +316,21 @@ actor WhisperStreamClient {
 
     // MARK: - Disconnection
 
+    /// Forcefully tears down the transport so that any in-flight
+    /// `send()`/`receive()` calls fail immediately rather than waiting
+    /// for `streamFinalTimeout`.
+    private func forceClose() {
+        task?.cancel(with: .goingAway, reason: nil)
+        FileLogger.shared.warn(.network, "Force-close: transport cancelled")
+    }
+
     /// Gracefully closes the WebSocket connection.
     ///
     /// It is safe to call this method even if the client is not currently
     /// connected; it becomes a no-op.
     func disconnect() async {
+        keepaliveTask?.cancel()
+        keepaliveTask = nil
         // Cancel any in-flight receive/send operations and close.
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
