@@ -167,7 +167,19 @@ final class FileLogger {
         // DB stores originals unscrubbed. Scrubbing happens at export (copy/share)
         // in DebugLogView, controlled by the scrubPII toggle.
         if !Self.isKeyboardExtension {
-            LogStore.shared.insert(level, component, message, payload: payload, raw: jsonString)
+            if level == .warn || level == .error {
+                // Synchronous for crash survivability — guarantees the log is
+                // persisted before the process exits.
+                LogStore.shared.insert(level, component, message, payload: payload, raw: jsonString)
+            } else {
+                // Asynchronous to avoid blocking the main thread while the
+                // LogStore serial queue is busy with a read query. The serial
+                // queue preserves insert ordering regardless of which thread
+                // dispatched the work.
+                DispatchQueue.global(qos: .utility).async {
+                    LogStore.shared.insert(level, component, message, payload: payload, raw: jsonString)
+                }
+            }
         } else {
             // Keyboard: flat-file write only.
             let write = { Self.append(line, durable: (level == .warn || level == .error)) }
