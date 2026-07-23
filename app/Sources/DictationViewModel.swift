@@ -316,6 +316,7 @@ final class DictationViewModel: ObservableObject {
         }
 
         let mode = SharedConfig.dictationMode()
+        activeModeLabel = mode == .stream ? "STREAM" : "BATCH"
         FileLogger.shared.info(.transcription, "dictation start", payload: [
             "id": id.uuidString,
             "mode": mode == .stream ? "stream" : "batch"
@@ -359,12 +360,9 @@ final class DictationViewModel: ObservableObject {
             break
         }
 
-        activeModeLabel = mode == .stream ? "STREAM" : "BATCH"
-
         switch mode {
         case .batch:
             do {
-                try AudioSession.configure()
                 let newRecorder = AudioRecorder()
                 _ = try await newRecorder.startRecording(jobId: id)
                 recorder = newRecorder
@@ -386,8 +384,6 @@ final class DictationViewModel: ObservableObject {
             let config = SharedConfig.load()
 
             do {
-                try AudioSession.configure()
-
                 // Await probe result and try the selected server first.
                 // If unavailable or the probe-selected connection fails, iterate
                 // the remaining servers with the existing failover behaviour.
@@ -565,25 +561,8 @@ final class DictationViewModel: ObservableObject {
             do {
                 let audioBytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? UInt64 ?? 0
 
-                // Await probe result with 3s cap; fall back to iterating transcribe on timeout.
-                let probeResult: String?
-                if let task = serverSelectionTask {
-                    FileLogger.shared.debug(.network, "stop probe await start", payload: ["active_id": activeID?.uuidString ?? "nil"])
-                    probeResult = await withTaskGroup(of: String?.self) { group in
-                        group.addTask { await task.value }
-                        group.addTask {
-                            try? await Task.sleep(nanoseconds: 3_000_000_000)
-                            return nil
-                        }
-                        let first = await group.next()
-                        group.cancelAll()
-                        return first ?? nil
-                    }
-                } else {
-                    probeResult = nil
-                }
-                let chosenServer = probeResult ?? config.servers.first
-                FileLogger.shared.debug(.network, "stop probe await done", payload: ["probe_result": probeResult ?? "nil", "chosen": chosenServer ?? "nil"])
+                // Use probe result if already available, otherwise let transcribe iterate servers.
+                let chosenServer = selectedServer
                 serverSelectionTask?.cancel()
                 serverSelectionTask = nil
 
@@ -591,7 +570,7 @@ final class DictationViewModel: ObservableObject {
                     "id": id.uuidString,
                     "audioBytes": audioBytes,
                     "serverCount": config.servers.count,
-                    "server": probeResult ?? config.servers.first ?? ""
+                    "server": chosenServer ?? config.servers.first ?? ""
                 ])
 
                 let text: String
