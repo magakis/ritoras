@@ -66,6 +66,18 @@ struct SharedConfig {
         /// Application-level PING interval; must stay under nginx idle (~60s). Resets the server 600s recv timer and keeps NAT/nginx alive.
         static let streamKeepaliveIntervalSeconds: TimeInterval = 25.0
 
+        /// Maximum number of chunks held in the in-memory send queue before
+        /// new chunks are dropped (queue overflow). When overflow occurs,
+        /// the WAV file still captures everything; the stream is declared
+        /// terminally failed at stop time so the user can retry via batch.
+        static let streamChunkQueueMaxDepth: Int = 50
+
+        /// Backoff intervals (seconds) between chunk send retries.
+        /// The last value is the cap for all subsequent retries.
+        /// Retry is unbounded while recording is active; terminal failure
+        /// is determined at stop time if the queue is not fully drained.
+        static let streamChunkRetryBackoffSeconds: [TimeInterval] = [1.0, 2.0, 5.0]
+
         // MARK: - SymSpell / Prediction Tunables
 
         /// Maximum edit distance for SymSpell fuzzy correction.

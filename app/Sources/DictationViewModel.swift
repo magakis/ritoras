@@ -63,6 +63,14 @@ final class DictationViewModel: ObservableObject {
     private var selectedServer: String?
     private var serverSelectionTask: Task<String?, Never>?
 
+    // MARK: - Stream Chunk Queue
+
+    private let chunkQueueLock = NSLock()
+    private var chunkQueue: [(UInt32, [Float])] = []
+    private var chunkQueueOverflowed = false
+    private var chunkConsumerTask: Task<Void, Never>?
+    private var recordingActive = false
+
     /// Idempotency guard: tracks job IDs currently being retried to prevent
     /// concurrent retries of the same job (defense against retry loops).
     private var retryingJobIds: Set<UUID> = []
@@ -403,10 +411,23 @@ final class DictationViewModel: ObservableObject {
                 try await recorder.start(fileURL: wavURL) { [weak self] chunkId, samples in
                     FileLogger.shared.debug(.audio, "Stream: chunk produced",
                                             payload: ["chunkId": chunkId, "sampleCount": samples.count])
-                    guard let client = await self?.streamClient else { return }
-                    try? await client.sendChunk(id: chunkId, samples: samples)
+                    self?.enqueueChunk(id: chunkId, samples: samples)
                 }
                 FileLogger.shared.info(.audio, "Stream: recorder started")
+
+                // Reset queue state and launch consumer
+                chunkQueueLock.lock()
+                chunkQueue.removeAll()
+                chunkQueueOverflowed = false
+                recordingActive = true
+                chunkQueueLock.unlock()
+                chunkConsumerTask?.cancel()
+                let consumerClient = client
+                chunkConsumerTask = Task { [weak self] in
+                    guard let self = self else { return }
+                    await self.runChunkConsumer(client: consumerClient)
+                }
+
                 recordingStartTime = Date()
 
                 UIApplication.shared.isIdleTimerDisabled = true
@@ -658,181 +679,102 @@ final class DictationViewModel: ObservableObject {
                 backgroundTaskID = .invalid
             }
 
+            // Signal recording done and drain queue
+            chunkQueueLock.lock()
+            recordingActive = false
+            chunkQueueLock.unlock()
+
             await streamRecorder?.stop()
+
+            guard activeID == id else { return }
+
+            let drainDeadline = Date().addingTimeInterval(SharedConfig.Defaults.streamFinalTimeout)
+            var queueDrained = false
+            var finalOverflowed = false
+            while Date() < drainDeadline {
+                chunkQueueLock.lock()
+                let empty = chunkQueue.isEmpty
+                finalOverflowed = chunkQueueOverflowed
+                chunkQueueLock.unlock()
+                if empty { queueDrained = true; break }
+                if finalOverflowed { break }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+
+            chunkConsumerTask?.cancel()
+            chunkConsumerTask = nil
 
             let uploadT0 = Date()
 
-            do {
-                try await streamClient?.sendEnd()
-                FileLogger.shared.info(.network, "Stream: END sent, awaiting final")
+            if queueDrained && !finalOverflowed {
+                do {
+                    try await streamClient?.sendEnd()
+                    FileLogger.shared.info(.network, "Stream: END sent, awaiting final")
 
-                FileLogger.shared.info(.transcription, "upload start", payload: [
-                    "id": id.uuidString
-                ])
+                    FileLogger.shared.info(.transcription, "upload start", payload: [
+                        "id": id.uuidString
+                    ])
 
-                let text = try await streamClient?.receiveMessages { [weak self] partial in
-                    FileLogger.shared.debug(.transcription, "livePartial updated",
-                                            payload: ["preview": String(partial.prefix(60)),
-                                                      "length": partial.count])
-                    Task { @MainActor in
-                        self?.livePartial = partial
-                    }
-                } ?? ""
-
-                let uploadElapsed = Date().timeIntervalSince(uploadT0) * 1000
-                FileLogger.shared.info(.transcription, "upload complete", payload: [
-                    "id": id.uuidString,
-                    "elapsed_ms": uploadElapsed,
-                    "textLength": text.count
-                ])
-
-                FileLogger.shared.info(.transcription, "Stream final received",
-                                       payload: ["preview": String(text.prefix(60)),
-                                                 "length": text.count])
-
-                guard activeID == id else {
-                    await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
-                    return
-                }
-
-                let ucTime = Date()
-                writeToClipboard(status: "completed", text: text)
-                FileLogger.shared.debug(.transcription, "result delivered", payload: [
-                    "id": id.uuidString, "channel": "clipboard",
-                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
-                ])
-                postResultToServer(status: "completed", text: text)
-                FileLogger.shared.debug(.transcription, "result delivered", payload: [
-                    "id": id.uuidString, "channel": "server",
-                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
-                ])
-                DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-                FileLogger.shared.info(.transcription, "result delivered", payload: [
-                    "id": id.uuidString, "channel": "darwin",
-                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
-                ])
-                TranscriptionHistory.shared.add(text: text)
-                RecordingStore.shared.deleteStreamWav(for: id)
-                FileLogger.shared.debug(.audio, "stream wav deleted on success",
-                                        payload: ["jobId": id.uuidString])
-                phase = .done(text)
-            } catch WhisperError.cancelled {
-                // User cancelled — do not record as failure.
-                RecordingStore.shared.deleteStreamWav(for: id)
-                FileLogger.shared.debug(.app, "transcription cancelled, wav deleted",
-                                        payload: ["jobId": id.uuidString])
-            } catch {
-                guard activeID == id else {
-                    await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
-                    return
-                }
-
-                let failedElapsed = Date().timeIntervalSince(uploadT0) * 1000
-                FileLogger.shared.error(.transcription, "Stream error",
-                                        payload: ["error": error.localizedDescription,
-                                                  "elapsed_ms": failedElapsed])
-
-                // Try batch fallback from the saved WAV file.
-                let wavURL = RecordingStore.shared.streamWavURL(for: id)
-                if let wavURL = wavURL, FileManager.default.fileExists(atPath: wavURL.path) {
-                    FileLogger.shared.debug(.audio, "stream fallback: WAV found, attempting batch transcribe",
-                                            payload: ["jobId": id.uuidString, "path": wavURL.path])
-                    do {
-                        let text = try await WhisperClient.transcribe(audioURL: wavURL, config: SharedConfig.load(), correlationId: id)
-                        // Clean up WAV before guard to prevent orphans on superseded session.
-                        RecordingStore.shared.deleteStreamWav(for: id)
-                        FileLogger.shared.debug(.audio, "stream wav deleted on fallback success",
-                                                payload: ["jobId": id.uuidString])
-                        guard activeID == id else {
-                            await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
-                            return
+                    let text = try await streamClient?.receiveMessages { [weak self] partial in
+                        FileLogger.shared.debug(.transcription, "livePartial updated",
+                                                payload: ["preview": String(partial.prefix(60)),
+                                                          "length": partial.count])
+                        Task { @MainActor in
+                            self?.livePartial = partial
                         }
+                    } ?? ""
 
-                        let ucTime = Date()
-                        writeToClipboard(status: "completed", text: text)
-                        FileLogger.shared.debug(.transcription, "result delivered (stream fallback)", payload: [
-                            "id": id.uuidString, "channel": "clipboard",
-                            "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
-                        ])
-                        postResultToServer(status: "completed", text: text)
-                        FileLogger.shared.debug(.transcription, "result delivered (stream fallback)", payload: [
-                            "id": id.uuidString, "channel": "server",
-                            "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
-                        ])
-                        DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-                        FileLogger.shared.info(.transcription, "result delivered (stream fallback)", payload: [
-                            "id": id.uuidString, "channel": "darwin",
-                            "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
-                        ])
-                        TranscriptionHistory.shared.add(text: text)
-                        phase = .done(text)
-                    } catch {
-                        // Batch transcribe also failed.
-                        FileLogger.shared.warn(.transcription, "stream+batch fallback failed",
-                                               payload: ["jobId": id.uuidString, "error": error.localizedDescription])
-                        if !livePartial.isEmpty {
-                            RecordingStore.shared.deleteStreamWav(for: id)
-                            FileLogger.shared.debug(.audio, "stream wav deleted after fallback",
-                                                    payload: ["jobId": id.uuidString])
-                            guard activeID == id else {
-                                await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
-                                return
-                            }
+                    let uploadElapsed = Date().timeIntervalSince(uploadT0) * 1000
+                    FileLogger.shared.info(.transcription, "upload complete", payload: [
+                        "id": id.uuidString,
+                        "elapsed_ms": uploadElapsed,
+                        "textLength": text.count
+                    ])
 
-                            writeToClipboard(status: "completed", text: livePartial)
-                            postResultToServer(status: "completed", text: livePartial)
-                            DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-                            TranscriptionHistory.shared.add(text: livePartial)
-                            FileLogger.shared.warn(.transcription, "stream+batch fallback failed — delivering live partial",
-                                                   payload: ["jobId": id.uuidString])
-                            phase = .done(livePartial)
-                        } else {
-                            // Enqueue for retry — KEEP the WAV on disk.
-                            let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
-                            let fallbackError = error.localizedDescription
-                            FailedJobStore.shared.append(FailedJobRecord(
-                                jobId: id,
-                                audioFilePath: wavURL.path,
-                                errorMessage: "stream+batch failed: \(fallbackError)",
-                                recordedDurationSeconds: duration,
-                                createdAt: Date(),
-                                retryCount: 0,
-                                lastRetriedAt: nil))
-                            FileLogger.shared.debug(.app, "failed-job record appended (stream fallback)",
-                                                    payload: ["jobId": id.uuidString, "durationSec": duration, "path": wavURL.path])
-                            writeToClipboard(status: "error", errorMessage: fallbackError)
-                            postResultToServer(status: "error", errorMessage: fallbackError)
-                            DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-                            phase = .error(fallbackError)
-                        }
+                    FileLogger.shared.info(.transcription, "Stream final received",
+                                           payload: ["preview": String(text.prefix(60)),
+                                                     "length": text.count])
+
+                    guard activeID == id else {
+                        await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
+                        return
                     }
-                } else {
-                    // No WAV file — degrade gracefully.
-                    FileLogger.shared.debug(.audio, "stream fallback: no WAV file found",
+
+                    let ucTime = Date()
+                    writeToClipboard(status: "completed", text: text)
+                    FileLogger.shared.debug(.transcription, "result delivered", payload: [
+                        "id": id.uuidString, "channel": "clipboard",
+                        "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
+                    ])
+                    postResultToServer(status: "completed", text: text)
+                    FileLogger.shared.debug(.transcription, "result delivered", payload: [
+                        "id": id.uuidString, "channel": "server",
+                        "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
+                    ])
+                    DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                    FileLogger.shared.info(.transcription, "result delivered", payload: [
+                        "id": id.uuidString, "channel": "darwin",
+                        "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
+                    ])
+                    TranscriptionHistory.shared.add(text: text)
+                    RecordingStore.shared.deleteStreamWav(for: id)
+                    FileLogger.shared.debug(.audio, "stream wav deleted on success",
                                             payload: ["jobId": id.uuidString])
-                    if !livePartial.isEmpty {
-                        guard activeID == id else {
-                            await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
-                            return
-                        }
-
-                        writeToClipboard(status: "completed", text: livePartial)
-                        postResultToServer(status: "completed", text: livePartial)
-                        DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-                        TranscriptionHistory.shared.add(text: livePartial)
-                        FileLogger.shared.warn(.transcription, "stream failed (no WAV) — delivering live partial",
-                                               payload: ["jobId": id.uuidString])
-                        phase = .done(livePartial)
-                    } else {
-                        let message = error.localizedDescription
-                        writeToClipboard(status: "error", errorMessage: message)
-                        postResultToServer(status: "error", errorMessage: message)
-                        DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-                        FileLogger.shared.debug(.app, "transcription failed (stream), no WAV to fall back to",
-                                                payload: ["jobId": id.uuidString])
-                        phase = .error(message)
+                    phase = .done(text)
+                } catch WhisperError.cancelled {
+                    // User cancelled — do not record as failure.
+                    RecordingStore.shared.deleteStreamWav(for: id)
+                    FileLogger.shared.debug(.app, "transcription cancelled, wav deleted",
+                                            payload: ["jobId": id.uuidString])
+                } catch {
+                    guard activeID == id else {
+                        await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
+                        return
                     }
+                    handleStreamTerminalFailure(jobId: id, error: error.localizedDescription)
                 }
+            } else {
+                handleStreamTerminalFailure(jobId: id, error: "stream send failed — recording preserved for retry")
             }
 
             if backgroundTaskID != .invalid {
@@ -1053,10 +995,112 @@ final class DictationViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Stream Chunk Queue Helpers
+
+    /// Enqueues a chunk for the consumer to send. Must return in microseconds —
+    /// called from the VAD audio thread. Drops the chunk if the queue is at
+    /// capacity (overflow is tracked as terminal failure at stop time).
+    private func enqueueChunk(id: UInt32, samples: [Float]) {
+        chunkQueueLock.lock()
+        if chunkQueue.count >= SharedConfig.Defaults.streamChunkQueueMaxDepth {
+            chunkQueueOverflowed = true
+            let depth = chunkQueue.count
+            chunkQueueLock.unlock()
+            FileLogger.shared.warn(.network, "Chunk queue overflow — dropping chunk",
+                                    payload: ["chunkId": id, "queueDepth": depth])
+            return
+        }
+        chunkQueue.append((id, samples))
+        chunkQueueLock.unlock()
+    }
+
+    /// Background task that dequeues and sends chunks with unbounded retry
+    /// while recording is active. Runs until the queue is empty AND recording
+    /// has stopped (natural completion), or until cancelled.
+    private func runChunkConsumer(client: WhisperStreamClient) async {
+        let backoff = SharedConfig.Defaults.streamChunkRetryBackoffSeconds
+        while !Task.isCancelled {
+            chunkQueueLock.lock()
+            let entry = chunkQueue.isEmpty ? nil : chunkQueue.removeFirst()
+            chunkQueueLock.unlock()
+
+            guard let (chunkId, samples) = entry else {
+                // Queue empty: check if recording is done
+                chunkQueueLock.lock()
+                let stillRecording = recordingActive
+                let queueEmpty = chunkQueue.isEmpty
+                chunkQueueLock.unlock()
+                if !stillRecording && queueEmpty { return }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                continue
+            }
+
+            // Unbounded retry loop for this chunk
+            var attempt = 0
+            var sent = false
+            while !sent && !Task.isCancelled {
+                do {
+                    try await client.sendChunk(id: chunkId, samples: samples)
+                    sent = true
+                    if attempt > 0 {
+                        FileLogger.shared.info(.network, "Chunk sent after retries",
+                                                payload: ["chunkId": chunkId, "attempts": attempt])
+                    }
+                } catch {
+                    attempt += 1
+                    FileLogger.shared.warn(.network, "Chunk send failed, retrying",
+                                            payload: ["chunkId": chunkId, "attempt": attempt,
+                                                      "error": error.localizedDescription])
+                    let sleepIdx = min(attempt - 1, backoff.count - 1)
+                    let sleepSec = backoff[sleepIdx]
+                    do {
+                        try await Task.sleep(nanoseconds: UInt64(sleepSec * 1_000_000_000))
+                    } catch {
+                        return
+                    }
+                }
+            }
+            if Task.isCancelled { return }
+        }
+    }
+
+    /// Consolidated terminal failure handler for stream dictation. Preserves the
+    /// WAV file in FailedJobStore, then delivers the error via the same multi-channel
+    /// path as a normal result (clipboard, postResultToServer, Darwin notification,
+    /// phase transition) per the retry-delivery-parity requirement.
+    private func handleStreamTerminalFailure(jobId: UUID, error: String) {
+        guard activeID == jobId else { return }
+
+        let wavURL = RecordingStore.shared.streamWavURL(for: jobId)
+        let wavExists = wavURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
+
+        if wavExists, let url = wavURL {
+            FailedJobStore.shared.append(FailedJobRecord(
+                jobId: jobId,
+                audioFilePath: url.path,
+                errorMessage: error,
+                recordedDurationSeconds: duration,
+                createdAt: Date(),
+                retryCount: 0,
+                lastRetriedAt: nil))
+        }
+
+        writeToClipboard(status: "error", errorMessage: error)
+        postResultToServer(status: "error", errorMessage: error)
+        DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+        phase = .error(error)
+    }
+
     /// Cleans up stream session resources: ends background task, disconnects
     /// WebSocket, and nils out stream references. Idempotent — safe to call
     /// multiple times or on already-cleaned-up sessions.
     private func cleanupStreamSession(backgroundTaskID: inout UIBackgroundTaskIdentifier) async {
+        chunkQueueLock.lock()
+        recordingActive = false
+        chunkQueueLock.unlock()
+        chunkConsumerTask?.cancel()
+        chunkConsumerTask = nil
         if backgroundTaskID != .invalid {
             UIApplication.shared.endBackgroundTask(backgroundTaskID)
             backgroundTaskID = .invalid
@@ -1068,6 +1112,13 @@ final class DictationViewModel: ObservableObject {
 
     func cancel() async {
         FileLogger.shared.info(.transcription, "cancel: stream teardown")
+        chunkConsumerTask?.cancel()
+        chunkConsumerTask = nil
+        chunkQueueLock.lock()
+        chunkQueue.removeAll()
+        chunkQueueOverflowed = false
+        recordingActive = false
+        chunkQueueLock.unlock()
         await streamRecorder?.stop()
         await streamClient?.disconnect()
         streamClient = nil
@@ -1083,6 +1134,7 @@ final class DictationViewModel: ObservableObject {
         selectedServer = nil
 
         if let id = activeID {
+            RecordingStore.shared.deleteStreamWav(for: id)
             writeToClipboard(status: "cancelled")
             postResultToServer(status: "cancelled")
             DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
