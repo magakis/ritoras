@@ -113,6 +113,19 @@ final class TrigramProvider: SuggestionProvider {
                 return
             }
 
+            // Guard against Jetsam: skip trigram load if memory is already near the 48 MB cap.
+            // Uses the same 40 MB threshold as the dictionary load (SharedConfig.Defaults).
+            // Trigram model + side index adds ~8-10 MB; loading near the threshold risks an
+            // immediate Jetsam kill. A skipped load degrades gracefully: next suggest() retries
+            // (state stays .cold).
+            let currentFootprint = MemoryMonitor.currentFootprint()
+            if currentFootprint > SharedConfig.Defaults.maxPhysFootprintDuringLoad {
+                FileLogger.shared.warn(.prediction,
+                    "trigram load deferred: phys_footprint \(currentFootprint) > \(SharedConfig.Defaults.maxPhysFootprintDuringLoad)")
+                DispatchQueue.main.async { completion?(false) }
+                return
+            }
+
             // Load side index (quick — ~320 KB JSON).
             let sideIndex = SideIndex()
 
@@ -160,6 +173,21 @@ final class TrigramProvider: SuggestionProvider {
 
             DispatchQueue.main.async { completion?(isReady) }
         }
+    }
+
+    /// Releases the KenLM model and side index to shed memory under pressure.
+    /// Transitions state back to `.cold` so the next `suggest()` triggers a fresh lazy load.
+    /// Safe to call from any thread. Frees ~8-10 MB of private dirty memory.
+    func unload() {
+        mutateState { state, model, index in
+            if let m = model {
+                kenlm_free(m)
+            }
+            model = nil
+            index = nil
+            state = .cold
+        }
+        FileLogger.shared.warn(.prediction, "trigram unloaded (memory pressure)")
     }
 
     deinit {

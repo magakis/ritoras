@@ -153,8 +153,6 @@ class KeyboardViewController: UIInputViewController {
     /// Builds the prediction engine (SymSpell + Trie) on a background queue.
     /// Sets `isPredictionEngineReady = true` on the main queue when done.
     private func buildPredictionEngine() {
-        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
-        FileLogger.shared.info(.prediction, "buildPredictionEngine start")
         isPredictionEngineReady = false
 
         predictionBuildQueue.async { [weak self] in
@@ -187,7 +185,6 @@ class KeyboardViewController: UIInputViewController {
                 DispatchQueue.main.async {
                     self.isPredictionEngineReady = true
                     self.predictionEngine = PredictionEngine()
-                    self.scheduleTrigramLoad()
                 }
                 return
             }
@@ -199,7 +196,6 @@ class KeyboardViewController: UIInputViewController {
             let appleProvider = AppleSpellCheckerProvider()
 
             // Build the engine and register providers.
-            // TrigramProvider is deferred — see scheduleTrigramLoad() below.
             let engine = PredictionEngine()
             engine.addProvider(provider)
             engine.addProvider(appleProvider)
@@ -207,36 +203,15 @@ class KeyboardViewController: UIInputViewController {
             DispatchQueue.main.async {
                 self.predictionEngine = engine
                 self.isPredictionEngineReady = true
-                FileLogger.shared.info(.keyboard, "PredictionEngine ready")
-                self.scheduleTrigramLoad()
-            }
-        }
-    }
 
-    /// Creates the TrigramProvider and starts its warmup 500 ms after the
-    /// prediction engine's SymSpell/dictionary work completes, avoiding
-    /// memory contention during initialisation.
-    ///
-    /// The TrigramProvider is added to the engine's provider list asynchronously,
-    /// so the first ~500 ms–2 s of a keyboard session (before the KenLM model
-    /// loads) does not block the prediction pipeline.
-    private func scheduleTrigramLoad() {
-        FileLogger.shared.warn(.keyboard, "scheduleTrigramLoad called")
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self = self else {
-                FileLogger.shared.warn(.keyboard, "scheduleTrigramLoad: self deallocated before fire")
-                return
-            }
-            FileLogger.shared.warn(.keyboard, "scheduleTrigramLoad: creating TrigramProvider")
-            let trigramProvider = TrigramProvider()
-            trigramProvider.warmup { [weak self] success in
-                DispatchQueue.main.async {
-                    guard let self = self else { return }
-                    FileLogger.shared.warn(.keyboard, "scheduleTrigramLoad: warmup completed success=\(success), registering provider")
-                    self.predictionEngine?.addProvider(trigramProvider)
-                    self.trigramProvider = trigramProvider
-                    self.keyboardView.refreshSuggestions()
-                }
+                // Register TrigramProvider in .cold state — lazy-loads on first suggest() call.
+                // KenLM model (~8-10 MB) is NOT loaded here, keeping steady-state ~38-43 MB
+                // (well under the 48 MB Jetsam cap) for short typing sessions.
+                let trigram = TrigramProvider()
+                self.trigramProvider = trigram
+                engine.addProvider(trigram)
+
+                FileLogger.shared.info(.keyboard, "PredictionEngine ready (trigram deferred)")
             }
         }
     }
@@ -245,9 +220,6 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-
-        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
-        FileLogger.shared.info(.lifecycle, "viewDidLoad start")
 
         // Wire FileLogger broadcast to ship logs to container app via localhost.
         // Set before any log calls so we capture everything from the start.
@@ -348,22 +320,25 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
-        FileLogger.shared.info(.lifecycle, "viewWillAppear")
         installOrUpdateHeightConstraint()
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
     }
 
     override func viewIsAppearing(_ animated: Bool) {
         super.viewIsAppearing(animated)
-        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
-        FileLogger.shared.info(.lifecycle, "viewIsAppearing")
         installOrUpdateHeightConstraint()
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
     }
 
-    // DIAGNOSTIC: blank-keyboard investigation — remove after fix
     override func didReceiveMemoryWarning() {
         super.didReceiveMemoryWarning()
-        FileLogger.shared.warn(.lifecycle, "didReceiveMemoryWarning")
+        let before = MemoryMonitor.currentFootprint()
+        trigramProvider?.unload()
+        let after = MemoryMonitor.currentFootprint()
+        FileLogger.shared.warn(.lifecycle,
+            "didReceiveMemoryWarning: phys_footprint \(before) → \(after) (\(before > after ? before - after : 0) bytes freed)")
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -430,11 +405,6 @@ class KeyboardViewController: UIInputViewController {
             keyboardView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             keyboardView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
-
-        // DIAGNOSTIC: blank-keyboard investigation — remove after fix
-        FileLogger.shared.info(.keyboard, "setupKeyboardView bounds",
-                               payload: ["w": Double(keyboardView.bounds.width),
-                                         "h": Double(keyboardView.bounds.height)])
 
         // Wire emoji panel search callbacks
         keyboardView.emojiPanelView.onSearchActivate = { [weak self] in
