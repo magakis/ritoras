@@ -317,9 +317,32 @@ class KeyboardViewController: UIInputViewController {
                 checkForPendingDictation()
             }
         } else {
-            state = .idle
-            FileLogger.shared.info(.keyboard, "viewDidAppear — idle",
-                                   payload: ["hasFullAccess": hasFullAccess])
+            // Check for a deferred result — a dictation completed while the keyboard
+            // was hidden and the paste was deferred until the keyboard reappears.
+            if let deferredText = UserDefaults.standard.string(forKey: "ritoras_deferred_text"),
+               !deferredText.isEmpty {
+                let deferredTs = UserDefaults.standard.double(forKey: "ritoras_deferred_ts")
+                let age = deferredTs > 0 ? Date().timeIntervalSince1970 - deferredTs : 0
+                if age < 300 {
+                    FileLogger.shared.info(.keyboard, "Inserting deferred dictation result",
+                                           payload: ["length": deferredText.count, "age": age])
+                    clearDeferredResult()
+                    state = .inserting
+                    textDocumentProxy.insertText(normalizedDictationInsertion(of: deferredText))
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                        self?.state = .idle
+                    }
+                } else {
+                    FileLogger.shared.warn(.keyboard, "Deferred dictation result expired",
+                                           payload: ["age": age])
+                    clearDeferredResult()
+                    state = .idle
+                }
+            } else {
+                state = .idle
+                FileLogger.shared.info(.keyboard, "viewDidAppear — idle",
+                                       payload: ["hasFullAccess": hasFullAccess])
+            }
         }
     }
 
@@ -497,6 +520,7 @@ class KeyboardViewController: UIInputViewController {
     private func openContainerAppForDictation() {
         // Clear any stale clipboard/server data from previous sessions
         clearClipboardDictation()
+        clearDeferredResult()
         lastProcessedTimestamp = 0
         clipboardPollTimer?.invalidate()
         clipboardPollTimer = nil
@@ -979,6 +1003,7 @@ class KeyboardViewController: UIInputViewController {
         confirmStopTimer?.invalidate()
         confirmStopTimer = nil
         stopDictationTransports()
+        clearDeferredResult()
         FileLogger.shared.debug(.keyboard, "Dictation cancelled by user",
                                 payload: ["pendingRequestId": pendingRequestId?.uuidString ?? "nil"])
         pendingRequestId = nil
@@ -997,6 +1022,18 @@ class KeyboardViewController: UIInputViewController {
             "length": text.count,
             "total_elapsed_ms": totalElapsed
         ])
+
+        // If the keyboard view is not in a window (hidden with no active text field),
+        // textDocumentProxy.insertText would silently no-op. Defer the paste until
+        // the keyboard reappears.
+        guard self.view.window != nil else {
+            FileLogger.shared.info(.keyboard, "Deferring dictation insertion — keyboard view is hidden",
+                                   payload: ["length": text.count])
+            storeDeferredResult(text: text)
+            stopDictationTransports()
+            pendingRequestId = nil
+            return
+        }
 
         if inputTarget != .hostApp {
             FileLogger.shared.warn(.keyboard, "dictation result arrived but inputTarget is not .hostApp",
@@ -1018,6 +1055,22 @@ class KeyboardViewController: UIInputViewController {
             FileLogger.shared.debug(.keyboard, "Dictation insertion complete, resetting to idle")
             self?.state = .idle
         }
+    }
+
+    // MARK: - Deferred Result (Keyboard Hidden)
+
+    /// Stores a dictation result in UserDefaults when the keyboard is hidden,
+    /// so it can be recovered and auto-pasted on the next viewDidAppear.
+    private func storeDeferredResult(text: String) {
+        UserDefaults.standard.set(text, forKey: "ritoras_deferred_text")
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "ritoras_deferred_ts")
+    }
+
+    /// Clears the deferred result from UserDefaults. Called when starting
+    /// a new dictation or when explicitly cancelling.
+    private func clearDeferredResult() {
+        UserDefaults.standard.removeObject(forKey: "ritoras_deferred_text")
+        UserDefaults.standard.removeObject(forKey: "ritoras_deferred_ts")
     }
 
     // MARK: - Server Polling (Works when app is backgrounded)
