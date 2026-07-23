@@ -164,6 +164,7 @@ struct DebugLogView: View {
     @State private var deleteFeedbackText: String = ""
     @State private var deleteFeedbackIsError = false
     @State private var missedUpdates = false
+    @State private var cachedShareText: String = ""
     private let pageSize = 200
 
     private var selectedOrFilteredLines: [LogLine] {
@@ -204,18 +205,21 @@ struct DebugLogView: View {
                 Text(deleteConfirmationMessage(for: action))
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .logStoreDidChange)) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .logStoreDidChange)
+            .throttle(for: .milliseconds(500), scheduler: DispatchQueue.main, latest: true)) { _ in
             refreshGuard()
         }
         .onChange(of: searchText) { _, _ in refresh() }
         .onChange(of: selectedFilter) { _, _ in refresh() }
         .onChange(of: componentFilter) { _, _ in refresh() }
         .onChange(of: timeRange) { _, _ in refresh() }
+        .onChange(of: scrubPII) { _, _ in updateShareText() }
         .onChange(of: expandedKeys) { _, newKeys in
             if newKeys.isEmpty { refreshGuard() }
         }
         .onChange(of: selectedIDs) { _, newIDs in
             if newIDs.isEmpty { refreshGuard() }
+            updateShareText()
         }
         .onChange(of: expandedReportID) { _, newValue in
             if newValue == nil { refreshGuard() }
@@ -519,9 +523,7 @@ struct DebugLogView: View {
     }
 
     private var shareButton: some View {
-        let rawText = selectedOrFilteredLines.map(\.raw).joined(separator: "\n")
-        let shareText = scrubPII ? LogScrubber.scrub(rawText) : rawText
-        return ShareLink(item: shareText) {
+        ShareLink(item: cachedShareText) {
             Image(systemName: "square.and.arrow.up")
         }
     }
@@ -650,11 +652,18 @@ struct DebugLogView: View {
             search: search)
         diagnostics = LogStore.shared.recentDiagnostics()
         crashReports = MetricKitSubscriber.loadReports()
+        updateShareText()
     }
 
     private func clear() {
         try? LogStore.shared.clear()
         refresh()
+        updateShareText()
+    }
+
+    private func updateShareText() {
+        let rawText = selectedOrFilteredLines.map(\.raw).joined(separator: "\n")
+        cachedShareText = scrubPII ? LogScrubber.scrub(rawText) : rawText
     }
 
     private func executeDelete(_ action: DeleteAction) {
@@ -758,6 +767,7 @@ struct DebugLogView: View {
         guard !more.isEmpty else { return }
         lines.append(contentsOf: more)
         oldestLoadedId = more.last?.rowId
+        updateShareText()
     }
 
     private func incrementalRefresh() {
@@ -777,6 +787,7 @@ struct DebugLogView: View {
             components: componentFilterToSet(),
             sinceNs: timeRangeToSinceNs(),
             search: searchText.isEmpty ? nil : searchText)
+        updateShareText()
     }
 
     // MARK: - Filter Helpers

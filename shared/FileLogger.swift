@@ -201,6 +201,40 @@ final class FileLogger {
         Self.broadcast?(level, component, message, payload)
     }
 
+    /// Batch-logs multiple entries in a single database transaction.
+    /// Used by LocalhostServer.handlePostLogs to avoid per-entry transaction overhead.
+    /// Only writes in the container app (keyboard uses flat-file writes).
+    func logBatch(_ entries: [(LogLevel, LogComponent, String, [String: Any]?)]) {
+        guard !Self.isKeyboardExtension else { return }
+
+        var batch: [(LogLevel, LogComponent, String, [String: Any]?, String)] = []
+
+        for (level, component, message, payload) in entries {
+            if level == .debug, !SharedConfig.verboseLoggingEnabled() { continue }
+
+            let ts = dateFormatter.string(from: Date())
+            var dict: [String: Any] = [
+                "ts": ts,
+                "level": level.rawValue,
+                "cat": component.rawValue,
+                "msg": message
+            ]
+            if let payload = payload {
+                if JSONSerialization.isValidJSONObject(payload) {
+                    dict["payload"] = payload
+                }
+            }
+            guard let data = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]),
+                  let jsonString = String(data: data, encoding: .utf8) else { continue }
+
+            batch.append((level, component, message, payload, jsonString))
+        }
+
+        if !batch.isEmpty {
+            LogStore.shared.insertBatch(batch)
+        }
+    }
+
     static func clear() {
         if Self.isKeyboardExtension {
             shared.queue.sync {

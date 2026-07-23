@@ -306,11 +306,15 @@ final class LocalhostServer {
         do {
             let wrapper = try decoder.decode([String: [LogShipmentEntry]].self, from: bodyData)
             let entries = wrapper["entries"] ?? []
+            var batch: [(LogLevel, LogComponent, String, [String: Any]?)] = []
             for entry in entries {
                 let level = LogLevel(rawValue: entry.level) ?? .info
                 let component = LogComponent(rawValue: entry.component) ?? .keyboard
                 let payload = entry.payload as [String: Any]?
-                FileLogger.shared.log(level, component, entry.message, payload: payload)
+                batch.append((level, component, entry.message, payload))
+            }
+            if !batch.isEmpty {
+                FileLogger.shared.logBatch(batch)
             }
             return Self.makeJSONResponse(status: 200, body: ["received": entries.count])
         } catch {
