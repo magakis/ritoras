@@ -143,6 +143,20 @@ class KeyboardViewController: UIInputViewController {
         set { UserDefaults.standard.set(newValue, forKey: "ritoras_pending_start") }
     }
 
+    /// The `documentIdentifier` of the text field that started the current
+    /// dictation, persisted so the keyboard can verify it is still attached
+    /// to the same text field when the result arrives.
+    private var dictationTargetId: UUID? {
+        get { UUID(uuidString: UserDefaults.standard.string(forKey: "ritoras_dictation_target_id") ?? "") }
+        set {
+            if let newValue = newValue {
+                UserDefaults.standard.set(newValue.uuidString, forKey: "ritoras_dictation_target_id")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "ritoras_dictation_target_id")
+            }
+        }
+    }
+
     private var serverPollTimer: Timer?
     private var serverPollCount = 0
     private var serverPollWorkItem: DispatchWorkItem?
@@ -279,9 +293,10 @@ class KeyboardViewController: UIInputViewController {
         if let id = pendingRequestId {
             let age = pendingRequestStart > 0 ? Date().timeIntervalSince1970 - pendingRequestStart : 0
             if age > 300 {  // >5 min — the result is unrecoverable; abandon it
-                FileLogger.shared.warn(.keyboard, "viewDidAppear — pending dictation stale",
-                                       payload: ["age": age, "pendingRequestId": id.uuidString])
+                FileLogger.shared.debug(.keyboard, "viewDidAppear — pending dictation stale",
+                                        payload: ["age": age, "pendingRequestId": id.uuidString])
                 pendingRequestId = nil
+                dictationTargetId = nil
                 state = .idle
             } else {
                 FileLogger.shared.info(.keyboard, "viewDidAppear — resuming pending dictation",
@@ -305,7 +320,7 @@ class KeyboardViewController: UIInputViewController {
                         self?.state = .idle
                     }
                 } else {
-                    FileLogger.shared.warn(.keyboard, "Deferred dictation result expired",
+                    FileLogger.shared.info(.keyboard, "Deferred dictation result expired",
                                            payload: ["age": age])
                     clearDeferredResult()
                     state = .idle
@@ -491,6 +506,7 @@ class KeyboardViewController: UIInputViewController {
         // Clear any stale clipboard/server data from previous sessions
         clearClipboardDictation()
         clearDeferredResult()
+        dictationTargetId = nil
         lastProcessedTimestamp = 0
         clipboardPollTimer?.invalidate()
         clipboardPollTimer = nil
@@ -502,6 +518,18 @@ class KeyboardViewController: UIInputViewController {
         let id = UUID()
         pendingRequestId = id
         pendingRequestStart = Date().timeIntervalSince1970
+
+        let docId = textDocumentProxy.documentIdentifier
+        if docId == UUID() {
+            FileLogger.shared.warn(.keyboard, "documentIdentifier is zero UUID — skipping target verification",
+                                   payload: ["pendingRequestId": id.uuidString])
+            dictationTargetId = nil
+        } else {
+            dictationTargetId = docId
+            FileLogger.shared.debug(.keyboard, "Captured dictation target",
+                                    payload: ["documentIdentifier": docId.uuidString,
+                                              "pendingRequestId": id.uuidString])
+        }
 
         FileLogger.shared.debug(.keyboard, "openContainerApp", payload: [
             "id": id.uuidString
@@ -609,9 +637,9 @@ class KeyboardViewController: UIInputViewController {
 
         // Ignore stale payloads (wrong request ID, or no pending request at all)
         guard let id = pendingRequestId, payload.id == id else {
-            FileLogger.shared.warn(.keyboard, "Ignoring stale dictation payload",
-                                   payload: ["payloadId": payload.id.uuidString,
-                                             "pendingRequestId": pendingRequestId?.uuidString ?? "nil"])
+            FileLogger.shared.debug(.keyboard, "Ignoring stale dictation payload",
+                                    payload: ["payloadId": payload.id.uuidString,
+                                              "pendingRequestId": pendingRequestId?.uuidString ?? "nil"])
             return
         }
 
@@ -623,12 +651,14 @@ class KeyboardViewController: UIInputViewController {
             FileLogger.shared.info(.keyboard, "Dictation cancelled",
                                    payload: ["pendingRequestId": id.uuidString])
             pendingRequestId = nil
+            dictationTargetId = nil
             state = .idle
         case .error:
             FileLogger.shared.error(.keyboard, "Dictation completed with error",
                                     payload: ["pendingRequestId": id.uuidString,
                                               "errorMessage": payload.errorMessage ?? "unknown"])
             pendingRequestId = nil
+            dictationTargetId = nil
             state = .error(payload.errorMessage ?? "Transcription failed.")
         case .recording, .transcribing:
             // Premature signal \u{2014} keep waiting
@@ -648,8 +678,9 @@ class KeyboardViewController: UIInputViewController {
             await MainActor.run {
                 self.stopDictationTransports()
                 self.pendingRequestId = nil
-                FileLogger.shared.warn(.keyboard, "Localhost polling timed out",
-                                       payload: ["timeoutSec": SharedConfig.Defaults.dictationTimeoutSeconds])
+                self.dictationTargetId = nil
+                FileLogger.shared.debug(.keyboard, "Localhost polling timed out",
+                                        payload: ["timeoutSec": SharedConfig.Defaults.dictationTimeoutSeconds])
                 self.state = .error("Dictation timed out. Try again.")
             }
             return
@@ -674,7 +705,7 @@ class KeyboardViewController: UIInputViewController {
                         }
                     }
                 } catch {
-                    FileLogger.shared.warn(.keyboard, "Failed to fetch result from localhost", payload: [
+                    FileLogger.shared.info(.keyboard, "Failed to fetch result from localhost", payload: [
                         "id": id.uuidString,
                         "error": String(describing: error)
                     ])
@@ -689,7 +720,7 @@ class KeyboardViewController: UIInputViewController {
             }
         } catch {
             // Other errors — log and continue polling
-            FileLogger.shared.warn(.keyboard, "LocalhostClient error", payload: ["error": String(describing: error)])
+            FileLogger.shared.info(.keyboard, "LocalhostClient error", payload: ["error": String(describing: error)])
         }
     }
 
@@ -764,6 +795,7 @@ class KeyboardViewController: UIInputViewController {
         darwinToken = nil
         waitTimer = nil
         pendingRequestId = nil
+        dictationTargetId = nil
         state = .error("Dictation timed out. Try again.")
     }
 
@@ -857,13 +889,13 @@ class KeyboardViewController: UIInputViewController {
                     case .error:
                         FileLogger.shared.warn(.keyboard, "resolve: appgroup error",
                                                payload: ["id": id.uuidString, "errorMessage": payload.errorMessage ?? "unknown"])
-                        self.stopDictationTransports(); self.pendingRequestId = nil
+                        self.stopDictationTransports(); self.pendingRequestId = nil; self.dictationTargetId = nil
                         self.state = .error(payload.errorMessage ?? "Transcription failed.")
                         completion(true); return
                     case .cancelled:
                         FileLogger.shared.info(.keyboard, "resolve: appgroup cancelled",
                                                payload: ["id": id.uuidString])
-                        self.stopDictationTransports(); self.pendingRequestId = nil
+                        self.stopDictationTransports(); self.pendingRequestId = nil; self.dictationTargetId = nil
                         self.state = .idle
                         completion(true); return
                     case .recording, .transcribing:
@@ -886,7 +918,7 @@ class KeyboardViewController: UIInputViewController {
                             self.insertDictationResult(text: clip["text"] as? String ?? "")
                             completion(true); return
                         case "error":
-                            FileLogger.shared.warn(.keyboard, "resolve: clipboard error",
+                            FileLogger.shared.error(.keyboard, "resolve: clipboard error",
                                                    payload: ["id": id.uuidString])
                             self.stopDictationTransports(); self.pendingRequestId = nil
                             self.state = .error(clip["errorMessage"] as? String ?? "Transcription failed.")
@@ -901,7 +933,7 @@ class KeyboardViewController: UIInputViewController {
                             break  // recording/transcribing — keep polling
                         }
                     } else if clipId != id {
-                        FileLogger.shared.warn(.keyboard, "resolve: clipboard id mismatch",
+                        FileLogger.shared.debug(.keyboard, "resolve: clipboard id mismatch",
                                                payload: ["expected": id.uuidString,
                                                          "actual": clipId?.uuidString ?? "nil",
                                                          "age": age])
@@ -993,6 +1025,25 @@ class KeyboardViewController: UIInputViewController {
             "total_elapsed_ms": totalElapsed
         ])
 
+        // Target-binding gate: verify the current text field is the one that started
+        // this dictation. If documentIdentifier was nil/zero at capture time, skip
+        // verification (graceful degradation).
+        if let targetId = dictationTargetId {
+            let currentId = textDocumentProxy.documentIdentifier
+            guard currentId == targetId else {
+                // Target mismatch — keyboard is now attached to a different text field.
+                FileLogger.shared.warn(.keyboard, "Dictation target mismatch — discarding",
+                                       payload: ["expected": targetId.uuidString,
+                                                 "actual": currentId.uuidString])
+                stopDictationTransports()
+                pendingRequestId = nil
+                dictationTargetId = nil
+                clearDeferredResult()
+                state = .idle
+                return
+            }
+        }
+
         // If the keyboard view is not in a window (hidden with no active text field),
         // textDocumentProxy.insertText would silently no-op. Defer the paste until
         // the keyboard reappears.
@@ -1002,17 +1053,27 @@ class KeyboardViewController: UIInputViewController {
             storeDeferredResult(text: text)
             stopDictationTransports()
             pendingRequestId = nil
+            dictationTargetId = nil
             return
         }
 
+        // Active emoji-search recovery: if the insertion target is the internal emoji
+        // search field, redirect to the host app and exit search mode so the dictation
+        // result reaches the intended text field.
         if inputTarget != .hostApp {
-            FileLogger.shared.warn(.keyboard, "dictation result arrived but inputTarget is not .hostApp",
+            FileLogger.shared.warn(.keyboard, "Dictation result arrived while inputTarget != .hostApp — recovering",
                                    payload: ["inputTarget": String(describing: inputTarget)])
+            inputTarget = .hostApp
+            keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
+            if uiMode == .emojiSearch {
+                uiMode = .emoji
+            }
         }
         FileLogger.shared.info(.keyboard, "insertDictationResult entry",
                                payload: ["length": text.count, "preview": String(text.prefix(30))])
         stopDictationTransports()
         pendingRequestId = nil
+        dictationTargetId = nil
         if text.isEmpty {
             state = .error("Nothing was heard. Try again.")
             return
@@ -1134,19 +1195,19 @@ class KeyboardViewController: UIInputViewController {
             guard let self = self else { return }
             let httpT0 = Date()
             if let error = error {
-                FileLogger.shared.warn(.network, "poll: network error",
-                                       payload: ["url": url.absoluteString, "error": error.localizedDescription])
+                FileLogger.shared.debug(.network, "poll: network error",
+                                        payload: ["url": url.absoluteString, "error": error.localizedDescription])
                 return
             }
             guard let data = data else {
-                FileLogger.shared.warn(.network, "poll: empty response",
-                                       payload: ["url": url.absoluteString])
+                FileLogger.shared.debug(.network, "poll: empty response",
+                                        payload: ["url": url.absoluteString])
                 return
             }
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                FileLogger.shared.warn(.network, "poll: unparseable body",
-                                       payload: ["url": url.absoluteString,
-                                                 "bodyPreview": String(data: data, encoding: .utf8).map { String($0.prefix(100)) } ?? "?"])
+                FileLogger.shared.debug(.network, "poll: unparseable body",
+                                        payload: ["url": url.absoluteString,
+                                                  "bodyPreview": String(data: data, encoding: .utf8).map { String($0.prefix(100)) } ?? "?"])
                 return
             }
 
@@ -1175,7 +1236,7 @@ class KeyboardViewController: UIInputViewController {
                 guard self.pendingRequestId != nil else { return }
 
                 guard timestamp > 0 else {
-                    FileLogger.shared.warn(.network, "poll: timestamp 0",
+                    FileLogger.shared.debug(.network, "poll: timestamp 0",
                                            payload: ["url": url.absoluteString])
                     return
                 }
@@ -1197,7 +1258,7 @@ class KeyboardViewController: UIInputViewController {
                     self.insertDictationResult(text: json["text"] as? String ?? "")
 
                 case "error":
-                    FileLogger.shared.warn(.network, "poll: server status=error",
+                    FileLogger.shared.info(.network, "poll: server status=error",
                                            payload: ["url": url.absoluteString,
                                                      "errorMessage": json["errorMessage"] as? String ?? "unknown"])
                     self.stopDictationTransports()

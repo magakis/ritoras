@@ -357,8 +357,8 @@ actor StreamingAudioRecorder {
             let frameLength = Int(buffer.frameLength)
             guard frameLength > 0,
                   let channelData = buffer.floatChannelData else {
-                FileLogger.shared.warn(.audio, "tap callback: invalid buffer",
-                                       payload: ["frameLength": frameLength,
+                FileLogger.shared.debug(.audio, "tap callback: invalid buffer",
+                                        payload: ["frameLength": frameLength,
                                                   "hasChannelData": buffer.floatChannelData != nil])
                 return
             }
@@ -455,7 +455,7 @@ actor StreamingAudioRecorder {
             return
         }
         if let old = oldFormat, old != deliveredFormat {
-            FileLogger.shared.warn(.audio,
+            FileLogger.shared.info(.audio,
                 "Format change detected — rebuilt converter",
                 payload: ["old": "\(old)", "new": "\(deliveredFormat)"])
         }

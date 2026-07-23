@@ -112,7 +112,7 @@ final class LocalhostServer {
                 guard let self = self else { return }
 
                 if let error = error {
-                    FileLogger.shared.warn(.network, "LocalhostServer: receive error",
+                    FileLogger.shared.debug(.network, "LocalhostServer: receive error",
                                            payload: ["error": error.localizedDescription])
                     connection.cancel()
                     return

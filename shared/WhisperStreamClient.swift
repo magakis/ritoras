@@ -112,7 +112,7 @@ actor WhisperStreamClient {
                 try await Task.sleep(
                     nanoseconds: UInt64(SharedConfig.Defaults.streamWsConnectTimeout * 1_000_000_000)
                 )
-                FileLogger.shared.warn(.network, "Connection timed out",
+                FileLogger.shared.info(.network, "Connection timed out",
                                        payload: ["url": self.url.absoluteString,
                                                  "timeout": SharedConfig.Defaults.streamWsConnectTimeout])
                 throw WhisperError.timeout
@@ -270,7 +270,7 @@ actor WhisperStreamClient {
 
                                 default:
                                     // Unknown type — defensive: ignore
-                                    FileLogger.shared.warn(.network, "Ignored unknown message type",
+                                    FileLogger.shared.debug(.network, "Ignored unknown message type",
                                                            payload: ["type": base.type])
                                     continue
                                 }
@@ -279,7 +279,7 @@ actor WhisperStreamClient {
                                 throw error
                             } catch {
                                 // Malformed frame — log and skip
-                                FileLogger.shared.warn(.network, "Malformed frame, skipping",
+                                FileLogger.shared.debug(.network, "Malformed frame, skipping",
                                                        payload: ["error": error.localizedDescription])
                                 continue
                             }
@@ -305,8 +305,8 @@ actor WhisperStreamClient {
                 try await Task.sleep(
                     nanoseconds: UInt64(SharedConfig.Defaults.streamFinalTimeout * 1_000_000_000)
                 )
-                FileLogger.shared.warn(.network, "receiveMessages timed out",
-                                       payload: ["timeout": SharedConfig.Defaults.streamFinalTimeout])
+                FileLogger.shared.debug(.network, "receiveMessages timed out",
+                                        payload: ["timeout": SharedConfig.Defaults.streamFinalTimeout])
                 throw WhisperError.timeout
             }
 
@@ -326,7 +326,7 @@ actor WhisperStreamClient {
     /// for `streamFinalTimeout`.
     private func forceClose() {
         task?.cancel(with: .goingAway, reason: nil)
-        FileLogger.shared.warn(.network, "Force-close: transport cancelled")
+        FileLogger.shared.info(.network, "Force-close: transport cancelled")
     }
 
     /// Gracefully closes the WebSocket connection.

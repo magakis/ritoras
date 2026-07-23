@@ -256,11 +256,11 @@ final class DictationViewModel: ObservableObject {
         let resolved = (config.servers.contains(candidate ?? "") ? candidate : nil) ?? config.servers.first
         let server = resolved?.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let baseURL = server, !baseURL.isEmpty else {
-            FileLogger.shared.warn(.network, "postResultToServer: no server configured")
+            FileLogger.shared.info(.network, "postResultToServer: no server configured")
             return
         }
         guard let url = URL(string: "\(baseURL)/dictation_result") else {
-            FileLogger.shared.warn(.network, "postResultToServer: invalid URL",
+            FileLogger.shared.info(.network, "postResultToServer: invalid URL",
                                    payload: ["baseURL": baseURL])
             return
         }
@@ -405,7 +405,7 @@ final class DictationViewModel: ObservableObject {
                                 FileLogger.shared.info(.network, "Stream: connected to probe-selected server",
                                                        payload: ["base": base])
                             } catch {
-                                FileLogger.shared.warn(.network, "Stream: probe-selected server failed",
+                                FileLogger.shared.info(.network, "Stream: probe-selected server failed",
                                                        payload: ["base": base, "error": error.localizedDescription])
                                 lastError = error
                                 await candidate.disconnect()
@@ -435,7 +435,7 @@ final class DictationViewModel: ObservableObject {
                                                    payload: ["base": server])
                             break
                         } catch {
-                            FileLogger.shared.warn(.network, "Stream: server failed",
+                            FileLogger.shared.info(.network, "Stream: server failed",
                                                    payload: ["base": server, "error": error.localizedDescription])
                             lastError = error
                             await candidate.disconnect()
@@ -459,7 +459,7 @@ final class DictationViewModel: ObservableObject {
                                             payload: ["chunkId": chunkId, "sampleCount": samples.count])
                     if !chunkQueue.enqueue(id: chunkId, samples: samples,
                                            maxDepth: SharedConfig.Defaults.streamChunkQueueMaxDepth) {
-                        FileLogger.shared.warn(.network, "Chunk queue overflow — dropping chunk",
+                        FileLogger.shared.debug(.network, "Chunk queue overflow — dropping chunk",
                                                payload: ["chunkId": chunkId, "queueDepth": chunkQueue.depth])
                     }
                 }
@@ -596,7 +596,7 @@ final class DictationViewModel: ObservableObject {
                         do {
                             text = try await WhisperClient.transcribe(audioURL: url, serverURL: server, correlationId: activeID)
                         } catch {
-                            FileLogger.shared.warn(.network, "single-server transcribe failed, falling back to iterating transcribe",
+                            FileLogger.shared.info(.network, "single-server transcribe failed, falling back to iterating transcribe",
                                                    payload: ["server": server, "error": error.localizedDescription])
                             text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
                         }
@@ -675,7 +675,7 @@ final class DictationViewModel: ObservableObject {
                     FileLogger.shared.debug(.app, "failed-job record appended",
                                             payload: ["jobId": id.uuidString, "durationSec": duration, "audioPath": url.path])
                 } else {
-                    FileLogger.shared.warn(.app, "failed-job record SKIPPED — audio file not found", payload: [
+                    FileLogger.shared.debug(.app, "failed-job record SKIPPED — audio file not found", payload: [
                         "jobId": id.uuidString,
                         "audioPath": url.path
                     ])
@@ -865,7 +865,7 @@ final class DictationViewModel: ObservableObject {
 
         let audioURL = URL(fileURLWithPath: record.audioFilePath)
         guard FileManager.default.fileExists(atPath: audioURL.path) else {
-            FileLogger.shared.warn(.app, "retry: audio file no longer exists", payload: [
+            FileLogger.shared.debug(.app, "retry: audio file no longer exists", payload: [
                 "jobId": jobId.uuidString,
                 "path": record.audioFilePath
             ])
@@ -931,7 +931,7 @@ final class DictationViewModel: ObservableObject {
     /// errorMessage so RecoveryView / DictationView shows the latest error.
     private func handleRetryFailure(error: Error, jobId: UUID) {
         let errorMessage = error.localizedDescription
-        FileLogger.shared.warn(.app, "retry failed", payload: [
+        FileLogger.shared.info(.app, "retry failed", payload: [
             "jobId": jobId.uuidString,
             "error": errorMessage
         ])
@@ -963,7 +963,7 @@ final class DictationViewModel: ObservableObject {
         // Look up the saved audio
         guard let record = FailedJobStore.shared.list().first(where: { $0.jobId == jobId }),
               FileManager.default.fileExists(atPath: record.audioFilePath) else {
-            FileLogger.shared.warn(.app, "retryAsLiveDictation: audio not found",
+            FileLogger.shared.debug(.app, "retryAsLiveDictation: audio not found",
                                    payload: ["jobId": jobId.uuidString])
             phase = .error("Saved audio no longer available")
             return
@@ -1016,8 +1016,8 @@ final class DictationViewModel: ObservableObject {
             let message = error.localizedDescription
             FailedJobStore.shared.updateErrorMessage(jobId: jobId, message: message)
             phase = .error(message)
-            FileLogger.shared.warn(.app, "retryAsLiveDictation failed",
-                                  payload: ["jobId": jobId.uuidString, "error": message])
+            FileLogger.shared.info(.app, "retryAsLiveDictation failed",
+                                   payload: ["jobId": jobId.uuidString, "error": message])
         }
     }
 
@@ -1053,7 +1053,7 @@ final class DictationViewModel: ObservableObject {
                     }
                 } catch {
                     attempt += 1
-                    FileLogger.shared.warn(.network, "Chunk send failed, retrying",
+                    FileLogger.shared.debug(.network, "Chunk send failed, retrying",
                                             payload: ["chunkId": chunkId, "attempt": attempt,
                                                       "error": error.localizedDescription])
                     let sleepIdx = min(attempt - 1, backoff.count - 1)

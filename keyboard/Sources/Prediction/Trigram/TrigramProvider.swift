@@ -80,7 +80,7 @@ final class TrigramProvider: SuggestionProvider {
         mutateState { state, _, _ in
             state = .loading
         }
-        FileLogger.shared.warn(.prediction, "trigram load started")
+        FileLogger.shared.info(.prediction, "trigram load started")
         performLoad(completion: completion)
     }
 
@@ -94,7 +94,7 @@ final class TrigramProvider: SuggestionProvider {
         mutateState { state, _, _ in
             state = .loading
         }
-        FileLogger.shared.warn(.prediction, "trigram load started")
+        FileLogger.shared.info(.prediction, "trigram load started")
         performLoad()
     }
 
@@ -120,7 +120,7 @@ final class TrigramProvider: SuggestionProvider {
             // (state stays .cold).
             let currentFootprint = MemoryMonitor.currentFootprint()
             if currentFootprint > SharedConfig.Defaults.maxPhysFootprintDuringLoad {
-                FileLogger.shared.warn(.prediction,
+                FileLogger.shared.info(.prediction,
                     "trigram load deferred: phys_footprint \(currentFootprint) > \(SharedConfig.Defaults.maxPhysFootprintDuringLoad)")
                 DispatchQueue.main.async { completion?(false) }
                 return
@@ -136,7 +136,7 @@ final class TrigramProvider: SuggestionProvider {
                     model = nil
                     state = .failed
                 }
-                FileLogger.shared.warn(.prediction, "trigram load failed: model file not found")
+                FileLogger.shared.info(.prediction, "trigram load failed: model file not found")
                 DispatchQueue.main.async { completion?(false) }
                 return
             }
@@ -162,13 +162,13 @@ final class TrigramProvider: SuggestionProvider {
                 let vocabSize = self.readState { _, model, _ in
                     model.map { kenlm_vocab_size($0) } ?? 0
                 }
-                FileLogger.shared.warn(.prediction, "trigram ready (vocab=\(vocabSize))")
+                FileLogger.shared.info(.prediction, "trigram ready (vocab=\(vocabSize))")
             } else {
                 let reason: String
                 if model == nil { reason = "kenlm_load returned nil" }
                 else if sideIndex == nil { reason = "side index load failed" }
                 else { reason = "unknown" }
-                FileLogger.shared.warn(.prediction, "trigram load failed: \(reason)")
+                FileLogger.shared.error(.prediction, "trigram load failed: \(reason)")
             }
 
             DispatchQueue.main.async { completion?(isReady) }
@@ -304,7 +304,7 @@ final class TrigramProvider: SuggestionProvider {
         if !Self.hasLoggedFirstSuggestion {
             Self.hasLoggedFirstSuggestion = true
             let logPrev2 = context.previousWord2?.lowercased() ?? "(nil)"
-            FileLogger.shared.warn(.prediction, "trigram first suggestion: \"\(logPrev2) \(prev)\" → \(followers.prefix(3))")
+            FileLogger.shared.debug(.prediction, "trigram first suggestion: \"\(logPrev2) \(prev)\" → \(followers.prefix(3))")
         }
 
         if context.lookupWord.isEmpty {
