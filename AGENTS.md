@@ -136,6 +136,22 @@ The dictation feature POSTs audio to a Whisper-compatible transcription server. 
 - Multipart field name is `audio`, not `file`.
 - No auth header by default.
 
+## Logging standard
+
+Every `FileLogger` call across the codebase follows the level definitions and decision rules in [docs/LOGGING.md](docs/LOGGING.md). The four levels — `.debug`, `.info`, `.warn`, `.error` — map onto Apple's `os.Logger` severity scale and are defined with concrete Ritoras examples and anti-examples.
+
+**Before writing any new log call, consult the standard.** Key rules every contributor must know:
+
+- `.debug` for developer diagnostics (VAD transitions, first-attempt network errors, poll scheduling)
+- `.info` for normal lifecycle and user-action confirmations (view loaded, connection established)
+- `.warn` for unexpected but recoverable (memory-pressure unloading, fallback paths, retries exhausted)
+- `.error` for hard failures with user impact (module init failure, audio unavailable)
+- Do not log normal lifecycle events at `.warn`
+- Retryable errors: `.debug` on first attempt, `.warn` after all retries exhausted
+- In the keyboard extension (48 MB Jetsam cap), keep log messages lean — never construct large strings on the hot path
+
+The component-to-subsystem mapping (`LogComponent` cases `.prediction`, `.keyboard`, `.network`, `.audio`, `.dictionary`, `.transcription`, `.app`, `.settings`, `.lifecycle`) is also documented there with typical level usage per component.
+
 ## OpenCode-local config
 
 `.opencode/`:

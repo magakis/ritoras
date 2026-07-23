@@ -409,3 +409,11 @@ the guidance above.
    The server expects the field named `audio` (not `file`), and the response
    shape is `{"success": bool, "transcription": string}`. If the server
    contract changes, update the doc in the same PR.
+
+8. **Log levels** — every `FileLogger` call in your diff must follow the
+   standard in `docs/LOGGING.md`. In particular: normal lifecycle events must
+   not be logged at `.warn`; retryable network errors use `.debug` on the first
+   attempt and only escalate to `.warn` after all retries are exhausted; log
+   messages in keyboard-extension code paths must be kept lean to respect the
+   48 MB Jetsam cap. When in doubt: `.info` for success paths, `.warn` for
+   adaptations/recoverable anomalies, `.error` for failures with user impact.
