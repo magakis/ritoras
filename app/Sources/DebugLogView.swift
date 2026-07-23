@@ -165,6 +165,8 @@ struct DebugLogView: View {
     @State private var deleteFeedbackIsError = false
     @State private var missedUpdates = false
     @State private var cachedShareText: String = ""
+    @State private var refreshGeneration = 0
+    @State private var isLoading = false
     private let pageSize = 200
 
     private var selectedOrFilteredLines: [LogLine] {
@@ -311,7 +313,16 @@ struct DebugLogView: View {
             crashReportsSection
             diagnosticsSection
             if lines.isEmpty && diagnostics.isEmpty && crashReports.isEmpty {
-                emptyStateRow
+                if isLoading {
+                    HStack {
+                        Spacer()
+                        ProgressView()
+                        Spacer()
+                    }
+                    .listRowBackground(Color.clear)
+                } else {
+                    emptyStateRow
+                }
             } else {
                 logLinesList
                 if lines.count < totalCount {
@@ -637,28 +648,47 @@ struct DebugLogView: View {
         let components = componentFilterToSet()
         let since = timeRangeToSinceNs()
         let search = searchText.isEmpty ? nil : searchText
-        lines = LogStore.shared.recent(
-            limit: pageSize,
-            levels: levels,
-            components: components,
-            sinceNs: since,
-            search: search)
-        newestSeenId = lines.first?.rowId
-        oldestLoadedId = lines.last?.rowId
-        totalCount = LogStore.shared.count(
-            levels: levels,
-            components: components,
-            sinceNs: since,
-            search: search)
-        diagnostics = LogStore.shared.recentDiagnostics()
-        crashReports = MetricKitSubscriber.loadReports()
-        updateShareText()
+        let piiScrub = scrubPII
+
+        refreshGeneration += 1
+        let gen = refreshGeneration
+        isLoading = true
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let newLines = LogStore.shared.recent(
+                limit: pageSize,
+                levels: levels,
+                components: components,
+                sinceNs: since,
+                search: search)
+            let newCount = LogStore.shared.count(
+                levels: levels,
+                components: components,
+                sinceNs: since,
+                search: search)
+            let newDiagnostics = LogStore.shared.recentDiagnostics()
+            let newCrashReports = MetricKitSubscriber.loadReports()
+
+            let rawText = newLines.map(\.raw).joined(separator: "\n")
+            let newShareText = piiScrub ? LogScrubber.scrub(rawText) : rawText
+
+            DispatchQueue.main.async {
+                guard gen == refreshGeneration else { return }
+                lines = newLines
+                newestSeenId = newLines.first?.rowId
+                oldestLoadedId = newLines.last?.rowId
+                totalCount = newCount
+                diagnostics = newDiagnostics
+                crashReports = newCrashReports
+                cachedShareText = newShareText
+                isLoading = false
+            }
+        }
     }
 
     private func clear() {
         try? LogStore.shared.clear()
         refresh()
-        updateShareText()
     }
 
     private func updateShareText() {
@@ -758,36 +788,73 @@ struct DebugLogView: View {
 
     private func loadMore() {
         guard let before = oldestLoadedId else { return }
-        let more = LogStore.shared.recent(
-            limit: pageSize, beforeId: before,
-            levels: levelFilterToSet(),
-            components: componentFilterToSet(),
-            sinceNs: timeRangeToSinceNs(),
-            search: searchText.isEmpty ? nil : searchText)
-        guard !more.isEmpty else { return }
-        lines.append(contentsOf: more)
-        oldestLoadedId = more.last?.rowId
-        updateShareText()
+        let levels = levelFilterToSet()
+        let components = componentFilterToSet()
+        let since = timeRangeToSinceNs()
+        let search = searchText.isEmpty ? nil : searchText
+        let piiScrub = scrubPII
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let more = LogStore.shared.recent(
+                limit: pageSize, beforeId: before,
+                levels: levels,
+                components: components,
+                sinceNs: since,
+                search: search)
+            guard !more.isEmpty else { return }
+
+            DispatchQueue.main.async {
+                lines.append(contentsOf: more)
+                oldestLoadedId = more.last?.rowId
+
+                let rawText = lines.map(\.raw).joined(separator: "\n")
+                cachedShareText = piiScrub ? LogScrubber.scrub(rawText) : rawText
+            }
+        }
     }
 
     private func incrementalRefresh() {
         guard let newest = newestSeenId else { refresh(); return }
-        let newer = LogStore.shared.recent(
-            limit: pageSize,
-            levels: levelFilterToSet(),
-            components: componentFilterToSet(),
-            sinceNs: timeRangeToSinceNs(),
-            afterId: newest,
-            search: searchText.isEmpty ? nil : searchText)
-        guard !newer.isEmpty else { return }
-        lines.insert(contentsOf: newer, at: 0)
-        newestSeenId = newer.first?.rowId
-        totalCount = LogStore.shared.count(
-            levels: levelFilterToSet(),
-            components: componentFilterToSet(),
-            sinceNs: timeRangeToSinceNs(),
-            search: searchText.isEmpty ? nil : searchText)
-        updateShareText()
+        let levels = levelFilterToSet()
+        let components = componentFilterToSet()
+        let since = timeRangeToSinceNs()
+        let search = searchText.isEmpty ? nil : searchText
+        let piiScrub = scrubPII
+
+        refreshGeneration += 1
+        let gen = refreshGeneration
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let newer = LogStore.shared.recent(
+                limit: pageSize,
+                levels: levels,
+                components: components,
+                sinceNs: since,
+                afterId: newest,
+                search: search)
+
+            let newCount: Int? = newer.isEmpty ? nil : LogStore.shared.count(
+                levels: levels,
+                components: components,
+                sinceNs: since,
+                search: search)
+
+            DispatchQueue.main.async {
+                guard gen == refreshGeneration else { return }
+                isLoading = false
+
+                guard !newer.isEmpty else { return }
+
+                lines.insert(contentsOf: newer, at: 0)
+                newestSeenId = newer.first?.rowId
+                if let newCount = newCount {
+                    totalCount = newCount
+                }
+
+                let rawText = lines.map(\.raw).joined(separator: "\n")
+                cachedShareText = piiScrub ? LogScrubber.scrub(rawText) : rawText
+            }
+        }
     }
 
     // MARK: - Filter Helpers
