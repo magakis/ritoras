@@ -598,7 +598,7 @@ class KeyboardView: UIView {
     }
 
     private func setupConstraints() {
-        let emojiPanelBottom = emojiPanelView.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -6)
+        let emojiPanelBottom = emojiPanelView.bottomAnchor.constraint(equalTo: bottomAnchor)
         emojiPanelBottom.priority = .defaultHigh
 
         NSLayoutConstraint.activate([
@@ -623,7 +623,7 @@ class KeyboardView: UIView {
             // Bottom action row (Row 4) — always visible, pinned to the bottom
             bottomActionRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             bottomActionRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            bottomActionRow.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -6),
+            bottomActionRow.bottomAnchor.constraint(equalTo: bottomAnchor),
             bottomActionRow.heightAnchor.constraint(equalToConstant: 48),
         ])
 
