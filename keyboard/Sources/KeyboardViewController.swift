@@ -157,6 +157,18 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
+    /// Reads documentIdentifier via the ObjC runtime so a nil return from the
+    /// (nonnull-declared) ObjC property yields nil here instead of trapping in
+    /// Swift's bridging layer (SIGTRAP). Use this INSTEAD of reading
+    /// textDocumentProxy.documentIdentifier directly — the direct read traps
+    /// when the text-input session is transitional (e.g. during viewDidAppear
+    /// on a mid-dictation app switch).
+    private var safeDocumentIdentifier: UUID? {
+        (textDocumentProxy as AnyObject)
+            .perform(NSSelectorFromString("documentIdentifier"))?
+            .takeUnretainedValue() as? UUID
+    }
+
     private var serverPollTimer: Timer?
     private var serverPollCount = 0
     private var serverPollWorkItem: DispatchWorkItem?
@@ -305,11 +317,11 @@ class KeyboardViewController: UIInputViewController {
             // from the one that started this dictation, discard right away rather
             // than waiting for the 300s staleness timeout.
             if let targetId = dictationTargetId {
-                let currentId = textDocumentProxy.documentIdentifier
+                let currentId = safeDocumentIdentifier
                 if currentId != targetId {
                     FileLogger.shared.warn(.keyboard, "viewDidAppear — target mismatch on recovery, discarding",
                                            payload: ["expected": targetId.uuidString,
-                                                     "actual": currentId.uuidString])
+                                                     "actual": currentId?.uuidString ?? "nil"])
                     pendingRequestId = nil
                     dictationTargetId = nil
                     clearDeferredResult()
@@ -342,10 +354,10 @@ class KeyboardViewController: UIInputViewController {
                     let deferredTargetIdStr = UserDefaults.standard.string(forKey: "ritoras_deferred_target_id") ?? ""
                     if !deferredTargetIdStr.isEmpty,
                        let deferredTargetId = UUID(uuidString: deferredTargetIdStr),
-                       deferredTargetId != textDocumentProxy.documentIdentifier {
+                       deferredTargetId != safeDocumentIdentifier {
                         FileLogger.shared.warn(.keyboard, "Deferred dictation target mismatch — discarding",
                                                payload: ["expected": deferredTargetId.uuidString,
-                                                         "actual": textDocumentProxy.documentIdentifier.uuidString])
+                                                         "actual": safeDocumentIdentifier?.uuidString ?? "nil"])
                         clearDeferredResult()
                         state = .idle
                     } else {
@@ -563,15 +575,15 @@ class KeyboardViewController: UIInputViewController {
         pendingRequestId = id
         pendingRequestStart = Date().timeIntervalSince1970
 
-        let docId = textDocumentProxy.documentIdentifier
-        if docId == UUID() {
-            FileLogger.shared.warn(.keyboard, "documentIdentifier is zero UUID — skipping target verification",
+        let docId = safeDocumentIdentifier
+        if docId == nil || docId == UUID() {
+            FileLogger.shared.warn(.keyboard, "documentIdentifier is nil or zero UUID — skipping target verification",
                                    payload: ["pendingRequestId": id.uuidString])
             dictationTargetId = nil
         } else {
             dictationTargetId = docId
             FileLogger.shared.debug(.keyboard, "Captured dictation target",
-                                    payload: ["documentIdentifier": docId.uuidString,
+                                    payload: ["documentIdentifier": docId?.uuidString ?? "nil",
                                               "pendingRequestId": id.uuidString])
         }
 
@@ -1077,12 +1089,12 @@ class KeyboardViewController: UIInputViewController {
         // this dictation. If documentIdentifier was nil/zero at capture time, skip
         // verification (graceful degradation).
         if let targetId = dictationTargetId {
-            let currentId = textDocumentProxy.documentIdentifier
+            let currentId = safeDocumentIdentifier
             guard currentId == targetId else {
                 // Target mismatch — keyboard is now attached to a different text field.
                 FileLogger.shared.warn(.keyboard, "Dictation target mismatch — discarding",
                                        payload: ["expected": targetId.uuidString,
-                                                 "actual": currentId.uuidString])
+                                                 "actual": currentId?.uuidString ?? "nil"])
                 stopDictationTransports()
                 pendingRequestId = nil
                 dictationTargetId = nil
