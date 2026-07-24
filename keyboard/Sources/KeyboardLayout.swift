@@ -28,6 +28,9 @@ struct KeyDefinition {
 
 // MARK: - Layout Mode
 
+/// The key-grid layout WITHIN the `.letters` surface (UIMode). Owned by
+/// KeyboardView's layout state. Has no meaning while UIMode is `.emoji` /
+/// `.emojiSearch`. Independent of UIMode — the two are never synchronized.
 enum KeyboardLayoutMode: Equatable {
     case letters
     case numbers

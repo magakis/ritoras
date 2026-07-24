@@ -237,17 +237,87 @@ enum EmojiDataLoader {
     }
 }
 
+// MARK: - Emoji Validation
+
+/// Bare scalars that carry the Unicode `Emoji` property only because they are
+/// keycap-sequence bases; they are NOT standalone emoji.
+private func isKeycapBaseScalar(_ scalar: Unicode.Scalar) -> Bool {
+    let v = scalar.value
+    return v == 0x0023                        // NUMBER SIGN  #
+        || v == 0x002A                        // ASTERISK      *
+        || (v >= 0x0030 && v <= 0x0039)       // DIGIT ZERO..NINE
+}
+
+private extension Character {
+    /// True iff this Character renders as an emoji rather than a plain
+    /// digit / letter / punctuation mark.
+    var isEmojiCharacter: Bool {
+        let scalars = unicodeScalars
+        guard let first = scalars.first else { return false }
+
+        if scalars.count == 1 {
+            // Single scalar: a real emoji iff it's emoji-capable and not a bare
+            // keycap base (0-9, #, *). Those carry the Emoji property only because
+            // they combine with U+20E3 into keycap sequences.
+            return first.properties.isEmoji && !isKeycapBaseScalar(first)
+        }
+
+        // Multi-scalar cluster. A keycap base (0-9, #, *) is only a real emoji when
+        // actually combined with U+20E3 (COMBINING ENCLOSING KEYCAP); a stray
+        // variation selector / combining mark on a bare digit must NOT pass.
+        if isKeycapBaseScalar(first) {
+            return scalars.contains { $0.value == 0x20E3 }
+        }
+        // Flags (regional indicators), ZWJ sequences, skin-tone modifiers, etc. —
+        // the base scalar is a genuine emoji.
+        return first.properties.isEmoji
+    }
+}
+
 // MARK: - EmojiRecents
 
 enum EmojiRecents {
     private static let storageKey = "ritoras_emoji_recents"
     private static let maxRecents = 12
 
+    private static var didPurgeOnLoad = false
+
     static func get() -> [String] {
-        UserDefaults.standard.stringArray(forKey: storageKey) ?? []
+        let stored = UserDefaults.standard.stringArray(forKey: storageKey) ?? []
+        if !didPurgeOnLoad {
+            didPurgeOnLoad = true
+            return purge(stored)   // one-time cleanup of pre-validation pollution
+        }
+        return stored
     }
 
-    static func add(_ emoji: String) {
+    /// True iff `string` is exactly one grapheme cluster that is an emoji.
+    /// Single source of truth for recents validation. Rejects bare digits,
+    /// letters, and punctuation — including keycap bases (0-9 # *) that carry
+    /// the Unicode `Emoji` property. Accepts keycap emoji (5️⃣), ZWJ sequences,
+    /// skin-toned emoji, and flags.
+    static func isSingleEmoji(_ string: String) -> Bool {
+        guard string.count == 1, let character = string.first else { return false }
+        return character.isEmojiCharacter
+    }
+
+    private static func purge(_ recents: [String]) -> [String] {
+        let cleaned = recents.filter { isSingleEmoji($0) }
+        if cleaned.count != recents.count {
+            UserDefaults.standard.set(cleaned, forKey: storageKey)
+        }
+        return cleaned
+    }
+
+    static func add(_ emoji: String, caller: String = #function) {
+        // Defense-in-depth: never trust callers. Only genuine emoji are persisted.
+        guard isSingleEmoji(emoji) else {
+            // Nobody should push a non-emoji here — the legit callers are the emoji
+            // pickers, which only ever supply real emoji. If this fires, something
+            // unexpected is routing through the recents path; the caller name tells us who.
+            FileLogger.shared.warn(.keyboard, "emoji recents rejected non-emoji \(emoji.prefix(8)) from \(caller)")
+            return
+        }
         var recents = get()
         // Remove existing occurrence so we can move it to front
         if let index = recents.firstIndex(of: emoji) {
@@ -271,13 +341,6 @@ enum EmojiRecents {
         }
     }
 
-    /// Returns true if the string contains at least one emoji scalar.
-    /// Used to guard the recents list against non-emoji strings (letters, punctuation)
-    /// that may arrive via the .insertText path during focus transitions.
-    static func isEmoji(_ s: String) -> Bool {
-        guard !s.isEmpty else { return false }
-        return s.unicodeScalars.contains { $0.properties.isEmoji }
-    }
 }
 
 // MARK: - EmojiSkinTone

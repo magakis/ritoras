@@ -21,6 +21,15 @@ enum ShiftState: Equatable {
 
 // MARK: - UI Mode
 
+/// The keyboard SURFACE currently shown to the user. Owned by
+/// `KeyboardViewController.uiMode`. Orthogonal to `KeyboardLayoutMode`.
+///   - `.letters`     → letter/number/symbol key grid (see KeyboardLayoutMode)
+///   - `.emoji`       → emoji panel grid (EmojiPanelView)
+///   - `.emojiSearch` → search overlay (EmojiSearchOverlay) over the panel
+/// These two mode systems are NOT kept in sync; a `.letters`-surface keystroke
+/// can briefly coincide with a stale `.emoji`/`.emojiSearch` value during async
+/// search-field focus transitions. Emoji-recents recording therefore happens at
+/// the picker tap handlers, not here.
 enum UIMode: Equatable {
     case letters
     case emoji

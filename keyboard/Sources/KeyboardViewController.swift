@@ -42,6 +42,15 @@ class KeyboardViewController: UIInputViewController {
     private var lastAtSentenceStart = false
     private var lastRecomputedContext: String?
 
+    /// Top-level keyboard surface shown to the user (`.letters` | `.emoji` panel |
+    /// `.emojiSearch` overlay). Independent of `KeyboardLayoutMode` (letters/numbers/
+    /// symbols), which only governs the key grid inside the `.letters` surface.
+    ///
+    /// Intentionally NOT reset across hide→show cycles: the user returns to the
+    /// surface they left (e.g. the emoji panel). Emoji-recents recording no longer
+    /// reads `uiMode` — it is performed at the picker tap handlers in EmojiPanelView
+    /// and EmojiSearchOverlay — so the async-search-field focus race cannot corrupt
+    /// recents regardless of the value here.
     private var uiMode: UIMode = .letters {
         didSet {
             keyboardView.apply(mode: uiMode)
@@ -1288,9 +1297,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
     func keyboardView(_ view: KeyboardView, didPerform action: KeyAction) {
         switch action {
         case .insertText(let s):
-            if uiMode == .emoji && EmojiRecents.isEmoji(s) {
-                EmojiRecents.add(s)
-            }
             let isTriggerPunct = SharedConfig.Defaults.autocorrectTriggerPunctuation.contains(s)
             let shouldAutoCorrect = isTriggerPunct && uiMode != .emoji
             let text = applyShift(to: s)

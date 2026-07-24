@@ -672,6 +672,7 @@ extension EmojiPanelView: UICollectionViewDelegateFlowLayout {
         selectionFeedback.selectionChanged()
         collectionView.deselectItem(at: indexPath, animated: false)
         let emoji = EmojiSkinTone.applying(.current, to: allEmojis[indexPath.item])
+        EmojiRecents.add(emoji)   // record at the picker — we KNOW this is a user-picked emoji
         onSelect?(emoji)
     }
 }
