@@ -66,6 +66,15 @@ class KeyboardViewController: UIInputViewController {
     private var predictionEngine: PredictionEngine?
     private var trigramProvider: TrigramProvider?
     private var isPredictionEngineReady = false
+
+    /// Identifies the keyboard process across VC instances. Set once per process launch.
+    static let processLaunchId: String = UUID().uuidString
+    /// Incremented on each buildPredictionEngine() call; logged on every build-related line.
+    private var buildGeneration: Int = 0
+    /// Main-thread-confined in-flight guard. Read/written only on the main thread
+    /// (buildPredictionEngine is called from viewDidLoad and the snapshot path,
+    /// both main; resets happen in the DispatchQueue.main.async completion callbacks).
+    private var isBuildingPrediction = false
     private let predictionBuildQueue = DispatchQueue(
         label: "com.ritoras.prediction.build",
         qos: .userInitiated
@@ -167,6 +176,15 @@ class KeyboardViewController: UIInputViewController {
     /// Sets `isPredictionEngineReady = true` on the main queue when done.
     private func buildPredictionEngine() {
         isPredictionEngineReady = false
+        guard !isBuildingPrediction else {
+            FileLogger.shared.info(.prediction, "build skipped: prediction build already in flight",
+                payload: ["buildId": buildGeneration])
+            return
+        }
+        isBuildingPrediction = true
+        buildGeneration &+= 1
+        let generation = buildGeneration
+        let launchId = KeyboardViewController.processLaunchId
 
         predictionBuildQueue.async { [weak self] in
             guard let self = self else { return }
@@ -180,6 +198,18 @@ class KeyboardViewController: UIInputViewController {
             // Build trie for completion.
             let trie = Trie()
 
+            let baselineFootprint = MemoryMonitor.currentFootprint()
+            let trigramReady = self.trigramProvider?.isReady ?? false
+            FileLogger.shared.warn(.prediction, "build start footprint",
+                payload: [
+                    "launchId": launchId,
+                    "buildId": generation,
+                    "baselineFootprint": baselineFootprint,
+                    "maxFootprint": SharedConfig.Defaults.maxPhysFootprintDuringLoad,
+                    "trigramReady": trigramReady,
+                    "hadEngineBeforeBuild": self.predictionEngine != nil
+                ])
+
             // Stream-load the frequency dictionary into both, with memory monitoring.
             do {
                 guard let url = WordListLoader.bundledURL() else {
@@ -188,14 +218,27 @@ class KeyboardViewController: UIInputViewController {
                 let loaded = try WordListLoader.loadStreamed(
                     from: url,
                     into: symSpell,
-                    trie: trie
+                    trie: trie,
+                    buildSessionId: "b\(generation)"
                 )
+                let postLoadFootprint = MemoryMonitor.currentFootprint()
+                FileLogger.shared.warn(.prediction, "build result footprint",
+                    payload: [
+                        "launchId": launchId,
+                        "buildId": generation,
+                        "wordsLoaded": loaded,
+                        "postLoadFootprint": postLoadFootprint,
+                        "baselineFootprint": baselineFootprint,
+                        "delta": postLoadFootprint > baselineFootprint ? postLoadFootprint - baselineFootprint : 0,
+                        "trigramReady": trigramReady
+                    ])
                 if loaded < 49000 {
                     FileLogger.shared.info(.dictionary, "prediction engine loaded partial dictionary", payload: ["wordsLoaded": loaded])
                 }
             } catch {
                 FileLogger.shared.error(.dictionary, "prediction engine failed to load dictionary", payload: ["error": error.localizedDescription])
                 DispatchQueue.main.async {
+                    self.isBuildingPrediction = false
                     self.isPredictionEngineReady = true
                     self.predictionEngine = PredictionEngine()
                 }
@@ -214,6 +257,7 @@ class KeyboardViewController: UIInputViewController {
             engine.addProvider(appleProvider)
 
             DispatchQueue.main.async {
+                self.isBuildingPrediction = false
                 self.predictionEngine = engine
                 self.isPredictionEngineReady = true
 
@@ -267,6 +311,8 @@ class KeyboardViewController: UIInputViewController {
         }
         buildPredictionEngine()
         state = .idle
+        FileLogger.shared.info(.lifecycle, "process launch",
+            payload: ["launchId": KeyboardViewController.processLaunchId])
         FileLogger.shared.info(.keyboard, "viewDidLoad OK",
                                payload: ["hasFullAccess": hasFullAccess])
     }

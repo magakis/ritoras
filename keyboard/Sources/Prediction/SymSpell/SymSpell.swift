@@ -242,4 +242,9 @@ final class SymSpell {
 
         return previous[n]
     }
+
+    deinit {
+        FileLogger.shared.warn(.dictionary, "SymSpell deinit",
+            payload: ["dictionaryCount": dictionary.count, "deletesCount": deletes.count])
+    }
 }

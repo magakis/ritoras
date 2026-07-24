@@ -66,7 +66,8 @@ enum WordListLoader {
         into symSpell: SymSpell,
         trie: Trie,
         maxPhysFootprintBytes: UInt64 = SharedConfig.Defaults.maxPhysFootprintDuringLoad,
-        pruneBelow: Int64? = nil
+        pruneBelow: Int64? = nil,
+        buildSessionId: String? = nil
     ) throws -> Int {
         guard let fileHandle = FileHandle(forReadingAtPath: url.path) else {
             throw WordListError.fileOpenFailed(url.path)
@@ -114,7 +115,7 @@ enum WordListLoader {
                 if wordCount % 5000 == 0 {
                     let physFootprint = MemoryMonitor.currentFootprint()
                     if physFootprint > maxPhysFootprintBytes {
-                        FileLogger.shared.error(.dictionary, "memory threshold exceeded during word list load", payload: ["physFootprint": physFootprint, "maxPhysFootprint": maxPhysFootprintBytes, "wordsLoaded": wordCount])
+                        FileLogger.shared.error(.dictionary, "memory threshold exceeded during word list load", payload: ["physFootprint": physFootprint, "maxPhysFootprint": maxPhysFootprintBytes, "wordsLoaded": wordCount, "buildSessionId": buildSessionId ?? "none"])
                         return wordCount
                     }
                 }

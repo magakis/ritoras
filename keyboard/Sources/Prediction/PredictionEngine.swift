@@ -208,4 +208,9 @@ final class PredictionEngine {
         }
         return allSuggestions
     }
+
+    deinit {
+        FileLogger.shared.warn(.prediction, "PredictionEngine deinit",
+            payload: ["providerCount": providers.count])
+    }
 }
