@@ -69,8 +69,10 @@ class KeyboardViewController: UIInputViewController {
 
     /// Identifies the keyboard process across VC instances. Set once per process launch.
     static let processLaunchId: String = UUID().uuidString
-    /// Incremented on each buildPredictionEngine() call; logged on every build-related line.
-    private var buildGeneration: Int = 0
+    /// Process-wide build counter (main-thread-confined: all build calls originate on the main thread).
+    /// Static so multiple KeyboardViewController instances in one process produce buildId 1,2,3,…,
+    /// revealing VC accumulation that a per-instance counter would mask.
+    private static var buildGeneration: Int = 0
     /// Main-thread-confined in-flight guard. Read/written only on the main thread
     /// (buildPredictionEngine is called from viewDidLoad and the snapshot path,
     /// both main; resets happen in the DispatchQueue.main.async completion callbacks).
@@ -178,12 +180,12 @@ class KeyboardViewController: UIInputViewController {
         isPredictionEngineReady = false
         guard !isBuildingPrediction else {
             FileLogger.shared.info(.prediction, "build skipped: prediction build already in flight",
-                payload: ["buildId": buildGeneration])
+                payload: ["buildId": Self.buildGeneration])
             return
         }
         isBuildingPrediction = true
-        buildGeneration &+= 1
-        let generation = buildGeneration
+        Self.buildGeneration &+= 1
+        let generation = Self.buildGeneration
         let launchId = KeyboardViewController.processLaunchId
 
         predictionBuildQueue.async { [weak self] in
@@ -277,6 +279,9 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        FileLogger.shared.debug(.lifecycle, "boot baseline",
+            payload: ["launchId": KeyboardViewController.processLaunchId,
+                      "footprint": MemoryMonitor.currentFootprint()])
 
         // Wire FileLogger broadcast to ship logs to container app via localhost.
         // Set before any log calls so we capture everything from the start.
@@ -447,6 +452,9 @@ class KeyboardViewController: UIInputViewController {
     }
 
     deinit {
+        FileLogger.shared.warn(.lifecycle, "KeyboardViewController deinit",
+            payload: ["launchId": KeyboardViewController.processLaunchId,
+                      "buildId": Self.buildGeneration])
         KeyboardLogShipper.shared.stop()
         FileLogger.broadcast = nil
         darwinToken = nil
@@ -578,6 +586,9 @@ class KeyboardViewController: UIInputViewController {
         let id = UUID()
         pendingRequestId = id
         pendingRequestStart = Date().timeIntervalSince1970
+
+        FileLogger.shared.debug(.keyboard, "dictation start footprint",
+            payload: ["id": id.uuidString, "footprint": MemoryMonitor.currentFootprint()])
 
         FileLogger.shared.debug(.keyboard, "openContainerApp", payload: [
             "id": id.uuidString
@@ -1065,6 +1076,9 @@ class KeyboardViewController: UIInputViewController {
     /// every other transport is stopped first (prevents double-insert now that the
     /// Darwin observer and server polling can run concurrently on resume).
     private func insertDictationResult(text: String) {
+        FileLogger.shared.debug(.keyboard, "dictation stop footprint",
+            payload: ["footprint": MemoryMonitor.currentFootprint()])
+
         let totalElapsed = pendingRequestStart > 0
             ? (Date().timeIntervalSince1970 - pendingRequestStart) * 1000 : 0
         FileLogger.shared.info(.keyboard, "insert", payload: [
