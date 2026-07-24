@@ -62,6 +62,10 @@ class KeyboardViewController: UIInputViewController {
         qos: .userInitiated
     )
 
+    /// Tracks the current server-poll data task so it can be cancelled before
+    /// the next poll starts or when transports are stopped.
+    private var currentPollTask: URLSessionDataTask?
+
     private var keyboardView: KeyboardView!
 
     private var heightConstraint: NSLayoutConstraint?
@@ -346,6 +350,8 @@ class KeyboardViewController: UIInputViewController {
         super.didReceiveMemoryWarning()
         let before = MemoryMonitor.currentFootprint()
         trigramProvider?.unload()
+        predictionEngine = nil
+        isPredictionEngineReady = false
         let after = MemoryMonitor.currentFootprint()
         FileLogger.shared.warn(.lifecycle,
             "didReceiveMemoryWarning: phys_footprint \(before) → \(after) (\(before > after ? before - after : 0) bytes freed)")
@@ -968,6 +974,8 @@ class KeyboardViewController: UIInputViewController {
     /// Tears down every active result-transport (timers + Darwin observer) so that
     /// once one path resolves the dictation, no competing path re-inserts the text.
     private func stopDictationTransports() {
+        currentPollTask?.cancel()
+        currentPollTask = nil
         waitTimer?.invalidate()
         pollTimer?.invalidate()
         serverPollTimer?.invalidate()
@@ -1155,6 +1163,7 @@ class KeyboardViewController: UIInputViewController {
             "source": selected != nil ? "probe" : "fallback_first"
         ])
 
+        currentPollTask?.cancel()
         let task = WhisperClient.session.dataTask(with: url) { [weak self] data, response, error in
             guard let self = self else { return }
             let httpT0 = Date()
@@ -1248,6 +1257,7 @@ class KeyboardViewController: UIInputViewController {
                 }
             }
         }
+        currentPollTask = task
         task.resume()
     }
 
@@ -1411,6 +1421,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     func keyboardViewSuggestionSnapshot(_ view: KeyboardView) -> SuggestionInputSnapshot? {
         guard inputTarget == .hostApp else { return nil }
+        if predictionEngine == nil { buildPredictionEngine() }
         guard isPredictionEngineReady, predictionEngine != nil else { return nil }
         let context = textDocumentProxy.documentContextBeforeInput
         let extracted = CurrentWordExtractor.extract(from: context)
