@@ -5,6 +5,7 @@ import UIKit
 enum KeyboardState: Equatable {
     case idle
     case openingApp
+    case recording
     case waiting
     case waitingConfirm
     case inserting
@@ -960,6 +961,14 @@ class KeyboardView: UIView {
             )
             micButton.tintColor = .white
             micButton.isEnabled = false
+
+        case .recording:
+            micButton.applyMicStyle(
+                icon: "circle.fill",
+                backgroundColor: .systemRed
+            )
+            micButton.tintColor = .white
+            micButton.isEnabled = true
 
         case .waiting:
             micButton.applyMicStyle(

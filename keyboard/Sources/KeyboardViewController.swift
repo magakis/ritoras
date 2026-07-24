@@ -169,6 +169,7 @@ class KeyboardViewController: UIInputViewController {
 
     private var serverPollTimer: Timer?
     private var serverPollCount = 0
+    private var serverPollUnresponsiveCount = 0
     private var serverPollWorkItem: DispatchWorkItem?
     private var lastPollStartTime: Date?
 
@@ -551,6 +552,12 @@ class KeyboardViewController: UIInputViewController {
                 return
             }
             openContainerAppForDictation()
+        case .recording:
+            // First tap: enter confirmation state, start 3s timer
+            FileLogger.shared.debug(.keyboard, "Mic: .recording -> .waitingConfirm")
+            state = .waitingConfirm
+            scheduleConfirmStopTimeout()
+
         case .waiting:
             // First tap: enter confirmation state, start 3s timer
             FileLogger.shared.debug(.keyboard, "Mic: .waiting -> .waitingConfirm")
@@ -580,6 +587,7 @@ class KeyboardViewController: UIInputViewController {
         clipboardPollTimer = nil
         serverPollTimer?.invalidate()
         serverPollTimer = nil
+        serverPollUnresponsiveCount = 0
         serverPollWorkItem?.cancel()
         serverPollWorkItem = nil
 
@@ -598,6 +606,7 @@ class KeyboardViewController: UIInputViewController {
         var components = URLComponents(url: SharedConfig.Defaults.dictateURL, resolvingAgainstBaseURL: false)!
         components.queryItems = [URLQueryItem(name: "id", value: id.uuidString)]
         guard let url = components.url else {
+            pendingRequestId = nil
             state = .error("Couldn't create dictation URL.")
             return
         }
@@ -612,6 +621,7 @@ class KeyboardViewController: UIInputViewController {
         if !opened {
             FileLogger.shared.error(.keyboard, "Failed to traverse responder chain",
                                     payload: ["url": url.absoluteString, "id": id.uuidString])
+            pendingRequestId = nil
             state = .error("Couldn't open Ritoras app. Make sure it's installed.")
         }
     }
@@ -751,6 +761,9 @@ class KeyboardViewController: UIInputViewController {
             await MainActor.run {
                 self.lastSeenPhase = snapshot.phase
                 self.updateRecordingInProgressUI(phase: snapshot.phase)
+                if snapshot.phase == "recording" || snapshot.phase == "transcribing" {
+                    self.localhostPollDeadline = Date().addingTimeInterval(120.0)
+                }
             }
             if snapshot.phase == "done" || snapshot.phase == "error" {
                 // Terminal — fetch the result
@@ -837,8 +850,10 @@ class KeyboardViewController: UIInputViewController {
     /// shows the active state without waiting for a localhost response.
     private func updateRecordingInProgressUI(phase: String) {
         switch phase {
-        case "recording", "transcribing":
-            state = .waiting  // unconditional — was guarded on .idle which never matched
+        case "recording":
+            state = .recording
+        case "transcribing":
+            state = .waiting
         case "idle", "done", "error":
             // Don't change state here — handleLocalhostResult will handle terminal states
             break
@@ -1028,6 +1043,18 @@ class KeyboardViewController: UIInputViewController {
         // Start localhost polling.
         startLocalhostPolling()
 
+        // Recreate the waitTimer if it was invalidated in viewWillDisappear.
+        // Use the remaining time from the original 900s dictation timeout.
+        if waitTimer == nil, pendingRequestStart > 0 {
+            let elapsed = Date().timeIntervalSince1970 - pendingRequestStart
+            let remaining = max(SharedConfig.Defaults.dictationTimeoutSeconds - elapsed, 0)
+            if remaining > 0 {
+                waitTimer = Timer.scheduledTimer(withTimeInterval: remaining, repeats: false) { [weak self] _ in
+                    DispatchQueue.main.async { self?.handleTimeout() }
+                }
+            }
+        }
+
         // Clipboard (primary under SideStore) + App Group payload.
         tryResolveFromStores(id: id) { [weak self] resolved in
             guard let self = self else { return }
@@ -1153,6 +1180,7 @@ class KeyboardViewController: UIInputViewController {
     /// fallback. Resolves as soon as ANY yields a terminal status.
     private func startServerPolling() {
         serverPollCount = 0
+        serverPollUnresponsiveCount = 0
         serverPollWorkItem?.cancel()
         serverPollWorkItem = nil
         scheduleNextServerPoll()
@@ -1179,13 +1207,15 @@ class KeyboardViewController: UIInputViewController {
     private func performServerPollCycle() {
         guard let id = pendingRequestId else { return }
         serverPollCount += 1
+        serverPollUnresponsiveCount += 1
 
-        if serverPollCount > 30 {  // ~33s (5×0.3s + 25×1.2s adaptive backoff)
+        if serverPollUnresponsiveCount >= 120 {  // ~140s of unresponsive polls
             stopDictationTransports()
             serverPollWorkItem?.cancel()
             serverPollWorkItem = nil
-            FileLogger.shared.warn(.keyboard, "Server polling timed out (30 iterations)",
-                                   payload: ["pendingRequestId": pendingRequestId?.uuidString ?? "nil"])
+            FileLogger.shared.warn(.keyboard, "Server polling timed out (120 unresponsive cycles)",
+                                   payload: ["pendingRequestId": pendingRequestId?.uuidString ?? "nil",
+                                             "serverPollUnresponsiveCount": serverPollUnresponsiveCount])
             pendingRequestId = nil
             state = .error("Dictation timed out. Try again.")
             return
@@ -1317,6 +1347,7 @@ class KeyboardViewController: UIInputViewController {
                     self.state = .idle
 
                 case "transcribing", "recording":
+                    self.serverPollUnresponsiveCount = 0
                     break  // keep polling
 
                 default:
@@ -1343,7 +1374,12 @@ class KeyboardViewController: UIInputViewController {
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             if case .error = self.state {
-                self.state = .idle
+                if self.pendingRequestId != nil {
+                    // Recording still active — resume waiting instead of going idle
+                    self.state = .waiting
+                } else {
+                    self.state = .idle
+                }
             }
         }
         errorResetWorkItem = workItem
