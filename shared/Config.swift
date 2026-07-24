@@ -66,6 +66,17 @@ struct SharedConfig {
         /// Application-level PING interval; must stay under nginx idle (~60s). Resets the server 600s recv timer and keeps NAT/nginx alive.
         static let streamKeepaliveIntervalSeconds: TimeInterval = 25.0
 
+        /// PING cadence (seconds) for stream liveness monitoring. A busy server answers
+        /// PING→PONG immediately, so this detects a dead server without false-timing-out
+        /// a long transcription.
+        static let streamHealthCheckInterval: TimeInterval = 5.0
+        /// Consecutive health-check intervals with no activity (PONG or partial) before
+        /// declaring the stream dead. 3 × 5s ≈ 15s tolerance for transient latency.
+        static let streamMaxMissedPongs: Int = 3
+        /// Per-PING wait for any response during an explicit healthCheck() (drain path).
+        /// Short — a healthy server answers in milliseconds.
+        static let streamPongTimeout: TimeInterval = 10.0
+
         /// Maximum number of chunks held in the in-memory send queue before
         /// new chunks are dropped (queue overflow). When overflow occurs,
         /// the WAV file still captures everything; the stream is declared
@@ -175,8 +186,6 @@ struct SharedConfig {
     // MARK: - Async Transcription
 
     enum AsyncTranscription {
-        /// Recordings longer than this use the async POST /transcriptions path.
-        static let longAudioThresholdSeconds: TimeInterval = 30
         /// Poll cadence while the job is in-flight (SERVER-CONTRACT §12 recommends 500–1000 ms).
         static let pollInterval: TimeInterval = 1.0
         /// Hard ceiling on total wait. Server retains jobs ≥10 min (§12); 15 min covers slow CPU + retry.

@@ -34,6 +34,12 @@ actor WhisperStreamClient {
     /// Periodic keepalive task that sends app-level PING frames while connected.
     private var keepaliveTask: Task<Void, Never>?
 
+    /// Last evidence the server is alive (PONG or partial received). Updated by the
+    /// receive loop; read by the liveness monitor and healthCheck(). A busy server
+    /// still answers PING→PONG immediately (server.py stream receive loop), so this
+    /// stays fresh even while the worker transcribes a long final.
+    private var lastActivityDate: Date = .distantPast
+
     // MARK: - Initialization
 
     /// Creates a streaming client for the given base URL.
@@ -122,6 +128,8 @@ actor WhisperStreamClient {
             group.cancelAll()
         }
 
+        lastActivityDate = Date()
+
         // Start the periodic keepalive loop. It must stay under nginx idle
         // (~60s) and the server's 600s recv timeout.
         keepaliveTask = Task { [weak self] in
@@ -191,6 +199,14 @@ actor WhisperStreamClient {
         FileLogger.shared.debug(.network, "Sent PING")
     }
 
+    /// Records that the server is alive. Called when a PONG or partial arrives.
+    private func touchActivity() { lastActivityDate = Date() }
+
+    /// Seconds since the last sign of server life.
+    private func secondsSinceLastActivity() -> TimeInterval {
+        Date().timeIntervalSince(lastActivityDate)
+    }
+
     // MARK: - Receiving
 
     /// Reads messages from the WebSocket until a `final` transcription
@@ -247,6 +263,7 @@ actor WhisperStreamClient {
                                                                       "length": accumulated.count,
                                                                       "chunkId": msg.chunk_id as Any])
                                     onPartial(accumulated)
+                                    await self.touchActivity()
 
                                 case "final":
                                     let msg = try JSONDecoder().decode(
@@ -259,6 +276,7 @@ actor WhisperStreamClient {
 
                                 case "PONG":
                                     FileLogger.shared.debug(.network, "Received PONG")
+                                    await self.touchActivity()
                                     continue
 
                                 case "error":
@@ -300,14 +318,28 @@ actor WhisperStreamClient {
                 }
             }
 
-            // Timeout guard
-            group.addTask {
-                try await Task.sleep(
-                    nanoseconds: UInt64(SharedConfig.Defaults.streamFinalTimeout * 1_000_000_000)
-                )
-                FileLogger.shared.debug(.network, "receiveMessages timed out",
-                                        payload: ["timeout": SharedConfig.Defaults.streamFinalTimeout])
-                throw WhisperError.timeout
+            // Liveness monitor — replaces the hard wall-clock timeout. Sends PING every
+            // streamHealthCheckInterval and declares timeout only after streamMaxMissedPongs
+            // consecutive silent intervals. A busy server answers PING→PONG immediately, so
+            // this distinguishes "transcribing" (PONGs flow) from "dead" (silent).
+            group.addTask { [self] in
+                let interval = SharedConfig.Defaults.streamHealthCheckInterval
+                let maxMissed = SharedConfig.Defaults.streamMaxMissedPongs
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                    } catch {
+                        return ""   // cancelled (final arrived / group torn down)
+                    }
+                    try? await self.sendPing()  // solicit a PONG
+                    let stale = await self.secondsSinceLastActivity()
+                    if stale > interval * Double(maxMissed) {
+                        FileLogger.shared.warn(.network, "Stream liveness: no activity, declaring timeout",
+                                               payload: ["staleSec": stale, "interval": interval, "maxMissedPongs": maxMissed])
+                        throw WhisperError.timeout
+                    }
+                }
+                return ""
             }
 
             guard let result = try await group.next() else {
@@ -340,6 +372,45 @@ actor WhisperStreamClient {
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         FileLogger.shared.info(.network, "Disconnected")
+    }
+
+    /// Sends PING and waits up to streamPongTimeout for any frame (PONG or partial).
+    /// Returns true if the server responded (alive), false if silent. Used by
+    /// DictationViewModel.stop() to gate the stream queue drain — only declare
+    /// terminal failure when the server stops responding.
+    ///
+    /// MUST only be called when no other receiver is active (i.e. during the queue
+    /// drain, before sendEnd/receiveMessages). Receiving a buffered partial here is
+    /// benign — partials are live-display only; the final frame (after END) carries
+    /// the authoritative text. On a false result the caller disconnects, which
+    /// cancels any abandoned receive.
+    func healthCheck() async -> Bool {
+        guard let task = task else { return false }
+        do { try await sendPing() } catch { return false }
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask { [weak task] in
+                guard let task = task else { return false }
+                do {
+                    let msg = try await task.receive()
+                    switch msg {
+                    case .string, .data:
+                        return true
+                    @unknown default:
+                        return false
+                    }
+                } catch { return false }
+            }
+            group.addTask {
+                try? await Task.sleep(
+                    nanoseconds: UInt64(SharedConfig.Defaults.streamPongTimeout * 1_000_000_000)
+                )
+                return false
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            if result { self.lastActivityDate = Date() }
+            return result
+        }
     }
 
     // MARK: - Decodable Helpers

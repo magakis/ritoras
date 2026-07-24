@@ -575,31 +575,15 @@ final class DictationViewModel: ObservableObject {
 
                 let text: String
                 let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
-                if duration >= SharedConfig.AsyncTranscription.longAudioThresholdSeconds {
-                    do {
-                        text = try await WhisperClient.transcribeAsync(
-                            audioURL: url, jobId: id, config: config, correlationId: activeID)
-                        FileLogger.shared.debug(.network, "async transcription succeeded",
-                                                payload: ["durationSec": duration, "textLength": text.count])
-                    } catch WhisperError.asyncUnsupported {
-                        FileLogger.shared.info(.network, "async unsupported, falling back to sync",
-                                               payload: ["durationSec": duration])
-                        // Fall through to the sync path below.
-                        if let server = chosenServer, config.servers.contains(server) {
-                            text = try await WhisperClient.transcribe(audioURL: url, serverURL: server, correlationId: activeID)
-                        } else {
-                            text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
-                        }
-                    }
-                } else {
+                do {
+                    text = try await WhisperClient.transcribeAsync(
+                        audioURL: url, jobId: id, config: config, correlationId: activeID)
+                    FileLogger.shared.debug(.network, "async transcription succeeded",
+                                            payload: ["textLength": text.count])
+                } catch WhisperError.asyncUnsupported {
+                    FileLogger.shared.info(.network, "async unsupported (404), falling back to sync", payload: [:])
                     if let server = chosenServer, config.servers.contains(server) {
-                        do {
-                            text = try await WhisperClient.transcribe(audioURL: url, serverURL: server, correlationId: activeID)
-                        } catch {
-                            FileLogger.shared.info(.network, "single-server transcribe failed, falling back to iterating transcribe",
-                                                   payload: ["server": server, "error": error.localizedDescription])
-                            text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
-                        }
+                        text = try await WhisperClient.transcribe(audioURL: url, serverURL: server, correlationId: activeID)
                     } else {
                         text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
                     }
@@ -716,14 +700,31 @@ final class DictationViewModel: ObservableObject {
 
             guard activeID == id else { return }
 
-            let drainDeadline = Date().addingTimeInterval(SharedConfig.Defaults.streamFinalTimeout)
+            // Liveness-aware drain: wait for the queue to empty while the server stays
+            // responsive. Stop early (→ terminal) if the server stops answering PINGs.
+            // streamFinalTimeout remains as an absolute safety cap.
             var queueDrained = false
             var finalOverflowed = false
-            while Date() < drainDeadline {
-                let empty = chunkSendQueue.isEmpty
-                finalOverflowed = chunkSendQueue.hasOverflowed
-                if empty { queueDrained = true; break }
-                if finalOverflowed { break }
+            let drainHardCap = Date().addingTimeInterval(SharedConfig.Defaults.streamFinalTimeout)
+            var lastProbe = Date.distantPast
+            while Date() < drainHardCap {
+                if chunkSendQueue.isEmpty { queueDrained = true; break }
+                if chunkSendQueue.hasOverflowed { finalOverflowed = true; break }
+                if Date().timeIntervalSince(lastProbe) >= SharedConfig.Defaults.streamHealthCheckInterval {
+                    lastProbe = Date()
+                    let alive: Bool
+                    if let client = streamClient { alive = await client.healthCheck() } else { alive = false }
+                    // Supersession guard — healthCheck() is an await suspension on this @MainActor method.
+                    guard activeID == id else {
+                        await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
+                        return
+                    }
+                    if !alive {
+                        FileLogger.shared.warn(.network, "Stream drain: server unresponsive, stopping drain",
+                                               payload: ["jobId": id.uuidString])
+                        break
+                    }
+                }
                 try? await Task.sleep(nanoseconds: 200_000_000)
             }
 
