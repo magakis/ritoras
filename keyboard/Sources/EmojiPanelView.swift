@@ -378,17 +378,8 @@ final class EmojiPanelView: UIView {
             reloadData()
             return
         }
-        let lower = trimmed.lowercased()
-        let tokens = lower.split(separator: " ").map(String.init)
-        let matches = EmojiData.searchable.filter { entry in
-            let nameLower = entry.name.lowercased()
-            let keywordsLower = entry.keywords.map { $0.lowercased() }
-            return tokens.allSatisfy { token in
-                nameLower.contains(token) || keywordsLower.contains { $0.contains(token) }
-            }
-        }
-        allEmojis = matches.map(\.char)
-        if matches.isEmpty {
+        allEmojis = EmojiSearchRanker.rankedSearch(trimmed, in: EmojiData.searchable).map(\.char)
+        if allEmojis.isEmpty {
             emptyStateLabel.text = "No results for \"\(trimmed)\""
             emptyStateLabel.isHidden = false
         } else {
