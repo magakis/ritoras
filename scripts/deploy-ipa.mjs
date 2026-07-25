@@ -31,8 +31,9 @@ import {
   rmSync,
   copyFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir, networkInterfaces, homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 const REPO = 'magakis/ritoras';
 const BRANCH = 'main';
@@ -40,6 +41,12 @@ const ARTIFACT_NAME = 'Ritoras.ipa';
 const TOKEN_PATH = '/home/michael/.config/opencode/gh-token';
 const DEPLOY_DIR = '/tmp/ritoras-deploy';
 const BUNDLE_ID = 'com.ritoras.app';
+
+// Derive repo root from script location so git commands work regardless of
+// the caller's cwd.
+const __filename = fileURLToPath(import.meta.url);
+process.chdir(dirname(dirname(__filename)));
+
 // Auto-detect the git worktree root so the script works from any worktree,
 // not just the primary checkout at ~/IT/ritoras. Override via env var if needed.
 const REPO_DIR =
