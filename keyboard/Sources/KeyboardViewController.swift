@@ -522,7 +522,10 @@ class KeyboardViewController: UIInputViewController {
             // EmojiRecents.add is already called inside the overlay on tap.
         }
         keyboardView.emojiSearchOverlay.onDismiss = { [weak self] in
-            self?.uiMode = .emoji   // exit to normal emoji panel (matches iOS reference flow)
+            guard let self = self else { return }
+            self.inputTarget = .hostApp
+            self.keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
+            self.uiMode = .emoji
         }
     }
 

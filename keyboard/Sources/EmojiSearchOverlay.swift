@@ -210,6 +210,7 @@ final class EmojiSearchOverlay: UIView {
     func deactivate() {
         currentQuery = ""
         searchField.text = ""
+        searchField.resignFirstResponder()
         searchDebounceWorkItem?.cancel()
         searchDebounceWorkItem = nil
         allEmojis = []
