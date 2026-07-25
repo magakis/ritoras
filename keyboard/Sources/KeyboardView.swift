@@ -1127,7 +1127,7 @@ class KeyboardView: UIView {
         let hadWorkItem = suggestionLookupWorkItem != nil
         suggestionLookupWorkItem?.cancel()
         suggestionLookupWorkItem = nil
-        FileLogger.shared.warn(.keyboard, "suggestion lookup shed",
+        FileLogger.shared.debug(.keyboard, "suggestion lookup shed",
             payload: ["hadWorkItem": hadWorkItem])
     }
 
@@ -1137,12 +1137,12 @@ class KeyboardView: UIView {
 
     override func willMove(toSuperview newSuperview: UIView?) {
         super.willMove(toSuperview: newSuperview)
-        FileLogger.shared.warn(.keyboard, "KeyboardView willMove(toSuperview:)",
+        FileLogger.shared.debug(.keyboard, "KeyboardView willMove(toSuperview:)",
             payload: ["removed": newSuperview == nil])
     }
 
     deinit {
-        FileLogger.shared.warn(.keyboard, "KeyboardView deinit",
+        FileLogger.shared.debug(.keyboard, "KeyboardView deinit",
             payload: ["hadPendingWorkItem": suggestionLookupWorkItem != nil])
     }
 }

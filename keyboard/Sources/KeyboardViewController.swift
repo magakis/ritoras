@@ -180,7 +180,7 @@ class KeyboardViewController: UIInputViewController {
     private func buildPredictionEngine() {
         isPredictionEngineReady = false
         guard !isBuildingPrediction else {
-            FileLogger.shared.info(.prediction, "build skipped: prediction build already in flight",
+            FileLogger.shared.debug(.prediction, "build skipped: prediction build already in flight",
                 payload: ["buildId": Self.buildGeneration])
             return
         }
@@ -203,7 +203,7 @@ class KeyboardViewController: UIInputViewController {
 
             let baselineFootprint = MemoryMonitor.currentFootprint()
             let trigramReady = self.trigramProvider?.isReady ?? false
-            FileLogger.shared.warn(.prediction, "build start footprint",
+            FileLogger.shared.debug(.prediction, "build start footprint",
                 payload: [
                     "launchId": launchId,
                     "buildId": generation,
@@ -225,7 +225,7 @@ class KeyboardViewController: UIInputViewController {
                     buildSessionId: "b\(generation)"
                 )
                 let postLoadFootprint = MemoryMonitor.currentFootprint()
-                FileLogger.shared.warn(.prediction, "build result footprint",
+                FileLogger.shared.debug(.prediction, "build result footprint",
                     payload: [
                         "launchId": launchId,
                         "buildId": generation,
@@ -319,7 +319,7 @@ class KeyboardViewController: UIInputViewController {
         }
         buildPredictionEngine()
         state = .idle
-        FileLogger.shared.info(.lifecycle, "process launch",
+        FileLogger.shared.debug(.lifecycle, "process launch",
             payload: ["launchId": KeyboardViewController.processLaunchId])
         FileLogger.shared.info(.keyboard, "viewDidLoad OK",
                                payload: ["hasFullAccess": hasFullAccess])
@@ -430,7 +430,7 @@ class KeyboardViewController: UIInputViewController {
         predictionEngine = nil
         isPredictionEngineReady = false
         let after = MemoryMonitor.currentFootprint()
-        FileLogger.shared.warn(.lifecycle, "hide shed: phys_footprint",
+        FileLogger.shared.debug(.lifecycle, "hide shed: phys_footprint",
             payload: ["before": before, "after": after,
                       "freed": before > after ? before - after : 0])
     }
@@ -472,7 +472,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     deinit {
-        FileLogger.shared.warn(.lifecycle, "KeyboardViewController deinit",
+        FileLogger.shared.debug(.lifecycle, "KeyboardViewController deinit",
             payload: ["launchId": KeyboardViewController.processLaunchId,
                       "buildId": Self.buildGeneration])
         KeyboardLogShipper.shared.stop()

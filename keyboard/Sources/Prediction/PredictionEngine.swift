@@ -210,7 +210,7 @@ final class PredictionEngine {
     }
 
     deinit {
-        FileLogger.shared.warn(.prediction, "PredictionEngine deinit",
+        FileLogger.shared.debug(.prediction, "PredictionEngine deinit",
             payload: ["providerCount": providers.count])
     }
 }
