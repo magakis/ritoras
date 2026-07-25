@@ -445,6 +445,7 @@ class KeyboardViewController: UIInputViewController {
         backspaceNilContextRetries = 0
         backspaceStaleHasTextRetries = 0
         stopLocalhostPolling()
+        keyboardView.cancelSuggestionLookup()
     }
 
     override func viewDidDisappear(_ animated: Bool) {

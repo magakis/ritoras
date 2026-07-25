@@ -1120,8 +1120,25 @@ class KeyboardView: UIView {
         suggestionLookupQueue.async(execute: workItem)
     }
 
+    /// Releases the engine-capturing suggestion work item. Called by the VC on
+    /// keyboard hide so the prediction engine (captured strongly inside the
+    /// work item's closure) is freed along with the VC's own engine property.
+    func cancelSuggestionLookup() {
+        let hadWorkItem = suggestionLookupWorkItem != nil
+        suggestionLookupWorkItem?.cancel()
+        suggestionLookupWorkItem = nil
+        FileLogger.shared.warn(.keyboard, "suggestion lookup shed",
+            payload: ["hadWorkItem": hadWorkItem])
+    }
+
     func reloadEmojiPanel() {
         emojiPanelView.reloadData()
+    }
+
+    override func willMove(toSuperview newSuperview: UIView?) {
+        super.willMove(toSuperview: newSuperview)
+        FileLogger.shared.warn(.keyboard, "KeyboardView willMove(toSuperview:)",
+            payload: ["removed": newSuperview == nil])
     }
 
     deinit {
