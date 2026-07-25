@@ -191,6 +191,7 @@ final class TrigramProvider: SuggestionProvider {
     }
 
     deinit {
+        FileLogger.shared.warn(.prediction, "TrigramProvider deinit")
         let modelToFree = readState { _, model, _ in model }
         if let m = modelToFree {
             kenlm_free(m)

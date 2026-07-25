@@ -64,4 +64,8 @@ final class AppleSpellCheckerProvider: SuggestionProvider {
 
         return Array(results.prefix(limit * 2))
     }
+
+    deinit {
+        FileLogger.shared.warn(.prediction, "AppleSpellCheckerProvider deinit")
+    }
 }

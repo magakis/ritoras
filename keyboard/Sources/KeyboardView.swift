@@ -1123,4 +1123,9 @@ class KeyboardView: UIView {
     func reloadEmojiPanel() {
         emojiPanelView.reloadData()
     }
+
+    deinit {
+        FileLogger.shared.warn(.keyboard, "KeyboardView deinit",
+            payload: ["hadPendingWorkItem": suggestionLookupWorkItem != nil])
+    }
 }

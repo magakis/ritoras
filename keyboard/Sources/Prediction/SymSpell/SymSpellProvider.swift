@@ -108,4 +108,8 @@ final class SymSpellProvider: SuggestionProvider {
 
         return results
     }
+
+    deinit {
+        FileLogger.shared.warn(.prediction, "SymSpellProvider deinit")
+    }
 }
