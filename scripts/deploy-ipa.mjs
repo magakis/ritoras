@@ -40,7 +40,11 @@ const ARTIFACT_NAME = 'Ritoras.ipa';
 const TOKEN_PATH = '/home/michael/.config/opencode/gh-token';
 const DEPLOY_DIR = '/tmp/ritoras-deploy';
 const BUNDLE_ID = 'com.ritoras.app';
-const REPO_DIR = '/home/michael/IT/ritoras';
+// Auto-detect the git worktree root so the script works from any worktree,
+// not just the primary checkout at ~/IT/ritoras. Override via env var if needed.
+const REPO_DIR =
+  process.env.RITORAS_REPO_DIR ||
+  execSync('git rev-parse --show-toplevel', { encoding: 'utf8' }).trim();
 // Persistent build store — XDG data dir (~/.local/share/ritoras/builds), NOT /tmp.
 // /tmp is ephemeral (wiped on reboot), defeating the version-history feature.
 // ~/.local/share/ mirrors the convention used for gh-token. Override via
@@ -323,19 +327,55 @@ async function push() {
       { mode: 0o500 },
     );
 
-    const sha = execSync('git rev-parse HEAD', {
+    const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+    const cred = `-c credential.helper="${tmpHelper}"`;
+
+    // Fetch the latest remote main so we can rebase onto it. This pulls in
+    // any commits pushed from other worktrees that this branch doesn't
+    // include yet. Without this, the push below would be rejected as
+    // non-fast-forward whenever branches have diverged.
+    execSync(`git ${cred} fetch origin ${BRANCH}`, {
+      cwd: REPO_DIR,
+      env: gitEnv,
+      stdio: 'inherit',
+    });
+
+    // Rebase the current branch's commits on top of origin/main. No-op when
+    // HEAD is already a descendant of origin/main. When branches diverged, it
+    // replays local commits on top of the latest remote commits so the push is
+    // a clean fast-forward. Aborts and surfaces a clear error on conflicts.
+    try {
+      execSync(`git rebase origin/${BRANCH}`, {
+        cwd: REPO_DIR,
+        env: gitEnv,
+        stdio: 'inherit',
+      });
+    } catch {
+      try {
+        execSync('git rebase --abort', { cwd: REPO_DIR, env: gitEnv, stdio: 'inherit' });
+      } catch { /* already cleaned up */ }
+      throw new Error(
+        `Rebase onto origin/${BRANCH} failed (likely merge conflicts). ` +
+        `Resolve manually in ${REPO_DIR}, then re-run deploy.`,
+      );
+    }
+
+    // Re-read HEAD — rebasing may have produced a new commit SHA.
+    const finalSha = execSync('git rev-parse HEAD', {
       cwd: REPO_DIR,
       encoding: 'utf8',
     }).trim();
 
-    execSync(`git -c credential.helper="${tmpHelper}" push origin ${BRANCH}`, {
+    // Push HEAD (the rebased commit, regardless of branch/worktree) to remote
+    // main. Guaranteed fast-forward since we just rebased onto origin/main.
+    execSync(`git ${cred} push origin HEAD:${BRANCH}`, {
       cwd: REPO_DIR,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      env: gitEnv,
       stdio: 'inherit',
     });
 
-    console.log(`Pushed ${sha}`);
-    return sha;
+    console.log(`Pushed ${finalSha}`);
+    return finalSha;
   } finally {
     try {
       unlinkSync(tmpHelper);
