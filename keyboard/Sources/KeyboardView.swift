@@ -477,13 +477,33 @@ class KeyboardView: UIView {
     weak var delegate: KeyboardViewDelegate?
 
     // Subviews
-    private let suggestionBar = SuggestionBar()
+    private var _suggestionBar: SuggestionBar?
+    private var suggestionBar: SuggestionBar {
+        if let v = _suggestionBar { return v }
+        let v = SuggestionBar()
+        _suggestionBar = v
+        return v
+    }
     /// Injected on every refreshSuggestions call and read by the suggestion-tap closure.
     private var suggestionCache = SuggestionDisplayCache()
-    private let letterRegionContainer = UIView()
-    private let keyStack = UIStackView()
+    private var _letterRegionContainer: UIView?
+    private var letterRegionContainer: UIView {
+        if let v = _letterRegionContainer { return v }
+        let v = UIView()
+        _letterRegionContainer = v
+        return v
+    }
+    private var _keyStack: UIStackView?
+    private var keyStack: UIStackView {
+        if let v = _keyStack { return v }
+        let v = UIStackView()
+        _keyStack = v
+        return v
+    }
     /// Internal so KeyboardViewController can route keystrokes to searchField in .emojiSearch mode.
-    lazy var emojiPanelView: EmojiPanelView = {
+    private var _emojiPanelView: EmojiPanelView?
+    var emojiPanelView: EmojiPanelView {
+        if let v = _emojiPanelView { return v }
         let panel = EmojiPanelView(frame: .zero)
         panel.translatesAutoresizingMaskIntoConstraints = false
         panel.onSelect = { [weak self] emoji in
@@ -498,20 +518,36 @@ class KeyboardView: UIView {
             self.delegate?.keyboardViewBackspaceDidBegin(self)
             self.delegate?.keyboardViewBackspaceDidEnd(self)
         }
+        _emojiPanelView = panel
         return panel
-    }()
+    }
     /// Overlay for emoji search — visible only in .emojiSearch mode, above the
     /// suggestion bar. Closures are wired by KeyboardViewController.
-    lazy var emojiSearchOverlay: EmojiSearchOverlay = {
+    private var _emojiSearchOverlay: EmojiSearchOverlay?
+    var emojiSearchOverlay: EmojiSearchOverlay {
+        if let v = _emojiSearchOverlay { return v }
         let v = EmojiSearchOverlay()
         v.translatesAutoresizingMaskIntoConstraints = false
+        _emojiSearchOverlay = v
         return v
-    }()
-    private let bottomActionRow = UIView()
+    }
+    private var _bottomActionRow: UIView?
+    private var bottomActionRow: UIView {
+        if let v = _bottomActionRow { return v }
+        let v = UIView()
+        _bottomActionRow = v
+        return v
+    }
 
     /// Single reusable character preview popup — recycled across key presses.
     /// Never per-tap allocated. See 48 MB Jetsam constraint.
-    private lazy var keyPreview = KeyPreviewView()
+    private var _keyPreview: KeyPreviewView?
+    private var keyPreview: KeyPreviewView {
+        if let v = _keyPreview { return v }
+        let v = KeyPreviewView()
+        _keyPreview = v
+        return v
+    }
 
     // Key references
     private weak var micKeyButton: KeyButton?
@@ -527,6 +563,7 @@ class KeyboardView: UIView {
     private var hasFullAccess = false
     private var currentShiftState: ShiftState = .lower
     private var currentLayoutMode: KeyboardLayoutMode = .letters
+    private var hasShedHeavyState = false
 
     /// Height constraint for emojiSearchOverlay — 0 when hidden, overlayHeight when active.
     private var emojiSearchOverlayHeightConstraint: NSLayoutConstraint?
@@ -1131,8 +1168,47 @@ class KeyboardView: UIView {
             payload: ["hadWorkItem": hadWorkItem])
     }
 
+    /// Strips heavy subviews + data so a system-retained view shell holds near-zero.
+    /// Triggered from didMoveToWindow(window == nil). One-shot; a fresh view is built
+    /// each show (setupKeyboardView → KeyboardView(frame: .zero) from viewDidLoad),
+    /// so a shed shell is never re-entered.
+    private func shedHeavyState() {
+        guard !hasShedHeavyState else { return }
+        hasShedHeavyState = true
+
+        let before = MemoryMonitor.currentFootprint()
+
+        cancelSuggestionLookup()                          // round-4 workItem shed (idempotent)
+
+        for sv in subviews { sv.removeFromSuperview() }   // detach UIKit hierarchy
+        _suggestionBar = nil
+        _letterRegionContainer = nil
+        _keyStack = nil
+        _bottomActionRow = nil
+        _emojiPanelView = nil
+        _emojiSearchOverlay = nil
+        _keyPreview = nil
+        suggestionCache = SuggestionDisplayCache()
+        allKeyButtons = []                                // releases KeyButtons (containers already nil'd)
+        hitTestPressedKey = nil
+
+        let after = MemoryMonitor.currentFootprint()
+        FileLogger.shared.warn(.keyboard, "view shell shed",
+            payload: ["before": before, "after": after,
+                      "freed": before > after ? before - after : 0])
+    }
+
     func reloadEmojiPanel() {
         emojiPanelView.reloadData()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil {
+            shedHeavyState()
+        }
+        FileLogger.shared.warn(.keyboard, "KeyboardView didMoveToWindow",
+            payload: ["hasWindow": window != nil])
     }
 
     override func willMove(toSuperview newSuperview: UIView?) {
