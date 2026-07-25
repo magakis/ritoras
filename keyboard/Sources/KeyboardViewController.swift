@@ -240,7 +240,8 @@ class KeyboardViewController: UIInputViewController {
                 }
             } catch {
                 FileLogger.shared.error(.dictionary, "prediction engine failed to load dictionary", payload: ["error": error.localizedDescription])
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
                     self.isBuildingPrediction = false
                     self.isPredictionEngineReady = true
                     self.predictionEngine = PredictionEngine()
@@ -259,7 +260,8 @@ class KeyboardViewController: UIInputViewController {
             engine.addProvider(provider)
             engine.addProvider(appleProvider)
 
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
                 self.isBuildingPrediction = false
                 self.predictionEngine = engine
                 self.isPredictionEngineReady = true
@@ -418,8 +420,24 @@ class KeyboardViewController: UIInputViewController {
             "didReceiveMemoryWarning: phys_footprint \(before) → \(after) (\(before > after ? before - after : 0) bytes freed)")
     }
 
+    /// Sheds the prediction engine + trigram model on keyboard hide. Mirrors
+    /// didReceiveMemoryWarning. The next show rebuilds a fresh engine
+    /// (new VC → viewDidLoad → buildPredictionEngine), so shedding is safe.
+    private func shedPredictionEngine() {
+        let before = MemoryMonitor.currentFootprint()
+        trigramProvider?.unload()
+        trigramProvider = nil
+        predictionEngine = nil
+        isPredictionEngineReady = false
+        let after = MemoryMonitor.currentFootprint()
+        FileLogger.shared.warn(.lifecycle, "hide shed: phys_footprint",
+            payload: ["before": before, "after": after,
+                      "freed": before > after ? before - after : 0])
+    }
+
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        shedPredictionEngine()
         FileLogger.shared.info(.keyboard, "viewWillDisappear")
 
         // Cancel timers so they don't fire across app switches.
