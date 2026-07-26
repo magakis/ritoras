@@ -97,6 +97,16 @@ final class LearnedWordsStore {
         return Array(cache).sorted()
     }
 
+    /// Returns all learned words in most-recently-added-first order.
+    ///
+    /// Backed by `insertionOrder.reversed()`. The first element is the word
+    /// added most recently; the last is the oldest still resident (subject to
+    /// the 1000-word cap, which evicts the oldest on overflow — see `add(_:)`).
+    /// Words are lowercased (the store normalizes on add), matching `allWords()`.
+    func allWordsMostRecentFirst() -> [String] {
+        return insertionOrder.reversed()
+    }
+
     /// Removes all learned words from the local store and UserDefaults.
     /// Does NOT unlearn from `UITextChecker` (no bulk-unlearn API exists);
     /// the system-resident learned words will be forgotten when the keyboard
@@ -105,5 +115,45 @@ final class LearnedWordsStore {
         cache.removeAll()
         insertionOrder.removeAll()
         defaults.removeObject(forKey: storeKey)
+    }
+
+    /// Removes a single word from the learned-words store.
+    ///
+    /// Persists immediately. Note: `UITextChecker` exposes no single-word
+    /// unlearn API, so the system-resident learned word persists until the
+    /// keyboard process terminates — same caveat as `clear()`.
+    func remove(_ word: String) {
+        let lower = word.lowercased().trimmingCharacters(in: .whitespaces)
+        guard cache.contains(lower) else { return }
+        cache.remove(lower)
+        insertionOrder.removeAll { $0 == lower }
+        persist()
+    }
+
+    /// Re-reads the persisted word list from App Group UserDefaults into the
+    /// in-memory cache. Use when this process may have been outlived by
+    /// writes from the other process (e.g. the container app refreshing its
+    /// dictionary view to show words the keyboard recently learned).
+    ///
+    /// Does NOT re-register words with `UITextChecker` (unlike `init`). Today
+    /// only the container app calls this, and the app never queries
+    /// `UITextChecker` — so the omission is harmless. A future keyboard-side
+    /// caller would desync the store's `cache` (used for `isLearned` in the
+    /// autocorrect path) from `UITextChecker`'s resident state (used for
+    /// `isMisspelled`). Do not call this from the keyboard process without
+    /// also re-registering with `UITextChecker.learnWord`.
+    ///
+    /// Main-thread-only (same threading contract as the rest of this class).
+    func reload() {
+        if let stored = defaults.array(forKey: storeKey) as? [String] {
+            let trimmed = stored.count > Self.maxLearnedWords
+                ? Array(stored.suffix(Self.maxLearnedWords))
+                : stored
+            cache = Set(trimmed)
+            insertionOrder = trimmed
+        } else {
+            cache = []
+            insertionOrder = []
+        }
     }
 }

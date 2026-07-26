@@ -543,6 +543,14 @@ signing (SideStore rewrites entitlements, breaking app-group container access).
 
 ### File references
 
+### Boundary change: LearnedWordsStore moved to shared/
+
+`LearnedWordsStore` was relocated from `keyboard/Sources/Prediction/` to
+`shared/` so it compiles into both the keyboard and container-app targets
+(via the existing `project.yml` recursive glob). Three new public methods
+were added: `remove(_:)`, `reload()`, and `allWordsMostRecentFirst()` to
+support the upcoming dictionary-management UI (Phase 3 of this sub-track).
+
 The new architecture is fully documented in
 [`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md). The `AppGroupResolver` remains in
 `shared/Config.swift` for reading settings (server URL, dictation mode) but is
