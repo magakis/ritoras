@@ -120,6 +120,7 @@ final class DictationViewModel: ObservableObject {
 
     private let chunkSendQueue = ChunkSendQueue()
     private var chunkConsumerTask: Task<Void, Never>?
+    private var transcriptionTask: Task<Void, Never>?
 
     /// Idempotency guard: tracks job IDs currently being retried to prevent
     /// concurrent retries of the same job (defense against retry loops).
@@ -556,120 +557,130 @@ final class DictationViewModel: ObservableObject {
                 backgroundTaskID = .invalid
             }
 
-            let uploadT0 = Date()
-
-            do {
-                let audioBytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? UInt64 ?? 0
-
-                // Use probe result if already available, otherwise let transcribe iterate servers.
-                let chosenServer = selectedServer
-                serverSelectionTask?.cancel()
-                serverSelectionTask = nil
-
-                FileLogger.shared.info(.transcription, "upload start", payload: [
-                    "id": id.uuidString,
-                    "audioBytes": audioBytes,
-                    "serverCount": config.servers.count,
-                    "server": chosenServer ?? config.servers.first ?? ""
-                ])
-
-                let text: String
-                let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
-                do {
-                    text = try await WhisperClient.transcribeAsync(
-                        audioURL: url, jobId: id, config: config, correlationId: activeID)
-                    FileLogger.shared.debug(.network, "async transcription succeeded",
-                                            payload: ["textLength": text.count])
-                } catch WhisperError.asyncUnsupported {
-                    FileLogger.shared.info(.network, "async unsupported (404), falling back to sync", payload: [:])
-                    if let server = chosenServer, config.servers.contains(server) {
-                        text = try await WhisperClient.transcribe(audioURL: url, serverURL: server, correlationId: activeID)
-                    } else {
-                        text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
+            transcriptionTask = Task { [weak self] in
+                guard let self = self else {
+                    if backgroundTaskID != .invalid {
+                        UIApplication.shared.endBackgroundTask(backgroundTaskID)
                     }
+                    return
                 }
-                guard activeID == id else { return }
 
-                let uploadElapsed = Date().timeIntervalSince(uploadT0) * 1000
-                FileLogger.shared.info(.transcription, "upload complete", payload: [
-                    "id": id.uuidString,
-                    "elapsed_ms": uploadElapsed,
-                    "textLength": text.count
-                ])
+                defer { self.transcriptionTask = nil }
 
-                let ucTime = Date()
-                writeToClipboard(status: "completed", text: text)
-                FileLogger.shared.debug(.transcription, "result delivered", payload: [
-                    "id": id.uuidString, "channel": "clipboard",
-                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
-                ])
-                postResultToServer(status: "completed", text: text)
-                FileLogger.shared.debug(.transcription, "result delivered", payload: [
-                    "id": id.uuidString, "channel": "server",
-                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
-                ])
-                FileLogger.shared.debug(.network, "stop posting darwin", payload: ["active_id": activeID?.uuidString ?? "nil", "elapsed_since_stop_start": Date().timeIntervalSince(stopStartTime) * 1000])
-                DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-                FileLogger.shared.info(.transcription, "result delivered", payload: [
-                    "id": id.uuidString, "channel": "darwin",
-                    "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
-                ])
-                TranscriptionHistory.shared.add(text: text)
-                // Audio delivered — clean up the recording file.
-                let deleteJobId = id
-                RecordingStore.shared.delete(jobId: deleteJobId)
-                FileLogger.shared.debug(.audio, "audio deleted on success",
-                                        payload: ["jobId": deleteJobId.uuidString])
-                phase = .done(text)
-            } catch WhisperError.cancelled {
-                // User cancelled — do not record as failure.
-                FileLogger.shared.debug(.app, "transcription cancelled",
-                                        payload: ["jobId": id.uuidString])
-            } catch {
-                guard activeID == id else { return }
-                let message = error.localizedDescription
-                let failedElapsed = Date().timeIntervalSince(uploadT0) * 1000
-                FileLogger.shared.info(.transcription, "upload failed", payload: [
-                    "id": id.uuidString,
-                    "elapsed_ms": failedElapsed,
-                    "error": message
-                ])
-                // Audio preserved on disk for Phase 4 retry.
-                FileLogger.shared.debug(.audio, "audio preserved for retry",
-                                        payload: ["jobId": id.uuidString])
-                writeToClipboard(status: "error", errorMessage: message)
-                postResultToServer(status: "error", errorMessage: message)
-                DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
-                // Phase 4: preserve failed job for retry if audio exists.
-                FileLogger.shared.debug(.app, "transcription failed, checking audio for recovery", payload: [
-                    "jobId": id.uuidString,
-                    "audioPath": url.path,
-                    "audioExists": FileManager.default.fileExists(atPath: url.path)
-                ])
-                if FileManager.default.fileExists(atPath: url.path) {
-                    let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
-                    FailedJobStore.shared.append(FailedJobRecord(
-                        jobId: id,
-                        audioFilePath: url.path,
-                        errorMessage: message,
-                        recordedDurationSeconds: duration,
-                        createdAt: Date(),
-                        retryCount: 0,
-                        lastRetriedAt: nil))
-                    FileLogger.shared.debug(.app, "failed-job record appended",
-                                            payload: ["jobId": id.uuidString, "durationSec": duration, "audioPath": url.path])
-                } else {
-                    FileLogger.shared.debug(.app, "failed-job record SKIPPED — audio file not found", payload: [
-                        "jobId": id.uuidString,
-                        "audioPath": url.path
+                let uploadT0 = Date()
+
+                do {
+                    let audioBytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? UInt64 ?? 0
+
+                    // Use probe result if already available, otherwise let transcribe iterate servers.
+                    let chosenServer = selectedServer
+                    serverSelectionTask?.cancel()
+                    serverSelectionTask = nil
+
+                    FileLogger.shared.info(.transcription, "upload start", payload: [
+                        "id": id.uuidString,
+                        "audioBytes": audioBytes,
+                        "serverCount": config.servers.count,
+                        "server": chosenServer ?? config.servers.first ?? ""
                     ])
-                }
-                phase = .error(message)
-            }
 
-            if backgroundTaskID != .invalid {
-                UIApplication.shared.endBackgroundTask(backgroundTaskID)
-                backgroundTaskID = .invalid
+                    let text: String
+                    let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
+                    do {
+                        text = try await WhisperClient.transcribeAsync(
+                            audioURL: url, jobId: id, config: config, correlationId: activeID)
+                        FileLogger.shared.debug(.network, "async transcription succeeded",
+                                                payload: ["textLength": text.count])
+                    } catch WhisperError.asyncUnsupported {
+                        FileLogger.shared.info(.network, "async unsupported (404), falling back to sync", payload: [:])
+                        if let server = chosenServer, config.servers.contains(server) {
+                            text = try await WhisperClient.transcribe(audioURL: url, serverURL: server, correlationId: activeID)
+                        } else {
+                            text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
+                        }
+                    }
+                    guard activeID == id else { return }
+
+                    let uploadElapsed = Date().timeIntervalSince(uploadT0) * 1000
+                    FileLogger.shared.info(.transcription, "upload complete", payload: [
+                        "id": id.uuidString,
+                        "elapsed_ms": uploadElapsed,
+                        "textLength": text.count
+                    ])
+
+                    let ucTime = Date()
+                    writeToClipboard(status: "completed", text: text)
+                    FileLogger.shared.debug(.transcription, "result delivered", payload: [
+                        "id": id.uuidString, "channel": "clipboard",
+                        "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
+                    ])
+                    postResultToServer(status: "completed", text: text)
+                    FileLogger.shared.debug(.transcription, "result delivered", payload: [
+                        "id": id.uuidString, "channel": "server",
+                        "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
+                    ])
+                    FileLogger.shared.debug(.network, "stop posting darwin", payload: ["active_id": activeID?.uuidString ?? "nil", "elapsed_since_stop_start": Date().timeIntervalSince(stopStartTime) * 1000])
+                    DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                    FileLogger.shared.info(.transcription, "result delivered", payload: [
+                        "id": id.uuidString, "channel": "darwin",
+                        "elapsed_ms_since_upload_complete": Date().timeIntervalSince(ucTime) * 1000
+                    ])
+                    TranscriptionHistory.shared.add(text: text)
+                    // Audio delivered — clean up the recording file.
+                    let deleteJobId = id
+                    RecordingStore.shared.delete(jobId: deleteJobId)
+                    FileLogger.shared.debug(.audio, "audio deleted on success",
+                                            payload: ["jobId": deleteJobId.uuidString])
+                    phase = .done(text)
+                } catch WhisperError.cancelled {
+                    // User cancelled — do not record as failure.
+                    FileLogger.shared.debug(.app, "transcription cancelled",
+                                            payload: ["jobId": id.uuidString])
+                } catch {
+                    guard activeID == id else { return }
+                    let message = error.localizedDescription
+                    let failedElapsed = Date().timeIntervalSince(uploadT0) * 1000
+                    FileLogger.shared.info(.transcription, "upload failed", payload: [
+                        "id": id.uuidString,
+                        "elapsed_ms": failedElapsed,
+                        "error": message
+                    ])
+                    // Audio preserved on disk for Phase 4 retry.
+                    FileLogger.shared.debug(.audio, "audio preserved for retry",
+                                            payload: ["jobId": id.uuidString])
+                    writeToClipboard(status: "error", errorMessage: message)
+                    postResultToServer(status: "error", errorMessage: message)
+                    DarwinNotifier.post(SharedConfig.Defaults.darwinNotificationName)
+                    // Phase 4: preserve failed job for retry if audio exists.
+                    FileLogger.shared.debug(.app, "transcription failed, checking audio for recovery", payload: [
+                        "jobId": id.uuidString,
+                        "audioPath": url.path,
+                        "audioExists": FileManager.default.fileExists(atPath: url.path)
+                    ])
+                    if FileManager.default.fileExists(atPath: url.path) {
+                        let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
+                        FailedJobStore.shared.append(FailedJobRecord(
+                            jobId: id,
+                            audioFilePath: url.path,
+                            errorMessage: message,
+                            recordedDurationSeconds: duration,
+                            createdAt: Date(),
+                            retryCount: 0,
+                            lastRetriedAt: nil))
+                        FileLogger.shared.debug(.app, "failed-job record appended",
+                                                payload: ["jobId": id.uuidString, "durationSec": duration, "audioPath": url.path])
+                    } else {
+                        FileLogger.shared.debug(.app, "failed-job record SKIPPED — audio file not found", payload: [
+                            "jobId": id.uuidString,
+                            "audioPath": url.path
+                        ])
+                    }
+                    phase = .error(message)
+                }
+
+                if backgroundTaskID != .invalid {
+                    UIApplication.shared.endBackgroundTask(backgroundTaskID)
+                }
             }
 
         case .stream:
@@ -1118,6 +1129,8 @@ final class DictationViewModel: ObservableObject {
         FileLogger.shared.info(.transcription, "cancel: stream teardown")
         chunkConsumerTask?.cancel()
         chunkConsumerTask = nil
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
         chunkSendQueue.clearAll()
         await streamRecorder?.stop()
         await streamClient?.disconnect()
