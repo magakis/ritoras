@@ -48,6 +48,63 @@ struct SuggestionDisplayCache {
     }
 }
 
+// MARK: - Merged Pool LRU Cache
+
+/// Thread-safe 3-entry LRU cache for the merged provider pool.
+///
+/// Keyed by an FNV-1a hash of the four-word context
+/// `(currentWord, lookupWord, previousWord, previousWord2)`. Stores the raw
+/// `[Suggestion]` array returned by `mergedPool()` — the cached value does
+/// NOT include KenLM re-scoring or dedup, which still run on every
+/// `suggestions()` call.
+///
+/// `PredictionEngine` is a non-isolated `final class` called concurrently
+/// from two queues (`suggestionLookupQueue` and `predictionBuildQueue`).
+/// `@unchecked Sendable` + internal `NSLock` provides safe cross-queue access
+/// without an actor hop (which would serialize the hot path).
+final class MergedPoolLRU: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [UInt64: [Suggestion]] = [:]
+    private var order: [UInt64] = []
+    private let capacity = 3
+
+    /// Returns the cached pool for `key`, or nil on miss.
+    /// On hit, promotes `key` to the most-recently-used position.
+    func get(_ key: UInt64) -> [Suggestion]? {
+        lock.lock(); defer { lock.unlock() }
+        guard let value = entries[key] else { return nil }
+        // Promote to MRU
+        if let idx = order.firstIndex(of: key) {
+            order.remove(at: idx)
+            order.append(key)
+        }
+        return value
+    }
+
+    /// Stores `value` for `key`. Evicts the least-recently-used entry when
+    /// the cache exceeds capacity. Re-inserting an existing key promotes it
+    /// to the most-recently-used position.
+    func set(_ key: UInt64, _ value: [Suggestion]) {
+        lock.lock(); defer { lock.unlock() }
+        if entries[key] != nil {
+            // Update existing — promote to MRU
+            if let idx = order.firstIndex(of: key) {
+                order.remove(at: idx)
+            }
+            entries[key] = value
+            order.append(key)
+            return
+        }
+        // Evict LRU when at capacity
+        if order.count >= capacity {
+            let lru = order.removeFirst()
+            entries.removeValue(forKey: lru)
+        }
+        entries[key] = value
+        order.append(key)
+    }
+}
+
 // MARK: - Pure Decision Function
 
 /// Pure function: the single entry point for the suggestion-tap closure.

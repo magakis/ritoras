@@ -16,6 +16,7 @@ final class PredictionEngine {
     // MARK: - Providers
 
     private var providers: [SuggestionProvider] = []
+    private let poolCache = MergedPoolLRU()
 
     // MARK: - Registration
 
@@ -71,11 +72,12 @@ final class PredictionEngine {
         // ──────────────────────────────────────────────
         // MID-WORD CASE: user is typing a word
         // ──────────────────────────────────────────────
+        // Build with the full provider result limit and cache the pool.
+        // Callers (suggestions, topCorrection) trim/filter downstream.
         var allSuggestions = mergedPool(
             forCurrentWord: currentWord,
             lookupWord: lookupWord,
-            previousWord: previousWord,
-            limit: limit
+            previousWord: previousWord
         )
 
         // — Boost Apple suggestions when SymSpell is uncertain —
@@ -187,13 +189,24 @@ final class PredictionEngine {
 
     /// Builds the unified suggestion pool from all registered providers.
     /// Shared by both `suggestions(...)` and `topCorrection(...)`.
+    ///
+    /// Always builds with `SharedConfig.Defaults.providerResultLimit` so the
+    /// cached pool is the same regardless of which caller triggers the miss.
+    /// Callers (suggestions, topCorrection) trim/filter downstream.
     private func mergedPool(
         forCurrentWord currentWord: String,
         lookupWord: String,
         previousWord: String?,
-        previousWord2: String? = nil,
-        limit: Int = SharedConfig.Defaults.providerResultLimit
+        previousWord2: String? = nil
     ) -> [Suggestion] {
+        let cacheKey = ContextHash.fnv1a(
+            "\(currentWord)\u{1F}\(lookupWord)\u{1F}\(previousWord ?? "")\u{1F}\(previousWord2 ?? "")"
+        )
+
+        if let cached = poolCache.get(cacheKey) {
+            return cached
+        }
+
         let context = SuggestionContext(
             currentWord: currentWord,
             lookupWord: lookupWord,
@@ -203,9 +216,10 @@ final class PredictionEngine {
         )
         var allSuggestions: [Suggestion] = []
         for provider in providers {
-            let results = provider.suggest(for: context, limit: limit)
+            let results = provider.suggest(for: context, limit: SharedConfig.Defaults.providerResultLimit)
             allSuggestions.append(contentsOf: results)
         }
+        poolCache.set(cacheKey, allSuggestions)
         return allSuggestions
     }
 
