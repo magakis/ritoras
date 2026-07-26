@@ -96,6 +96,19 @@ The keyboard extension is killed without warning if it exceeds ~48 MB resident m
 
 Do not switch `GENERATE_INFOPLIST_FILE` to `YES` — XcodeGen will overwrite the custom plist.
 
+## Git workflow
+
+This repository is checked out as multiple git worktrees. Agents work independently, each in its own worktree on its own branch. The shared `main` branch is the integration point.
+
+**Never push to the remote.** The remote (`magakis/ritoras` — the "gate" repository) is pushed only by the user, manually. Agents must never run `git push`, never run `scripts/deploy-ipa.mjs`, and never trigger CI by pushing. CI runs only after the user pushes.
+
+**When an agent's commits are finished:**
+1. Make sure all work is committed on the worktree's branch.
+2. Integrate the branch into `main` using a fast-forward merge only — no merge commits: `git merge --ff-only <branch>`.
+3. Stop and report "merged to main, ready for you to push." Do not push.
+
+If a fast-forward is not possible because another worktree has already merged new commits onto `main`, rebase the branch onto `main` first, then fast-forward merge again. Never force-push to `main`, and never create a merge commit for routine integration.
+
 ## Commits
 
 **Prose-style messages, not conventional commits.** No `feat:` / `fix:` prefixes.
@@ -104,7 +117,7 @@ Format: `subsystem: concise summary of the change` — subsystem from the table 
 
 Body required for non-trivial changes, wrapped at 75 columns.
 
-The repo uses the OpenCode committer protocol: dispatch the committer agent for a numbered commit plan, present it to the user, then execute the chosen commits. After execution, verify with `git log --oneline -5` — the committer sometimes returns empty output on success.
+The repo uses the OpenCode committer protocol: dispatch the committer agent for a numbered commit plan, present it to the user, then execute the chosen commits. After execution, verify with `git log --oneline -5` — the committer sometimes returns empty output on success. After commits land, follow [Git workflow](#git-workflow): fast-forward merge into `main` and stop. Never push.
 
 ## CI / deploy
 
@@ -112,9 +125,9 @@ The repo uses the OpenCode committer protocol: dispatch the committer agent for 
 
 The workflow produces an unsigned `Ritoras.ipa` (~3.1 MB) uploaded as a build artifact. Build time is 5–10 minutes once the runner starts.
 
-**Deploy to device:** SideStore (on-device signing). The full pipeline — push → CI wait → artifact download → HTTP serve → `sidestore://install?url=` — is automated in `scripts/deploy-ipa.mjs`. **Load the `ritoras-deploy-pipeline` skill before running any deploy**; it documents the complete commit-to-device cycle including rollback from `~/.local/share/ritoras/builds/<runId>/`.
+**Deploy to device:** SideStore (on-device signing). The full pipeline — push → CI wait → artifact download → HTTP serve → `sidestore://install?url=` — is automated in `scripts/deploy-ipa.mjs`, but **the push step is the user's manual action** (see [Git workflow](#git-workflow)). Agents never push and never run the deploy script themselves; the user pushes `main` and then, optionally, runs the pipeline.
 
-**Do not push manually to deploy.** The deploy script handles credentials via a temporary git helper that wipes the PAT after use. GitHub token lives at `/home/michael/.config/opencode/gh-token`. Repo: `magakis/ritoras`.
+**Load the `ritoras-deploy-pipeline` skill before any deploy**; it documents the complete commit-to-device cycle including rollback from `~/.local/share/ritoras/builds/<runId>/`. GitHub token lives at `/home/michael/.config/opencode/gh-token`; repo is `magakis/ritoras`. These credentials are for the user's manual push — agents must not use them to push.
 
 ### CI failure triage
 
