@@ -4,7 +4,6 @@ import UIKit
 private enum BackspacePhase {
     case charRepeat
     case wordRepeat
-    case staleHasTextRetry
 }
 
 class KeyboardViewController: UIInputViewController {
@@ -96,8 +95,6 @@ class KeyboardViewController: UIInputViewController {
     private var backspacePhase: BackspacePhase?
     private var backspaceSingleCharCount = 0
     private var backspaceNilContextRetries = 0
-    private var backspaceStaleHasTextRetries = 0
-
     // MARK: - Autocorrect-on-space
 
     private var wordOrigin = WordOriginTracker()
@@ -464,7 +461,6 @@ class KeyboardViewController: UIInputViewController {
         backspacePhase = nil
         backspaceSingleCharCount = 0
         backspaceNilContextRetries = 0
-        backspaceStaleHasTextRetries = 0
         stopLocalhostPolling()
         keyboardView.cancelSuggestionLookup()
     }
@@ -495,7 +491,6 @@ class KeyboardViewController: UIInputViewController {
         errorResetWorkItem?.cancel()
         backspaceTimer?.invalidate()
         backspaceNilContextRetries = 0
-        backspaceStaleHasTextRetries = 0
     }
 
     // MARK: - Setup
@@ -1717,25 +1712,9 @@ extension KeyboardViewController: KeyboardViewDelegate {
         backspaceTimer = nil
         backspaceSingleCharCount = 0
         backspacePhase = nil
-
-        guard hasTextInCurrentTarget else {
-            backspacePhase = .staleHasTextRetry
-            backspaceStaleHasTextRetries = 1
-            scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceStaleHasTextRetryInterval, repeats: false)
-            return
-        }
-
         deleteTargetedBackward()
         backspaceSingleCharCount = 1
         scheduleSuggestionRefresh()
-
-        guard hasTextInCurrentTarget else {
-            backspacePhase = .staleHasTextRetry
-            backspaceStaleHasTextRetries = 1
-            scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceStaleHasTextRetryInterval, repeats: false)
-            return
-        }
-
         backspacePhase = .charRepeat
         scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceInitialRepeatDelay, repeats: false)
     }
@@ -1746,7 +1725,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
         backspacePhase = nil
         backspaceSingleCharCount = 0
         backspaceNilContextRetries = 0
-        backspaceStaleHasTextRetries = 0
     }
 
     // MARK: - Text Changes
@@ -1764,7 +1742,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
     override func textWillChange(_ textInput: UITextInput?) {
         super.textWillChange(textInput)
         backspaceNilContextRetries = 0
-        backspaceStaleHasTextRetries = 0
     }
 
     override func selectionWillChange(_ textInput: UITextInput?) {
@@ -1774,7 +1751,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
         backspacePhase = nil
         backspaceSingleCharCount = 0
         backspaceNilContextRetries = 0
-        backspaceStaleHasTextRetries = 0
     }
 
     override func selectionDidChange(_ textInput: UITextInput?) {
@@ -1782,7 +1758,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         lastAutoCorrection = nil  // cursor move invalidates any pending revert
         backspaceNilContextRetries = 0
-        backspaceStaleHasTextRetries = 0
         recomputeAutoCap()
     }
 
@@ -2007,9 +1982,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
     private func deleteTargetedBackward() {
         switch inputTarget {
         case .hostApp:
-            guard textDocumentProxy.hasText else {
-                return
-            }
             textDocumentProxy.deleteBackward()
         case .emojiSearch:
             keyboardView.emojiSearchOverlay.searchField.deleteBackward()
@@ -2027,23 +1999,16 @@ extension KeyboardViewController: KeyboardViewDelegate {
     }
 
     private func handleBackspaceTick() {
-        guard hasTextInCurrentTarget else {
-            backspaceStaleHasTextRetries += 1
-            if backspaceStaleHasTextRetries > SharedConfig.Defaults.backspaceStaleHasTextRetryLimit {
-                backspaceTimer?.invalidate()
-                backspaceTimer = nil
-                backspacePhase = nil
-                backspaceStaleHasTextRetries = 0
-                return
-            }
-            backspacePhase = .staleHasTextRetry
-            scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceStaleHasTextRetryInterval, repeats: false)
-            return
-        }
-
         // In search mode, always use char-repeat (no word-mode) since the
         // search field is a single-line input with no need for word-level deletion.
         if inputTarget == .emojiSearch {
+            guard hasTextInCurrentTarget else {
+                backspaceTimer?.invalidate()
+                backspaceTimer = nil
+                backspacePhase = nil
+                backspaceNilContextRetries = 0
+                return
+            }
             deleteTargetedBackward()
             HapticsManager.shared.tapImpact()
             scheduleSuggestionRefresh()
@@ -2058,19 +2023,21 @@ extension KeyboardViewController: KeyboardViewDelegate {
             backspaceSingleCharCount += 1
             scheduleSuggestionRefresh()
 
-            guard hasTextInCurrentTarget else {
-                backspaceStaleHasTextRetries += 1
-                if backspaceStaleHasTextRetries > SharedConfig.Defaults.backspaceStaleHasTextRetryLimit {
+            let context = textDocumentProxy.documentContextBeforeInput
+            if context == nil || context?.isEmpty == true {
+                backspaceNilContextRetries += 1
+                if backspaceNilContextRetries > SharedConfig.Defaults.backspaceNilContextRetryLimit {
                     backspaceTimer?.invalidate()
                     backspaceTimer = nil
                     backspacePhase = nil
-                    backspaceStaleHasTextRetries = 0
+                    backspaceNilContextRetries = 0
                     return
                 }
-                backspacePhase = .staleHasTextRetry
-                scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceStaleHasTextRetryInterval, repeats: false)
+                scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceNilContextRetryInterval, repeats: false)
                 return
             }
+
+            backspaceNilContextRetries = 0
 
             if backspaceSingleCharCount >= SharedConfig.Defaults.backspaceCharsBeforeWordMode {
                 backspacePhase = .wordRepeat
@@ -2105,34 +2072,11 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 return
             }
             for _ in 0..<n {
-                guard hasTextInCurrentTarget else { break }
                 deleteTargetedBackward()
                 HapticsManager.shared.tapImpact()
             }
             scheduleSuggestionRefresh()
             scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceWordRepeatInterval, repeats: false)
-
-        case .staleHasTextRetry:
-            guard hasTextInCurrentTarget else {
-                backspaceStaleHasTextRetries += 1
-                if backspaceStaleHasTextRetries > SharedConfig.Defaults.backspaceStaleHasTextRetryLimit {
-                    backspaceTimer?.invalidate()
-                    backspaceTimer = nil
-                    backspacePhase = nil
-                    backspaceStaleHasTextRetries = 0
-                    return
-                }
-                scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceStaleHasTextRetryInterval, repeats: false)
-                return
-            }
-            // Recovered: do exactly what a normal .charRepeat tick does, then resume .charRepeat.
-            backspaceStaleHasTextRetries = 0
-            deleteTargetedBackward()
-            HapticsManager.shared.tapImpact()
-            backspaceSingleCharCount += 1
-            scheduleSuggestionRefresh()
-            backspacePhase = .charRepeat
-            scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceCharRepeatInterval, repeats: true)
 
         case nil:
             break
