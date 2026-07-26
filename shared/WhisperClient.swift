@@ -101,17 +101,19 @@ enum WhisperClient {
         // Generate boundary ONCE and build multipart body ONCE — read the audio
         // file a single time regardless of server count.
         let boundary = "Boundary-\(UUID().uuidString)"
-        let body: Data
+        let bodyFileURL: URL
         do {
             let bodyBuildT0 = Date()
-            body = try await buildBodyOffMain(audioURL: audioURL, boundary: boundary)
+            bodyFileURL = try await buildBodyFileOffMain(audioURL: audioURL, boundary: boundary)
+            let bodyBytes = (try? FileManager.default.attributesOfItem(atPath: bodyFileURL.path)[.size] as? Int64).map(Int.init) ?? 0
             FileLogger.shared.debug(.transcription, "multipart body build", payload: [
                 "elapsed_ms": Date().timeIntervalSince(bodyBuildT0) * 1000,
-                "bodyBytes": body.count
+                "bodyBytes": bodyBytes
             ])
         } catch {
             throw WhisperError.networkError(error)
         }
+        defer { try? FileManager.default.removeItem(at: bodyFileURL) }
 
         for (serverIndex, server) in config.servers.enumerated() {
             let attemptElapsed = Date().timeIntervalSince(t0) * 1000
@@ -126,7 +128,7 @@ enum WhisperClient {
             do {
                 let text = try await transcribeAgainst(
                     serverURL: server,
-                    body: body,
+                    bodyFileURL: bodyFileURL,
                     boundary: boundary,
                     timeout: config.timeoutSeconds,
                     correlationId: correlationId
@@ -157,21 +159,23 @@ enum WhisperClient {
         correlationId: UUID? = nil
     ) async throws -> String {
         let boundary = "Boundary-\(UUID().uuidString)"
-        let body: Data
+        let bodyFileURL: URL
         do {
             let bodyBuildT0 = Date()
-            body = try await buildBodyOffMain(audioURL: audioURL, boundary: boundary)
+            bodyFileURL = try await buildBodyFileOffMain(audioURL: audioURL, boundary: boundary)
+            let bodyBytes = (try? FileManager.default.attributesOfItem(atPath: bodyFileURL.path)[.size] as? Int64).map(Int.init) ?? 0
             FileLogger.shared.debug(.transcription, "multipart body build", payload: [
                 "elapsed_ms": Date().timeIntervalSince(bodyBuildT0) * 1000,
-                "bodyBytes": body.count
+                "bodyBytes": bodyBytes
             ])
         } catch {
             throw WhisperError.networkError(error)
         }
+        defer { try? FileManager.default.removeItem(at: bodyFileURL) }
 
         return try await transcribeAgainst(
             serverURL: serverURL,
-            body: body,
+            bodyFileURL: bodyFileURL,
             boundary: boundary,
             timeout: SharedConfig.Defaults.timeoutSeconds,
             correlationId: correlationId
@@ -265,7 +269,7 @@ enum WhisperClient {
     /// - Parameters:
     ///   - audioURL:      Local file URL of the recorded audio (.m4a).
     ///   - serverURL:     The target server base URL.
-    ///   - body:          Pre-built multipart form body.
+    ///   - bodyFileURL:   Temp file containing the multipart body.
     ///   - boundary:      Boundary string matching the body.
     ///   - jobId:         UUID used as Idempotency-Key.
     ///   - timeout:       Per-request timeout for the submit.
@@ -275,7 +279,7 @@ enum WhisperClient {
     private static func submitTranscription(
         audioURL: URL,
         serverURL: String,
-        body: Data,
+        bodyFileURL: URL,
         boundary: String,
         jobId: UUID,
         timeout: TimeInterval,
@@ -294,11 +298,10 @@ enum WhisperClient {
         if let id = correlationId {
             request.setValue(id.uuidString, forHTTPHeaderField: "X-Correlation-ID")
         }
-        request.httpBody = body
         request.timeoutInterval = timeout
 
         let session = SessionHolder.shared.get()
-        let bodyBytes = request.httpBody?.count ?? 0
+        let bodyBytes = (try? FileManager.default.attributesOfItem(atPath: bodyFileURL.path)[.size] as? Int64).map(Int.init) ?? 0
 
         FileLogger.shared.debug(.network, "async submit start", payload: [
             "serverURL": base,
@@ -310,7 +313,7 @@ enum WhisperClient {
         let httpT0 = Date()
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await session.upload(for: request, fromFile: bodyFileURL)
         } catch let error as URLError where error.code == .timedOut {
             throw WhisperError.timeout
         } catch {
@@ -470,25 +473,27 @@ enum WhisperClient {
             "serverURL": serverURL
         ])
 
-        // 2. Build multipart body once.
+        // 2. Build multipart body once (temp file, streamed).
         let boundary = "Boundary-\(UUID().uuidString)"
-        let body: Data
+        let bodyFileURL: URL
         do {
             let bodyBuildT0 = Date()
-            body = try await buildBodyOffMain(audioURL: audioURL, boundary: boundary)
+            bodyFileURL = try await buildBodyFileOffMain(audioURL: audioURL, boundary: boundary)
+            let bodyBytes = (try? FileManager.default.attributesOfItem(atPath: bodyFileURL.path)[.size] as? Int64).map(Int.init) ?? 0
             FileLogger.shared.debug(.transcription, "async multipart body build", payload: [
                 "elapsed_ms": Date().timeIntervalSince(bodyBuildT0) * 1000,
-                "bodyBytes": body.count
+                "bodyBytes": bodyBytes
             ])
         } catch {
             throw WhisperError.networkError(error)
         }
+        defer { try? FileManager.default.removeItem(at: bodyFileURL) }
 
         // 3. Submit transcription.
         let submitResponse = try await submitTranscription(
             audioURL: audioURL,
             serverURL: serverURL,
-            body: body,
+            bodyFileURL: bodyFileURL,
             boundary: boundary,
             jobId: jobId,
             timeout: config.timeoutSeconds,
@@ -648,51 +653,91 @@ enum WhisperClient {
 
     // MARK: - Private Helpers
 
-    /// Builds the multipart form body off the caller thread on a .userInitiated queue.
-    private static func buildBodyOffMain(audioURL: URL, boundary: String) async throws -> Data {
+    /// Builds the multipart form body as a temp file off the caller thread on a .userInitiated queue.
+    private static func buildBodyFileOffMain(audioURL: URL, boundary: String) async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
+                let tempURL = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString + ".multipart")
                 do {
-                    let body = try buildBody(audioURL: audioURL, boundary: boundary)
-                    continuation.resume(returning: body)
+                    let ext = audioURL.pathExtension.lowercased()
+                    let (filename, mimeType) = ext == "wav" ? ("audio.wav", "audio/wav") : ("audio.m4a", "audio/mp4")
+                    try writeBodyToFile(audioURL: audioURL, boundary: boundary, mimeType: mimeType, filename: filename, to: tempURL)
+                    continuation.resume(returning: tempURL)
                 } catch {
+                    try? FileManager.default.removeItem(at: tempURL)
                     continuation.resume(throwing: error)
                 }
             }
         }
     }
 
-    /// Builds the multipart/form-data body for a transcription request.
-    /// Reads the audio file from disk exactly once.
-    private static func buildBody(audioURL: URL, boundary: String) throws -> Data {
-        var body = Data()
+    /// Writes the multipart/form-data body to a temp file, streaming the audio
+    /// in 64 KB chunks to avoid loading the entire recording into memory.
+    private static func writeBodyToFile(audioURL: URL, boundary: String, mimeType: String, filename: String, to tempURL: URL) throws {
+        guard let outputStream = OutputStream(url: tempURL, append: false) else {
+            throw NSError(domain: "WhisperClient", code: 0, userInfo: [NSLocalizedDescriptionKey: "Failed to create output stream"])
+        }
+        outputStream.open()
+        defer { outputStream.close() }
 
-        func append(_ string: String) {
-            body.append(string.data(using: .utf8)!)
+        func writeString(_ string: String) throws {
+            let data = string.data(using: .utf8)!
+            try data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
+                guard let base = ptr.baseAddress else { return }
+                let bytes = base.assumingMemoryBound(to: UInt8.self)
+                var written = 0
+                while written < data.count {
+                    let result = outputStream.write(bytes.advanced(by: written), maxLength: data.count - written)
+                    if result < 0 {
+                        throw outputStream.streamError ?? NSError(domain: "WhisperClient", code: 0, userInfo: [NSLocalizedDescriptionKey: "Failed to write to output stream"])
+                    }
+                    written += result
+                }
+            }
         }
 
-        // File part
-        append("--\(boundary)\r\n")
-        let ext = audioURL.pathExtension.lowercased()
-        let (filename, contentType) = ext == "wav" ? ("audio.wav", "audio/wav") : ("audio.m4a", "audio/mp4")
-        append("Content-Disposition: form-data; name=\"audio\"; filename=\"\(filename)\"\r\n")
-        append("Content-Type: \(contentType)\r\n\r\n")
-        body.append(try Data(contentsOf: audioURL))
-        append("\r\n")
+        // Header
+        try writeString("--\(boundary)\r\n")
+        try writeString("Content-Disposition: form-data; name=\"audio\"; filename=\"\(filename)\"\r\n")
+        try writeString("Content-Type: \(mimeType)\r\n\r\n")
 
-        // Close boundary
-        append("--\(boundary)--\r\n")
+        // Audio bytes in 64 KB chunks
+        guard let inputStream = InputStream(url: audioURL) else {
+            throw NSError(domain: "WhisperClient", code: 0, userInfo: [NSLocalizedDescriptionKey: "Failed to open audio file"])
+        }
+        inputStream.open()
+        defer { inputStream.close() }
 
-        return body
+        let bufferSize = 65536
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
+        defer { buffer.deallocate() }
+
+        while true {
+            let readCount = inputStream.read(buffer, maxLength: bufferSize)
+            if readCount < 0 {
+                throw inputStream.streamError ?? NSError(domain: "WhisperClient", code: 0, userInfo: [NSLocalizedDescriptionKey: "Failed to read audio file"])
+            }
+            if readCount == 0 { break }
+
+            var written = 0
+            while written < readCount {
+                let result = outputStream.write(buffer.advanced(by: written), maxLength: readCount - written)
+                if result < 0 {
+                    throw outputStream.streamError ?? NSError(domain: "WhisperClient", code: 0, userInfo: [NSLocalizedDescriptionKey: "Failed to write audio data to output stream"])
+                }
+                written += result
+            }
+        }
+
+        // Closing boundary
+        try writeString("\r\n--\(boundary)--\r\n")
     }
 
     /// Builds a multipart/form-data URLRequest targeting a single server.
-    /// The body must be pre-built via `buildBody(audioURL:boundary:)`. The same
-    /// boundary string that was passed to `buildBody` must be passed here so the
-    /// `Content-Type` header matches the body's boundary markers.
+    /// The body file is uploaded separately via `upload(for:fromFile:)`.
     private static func buildRequest(
         baseURL: String,
-        body: Data,
         boundary: String,
         timeout: TimeInterval
     ) throws -> URLRequest {
@@ -703,7 +748,6 @@ enum WhisperClient {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        request.httpBody = body
         // Floor timeout at totalDeadline so legacy servers (no /transcriptions)
         // get a long enough leash for one sync attempt.
         request.timeoutInterval = max(timeout, SharedConfig.AsyncTranscription.totalDeadline)
@@ -716,7 +760,7 @@ enum WhisperClient {
     /// here so the request-build and response-decode logic lives in one place.
     /// - Parameters:
     ///   - serverURL:     Target server base URL (trimmed internally).
-    ///   - body:          Pre-built multipart form body.
+    ///   - bodyFileURL:   Temp file containing the multipart body.
     ///   - boundary:      Boundary string matching the body.
     ///   - timeout:       Per-request timeout.
     ///   - correlationId: Optional UUID for cross-process correlation.
@@ -724,7 +768,7 @@ enum WhisperClient {
     /// - Throws: `WhisperError` on any failure.
     private static func transcribeAgainst(
         serverURL: String,
-        body: Data,
+        bodyFileURL: URL,
         boundary: String,
         timeout: TimeInterval,
         correlationId: UUID?
@@ -734,12 +778,11 @@ enum WhisperClient {
 
         let request = try buildRequest(
             baseURL: base,
-            body: body,
             boundary: boundary,
             timeout: timeout
         )
 
-        let bodyBytes = request.httpBody?.count ?? 0
+        let bodyBytes = (try? FileManager.default.attributesOfItem(atPath: bodyFileURL.path)[.size] as? Int64).map(Int.init) ?? 0
         var postPayload: [String: Any] = [
             "bodyBytes": bodyBytes
         ]
@@ -750,7 +793,7 @@ enum WhisperClient {
         let httpT0 = Date()
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await session.upload(for: request, fromFile: bodyFileURL)
         } catch let error as URLError where error.code == .timedOut {
             throw WhisperError.timeout
         } catch {
