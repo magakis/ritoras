@@ -20,6 +20,10 @@ Ritoras is built entirely greenfield (no forks of closed-source iOS keyboard app
 
 See [docs/IMPLEMENTATION-PLAN.md](docs/IMPLEMENTATION-PLAN.md) for the full phase roadmap, risk register, and design decisions.
 
+## Personal Dictionary
+
+The container app includes a **Personal Dictionary** screen (Settings → Personal Dictionary) for managing words you keep from autocorrect. You can view, add, edit, swipe-to-delete, search, and bulk-clear your learned-words list. Words are stored locally in the App Group and never leave the device. Edits made in the app take effect the next time the keyboard is opened (the keyboard reads the dictionary at cold start).
+
 ## Prerequisites
 
 - An iPhone running iOS 17+

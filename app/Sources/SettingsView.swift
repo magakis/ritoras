@@ -36,6 +36,7 @@ struct SettingsView: View {
             serverSection
             dictationSection
             keyboardSection
+            dictionarySection
             historySection
             diagnosticsSection
             infoSection
@@ -156,6 +157,20 @@ struct SettingsView: View {
             Text("Keyboard")
         } footer: {
             Text("iOS's built-in Keyboard Feedback setting does not apply to custom keyboards. This toggle provides independent control.")
+        }
+    }
+
+    // MARK: - Dictionary Section
+
+    private var dictionarySection: some View {
+        Section {
+            NavigationLink("Personal Dictionary") {
+                DictionaryView()
+            }
+        } header: {
+            Text("Personal Dictionary")
+        } footer: {
+            Text("Words you keep from autocorrect. They won't be flagged as typos or auto-corrected while you type. Changes take effect the next time the keyboard is opened.")
         }
     }
 
