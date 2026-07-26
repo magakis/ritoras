@@ -1416,7 +1416,9 @@ class KeyboardViewController: UIInputViewController {
         ])
 
         currentPollTask?.cancel()
-        let task = WhisperClient.session.dataTask(with: url) { [weak self] data, response, error in
+        var request = URLRequest(url: url)
+        request.timeoutInterval = SharedConfig.AsyncTranscription.pollRequestTimeout
+        let task = SessionHolder.shared.get().dataTask(with: request) { [weak self] data, response, error in
             guard let self = self else { return }
             let httpT0 = Date()
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
