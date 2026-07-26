@@ -1225,8 +1225,11 @@ class KeyboardViewController: UIInputViewController {
         DispatchQueue.main.asyncAfter(deadline: .now() + interval, execute: workItem)
     }
 
-    /// One cycle of server polling. Increments the poll counter, checks local
-    /// stores first (clipboard + App Group), and falls back to the HTTP server.
+    /// One cycle of server polling. Increments the poll counter, checks three
+    /// resolution tiers in order, then schedules the next poll. Tier order:
+    ///   1. Local stores (clipboard + App Group payload)
+    ///   2. Whisper /jobs/{id} direct (source of truth)
+    ///   3. /dictation_result/latest relay (downstream fallback the container app writes to)
     /// Always schedules the next poll at the end; cancellation is handled by
     /// the `pendingRequestId` guard in `scheduleNextServerPoll`.
     private func performServerPollCycle() {
@@ -1250,8 +1253,10 @@ class KeyboardViewController: UIInputViewController {
         tryResolveFromStores(id: id) { [weak self] resolved in
             guard let self = self else { return }
             if !resolved {
-                // Fallback channel: the server.
-                self.pollServerForDictation()
+                // Tier 2: Whisper /jobs/{id} direct (source of truth).
+                // Falls through to Tier 3 (/dictation_result/latest relay) internally
+                // for non-terminal results (404, pending, transcribing).
+                self.pollWhisperJobStatus(id: id)
             }
         }
 
@@ -1388,7 +1393,118 @@ class KeyboardViewController: UIInputViewController {
         task.resume()
     }
 
+    /// One-shot HTTP GET to Whisper's /jobs/{id} endpoint (source of truth).
+    /// On terminal status (ready/failed), resolves the dictation directly.
+    /// On non-terminal status (pending/transcribing/404), falls through to
+    /// the relay-based pollServerForDictation() as the final fallback.
+    private func pollWhisperJobStatus(id: UUID) {
+        let config = SharedConfig.load()
+        // Prefer the probe-selected server (written by the container app on recording
+        // start). Fall back to config.servers.first if the probe hasn't run, returned
+        // nil, or the selected server is no longer in the configured list (user
+        // removed it mid-dictation).
+        let selected = SharedConfig.selectedServer().flatMap { s -> String? in
+            config.servers.contains(s) ? s : nil
+        }
+        guard let server = selected ?? config.servers.first else { return }
+        guard let url = URL(string: "\(server)/jobs/\(id.uuidString.lowercased())") else { return }
 
+        FileLogger.shared.debug(.network, "poll job direct", payload: [
+            "server": server,
+            "jobId": id.uuidString.lowercased(),
+            "source": selected != nil ? "probe" : "fallback_first"
+        ])
+
+        currentPollTask?.cancel()
+        let task = WhisperClient.session.dataTask(with: url) { [weak self] data, response, error in
+            guard let self = self else { return }
+            let httpT0 = Date()
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+
+            DispatchQueue.main.async {
+                // 404 — server doesn't expose /jobs/{id} or job not found;
+                // fall through to the relay without resetting unresponsive count.
+                if statusCode == 404 {
+                    FileLogger.shared.debug(.network, "poll job: 404, falling back to relay",
+                                            payload: ["statusCode": statusCode,
+                                                      "jobId": id.uuidString.lowercased()])
+                    self.pollServerForDictation()
+                    return
+                }
+
+                // Superseded by the next poll cycle — do NOT spawn a relay task (would cascade).
+                if let urlError = error as? URLError, urlError.code == .cancelled {
+                    return
+                }
+
+                if error != nil {
+                    FileLogger.shared.debug(.network, "poll job: network error, falling back to relay",
+                                            payload: ["statusCode": statusCode,
+                                                      "error": error?.localizedDescription ?? "nil",
+                                                      "jobId": id.uuidString.lowercased()])
+                    self.pollServerForDictation()
+                    return
+                }
+
+                guard let data = data else {
+                    FileLogger.shared.debug(.network, "poll job: empty response, falling back to relay",
+                                            payload: ["jobId": id.uuidString.lowercased()])
+                    self.pollServerForDictation()
+                    return
+                }
+
+                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    FileLogger.shared.debug(.network, "poll job: unparseable body, falling back to relay",
+                                            payload: ["jobId": id.uuidString.lowercased(),
+                                                      "bodyPreview": String(data: data, encoding: .utf8).map { String($0.prefix(100)) } ?? "?"])
+                    self.pollServerForDictation()
+                    return
+                }
+
+                let status = json["status"] as? String ?? "none"
+                let text = json["text"] as? String
+                let elapsed = Date().timeIntervalSince(httpT0) * 1000
+
+                FileLogger.shared.debug(.keyboard, "poll job response", payload: [
+                    "statusCode": statusCode,
+                    "elapsed_ms": elapsed,
+                    "status": status,
+                    "hasText": text != nil ? "yes" : "no",
+                    "jobId": id.uuidString.lowercased()
+                ])
+
+                switch status {
+                case "ready":
+                    guard self.pendingRequestId != nil else { return }
+                    FileLogger.shared.info(.network, "poll job: status=ready",
+                                           payload: ["jobId": id.uuidString.lowercased(),
+                                                     "textLength": text?.count ?? 0])
+                    self.insertDictationResult(text: text ?? "")
+
+                case "failed":
+                    guard self.pendingRequestId != nil else { return }
+                    FileLogger.shared.info(.network, "poll job: status=failed",
+                                           payload: ["jobId": id.uuidString.lowercased()])
+                    self.stopDictationTransports()
+                    self.pendingRequestId = nil
+                    self.state = .error("Transcription failed.")
+
+                case "pending", "transcribing":
+                    self.serverPollUnresponsiveCount = 0
+                    FileLogger.shared.debug(.network, "poll job: still processing, falling back to relay",
+                                            payload: ["status": status, "jobId": id.uuidString.lowercased()])
+                    self.pollServerForDictation()
+
+                default:
+                    FileLogger.shared.debug(.network, "poll job: unexpected status, falling back to relay",
+                                            payload: ["status": status, "jobId": id.uuidString.lowercased()])
+                    self.pollServerForDictation()
+                }
+            }
+        }
+        currentPollTask = task
+        task.resume()
+    }
 
     /// Clears the clipboard dictation payload to prevent re-processing.
     private func clearClipboardDictation() {
