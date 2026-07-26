@@ -180,7 +180,7 @@ struct SharedConfig {
 
         /// Per-server health-probe timeout. 5s balances false-negative risk on slow
         /// LANs/Tailscale against the user's failure-tolerance for offline servers.
-        static let serverProbeTimeoutSeconds: TimeInterval = 5.0
+        static let serverProbeTimeoutSeconds: TimeInterval = 3.0
     }
 
     // MARK: - Async Transcription

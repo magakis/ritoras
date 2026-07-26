@@ -588,7 +588,7 @@ final class DictationViewModel: ObservableObject {
                     let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
                     do {
                         text = try await WhisperClient.transcribeAsync(
-                            audioURL: url, jobId: id, config: config, correlationId: activeID)
+                            audioURL: url, jobId: id, config: config, correlationId: activeID, preferredServer: chosenServer)
                         FileLogger.shared.debug(.network, "async transcription succeeded",
                                                 payload: ["textLength": text.count])
                     } catch WhisperError.asyncUnsupported {

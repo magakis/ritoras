@@ -219,7 +219,8 @@ enum WhisperClient {
         return false
     }
 
-    /// Probes all servers in parallel and returns the highest-priority healthy one.
+    /// Probes all servers in parallel and returns the first healthy one.
+    /// Returns as soon as any server responds, cancelling remaining probes.
     /// - Parameters:
     ///   - servers: Candidate server URLs in priority order.
     ///   - timeout: Per-server probe timeout (default from SharedConfig.Defaults).
@@ -233,24 +234,27 @@ enum WhisperClient {
             .filter { !$0.isEmpty }
         guard !candidates.isEmpty else { return nil }
 
-        let healthy: [String] = await withTaskGroup(of: String?.self) { group in
+        let selected: String? = await withTaskGroup(of: (String, Bool).self) { group in
             for server in candidates {
                 group.addTask {
                     let ok = await Self.checkHealth(serverURL: server, timeout: timeout)
-                    return ok ? server : nil
+                    return (server, ok)
                 }
             }
-            var results: [String] = []
+
             for await result in group {
-                if let r = result { results.append(r) }
+                if result.1 {
+                    group.cancelAll()
+                    return result.0
+                }
             }
-            return results
+
+            return nil
         }
-        let selected = candidates.first { healthy.contains($0) }
+
         FileLogger.shared.info(.network, "server selection", payload: [
             "selected": selected ?? "none",
-            "candidates": candidates,
-            "healthy": healthy
+            "candidates": candidates
         ])
         return selected
     }
@@ -423,11 +427,16 @@ enum WhisperClient {
     /// `submitTranscription`, then polls until the job reaches a terminal state
     /// or the deadline expires. Respects `Task.isCancelled` and the total deadline.
     ///
+    /// When `preferredServer` is provided and is in `config.servers`, health probe
+    /// is skipped entirely and the preferred server is used directly. This avoids
+    /// redundant probing when a background probe already selected a healthy server.
+    ///
     /// - Parameters:
-    ///   - audioURL:      Local file URL of the recorded audio (.m4a).
-    ///   - jobId:         UUID for this dictation (used as Idempotency-Key).
-    ///   - config:        Server configuration from `SharedConfig`.
-    ///   - correlationId: Optional UUID to correlate this request across processes.
+    ///   - audioURL:        Local file URL of the recorded audio (.m4a).
+    ///   - jobId:           UUID for this dictation (used as Idempotency-Key).
+    ///   - config:          Server configuration from `SharedConfig`.
+    ///   - correlationId:   Optional UUID to correlate this request across processes.
+    ///   - preferredServer: Optional pre-selected server URL to use without probing.
     /// - Returns: The transcribed text string.
     /// - Throws: `WhisperError.asyncUnsupported` if the server lacks /transcriptions;
     ///           `.jobFailed` on transcription failure; `.timeout` on deadline.
@@ -435,16 +444,27 @@ enum WhisperClient {
         audioURL: URL,
         jobId: UUID,
         config: SharedConfig,
-        correlationId: UUID? = nil
+        correlationId: UUID? = nil,
+        preferredServer: String? = nil
     ) async throws -> String {
         FileLogger.shared.debug(.network, "transcribeAsync start", payload: [
             "jobId": jobId.uuidString,
             "serverCount": config.servers.count
         ])
 
-        // 1. Pick a healthy server.
-        guard let serverURL = await selectFirstHealthyServer(servers: config.servers) else {
-            throw WhisperError.allServersFailed(config.servers)
+        // 1. Pick a healthy server — use preferredServer if available and valid,
+        //    otherwise probe candidates in parallel until the first responds.
+        let serverURL: String
+        if let preferredServer, config.servers.contains(preferredServer) {
+            serverURL = preferredServer
+            FileLogger.shared.debug(.network, "transcribeAsync using preferred server", payload: [
+                "server": preferredServer
+            ])
+        } else {
+            guard let healthyServer = await selectFirstHealthyServer(servers: config.servers) else {
+                throw WhisperError.allServersFailed(config.servers)
+            }
+            serverURL = healthyServer
         }
         FileLogger.shared.debug(.network, "transcribeAsync server selected", payload: [
             "serverURL": serverURL
