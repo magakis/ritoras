@@ -463,6 +463,8 @@ class KeyboardViewController: UIInputViewController {
         backspaceNilContextRetries = 0
         stopLocalhostPolling()
         keyboardView.cancelSuggestionLookup()
+        autocorrectWorkItem?.cancel()
+        autocorrectWorkItem = nil
     }
 
     override func viewDidDisappear(_ animated: Bool) {
@@ -1831,8 +1833,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
         // concurrency and avoids wasted CPU).
         autocorrectWorkItem?.cancel()
 
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self = self else { return }
+        let workItem = DispatchWorkItem { [weak self, weak engine] in
+            guard let self = self, let engine = engine else { return }
 
             // --- Off-main: pure compute only ---
             let isMisspelled: Bool = {

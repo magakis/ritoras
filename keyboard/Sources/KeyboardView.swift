@@ -1131,8 +1131,8 @@ class KeyboardView: UIView {
         // SymSpell result sets).
         suggestionLookupWorkItem?.cancel()
 
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self = self else { return }
+        let workItem = DispatchWorkItem { [weak self, weak engine] in
+            guard let self = self, let engine = engine else { return }
             let suggestions = engine.suggestions(
                 forCurrentWord: snapshot.currentWord,
                 lookupWord: snapshot.lookupWord,
