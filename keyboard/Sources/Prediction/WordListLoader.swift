@@ -103,7 +103,7 @@ enum WordListLoader {
                     if let minFreq = pruneBelow, count < minFreq { return false }
 
                     symSpell.createDictionaryEntry(key: word, count: count)
-                    trie.insert(word: word, frequency: count)
+                    trie.insert(word: word)
                     return true
                 }
 

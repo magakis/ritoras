@@ -4,49 +4,23 @@ import Foundation
 
 final class TrieNode {
     var children: [Character: TrieNode] = [:]
-    var frequency: Int64 = 0
     var isTerminal: Bool = false
 }
 
 // MARK: - Trie
 
-/// A lightweight prefix trie backed by frequency data.
+/// A lightweight prefix trie for prefix completion and real-word checks.
 /// Rebuilt from the bundled frequency dictionary (82,765 words).
 final class Trie {
 
     private let root = TrieNode()
     private(set) var wordCount: Int = 0
 
-    // MARK: - Loading
-
-    /// Loads words from a frequency-dictionary file (format: "word count" per line).
-    func load(from url: URL) throws {
-        let content = try String(contentsOf: url, encoding: .utf8)
-        let lines = content.components(separatedBy: .newlines)
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-
-            let parts = trimmed.components(separatedBy: .whitespaces)
-            guard parts.count >= 2 else { continue }
-            let word = parts[0]
-            guard let count = Int64(parts[1]) else { continue }
-            insert(word: word, frequency: count)
-        }
-    }
-
-    /// Bulk-load from parsed (word, count) tuples.
-    func bulkLoad(words: [(String, Int64)]) {
-        for (word, count) in words {
-            insert(word: word, frequency: count)
-        }
-    }
-
     // MARK: - Insertion
 
-    /// Inserts a single word with its frequency into the trie.
+    /// Inserts a single word into the trie.
     /// Package-internal so streaming loaders can insert one word at a time.
-    func insert(word: String, frequency: Int64) {
+    func insert(word: String) {
         var node = root
         for char in word.lowercased() {
             if let next = node.children[char] {
@@ -61,9 +35,6 @@ final class Trie {
             wordCount += 1
         }
         node.isTerminal = true
-        if frequency > node.frequency {
-            node.frequency = frequency
-        }
     }
 
     // MARK: - Query
@@ -78,7 +49,7 @@ final class Trie {
         return node.isTerminal
     }
 
-    /// Returns the top-N most frequent words matching the given prefix.
+    /// Returns words matching the given prefix.
     func suggest(prefix: String, limit: Int = 3) -> [String] {
         let trimmed = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -97,30 +68,21 @@ final class Trie {
         }
 
         // Collect all words under this prefix.
-        var results: [(String, Int64)] = []
+        var results: [String] = []
         collectWords(from: node, prefix: lowerPrefix, results: &results)
 
-        // Sort by frequency descending and take top N.
-        results.sort { $0.1 > $1.1 }
-        let top = results.prefix(limit).map { $0.0 }
-
-        // Preserve original capitalization style.
-        if trimmed.first?.isUppercase == true {
-            return top.map { $0.capitalized }
-        }
-        return top
+        return Array(results.prefix(limit))
     }
 
     private func defaultSuggestions(limit: Int) -> [String] {
-        var results: [(String, Int64)] = []
+        var results: [String] = []
         collectWords(from: root, prefix: "", results: &results)
-        results.sort { $0.1 > $1.1 }
-        return results.prefix(limit).map { $0.0 }
+        return Array(results.prefix(limit))
     }
 
-    private func collectWords(from node: TrieNode, prefix: String, results: inout [(String, Int64)]) {
+    private func collectWords(from node: TrieNode, prefix: String, results: inout [String]) {
         if node.isTerminal {
-            results.append((prefix, node.frequency))
+            results.append(prefix)
         }
         for (char, child) in node.children {
             collectWords(from: child, prefix: prefix + String(char), results: &results)
