@@ -321,6 +321,7 @@ class KeyboardViewController: UIInputViewController {
         state = .idle
         FileLogger.shared.debug(.lifecycle, "process launch",
             payload: ["launchId": KeyboardViewController.processLaunchId])
+        NetworkChangeMonitor.shared.start()
         FileLogger.shared.info(.keyboard, "viewDidLoad OK",
                                payload: ["hasFullAccess": hasFullAccess])
     }
@@ -453,6 +454,8 @@ class KeyboardViewController: UIInputViewController {
         serverPollTimer?.invalidate()
         serverPollWorkItem?.cancel()
         serverPollWorkItem = nil
+        currentPollTask?.cancel()
+        currentPollTask = nil
         confirmStopTimer?.invalidate()
         confirmStopTimer = nil
         errorResetWorkItem?.cancel()
@@ -1285,7 +1288,9 @@ class KeyboardViewController: UIInputViewController {
         ])
 
         currentPollTask?.cancel()
-        let task = WhisperClient.session.dataTask(with: url) { [weak self] data, response, error in
+        var request = URLRequest(url: url)
+        request.timeoutInterval = SharedConfig.AsyncTranscription.pollRequestTimeout
+        let task = SessionHolder.shared.get().dataTask(with: request) { [weak self] data, response, error in
             guard let self = self else { return }
             let httpT0 = Date()
             if let error = error {

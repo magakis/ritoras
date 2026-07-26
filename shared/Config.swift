@@ -3,7 +3,7 @@ import Foundation
 struct SharedConfig {
     struct Defaults {
         static let baseUrl = "http://100.107.181.45:5000"
-        static let timeoutSeconds: TimeInterval = 30.0
+        static let timeoutSeconds: TimeInterval = 20.0
         /// The original (unsuffixed) app-group identifier declared in our entitlements.
         /// Used as the base identifier for runtime resolution.
         /// Under App Store / TrollStore / Simulator installs, this is the actual identifier.
@@ -178,20 +178,26 @@ struct SharedConfig {
         /// cancel (stale value is the best guess for the next dictation).
         static let selectedServerKey = "selectedServer"
 
-        /// Per-server health-probe timeout. 3s balances false-negative risk on slow
+        /// Per-server health-probe timeout. 5s balances false-negative risk on slow
         /// LANs/Tailscale against the user's failure-tolerance for offline servers.
-        static let serverProbeTimeoutSeconds: TimeInterval = 3.0
+        static let serverProbeTimeoutSeconds: TimeInterval = 5.0
     }
 
     // MARK: - Async Transcription
 
     enum AsyncTranscription {
-        /// Poll cadence while the job is in-flight (SERVER-CONTRACT §12 recommends 500–1000 ms).
+        /// Two-tier poll cadence: first `initialPollCount` polls at `initialPollInterval`
+        /// for quick job-detection, then reverts to `pollInterval` for the remaining duration.
+        /// ±10% jitter is applied at the call site (WhisperClient.swift Phase 2).
+        static let initialPollInterval: TimeInterval = 0.5
+        static let initialPollCount: Int = 10
+        /// Baseline poll cadence while the job is in-flight (SERVER-CONTRACT §12 recommends 500–1000 ms).
         static let pollInterval: TimeInterval = 1.0
-        /// Hard ceiling on total wait. Server retains jobs ≥10 min (§12); 15 min covers slow CPU + retry.
-        static let totalDeadline: TimeInterval = 900
+        /// Hard ceiling on total wait. Server retains jobs ≥10 min (§13) with
+        /// STREAM_RECV_TIMEOUT=600s, so 600s matches the server's own window.
+        static let totalDeadline: TimeInterval = 600
         /// Per-poll request timeout — short, because each poll is a tiny JSON GET.
-        static let pollRequestTimeout: TimeInterval = 10
+        static let pollRequestTimeout: TimeInterval = 5
     }
 
     // MARK: - Recording

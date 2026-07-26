@@ -13,6 +13,7 @@ enum WhisperError: Error, LocalizedError {
     case allServersFailed([String])
     case asyncUnsupported
     case jobFailed(String)
+    case stuck
 
     var errorDescription: String? {
         switch self {
@@ -36,6 +37,8 @@ enum WhisperError: Error, LocalizedError {
             return "Server does not support async transcription."
         case .jobFailed(let reason):
             return "Transcription job failed: \(reason)"
+        case .stuck:
+            return "Transcription stuck — server stopped responding to polls."
         }
     }
 }
@@ -71,27 +74,12 @@ struct JobStatusResponse: Decodable {
 
 enum WhisperClient {
 
-    /// Low-latency URLSession tuned for foreground app-extension HTTP.
-    /// - `waitsForConnectivity = false`: fail fast so multi-server failover kicks in
-    ///   instead of waiting indefinitely for connectivity.
-    /// - `timeoutIntervalForResource = 60`: cap total request time (default is 7 days,
-    ///   which is wildly inappropriate for a foreground dictation request).
-    /// - `httpShouldUsePipelining = true`: removes a round-trip per request on HTTP/1.1.
-    /// - `requestCachePolicy = .reloadIgnoringLocalCacheData`: dictation POSTs are not
-    ///   cacheable; bypass cache lookup.
-    static let session: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.waitsForConnectivity = false
-        config.timeoutIntervalForRequest = SharedConfig.Defaults.timeoutSeconds
-        config.timeoutIntervalForResource = SharedConfig.Defaults.timeoutSeconds * 2
-        config.httpShouldUsePipelining = true
-        config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        return URLSession(configuration: config)
-    }()
-
-    /// Test seam — overrides the shared session when non-nil.
-    /// Set in test setUp, cleared in tearDown.
-    static var _testSession: URLSession?
+    /// Resets the active URLSession, forcing new requests to use a fresh
+    /// connection. Safe to call from any thread — forwards to the lock-guarded
+    /// SessionHolder. This is the public entry point for NetworkChangeMonitor.
+    static func resetSession() {
+        SessionHolder.shared.reset()
+    }
 
     /// Transcribes the audio file at `audioURL` by iterating configured servers
     /// in order and returning the first successful result.
@@ -116,7 +104,7 @@ enum WhisperClient {
         let body: Data
         do {
             let bodyBuildT0 = Date()
-            body = try buildBody(audioURL: audioURL, boundary: boundary)
+            body = try await buildBodyOffMain(audioURL: audioURL, boundary: boundary)
             FileLogger.shared.debug(.transcription, "multipart body build", payload: [
                 "elapsed_ms": Date().timeIntervalSince(bodyBuildT0) * 1000,
                 "bodyBytes": body.count
@@ -172,7 +160,7 @@ enum WhisperClient {
         let body: Data
         do {
             let bodyBuildT0 = Date()
-            body = try buildBody(audioURL: audioURL, boundary: boundary)
+            body = try await buildBodyOffMain(audioURL: audioURL, boundary: boundary)
             FileLogger.shared.debug(.transcription, "multipart body build", payload: [
                 "elapsed_ms": Date().timeIntervalSince(bodyBuildT0) * 1000,
                 "bodyBytes": body.count
@@ -198,7 +186,7 @@ enum WhisperClient {
     ///            or any sub-500 status on the root endpoint as fallback.
     static func checkHealth(serverURL: String, timeout: TimeInterval = 5) async -> Bool {
         let base = serverURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let session = Self._testSession ?? Self.session
+        let session = SessionHolder.shared.get()
 
         // Try /health first
         if let url = URL(string: "\(base)/health") {
@@ -305,7 +293,7 @@ enum WhisperClient {
         request.httpBody = body
         request.timeoutInterval = timeout
 
-        let session = Self._testSession ?? Self.session
+        let session = SessionHolder.shared.get()
         let bodyBytes = request.httpBody?.count ?? 0
 
         FileLogger.shared.debug(.network, "async submit start", payload: [
@@ -380,7 +368,7 @@ enum WhisperClient {
             request.setValue(id.uuidString, forHTTPHeaderField: "X-Correlation-ID")
         }
 
-        let session = Self._testSession ?? Self.session
+        let session = SessionHolder.shared.get()
         FileLogger.shared.debug(.network, "poll job start", payload: [
             "url": url.absoluteString
         ])
@@ -467,7 +455,7 @@ enum WhisperClient {
         let body: Data
         do {
             let bodyBuildT0 = Date()
-            body = try buildBody(audioURL: audioURL, boundary: boundary)
+            body = try await buildBodyOffMain(audioURL: audioURL, boundary: boundary)
             FileLogger.shared.debug(.transcription, "async multipart body build", payload: [
                 "elapsed_ms": Date().timeIntervalSince(bodyBuildT0) * 1000,
                 "bodyBytes": body.count
@@ -494,6 +482,9 @@ enum WhisperClient {
         // 4. Poll loop.
         let deadline = Date().addingTimeInterval(SharedConfig.AsyncTranscription.totalDeadline)
         var pollCount = 0
+        var consecutivePollFailures = 0
+        var lastSuccessfulPollAt = Date()
+        var stuckWarned = false
 
         while !Task.isCancelled {
             let remaining = deadline.timeIntervalSinceNow
@@ -504,9 +495,30 @@ enum WhisperClient {
                 throw WhisperError.timeout
             }
 
+            // B.6 — Adaptive interval based on pollCount
+            let base = pollCount < SharedConfig.AsyncTranscription.initialPollCount
+                ? SharedConfig.AsyncTranscription.initialPollInterval
+                : SharedConfig.AsyncTranscription.pollInterval
+
+            // B.7 — ±10% jitter
+            let jitter = base * Double.random(in: -0.1...0.1)
+            let sleep = max(0.05, base + jitter)
+
+            // B.9 — Stuck-state detection
+            let elapsed = Date().timeIntervalSince(lastSuccessfulPollAt)
+            if elapsed >= 60 {
+                throw WhisperError.stuck
+            }
+            if elapsed >= 30 && !stuckWarned {
+                FileLogger.shared.warn(.network, "transcribeAsync no successful poll in 30s", payload: [
+                    "pollCount": pollCount
+                ])
+                stuckWarned = true
+            }
+
             // Sleep with cancellation handling — Task.sleep throws on cancel.
             do {
-                try await Task.sleep(nanoseconds: UInt64(SharedConfig.AsyncTranscription.pollInterval * 1_000_000_000))
+                try await Task.sleep(nanoseconds: UInt64(sleep * 1_000_000_000))
             } catch {
                 break // task was cancelled
             }
@@ -521,20 +533,56 @@ enum WhisperClient {
                     serverURL: serverURL,
                     correlationId: correlationId
                 )
+                // B.8 — Reset consecutive failures on any successful poll
+                consecutivePollFailures = 0
+                lastSuccessfulPollAt = Date()
+                stuckWarned = false
             } catch WhisperError.jobFailed(let message) {
                 throw WhisperError.jobFailed(message)
             } catch WhisperError.timeout {
-                // Per-poll timeout — transient, retry
+                // B.8 — Exponential backoff on poll timeout
+                consecutivePollFailures += 1
+                // B.10 — Circuit breaker at N=8
+                if consecutivePollFailures >= 8 {
+                    FileLogger.shared.warn(.network, "transcribeAsync circuit breaker opened", payload: [
+                        "pollCount": pollCount,
+                        "consecutivePollFailures": consecutivePollFailures
+                    ])
+                    throw WhisperError.allServersFailed([serverURL])
+                }
+                let backoff = min(8.0, pow(2.0, Double(min(consecutivePollFailures - 1, 3))))
                 FileLogger.shared.debug(.network, "transcribeAsync poll timeout, retrying", payload: [
-                    "pollCount": pollCount
+                    "pollCount": pollCount,
+                    "consecutivePollFailures": consecutivePollFailures
                 ])
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(max(sleep, backoff) * 1_000_000_000))
+                } catch {
+                    break
+                }
                 continue
             } catch {
-                // Transient network error — retry
+                // B.8 — Exponential backoff on poll error
+                consecutivePollFailures += 1
+                // B.10 — Circuit breaker at N=8
+                if consecutivePollFailures >= 8 {
+                    FileLogger.shared.warn(.network, "transcribeAsync circuit breaker opened", payload: [
+                        "pollCount": pollCount,
+                        "consecutivePollFailures": consecutivePollFailures
+                    ])
+                    throw WhisperError.allServersFailed([serverURL])
+                }
+                let backoff = min(8.0, pow(2.0, Double(min(consecutivePollFailures - 1, 3))))
                 FileLogger.shared.debug(.network, "transcribeAsync poll transient error, retrying", payload: [
                     "pollCount": pollCount,
+                    "consecutivePollFailures": consecutivePollFailures,
                     "error": error.localizedDescription
                 ])
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(max(sleep, backoff) * 1_000_000_000))
+                } catch {
+                    break
+                }
                 continue
             }
 
@@ -579,6 +627,20 @@ enum WhisperClient {
     }
 
     // MARK: - Private Helpers
+
+    /// Builds the multipart form body off the caller thread on a .userInitiated queue.
+    private static func buildBodyOffMain(audioURL: URL, boundary: String) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let body = try buildBody(audioURL: audioURL, boundary: boundary)
+                    continuation.resume(returning: body)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
 
     /// Builds the multipart/form-data body for a transcription request.
     /// Reads the audio file from disk exactly once.
@@ -664,7 +726,7 @@ enum WhisperClient {
         if let id = correlationId { postPayload["id"] = id.uuidString }
         FileLogger.shared.debug(.transcription, "HTTP POST /transcribe start", payload: postPayload)
 
-        let session = Self._testSession ?? Self.session
+        let session = SessionHolder.shared.get()
         let httpT0 = Date()
         let (data, response): (Data, URLResponse)
         do {

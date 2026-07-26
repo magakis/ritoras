@@ -19,6 +19,8 @@ struct RitorasApp: App {
         FileLogger.shared.info(.app, "MetricKit subscriber started")
         // Phase 4: prune expired failed-job records on launch.
         FailedJobStore.shared.pruneOlderThan(SharedConfig.Recording.retention)
+        // Phase 5: start network path monitor for resettable URLSession.
+        NetworkChangeMonitor.shared.start()
     }
 
     var body: some Scene {
