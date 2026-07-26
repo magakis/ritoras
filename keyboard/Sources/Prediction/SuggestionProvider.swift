@@ -22,6 +22,10 @@ struct Suggestion: Hashable {
     let text: String
     let score: Double
     let source: Source
+    /// True when this is the user's typed word rendered as the verbatim
+    /// candidate AND the word is not a known/learned word. Drives the
+    /// quote-wrapped display ("word") in the suggestion bar.
+    let isUnknownVerbatim: Bool
 
     enum Source: String {
         case symspell

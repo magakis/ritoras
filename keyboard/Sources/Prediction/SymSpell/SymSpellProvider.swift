@@ -58,12 +58,26 @@ final class SymSpellProvider: SuggestionProvider {
         let word = context.lookupWord.lowercased()
         guard !word.isEmpty else { return [] }
 
-        // Always include the input itself as the leftmost chip.
-        var results: [Suggestion] = [
-            Suggestion(text: context.currentWord, score: 1.0, source: .symspell)
-        ]
-
+        // Compute isRealWord once — drives both the verbatim-candidate display
+        // signal and the prefix-completion vs typo-correction branch.
+        // A word is "real" if it is in the built-in trie OR has been learned
+        // by the user. Learned words must take the prefix-completion path so
+        // SymSpell does not treat them as typos and outrank them with corrections.
         let isRealWord = trie.contains(word: word)
+            || LearnedWordsStore.shared.contains(word)
+
+        // Always include the input itself as the leftmost chip. Mark it as an
+        // unknown-verbatim when the typed word is not a known/learned word —
+        // the UI renders these with quotes so the user can distinguish the
+        // verbatim candidate from a normal suggestion.
+        var results: [Suggestion] = [
+            Suggestion(
+                text: context.currentWord,
+                score: 1.0,
+                source: .symspell,
+                isUnknownVerbatim: !isRealWord
+            )
+        ]
 
         if isRealWord {
             // Prefix completions from trie.
@@ -74,7 +88,7 @@ final class SymSpellProvider: SuggestionProvider {
                 let capped = Self.applyCapitalizationTemplate(from: context.currentWord, to: completion)
                 if capped.lowercased() != word {
                     results.append(
-                        Suggestion(text: capped, score: 0.5, source: .symspell)
+                        Suggestion(text: capped, score: 0.5, source: .symspell, isUnknownVerbatim: false)
                     )
                 }
             }
@@ -102,7 +116,7 @@ final class SymSpellProvider: SuggestionProvider {
                         )
                     }
                     results.append(
-                        Suggestion(text: capped, score: score, source: .symspell)
+                        Suggestion(text: capped, score: score, source: .symspell, isUnknownVerbatim: false)
                     )
                 }
             }

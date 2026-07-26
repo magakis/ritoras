@@ -95,7 +95,8 @@ final class PredictionEngine {
                 return Suggestion(
                     text: suggestion.text,
                     score: min(suggestion.score * 1.2, 1.0),
-                    source: suggestion.source
+                    source: suggestion.source,
+                    isUnknownVerbatim: false
                 )
             }
         }
@@ -129,7 +130,8 @@ final class PredictionEngine {
                     return Suggestion(
                         text: item.suggestion.text,
                         score: blendedScore,
-                        source: item.suggestion.source
+                        source: item.suggestion.source,
+                        isUnknownVerbatim: item.suggestion.isUnknownVerbatim
                     )
                 }
             }
@@ -151,7 +153,12 @@ final class PredictionEngine {
         let sorted = bestByText.values
             .sorted { $0.score > $1.score }
             .prefix(limit)
-            .map { $0.text }
+            .map { suggestion -> String in
+                if suggestion.isUnknownVerbatim {
+                    return "\"\(suggestion.text)\""
+                }
+                return suggestion.text
+            }
 
         return sorted
     }

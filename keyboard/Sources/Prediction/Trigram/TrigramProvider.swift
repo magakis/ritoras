@@ -329,7 +329,7 @@ final class TrigramProvider: SuggestionProvider {
                     normalized = max(SharedConfig.Defaults.trigramReadyMinScore,
                                      min(1.0, exp((prob - maxProb) * Self.ln10)))
                 }
-                return Suggestion(text: word, score: normalized, source: .trigram)
+                return Suggestion(text: word, score: normalized, source: .trigram, isUnknownVerbatim: false)
             }
         } else {
             // Mid-word case: filter followers by prefix, score each.
@@ -358,7 +358,7 @@ final class TrigramProvider: SuggestionProvider {
                         normalized = max(SharedConfig.Defaults.trigramReadyMinScore,
                                          min(1.0, exp((prob - maxProb) * Self.ln10)))
                     }
-                    return Suggestion(text: word, score: normalized, source: .trigram)
+                    return Suggestion(text: word, score: normalized, source: .trigram, isUnknownVerbatim: false)
                 }
         }
     }

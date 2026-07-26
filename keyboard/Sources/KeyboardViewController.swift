@@ -1634,8 +1634,18 @@ extension KeyboardViewController: KeyboardViewDelegate {
     func keyboardView(_ view: KeyboardView, didTapSuggestion text: String) {
         let context = textDocumentProxy.documentContextBeforeInput ?? ""
 
-        // Extract the typed word before deleting it (needed for learnWord).
+        // Extract the typed word before deleting it (needed for the learn path).
         let typedWord = CurrentWordExtractor.extract(from: context).currentWord
+
+        // Strip display-only quotes wrapping an unknown-verbatim candidate.
+        // The quotes exist only in the suggestion-bar rendering (Step 2.3);
+        // the document and the learned-words store must see the bare word.
+        let isQuotedVerbatim = text.count >= 2
+            && text.hasPrefix("\"")
+            && text.hasSuffix("\"")
+        let insertText = isQuotedVerbatim
+            ? String(text.dropFirst().dropLast())
+            : text
 
         var deleteCount = 0
         for char in context.reversed() {
@@ -1648,15 +1658,23 @@ extension KeyboardViewController: KeyboardViewDelegate {
         for _ in 0..<deleteCount {
             deleteTargetedBackward()
         }
-        insertTargeted(text + " ")
+        insertTargeted(insertText + " ")
         wordOrigin.markSuggestionTap()    // Lock persists until the next separator handler clears it
         lastAutoCorrection = nil          // Suggestion tap invalidates any pending revert
         // Refresh is async; the token guard rejects any result whose captured state no longer matches.
         keyboardView.refreshSuggestions()
 
-        // If the user accepted a suggestion that differs from their typed word,
-        // learn the typed word so the system spell checker stops flagging it.
-        if !typedWord.isEmpty, typedWord.lowercased() != text.lowercased() {
+        // Learn the word the user kept.
+        //
+        // R1: Tapping the verbatim candidate (the quoted form) learns the
+        //     user's typed word immediately.
+        // R2: Tapping any candidate that matches the typed word
+        //     case-insensitively also learns the typed form (preserves the
+        //     user's actual spelling). The store normalizes case on add.
+        if isQuotedVerbatim {
+            LearnedWordsStore.shared.add(insertText)
+        } else if !typedWord.isEmpty,
+                  typedWord.lowercased() == insertText.lowercased() {
             LearnedWordsStore.shared.add(typedWord)
         }
     }

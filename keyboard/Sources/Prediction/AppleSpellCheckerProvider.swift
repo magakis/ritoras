@@ -42,7 +42,7 @@ final class AppleSpellCheckerProvider: SuggestionProvider {
                     if !seen.contains(key) {
                         seen.insert(key)
                         results.append(
-                            Suggestion(text: guess, score: 0.85, source: .apple)
+                            Suggestion(text: guess, score: 0.85, source: .apple, isUnknownVerbatim: false)
                         )
                     }
                 }
@@ -56,7 +56,7 @@ final class AppleSpellCheckerProvider: SuggestionProvider {
                 if !seen.contains(key) {
                     seen.insert(key)
                     results.append(
-                        Suggestion(text: completion, score: 0.6, source: .apple)
+                        Suggestion(text: completion, score: 0.6, source: .apple, isUnknownVerbatim: false)
                     )
                 }
             }
