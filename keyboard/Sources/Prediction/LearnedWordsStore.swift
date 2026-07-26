@@ -16,7 +16,9 @@ final class LearnedWordsStore {
 
     private let defaults: UserDefaults
     private let storeKey = "learnedWords"
+    private static let maxLearnedWords = 1000
     private var cache: Set<String>
+    private var insertionOrder: [String] = []
 
     // MARK: - Init
 
@@ -27,9 +29,19 @@ final class LearnedWordsStore {
             ?? UserDefaults.standard
 
         if let stored = defaults.array(forKey: storeKey) as? [String] {
-            self.cache = Set(stored)
+            // The persisted array is in insertion order (written by
+            // persist()). During migration from the old unbounded version
+            // the order is arbitrary; suffix simply keeps the first N for
+            // the cap. Either way, trimming is safe — the cap holds and
+            // subsequent persist() calls will write ordered data.
+            let trimmed = stored.count > Self.maxLearnedWords
+                ? Array(stored.suffix(Self.maxLearnedWords))
+                : stored
+            self.cache = Set(trimmed)
+            self.insertionOrder = trimmed
         } else {
             self.cache = []
+            self.insertionOrder = []
         }
 
         // Re-register every persisted word with UITextChecker — learned words
@@ -48,8 +60,7 @@ final class LearnedWordsStore {
     /// here because in keyboard extension contexts (App Group containers),
     /// it can surface write failures that would otherwise be silently lost.
     private func persist() {
-        let array = Array(cache)
-        defaults.set(array, forKey: storeKey)
+        defaults.set(insertionOrder, forKey: storeKey)
     }
 
     // MARK: - Public API
@@ -65,6 +76,13 @@ final class LearnedWordsStore {
         if cache.contains(lower) { return }
 
         cache.insert(lower)
+        insertionOrder.append(lower)
+
+        if cache.count > Self.maxLearnedWords {
+            let oldest = insertionOrder.removeFirst()
+            cache.remove(oldest)
+        }
+
         persist()
         UITextChecker.learnWord(lower)
     }
@@ -85,6 +103,7 @@ final class LearnedWordsStore {
     /// extension process is terminated naturally.
     func clear() {
         cache.removeAll()
+        insertionOrder.removeAll()
         defaults.removeObject(forKey: storeKey)
     }
 }
