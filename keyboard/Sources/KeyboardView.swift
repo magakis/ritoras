@@ -1218,7 +1218,7 @@ class KeyboardView: UIView {
     }
 
     deinit {
-        FileLogger.shared.debug(.keyboard, "KeyboardView deinit",
+        FileLogger.shared.info(.keyboard, "KeyboardView deinit",
             payload: ["hadPendingWorkItem": suggestionLookupWorkItem != nil])
     }
 }

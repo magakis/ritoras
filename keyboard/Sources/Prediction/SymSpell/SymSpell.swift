@@ -244,7 +244,7 @@ final class SymSpell {
     }
 
     deinit {
-        FileLogger.shared.debug(.dictionary, "SymSpell deinit",
+        FileLogger.shared.info(.dictionary, "SymSpell deinit",
             payload: ["dictionaryCount": dictionary.count, "deletesCount": deletes.count])
     }
 }

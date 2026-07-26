@@ -473,7 +473,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     deinit {
-        FileLogger.shared.debug(.lifecycle, "KeyboardViewController deinit",
+        FileLogger.shared.info(.lifecycle, "KeyboardViewController deinit",
             payload: ["launchId": KeyboardViewController.processLaunchId,
                       "buildId": Self.buildGeneration])
         KeyboardLogShipper.shared.stop()

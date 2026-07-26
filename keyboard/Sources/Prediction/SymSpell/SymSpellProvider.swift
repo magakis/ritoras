@@ -126,6 +126,6 @@ final class SymSpellProvider: SuggestionProvider {
     }
 
     deinit {
-        FileLogger.shared.debug(.prediction, "SymSpellProvider deinit")
+        FileLogger.shared.info(.prediction, "SymSpellProvider deinit")
     }
 }

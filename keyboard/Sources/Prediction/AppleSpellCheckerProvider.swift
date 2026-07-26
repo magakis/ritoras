@@ -66,6 +66,6 @@ final class AppleSpellCheckerProvider: SuggestionProvider {
     }
 
     deinit {
-        FileLogger.shared.debug(.prediction, "AppleSpellCheckerProvider deinit")
+        FileLogger.shared.info(.prediction, "AppleSpellCheckerProvider deinit")
     }
 }
