@@ -117,10 +117,12 @@ final class PredictionEngine {
             previousWord2: previousWord2
         )
         let lowerTyped = currentWord.lowercased()
-        guard let winner = pool
-            .filter { $0.source != .trigram && $0.text.lowercased() != lowerTyped }
-            .max(by: { $0.score < $1.score })
-        else { return nil }
+        let candidates = pool.filter {
+            $0.source != .trigram && $0.text.lowercased() != lowerTyped
+        }
+        guard let winner = candidates.max(by: { $0.score < $1.score }) else {
+            return nil
+        }
 
         // Absolute KenLM floor: reject if the winner is contextually implausible even
         // after min-max normalization inflated its relative score. Only applies when
