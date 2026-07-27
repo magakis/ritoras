@@ -13,6 +13,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Run pure-logic tests (Node)
+        run: node --test 'scripts/prediction-sim/test/**/*.{js,cjs,mjs}'
+
       - name: Install XcodeGen
         run: brew install xcodegen
 

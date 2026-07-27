@@ -1,4 +1,4 @@
-> **Status: Superseded.** This repo no longer maintains tests or a test target (see `AGENTS.md` → *No tests*). Items below proposing to re-enable a CI Test step are no longer applicable.
+> **Status: Superseded.** This repo has no Swift test target; pure-logic Node.js tests now live under `scripts/prediction-sim/` (see `AGENTS.md` → *Test policy*). Items below proposing to re-enable a CI Test step are no longer applicable.
 
 # Trigram Prediction — Improvement Roadmap
 

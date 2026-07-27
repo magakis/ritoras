@@ -1,0 +1,11 @@
+{
+  "name": "ritoras-prediction-sim",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pure-logic JS port of the Ritoras prediction/autocorrect pipeline. The project's official test surface (see AGENTS.md → Test policy).",
+  "scripts": {
+    "test": "node --test 'test/**/*.{js,cjs,mjs}'"
+  },
+  "engines": { "node": ">=18" }
+}

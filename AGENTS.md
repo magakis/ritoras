@@ -64,25 +64,44 @@ substitute a local build check.
 
 The only real build gate is GitHub Actions CI on push. Wait for that.
 
-### No tests
+### Test policy
 
-This repository intentionally has **no test target and no automated tests.** Do not
-create XCTest files, do not re-add a `RitorasTests` (or any other) target to
-`project.yml`, and do not add a `xcodebuild test` step to CI. CI only builds; it has
-never run tests here, and a test target is dead weight this repo does not carry.
+This repository uses a **two-tier testing model**:
 
-When a change needs verification, prefer a build-only CI gate and manual on-device
-checks (see the `ritoras-ios-debugging` skill). The 48 MB Jetsam cap below is enforced
-by reasoning and on-device observation, **not** by an automated test.
+1. **Pure-logic tests (Node.js — ALLOWED, the official test surface).** Pure-logic
+   components — `CurrentWordExtractor`, `ApostropheNormalizer`,
+   `WordBoundaryPunctuation`, `SymSpell` delete-index + lookup, `QwertyGeometry`,
+   `Trie`, `Contractions`, `AutocorrectController`, and the `PredictionEngine`
+   fusion formula (Apple boost + KenLM min-max normalization + two-tier threshold)
+   — are unit-tested via a co-maintained JavaScript port under
+   `scripts/prediction-sim/`. These tests run on the Linux dev machine
+   (`node --test 'scripts/prediction-sim/test/**/*.{js,cjs,mjs}'`) with no Mac, Xcode, or simulator.
+   The JS port is a **first-class mirror** of the Swift pure-logic modules, kept in
+   sync as the Swift evolves — not a throwaway reproduction. It serves triple duty:
+   (a) regression net for algorithmic changes, (b) parameter sweeper for α and the
+   autocorrect thresholds, (c) precision/recall measurer against a typo corpus.
 
-Treat the absence of tests as a deliberate decision — not an oversight to "fix."
+2. **Swift XCTest targets (FORBIDDEN).** Do not create XCTest files, do not re-add
+   a `RitorasTests` (or any other) target to `project.yml`, and do not add an
+   `xcodebuild test` step to CI. The historical `RitorasTests` target accumulated
+   119 compilation errors and was removed; pure-logic coverage now lives in the
+   Node harness. Swift is verified only by build-on-push CI on `macos-15`.
+
+**Device/UI/end-to-end testing remains manual** via the `ritoras-ios-debugging`
+skill (libimobiledevice / pymobiledevice3). The Node harness does NOT cover UIKit,
+AVFoundation, `textDocumentProxy` interaction, the 48 MB Jetsam cap, or any runtime
+behavior — only pure algorithmic logic.
+
+**Working rule:** when a change touches pure logic, add or update the corresponding
+JS port + test in `scripts/prediction-sim/` in the same commit. When a change
+touches UIKit/AVFoundation/device behavior, verify on device manually.
 
 ### 48 MB Jetsam memory cap
 
 The keyboard extension is killed without warning if it exceeds ~48 MB resident memory. This is a hard OS limit, not a guideline.
 
 - `SymSpell` index alone uses ~25 MB.
-- Any change to `keyboard/` or `shared/` that touches memory must be reasoned about against this 48 MB cap before a keyboard change is considered done. There is no automated test enforcing it (see the *No tests* constraint) — verify on device with the `ritoras-ios-debugging` skill.
+- Any change to `keyboard/` or `shared/` that touches memory must be reasoned about against this 48 MB cap before a keyboard change is considered done. There is no automated test enforcing the memory cap (the Node harness covers pure logic only, not runtime memory — see *Test policy*); verify on device with the `ritoras-ios-debugging` skill.
 - Prefer streaming / in-place approaches over holding full data structures.
 - Release builds strip debug dylibs in `build.yml` specifically to fit this budget — do not disable that step.
 

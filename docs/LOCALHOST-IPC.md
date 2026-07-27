@@ -329,7 +329,7 @@ server is unavailable for that session. This is extremely unlikely on iOS
 | `shared/Config.swift` | Constants (`localhostServerPort`, `darwinNotificationName`, `darwinStateChangedNotificationName`) |
 | `shared/DarwinNotifier.swift` | Darwin notification post/observe helpers |
 | `keyboard/Sources/KeyboardView.swift` | KeyboardState enum (idle, openingApp, waiting, waitingConfirm, inserting, error) |
-_Unit tests previously listed here were removed; this repo no longer maintains a test target (see AGENTS.md)._
+_Unit tests previously listed here were removed; this repo has no Swift test target; pure-logic tests live in `scripts/prediction-sim/` (see AGENTS.md → Test policy)._
 
 ---
 

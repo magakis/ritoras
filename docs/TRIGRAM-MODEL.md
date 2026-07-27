@@ -896,7 +896,7 @@ The `.github/workflows/build.yml` workflow:
 5. Verifies the keyboard extension is embedded
 6. Uploads `.ipa` and `.app` as build artifacts
 
-**There is no test step in CI.** _(The `RitorasTests` target has since been removed entirely; see AGENTS.md No-tests policy.)_ The test target (`RitorasTests`) has 119
+**A Node.js pure-logic test step has been added to CI (see the build.yml workflow).** _(The `RitorasTests` Swift target has been removed; pure-logic tests live under `scripts/prediction-sim/` — see AGENTS.md → Test policy.)_ The test target (`RitorasTests`) has 119
 pre-existing compilation errors that have been deferred. To run tests locally
 on macOS:
 
@@ -939,9 +939,10 @@ learn from the user's typing history, frequently used phrases, or writing
 style. All users receive identical suggestions for identical contexts. User
 personalization is a potential future enhancement (not planned).
 
-### No Test Step in CI
+### No Swift XCTest Step in CI
 
-CI builds and verifies the binary but does not run tests. The `RitorasTests`
+CI builds and verifies the binary and runs pure-logic Node.js tests under
+`scripts/prediction-sim/`. It does NOT run Swift XCTest tests. The `RitorasTests`
 target has 119 pre-existing compilation errors (unrelated to prediction) that
 have been deferred. Tests in `KenLMMemorySpike.swift`,
 `SymSpellMemorySpike.swift`, and `TrigramLatencyTest.swift` exist and should
