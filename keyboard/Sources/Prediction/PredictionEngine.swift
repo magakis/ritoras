@@ -79,9 +79,21 @@ final class PredictionEngine {
             previousWord2: previousWord2
         )
 
-        // — Sort by score descending, take limit —
-        let sorted = allSuggestions
+        // — Pin verbatim/current word to #1 (iOS QuickType convention),
+        // then sort corrections by score descending —
+        let lowerCurrent = currentWord.lowercased()
+        let verbatim = allSuggestions.first { $0.text.lowercased() == lowerCurrent }
+        let corrections = allSuggestions.filter { $0.text.lowercased() != lowerCurrent }
             .sorted { $0.score > $1.score }
+
+        let pinned: [Suggestion]
+        if let v = verbatim {
+            pinned = [v] + Array(corrections.prefix(max(limit - 1, 0)))
+        } else {
+            pinned = Array(corrections.prefix(limit))
+        }
+
+        return pinned
             .prefix(limit)
             .map { suggestion -> String in
                 if suggestion.isUnknownVerbatim {
@@ -89,8 +101,6 @@ final class PredictionEngine {
                 }
                 return suggestion.text
             }
-
-        return sorted
     }
 
     // MARK: - Autocorrect Support

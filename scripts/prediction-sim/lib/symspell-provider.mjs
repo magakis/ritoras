@@ -56,7 +56,7 @@ export class SymSpellProvider {
    * @param {'top'|'all'|'closest'} [opts.verbosity='top'] - SymSpell verbosity.
    *   Default 'top' matches the Swift provider (only the best SymSpell candidate).
    *   Pass 'all' for broader candidate exploration in sweeps.
-   * @returns {Array<{text: string, score: number, source: string, distance: number}>}
+   * @returns {Array<{text: string, score: number, source: string, distance: number, isUnknownVerbatim: boolean}>}
    *   Sorted by score descending.
    */
   suggest(word, opts = {}) {
@@ -76,9 +76,9 @@ export class SymSpellProvider {
     // secondary option the user can tap to keep the apostrophe-less form.
     const verbatimScore = contract ? 0.5 : 1.0;
 
-    /** @type {Array<{text: string, score: number, source: string, distance: number}>} */
+    /** @type {Array<{text: string, score: number, source: string, distance: number, isUnknownVerbatim: boolean}>} */
     const results = [
-      { text: currentWord, score: verbatimScore, source: 'symspell', distance: 0 },
+      { text: currentWord, score: verbatimScore, source: 'symspell', distance: 0, isUnknownVerbatim: !isRealWord },
     ];
 
     if (contract) {
@@ -87,6 +87,7 @@ export class SymSpellProvider {
         score: 1.0,
         source: 'contraction',
         distance: 0,
+        isUnknownVerbatim: false,
       });
     }
 
@@ -125,6 +126,7 @@ export class SymSpellProvider {
           score: qScore,
           source: 'symspell',
           distance: c.distance,
+          isUnknownVerbatim: false,
         });
       }
     }
