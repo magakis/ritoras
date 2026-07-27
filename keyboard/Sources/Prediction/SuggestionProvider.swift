@@ -32,5 +32,6 @@ struct Suggestion: Hashable {
         case apple
         case lexicon
         case trigram
+        case contraction
     }
 }

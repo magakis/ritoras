@@ -54,12 +54,20 @@ enum AutocorrectController {
         guard typedWord.count >= config.minWordLength,
               typedWord.count <= config.maxWordLength else { return .leaveAsIs }
 
+        // Contraction candidates are deterministic — they bypass the isLearned,
+        // isMisspelled, and threshold gates because the contraction table
+        // represents a high-confidence mapping the user almost certainly wants
+        // ("dont" → "don't").
+        let isContraction = topCorrection?.source == .contraction
+
         // User has explicitly accepted this word before.
-        if isLearned { return .leaveAsIs }
+        if !isContraction, isLearned { return .leaveAsIs }
 
         // Only correct genuinely misspelled words. This prevents "me" → "message",
         // "and" → "Andrew", etc.
-        guard isMisspelled else { return .leaveAsIs }
+        if !isContraction {
+            guard isMisspelled else { return .leaveAsIs }
+        }
 
         // No candidate available.
         guard let candidate = topCorrection else { return .leaveAsIs }
@@ -67,8 +75,10 @@ enum AutocorrectController {
         // Don't "correct" to the same word (case-insensitive).
         guard candidate.text.lowercased() != typedWord.lowercased() else { return .leaveAsIs }
 
-        // Confidence threshold.
-        guard candidate.score >= config.minConfidenceScore else { return .leaveAsIs }
+        // Confidence threshold (skipped for deterministic contractions).
+        if !isContraction {
+            guard candidate.score >= config.minConfidenceScore else { return .leaveAsIs }
+        }
 
         // First-letter preservation. SymSpell ranks candidates by raw frequency with no
         // first-letter constraint, so without this guard a typed "michael" can be "corrected"

@@ -66,14 +66,24 @@ final class SymSpellProvider: SuggestionProvider {
         let isRealWord = trie.contains(word: word)
             || LearnedWordsStore.shared.contains(word)
 
-        // Always include the input itself as the leftmost chip. Mark it as an
-        // unknown-verbatim when the typed word is not a known/learned word —
-        // the UI renders these with quotes so the user can distinguish the
-        // verbatim candidate from a normal suggestion.
+        let contractionExpansion = Contractions.expansion(for: word)
+
+        // When a contraction exists, it should be the PRIMARY candidate (leftmost
+        // chip, highest score). The verbatim is demoted so it appears as a
+        // secondary option the user can tap to keep the apostrophe-less form if
+        // they really want it. The 0.5 score gap ensures the contraction survives
+        // KenLM fusion (which blends at α=0.5, preserving a 0.25 gap after
+        // blending — contraction always wins).
+        let verbatimScore: Double = contractionExpansion != nil ? 0.5 : 1.0
+
+        // Always include the input itself as a chip. Mark it as an unknown-verbatim
+        // when the typed word is not a known/learned word — the UI renders these
+        // with quotes so the user can distinguish the verbatim candidate from a
+        // normal suggestion.
         var results: [Suggestion] = [
             Suggestion(
                 text: context.currentWord,
-                score: 1.0,
+                score: verbatimScore,
                 source: .symspell,
                 isUnknownVerbatim: !isRealWord
             )
@@ -82,15 +92,19 @@ final class SymSpellProvider: SuggestionProvider {
         // Contraction fast-path: checked BEFORE trie/SymSpell so that
         // apostrophe-less forms like "dont" produce "don't" deterministically.
         // Real-word status is irrelevant here — "dont" IS a real word in our
-        // lexicon but the user very likely meant "don't".
-        if let contraction = Contractions.expansion(for: word) {
+        // lexicon but the user very likely meant "don't". Inserted at position 0
+        // so it appears leftmost in the suggestion bar.
+        if let contraction = contractionExpansion {
             let capped = Self.applyCapitalizationTemplate(from: context.currentWord, to: contraction)
-            results.append(Suggestion(
-                text: capped,
-                score: 0.9,
-                source: .symspell,
-                isUnknownVerbatim: false
-            ))
+            results.insert(
+                Suggestion(
+                    text: capped,
+                    score: 1.0,
+                    source: .contraction,
+                    isUnknownVerbatim: false
+                ),
+                at: 0
+            )
         }
 
         if isRealWord {

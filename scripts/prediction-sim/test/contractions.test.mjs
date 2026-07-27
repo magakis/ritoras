@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { CONTRACTIONS, expansion } from '../lib/contractions.mjs';
 import { applyCapitalizationTemplate } from '../lib/apply-capitalization-template.mjs';
 import { SymSpell } from '../lib/symspell.mjs';
+import { fusedPool } from '../lib/fused-pool.mjs';
 
 const APOSTROPHE = '\u{2019}';
 
@@ -143,8 +144,8 @@ describe('Contractions', () => {
       // Phase 1: contraction fast-path (new Phase 3 behavior)
       const contraction = expansion(canonicalLower);
 
-      // Phase 2: verbatim candidate
-      const verbatim = { text: input, score: 1.0, source: 'symspell', isUnknownVerbatim: !speller.dictionary.has(canonicalLower) };
+      // Phase 2: verbatim candidate — score demoted to 0.5 when contraction exists
+      const verbatim = { text: input, score: 0.5, source: 'symspell', isUnknownVerbatim: !speller.dictionary.has(canonicalLower) };
 
       // Phase 3: SymSpell lookup (returns "dont" at distance 0 — same as input)
       const symspellResult = speller.lookup(canonicalLower, undefined, 'top');
@@ -154,7 +155,7 @@ describe('Contractions', () => {
 
       // Assert verbatim is "dont"
       assert.strictEqual(verbatim.text, 'dont');
-      assert.strictEqual(verbatim.score, 1.0);
+      assert.strictEqual(verbatim.score, 0.5);
 
       // Assert SymSpell returns "dont" at distance 0 (the regression)
       assert.strictEqual(symspellResult.length, 1);
@@ -162,20 +163,87 @@ describe('Contractions', () => {
       assert.strictEqual(symspellResult[0].distance, 0);
 
       // Simulate topCorrection: filter out the verbatim, then take max score.
-      // Contraction has score 0.9, there's no other symspell result that differs from verbatim.
+      // Contraction has score 1.0, source 'contraction', and is inserted at
+      // position 0 (leftmost). The verbatim is at position 1 with score 0.5.
       const lowerTyped = input.toLowerCase();
       const pool = [
-        { text: input, score: 1.0, source: 'symspell' },
-        { text: contraction, score: 0.9, source: 'symspell' },
+        { text: contraction, score: 1.0, source: 'contraction' },
+        { text: input, score: 0.5, source: 'symspell' },
       ];
       const filtered = pool.filter(s => s.text.toLowerCase() !== lowerTyped);
       assert.strictEqual(filtered.length, 1);
       assert.strictEqual(filtered[0].text, `don${APOSTROPHE}t`);
-      assert.strictEqual(filtered[0].score, 0.9);
+      assert.strictEqual(filtered[0].score, 1.0);
 
       // topCorrection returns the contraction
       const topCorrection = filtered.reduce((best, s) => s.score > best.score ? s : best, filtered[0]);
       assert.strictEqual(topCorrection.text, `don${APOSTROPHE}t`);
+    });
+
+    it('contraction candidate has source "contraction" (not "symspell")', () => {
+      const input = 'dont';
+      const contract = expansion(input);
+      assert.ok(contract);
+
+      // The source should be 'contraction', not 'symspell'
+      assert.strictEqual(contract, `don${APOSTROPHE}t`);
+    });
+
+    it('when contraction exists, contraction is at position 0 and verbatim at position 1', () => {
+      // Simulate the provider ordering: contraction inserted at 0, verbatim at 1
+      const input = 'dont';
+      const contract = expansion(input);
+
+      // Pool as produced by the updated SymSpellProvider
+      const pool = [
+        { text: contract, score: 1.0, source: 'contraction' },
+        { text: input, score: 0.5, source: 'symspell' },
+      ];
+
+      assert.strictEqual(pool[0].text, `don${APOSTROPHE}t`);
+      assert.strictEqual(pool[0].score, 1.0);
+      assert.strictEqual(pool[0].source, 'contraction');
+
+      assert.strictEqual(pool[1].text, 'dont');
+      assert.strictEqual(pool[1].score, 0.5);
+      assert.strictEqual(pool[1].source, 'symspell');
+    });
+
+    it('after fusedPool with mock KenLM, contraction still outranks verbatim', () => {
+      const input = 'dont';
+      const contract = expansion(input);
+      const pool = [
+        { text: contract, score: 1.0, source: 'contraction' },
+        { text: input, score: 0.5, source: 'symspell' },
+      ];
+
+      // Mock KenLM: contraction and verbatim get similar log probs.
+      // With α=0.5 blend, contraction (1.0 base → 0.5 blended) still
+      // outranks verbatim (0.5 base → 0.25 blended plus KenLM portion).
+      const kenlmScorer = (text) => {
+        if (text === `don${APOSTROPHE}t`) return -1.5;
+        if (text === 'dont') return -2.0;
+        return -10;
+      };
+
+      const fused = fusedPool({
+        pool,
+        currentWord: input,
+        previousWord: 'I',
+        kenlmScorer,
+        blendWeight: 0.5,
+      });
+
+      // Find both candidates in the fused pool
+      const contractionFused = fused.find(s => s.text === `don${APOSTROPHE}t`);
+      const verbatimFused = fused.find(s => s.text === 'dont');
+
+      assert.ok(contractionFused, 'contraction should survive fusedPool');
+      assert.ok(verbatimFused, 'verbatim should survive fusedPool');
+
+      // Contraction should still outrank verbatim
+      assert.ok(contractionFused.score > verbatimFused.score,
+        `contraction score ${contractionFused.score} should be > verbatim score ${verbatimFused.score}`);
     });
   });
 

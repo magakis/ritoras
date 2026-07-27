@@ -50,7 +50,7 @@ describe('SymSpellProvider', () => {
       assert.strictEqual(results[0].text, 'bith');
     });
 
-    it('"dont" returns verbatim + contraction "don\'t" when "dont" is a real word', () => {
+    it('"dont" returns contraction first then verbatim when "dont" is a real word', () => {
       const speller = new SymSpell(2, 7);
       speller.createDictionaryEntry('dont', 5000);
       speller.createDictionaryEntry(`don${CANONICAL_APOSTROPHE}t`, 100);
@@ -64,16 +64,16 @@ describe('SymSpellProvider', () => {
 
       const results = provider.suggest('dont', { verbosity: 'all' });
 
-      // Verbatim "dont" at score 1.0
+      // Verbatim "dont" at score 0.5 (demoted because contraction exists)
       const verbatim = results.find(s => s.text === 'dont');
       assert.ok(verbatim, 'result should include verbatim "dont"');
-      assert.strictEqual(verbatim.score, 1.0);
+      assert.strictEqual(verbatim.score, 0.5);
 
-      // Contraction "don't" at score 0.9
+      // Contraction "don't" at score 1.0, source 'contraction'
       const contraction = results.find(s => s.text === `don${CANONICAL_APOSTROPHE}t`);
       assert.ok(contraction, 'result should include contraction "don\'t"');
-      assert.strictEqual(contraction.score, 0.9);
-      assert.strictEqual(contraction.source, 'symspell');
+      assert.strictEqual(contraction.score, 1.0);
+      assert.strictEqual(contraction.source, 'contraction');
       assert.strictEqual(contraction.distance, 0);
 
       // "dont" is a real word (high count), so no SymSpell corrections
@@ -81,18 +81,17 @@ describe('SymSpellProvider', () => {
       assert.strictEqual(results.length, 2,
         `expected 2 results (verbatim + contraction), got ${results.length}`);
 
-      // "dont" should be ranked first (score 1.0 > 0.9)
-      assert.strictEqual(results[0].text, 'dont');
+      // Contraction should be ranked first (score 1.0 > 0.5) and leftmost
+      assert.strictEqual(results[0].text, `don${CANONICAL_APOSTROPHE}t`);
+      assert.strictEqual(results[0].score, 1.0);
     });
 
-    it('"dont" with low count returns SymSpell corrections, contraction at 0.9', () => {
+    it('"dont" with low count returns contraction at 1.0, verbatim at 0.5', () => {
       const speller = new SymSpell(2, 7);
       speller.createDictionaryEntry('dont', 50);
       // NOTE: don't is deliberately NOT in the SymSpell dictionary here.
-      // The contraction table (contractions.mjs) provides "don't" at score 0.9
-      // independently of SymSpell. If we added it to SymSpell, QwertyGeometry
-      // would give it score 1.0 (apostrophe insertion cost = 0), masking the
-      // contraction-path score.
+      // The contraction table (contractions.mjs) provides "don't" at score 1.0
+      // independently of SymSpell.
 
       const dict = new Map([
         ['dont', { count: 50 }],        // 50 < 2000 → not a real word
@@ -102,15 +101,16 @@ describe('SymSpellProvider', () => {
 
       const results = provider.suggest('dont', { verbosity: 'all' });
 
-      // Verbatim "dont" at score 1.0
+      // Verbatim "dont" at score 0.5 (demoted because contraction exists)
       const verbatim = results.find(s => s.text === 'dont');
       assert.ok(verbatim, 'result should include verbatim "dont"');
-      assert.strictEqual(verbatim.score, 1.0);
+      assert.strictEqual(verbatim.score, 0.5);
 
-      // Contraction "don't" at score 0.9 (from contraction table, not SymSpell)
+      // Contraction "don't" at score 1.0 (from contraction table, not SymSpell)
       const contraction = results.find(s => s.text === `don${CANONICAL_APOSTROPHE}t`);
       assert.ok(contraction, 'result should include contraction "don\'t"');
-      assert.strictEqual(contraction.score, 0.9);
+      assert.strictEqual(contraction.score, 1.0);
+      assert.strictEqual(contraction.source, 'contraction');
 
       // Since "dont" is not a real word, SymSpell corrections are returned.
       assert.ok(results.length >= 2, `expected at least 2 results, got ${results.length}`);

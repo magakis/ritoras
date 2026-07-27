@@ -67,20 +67,25 @@ export class SymSpellProvider {
     // Determine if the typed word is a "real" (known) dictionary word.
     const isRealWord = this._isRealWord(lower);
 
-    // Always include the input itself as the leftmost chip.
-    /** @type {Array<{text: string, score: number, source: string, distance: number}>} */
-    const results = [
-      { text: currentWord, score: 1.0, source: 'symspell', distance: 0 },
-    ];
-
     // Contraction fast-path: checked BEFORE SymSpell so that
     // apostrophe-less forms like "dont" produce "don't" deterministically.
     const contract = expansion(lower);
+
+    // When a contraction exists, it should be the PRIMARY candidate (leftmost
+    // chip, highest score). The verbatim is demoted so it appears as a
+    // secondary option the user can tap to keep the apostrophe-less form.
+    const verbatimScore = contract ? 0.5 : 1.0;
+
+    /** @type {Array<{text: string, score: number, source: string, distance: number}>} */
+    const results = [
+      { text: currentWord, score: verbatimScore, source: 'symspell', distance: 0 },
+    ];
+
     if (contract) {
-      results.push({
+      results.unshift({
         text: contract,
-        score: 0.9,
-        source: 'symspell',
+        score: 1.0,
+        source: 'contraction',
         distance: 0,
       });
     }
