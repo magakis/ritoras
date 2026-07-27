@@ -120,6 +120,7 @@ final class DictationViewModel: ObservableObject {
 
     private let chunkSendQueue = ChunkSendQueue()
     private var chunkConsumerTask: Task<Void, Never>?
+    private var receiveTask: Task<String, Error>?
     private var transcriptionTask: Task<Void, Never>?
 
     /// Idempotency guard: tracks job IDs currently being retried to prevent
@@ -451,6 +452,22 @@ final class DictationViewModel: ObservableObject {
                 FileLogger.shared.info(.network, "Stream: WebSocket connected")
                 streamClient = client
 
+                let receiveClient = client
+                let sessionID = id
+                receiveTask?.cancel()
+                receiveTask = Task { [weak self] in
+                    guard let self = self else { throw WhisperError.networkError(URLError(.cancelled)) }
+                    return try await receiveClient.receiveMessages(onPartial: { [weak self] partial in
+                        FileLogger.shared.debug(.transcription, "livePartial updated",
+                                                payload: ["preview": String(partial.prefix(60)), "length": partial.count])
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            guard self.activeID == sessionID else { return }
+                            self.livePartial = partial
+                        }
+                    })
+                }
+
                 let recorder = StreamingAudioRecorder()
                 streamRecorder = recorder
 
@@ -483,6 +500,8 @@ final class DictationViewModel: ObservableObject {
                 FileLogger.shared.error(.transcription, "Stream start error",
                                         payload: ["error": error.localizedDescription])
                 await streamClient?.disconnect()
+                receiveTask?.cancel()
+                receiveTask = nil
                 streamClient = nil
                 streamRecorder = nil
                 DispatchQueue.global(qos: .utility).async {
@@ -711,32 +730,17 @@ final class DictationViewModel: ObservableObject {
 
             guard activeID == id else { return }
 
-            // Liveness-aware drain: wait for the queue to empty while the server stays
-            // responsive. Stop early (→ terminal) if the server stops answering PINGs.
-            // streamFinalTimeout remains as an absolute safety cap.
             var queueDrained = false
             var finalOverflowed = false
             let drainHardCap = Date().addingTimeInterval(SharedConfig.Defaults.streamFinalTimeout)
-            var lastProbe = Date.distantPast
             while Date() < drainHardCap {
                 if chunkSendQueue.isEmpty { queueDrained = true; break }
                 if chunkSendQueue.hasOverflowed { finalOverflowed = true; break }
-                if Date().timeIntervalSince(lastProbe) >= SharedConfig.Defaults.streamHealthCheckInterval {
-                    lastProbe = Date()
-                    let alive: Bool
-                    if let client = streamClient { alive = await client.healthCheck() } else { alive = false }
-                    // Supersession guard — healthCheck() is an await suspension on this @MainActor method.
-                    guard activeID == id else {
-                        await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
-                        return
-                    }
-                    if !alive {
-                        FileLogger.shared.warn(.network, "Stream drain: server unresponsive, stopping drain",
-                                               payload: ["jobId": id.uuidString])
-                        break
-                    }
-                }
                 try? await Task.sleep(nanoseconds: 200_000_000)
+                guard activeID == id else {
+                    await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
+                    return
+                }
             }
 
             chunkConsumerTask?.cancel()
@@ -747,20 +751,18 @@ final class DictationViewModel: ObservableObject {
             if queueDrained && !finalOverflowed {
                 do {
                     try await streamClient?.sendEnd()
-                    FileLogger.shared.info(.network, "Stream: END sent, awaiting final")
+                    FileLogger.shared.info(.network, "Stream: END sent, awaiting final from receive task")
 
                     FileLogger.shared.info(.transcription, "upload start", payload: [
                         "id": id.uuidString
                     ])
 
-                    let text = try await streamClient?.receiveMessages { [weak self] partial in
-                        FileLogger.shared.debug(.transcription, "livePartial updated",
-                                                payload: ["preview": String(partial.prefix(60)),
-                                                          "length": partial.count])
-                        Task { @MainActor in
-                            self?.livePartial = partial
-                        }
-                    } ?? ""
+                    let text = try await receiveTask?.value ?? ""
+
+                    guard activeID == id else {
+                        await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
+                        return
+                    }
 
                     let uploadElapsed = Date().timeIntervalSince(uploadT0) * 1000
                     FileLogger.shared.info(.transcription, "upload complete", payload: [
@@ -819,6 +821,9 @@ final class DictationViewModel: ObservableObject {
                 UIApplication.shared.endBackgroundTask(backgroundTaskID)
                 backgroundTaskID = .invalid
             }
+
+            receiveTask?.cancel()
+            receiveTask = nil
 
             await streamClient?.disconnect()
             streamClient = nil
@@ -1116,6 +1121,8 @@ final class DictationViewModel: ObservableObject {
         chunkSendQueue.setRecordingActive(false)
         chunkConsumerTask?.cancel()
         chunkConsumerTask = nil
+        receiveTask?.cancel()
+        receiveTask = nil
         if backgroundTaskID != .invalid {
             UIApplication.shared.endBackgroundTask(backgroundTaskID)
             backgroundTaskID = .invalid
@@ -1129,6 +1136,8 @@ final class DictationViewModel: ObservableObject {
         FileLogger.shared.info(.transcription, "cancel: stream teardown")
         chunkConsumerTask?.cancel()
         chunkConsumerTask = nil
+        receiveTask?.cancel()
+        receiveTask = nil
         transcriptionTask?.cancel()
         transcriptionTask = nil
         chunkSendQueue.clearAll()

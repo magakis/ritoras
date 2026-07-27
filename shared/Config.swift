@@ -71,9 +71,6 @@ struct SharedConfig {
         /// Consecutive health-check intervals with no activity (PONG or partial) before
         /// declaring the stream dead. 3 × 5s ≈ 15s tolerance for transient latency.
         static let streamMaxMissedPongs: Int = 3
-        /// Per-PING wait for any response during an explicit healthCheck() (drain path).
-        /// Short — a healthy server answers in milliseconds.
-        static let streamPongTimeout: TimeInterval = 10.0
 
         /// Maximum number of chunks held in the in-memory send queue before
         /// new chunks are dropped (queue overflow). When overflow occurs,

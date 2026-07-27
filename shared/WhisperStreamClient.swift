@@ -35,7 +35,7 @@ actor WhisperStreamClient {
     private var keepaliveTask: Task<Void, Never>?
 
     /// Last evidence the server is alive (PONG or partial received). Updated by the
-    /// receive loop; read by the liveness monitor and healthCheck(). A busy server
+    /// receive loop; read by the liveness monitor. A busy server
     /// still answers PING→PONG immediately (server.py stream receive loop), so this
     /// stays fresh even while the worker transcribes a long final.
     private var lastActivityDate: Date = .distantPast
@@ -374,44 +374,6 @@ actor WhisperStreamClient {
         FileLogger.shared.info(.network, "Disconnected")
     }
 
-    /// Sends PING and waits up to streamPongTimeout for any frame (PONG or partial).
-    /// Returns true if the server responded (alive), false if silent. Used by
-    /// DictationViewModel.stop() to gate the stream queue drain — only declare
-    /// terminal failure when the server stops responding.
-    ///
-    /// MUST only be called when no other receiver is active (i.e. during the queue
-    /// drain, before sendEnd/receiveMessages). Receiving a buffered partial here is
-    /// benign — partials are live-display only; the final frame (after END) carries
-    /// the authoritative text. On a false result the caller disconnects, which
-    /// cancels any abandoned receive.
-    func healthCheck() async -> Bool {
-        guard let task = task else { return false }
-        do { try await sendPing() } catch { return false }
-        return await withTaskGroup(of: Bool.self) { group in
-            group.addTask { [weak task] in
-                guard let task = task else { return false }
-                do {
-                    let msg = try await task.receive()
-                    switch msg {
-                    case .string, .data:
-                        return true
-                    @unknown default:
-                        return false
-                    }
-                } catch { return false }
-            }
-            group.addTask {
-                try? await Task.sleep(
-                    nanoseconds: UInt64(SharedConfig.Defaults.streamPongTimeout * 1_000_000_000)
-                )
-                return false
-            }
-            let result = await group.next() ?? false
-            group.cancelAll()
-            if result { self.lastActivityDate = Date() }
-            return result
-        }
-    }
 
     // MARK: - Decodable Helpers
 
