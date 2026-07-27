@@ -1,0 +1,1198 @@
+[
+  {
+    "previousWord": "the",
+    "word": "cat"
+  },
+  {
+    "previousWord": "a",
+    "word": "dog"
+  },
+  {
+    "previousWord": "the",
+    "word": "house"
+  },
+  {
+    "previousWord": "a",
+    "word": "car"
+  },
+  {
+    "previousWord": "the",
+    "word": "book"
+  },
+  {
+    "previousWord": "a",
+    "word": "tree"
+  },
+  {
+    "previousWord": "the",
+    "word": "water"
+  },
+  {
+    "previousWord": "a",
+    "word": "phone"
+  },
+  {
+    "previousWord": "the",
+    "word": "door"
+  },
+  {
+    "previousWord": "a",
+    "word": "chair"
+  },
+  {
+    "previousWord": "the",
+    "word": "table"
+  },
+  {
+    "previousWord": "a",
+    "word": "cup"
+  },
+  {
+    "previousWord": "the",
+    "word": "sun"
+  },
+  {
+    "previousWord": "a",
+    "word": "star"
+  },
+  {
+    "previousWord": "the",
+    "word": "moon"
+  },
+  {
+    "previousWord": "a",
+    "word": "river"
+  },
+  {
+    "previousWord": "the",
+    "word": "mountain"
+  },
+  {
+    "previousWord": "a",
+    "word": "garden"
+  },
+  {
+    "previousWord": "the",
+    "word": "kitchen"
+  },
+  {
+    "previousWord": "a",
+    "word": "window"
+  },
+  {
+    "previousWord": "I",
+    "word": "went"
+  },
+  {
+    "previousWord": "I",
+    "word": "like"
+  },
+  {
+    "previousWord": "I",
+    "word": "have"
+  },
+  {
+    "previousWord": "I",
+    "word": "think"
+  },
+  {
+    "previousWord": "I",
+    "word": "know"
+  },
+  {
+    "previousWord": "I",
+    "word": "need"
+  },
+  {
+    "previousWord": "I",
+    "word": "want"
+  },
+  {
+    "previousWord": "I",
+    "word": "am"
+  },
+  {
+    "previousWord": "I",
+    "word": "see"
+  },
+  {
+    "previousWord": "I",
+    "word": "feel"
+  },
+  {
+    "previousWord": "you",
+    "word": "are"
+  },
+  {
+    "previousWord": "you",
+    "word": "have"
+  },
+  {
+    "previousWord": "you",
+    "word": "need"
+  },
+  {
+    "previousWord": "you",
+    "word": "want"
+  },
+  {
+    "previousWord": "you",
+    "word": "know"
+  },
+  {
+    "previousWord": "you",
+    "word": "think"
+  },
+  {
+    "previousWord": "you",
+    "word": "like"
+  },
+  {
+    "previousWord": "you",
+    "word": "went"
+  },
+  {
+    "previousWord": "you",
+    "word": "said"
+  },
+  {
+    "previousWord": "you",
+    "word": "can"
+  },
+  {
+    "previousWord": "he",
+    "word": "said"
+  },
+  {
+    "previousWord": "he",
+    "word": "went"
+  },
+  {
+    "previousWord": "he",
+    "word": "knows"
+  },
+  {
+    "previousWord": "he",
+    "word": "likes"
+  },
+  {
+    "previousWord": "he",
+    "word": "has"
+  },
+  {
+    "previousWord": "he",
+    "word": "was"
+  },
+  {
+    "previousWord": "he",
+    "word": "will"
+  },
+  {
+    "previousWord": "he",
+    "word": "could"
+  },
+  {
+    "previousWord": "she",
+    "word": "said"
+  },
+  {
+    "previousWord": "she",
+    "word": "went"
+  },
+  {
+    "previousWord": "she",
+    "word": "knows"
+  },
+  {
+    "previousWord": "she",
+    "word": "likes"
+  },
+  {
+    "previousWord": "she",
+    "word": "has"
+  },
+  {
+    "previousWord": "she",
+    "word": "was"
+  },
+  {
+    "previousWord": "she",
+    "word": "will"
+  },
+  {
+    "previousWord": "she",
+    "word": "could"
+  },
+  {
+    "previousWord": "we",
+    "word": "are"
+  },
+  {
+    "previousWord": "we",
+    "word": "have"
+  },
+  {
+    "previousWord": "we",
+    "word": "need"
+  },
+  {
+    "previousWord": "we",
+    "word": "can"
+  },
+  {
+    "previousWord": "we",
+    "word": "will"
+  },
+  {
+    "previousWord": "we",
+    "word": "went"
+  },
+  {
+    "previousWord": "we",
+    "word": "know"
+  },
+  {
+    "previousWord": "we",
+    "word": "like"
+  },
+  {
+    "previousWord": "they",
+    "word": "are"
+  },
+  {
+    "previousWord": "they",
+    "word": "have"
+  },
+  {
+    "previousWord": "they",
+    "word": "need"
+  },
+  {
+    "previousWord": "they",
+    "word": "know"
+  },
+  {
+    "previousWord": "they",
+    "word": "think"
+  },
+  {
+    "previousWord": "they",
+    "word": "went"
+  },
+  {
+    "previousWord": "they",
+    "word": "said"
+  },
+  {
+    "previousWord": "they",
+    "word": "can"
+  },
+  {
+    "previousWord": "it",
+    "word": "was"
+  },
+  {
+    "previousWord": "it",
+    "word": "is"
+  },
+  {
+    "previousWord": "it",
+    "word": "has"
+  },
+  {
+    "previousWord": "it",
+    "word": "will"
+  },
+  {
+    "previousWord": "it",
+    "word": "does"
+  },
+  {
+    "previousWord": "it",
+    "word": "looks"
+  },
+  {
+    "previousWord": "it",
+    "word": "feels"
+  },
+  {
+    "previousWord": "it",
+    "word": "seems"
+  },
+  {
+    "previousWord": "the",
+    "word": "its"
+  },
+  {
+    "previousWord": "its",
+    "word": "owner"
+  },
+  {
+    "previousWord": "its",
+    "word": "color"
+  },
+  {
+    "previousWord": "its",
+    "word": "size"
+  },
+  {
+    "previousWord": "its",
+    "word": "name"
+  },
+  {
+    "previousWord": "its",
+    "word": "shape"
+  },
+  {
+    "previousWord": "the",
+    "word": "lets"
+  },
+  {
+    "previousWord": "this",
+    "word": "lets"
+  },
+  {
+    "previousWord": "that",
+    "word": "lets"
+  },
+  {
+    "previousWord": "and",
+    "word": "lets"
+  },
+  {
+    "previousWord": "we",
+    "word": "well"
+  },
+  {
+    "previousWord": "it",
+    "word": "well"
+  },
+  {
+    "previousWord": "now",
+    "word": "well"
+  },
+  {
+    "previousWord": "all",
+    "word": "well"
+  },
+  {
+    "previousWord": "very",
+    "word": "well"
+  },
+  {
+    "previousWord": "the",
+    "word": "qop"
+  },
+  {
+    "previousWord": "a",
+    "word": "nth"
+  },
+  {
+    "previousWord": "the",
+    "word": "xor"
+  },
+  {
+    "previousWord": "a",
+    "word": "grep"
+  },
+  {
+    "previousWord": "the",
+    "word": "awk"
+  },
+  {
+    "previousWord": "the",
+    "word": "sed"
+  },
+  {
+    "previousWord": "a",
+    "word": "trie"
+  },
+  {
+    "previousWord": "the",
+    "word": "sym"
+  },
+  {
+    "previousWord": "a",
+    "word": "tty"
+  },
+  {
+    "previousWord": "the",
+    "word": "typo"
+  },
+  {
+    "previousWord": "the",
+    "word": "the"
+  },
+  {
+    "previousWord": "the",
+    "word": "and"
+  },
+  {
+    "previousWord": "the",
+    "word": "for"
+  },
+  {
+    "previousWord": "the",
+    "word": "not"
+  },
+  {
+    "previousWord": "the",
+    "word": "but"
+  },
+  {
+    "previousWord": "the",
+    "word": "are"
+  },
+  {
+    "previousWord": "in",
+    "word": "both"
+  },
+  {
+    "previousWord": "for",
+    "word": "both"
+  },
+  {
+    "previousWord": "with",
+    "word": "both"
+  },
+  {
+    "previousWord": "to",
+    "word": "both"
+  },
+  {
+    "previousWord": "to",
+    "word": "bath"
+  },
+  {
+    "previousWord": "a",
+    "word": "bath"
+  },
+  {
+    "previousWord": "the",
+    "word": "bath"
+  },
+  {
+    "previousWord": "in",
+    "word": "bath"
+  },
+  {
+    "previousWord": "the",
+    "word": "bathroom"
+  },
+  {
+    "previousWord": "the",
+    "word": "boat"
+  },
+  {
+    "previousWord": "a",
+    "word": "boat"
+  },
+  {
+    "previousWord": "the",
+    "word": "boot"
+  },
+  {
+    "previousWord": "a",
+    "word": "boot"
+  },
+  {
+    "previousWord": "the",
+    "word": "booth"
+  },
+  {
+    "previousWord": "a",
+    "word": "bother"
+  },
+  {
+    "previousWord": "the",
+    "word": "bother"
+  },
+  {
+    "previousWord": "dont",
+    "word": "bother"
+  },
+  {
+    "previousWord": "wont",
+    "word": "bother"
+  },
+  {
+    "previousWord": "couldnt",
+    "word": "bother"
+  },
+  {
+    "previousWord": "wouldnt",
+    "word": "bother"
+  },
+  {
+    "previousWord": "shouldnt",
+    "word": "bother"
+  },
+  {
+    "previousWord": "doesnt",
+    "word": "bother"
+  },
+  {
+    "previousWord": "didnt",
+    "word": "bother"
+  },
+  {
+    "previousWord": "havent",
+    "word": "bother"
+  },
+  {
+    "previousWord": "isnt",
+    "word": "bother"
+  },
+  {
+    "previousWord": "wasnt",
+    "word": "bother"
+  },
+  {
+    "previousWord": "i",
+    "word": "will"
+  },
+  {
+    "previousWord": "i",
+    "word": "would"
+  },
+  {
+    "previousWord": "i",
+    "word": "could"
+  },
+  {
+    "previousWord": "i",
+    "word": "should"
+  },
+  {
+    "previousWord": "i",
+    "word": "must"
+  },
+  {
+    "previousWord": "i",
+    "word": "shall"
+  },
+  {
+    "previousWord": "i",
+    "word": "might"
+  },
+  {
+    "previousWord": "i",
+    "word": "may"
+  },
+  {
+    "previousWord": "i",
+    "word": "can"
+  },
+  {
+    "previousWord": "you",
+    "word": "ve"
+  },
+  {
+    "previousWord": "you",
+    "word": "re"
+  },
+  {
+    "previousWord": "they",
+    "word": "re"
+  },
+  {
+    "previousWord": "they",
+    "word": "ve"
+  },
+  {
+    "previousWord": "we",
+    "word": "re"
+  },
+  {
+    "previousWord": "we",
+    "word": "ve"
+  },
+  {
+    "previousWord": "i",
+    "word": "d"
+  },
+  {
+    "previousWord": "he",
+    "word": "d"
+  },
+  {
+    "previousWord": "she",
+    "word": "d"
+  },
+  {
+    "previousWord": "they",
+    "word": "d"
+  },
+  {
+    "previousWord": "we",
+    "word": "d"
+  },
+  {
+    "previousWord": "you",
+    "word": "d"
+  },
+  {
+    "previousWord": "i",
+    "word": "ll"
+  },
+  {
+    "previousWord": "he",
+    "word": "ll"
+  },
+  {
+    "previousWord": "she",
+    "word": "ll"
+  },
+  {
+    "previousWord": "they",
+    "word": "ll"
+  },
+  {
+    "previousWord": "we",
+    "word": "ll"
+  },
+  {
+    "previousWord": "you",
+    "word": "ll"
+  },
+  {
+    "previousWord": "it",
+    "word": "ll"
+  },
+  {
+    "previousWord": "that",
+    "word": "ll"
+  },
+  {
+    "previousWord": "this",
+    "word": "ll"
+  },
+  {
+    "previousWord": "there",
+    "word": "ll"
+  },
+  {
+    "previousWord": "here",
+    "word": "ll"
+  },
+  {
+    "previousWord": "when",
+    "word": "ll"
+  },
+  {
+    "previousWord": "where",
+    "word": "ll"
+  },
+  {
+    "previousWord": "why",
+    "word": "ll"
+  },
+  {
+    "previousWord": "how",
+    "word": "ll"
+  },
+  {
+    "previousWord": "what",
+    "word": "ll"
+  },
+  {
+    "previousWord": "who",
+    "word": "ll"
+  },
+  {
+    "previousWord": "a",
+    "word": "house"
+  },
+  {
+    "previousWord": "my",
+    "word": "house"
+  },
+  {
+    "previousWord": "your",
+    "word": "house"
+  },
+  {
+    "previousWord": "their",
+    "word": "house"
+  },
+  {
+    "previousWord": "our",
+    "word": "house"
+  },
+  {
+    "previousWord": "his",
+    "word": "house"
+  },
+  {
+    "previousWord": "her",
+    "word": "house"
+  },
+  {
+    "previousWord": "a",
+    "word": "state"
+  },
+  {
+    "previousWord": "the",
+    "word": "state"
+  },
+  {
+    "previousWord": "his",
+    "word": "state"
+  },
+  {
+    "previousWord": "her",
+    "word": "state"
+  },
+  {
+    "previousWord": "your",
+    "word": "state"
+  },
+  {
+    "previousWord": "my",
+    "word": "state"
+  },
+  {
+    "previousWord": "in",
+    "word": "which"
+  },
+  {
+    "previousWord": "of",
+    "word": "which"
+  },
+  {
+    "previousWord": "to",
+    "word": "which"
+  },
+  {
+    "previousWord": "by",
+    "word": "which"
+  },
+  {
+    "previousWord": "for",
+    "word": "which"
+  },
+  {
+    "previousWord": "from",
+    "word": "which"
+  },
+  {
+    "previousWord": "with",
+    "word": "which"
+  },
+  {
+    "previousWord": "in",
+    "word": "what"
+  },
+  {
+    "previousWord": "to",
+    "word": "what"
+  },
+  {
+    "previousWord": "for",
+    "word": "what"
+  },
+  {
+    "previousWord": "of",
+    "word": "what"
+  },
+  {
+    "previousWord": "with",
+    "word": "what"
+  },
+  {
+    "previousWord": "at",
+    "word": "what"
+  },
+  {
+    "previousWord": "the",
+    "word": "company"
+  },
+  {
+    "previousWord": "a",
+    "word": "company"
+  },
+  {
+    "previousWord": "my",
+    "word": "company"
+  },
+  {
+    "previousWord": "your",
+    "word": "company"
+  },
+  {
+    "previousWord": "their",
+    "word": "company"
+  },
+  {
+    "previousWord": "our",
+    "word": "company"
+  },
+  {
+    "previousWord": "the",
+    "word": "system"
+  },
+  {
+    "previousWord": "a",
+    "word": "system"
+  },
+  {
+    "previousWord": "the",
+    "word": "server"
+  },
+  {
+    "previousWord": "a",
+    "word": "server"
+  },
+  {
+    "previousWord": "the",
+    "word": "network"
+  },
+  {
+    "previousWord": "a",
+    "word": "network"
+  },
+  {
+    "previousWord": "the",
+    "word": "database"
+  },
+  {
+    "previousWord": "a",
+    "word": "database"
+  },
+  {
+    "previousWord": "the",
+    "word": "program"
+  },
+  {
+    "previousWord": "a",
+    "word": "program"
+  },
+  {
+    "previousWord": "the",
+    "word": "process"
+  },
+  {
+    "previousWord": "a",
+    "word": "process"
+  },
+  {
+    "previousWord": "the",
+    "word": "function"
+  },
+  {
+    "previousWord": "a",
+    "word": "function"
+  },
+  {
+    "previousWord": "the",
+    "word": "variable"
+  },
+  {
+    "previousWord": "a",
+    "word": "variable"
+  },
+  {
+    "previousWord": "the",
+    "word": "interface"
+  },
+  {
+    "previousWord": "a",
+    "word": "interface"
+  },
+  {
+    "previousWord": "the",
+    "word": "algorithm"
+  },
+  {
+    "previousWord": "a",
+    "word": "algorithm"
+  },
+  {
+    "previousWord": "the",
+    "word": "implementation"
+  },
+  {
+    "previousWord": "an",
+    "word": "implementation"
+  },
+  {
+    "previousWord": "the",
+    "word": "application"
+  },
+  {
+    "previousWord": "an",
+    "word": "application"
+  },
+  {
+    "previousWord": "the",
+    "word": "directory"
+  },
+  {
+    "previousWord": "a",
+    "word": "directory"
+  },
+  {
+    "previousWord": "the",
+    "word": "document"
+  },
+  {
+    "previousWord": "a",
+    "word": "document"
+  },
+  {
+    "previousWord": "the",
+    "word": "element"
+  },
+  {
+    "previousWord": "an",
+    "word": "element"
+  },
+  {
+    "previousWord": "the",
+    "word": "example"
+  },
+  {
+    "previousWord": "an",
+    "word": "example"
+  },
+  {
+    "previousWord": "the",
+    "word": "symbol"
+  },
+  {
+    "previousWord": "a",
+    "word": "symbol"
+  },
+  {
+    "previousWord": "the",
+    "word": "syntax"
+  },
+  {
+    "previousWord": "the",
+    "word": "semantic"
+  },
+  {
+    "previousWord": "a",
+    "word": "semantic"
+  },
+  {
+    "previousWord": "the",
+    "word": "morph"
+  },
+  {
+    "previousWord": "the",
+    "word": "phoneme"
+  },
+  {
+    "previousWord": "a",
+    "word": "phoneme"
+  },
+  {
+    "previousWord": "the",
+    "word": "lexicon"
+  },
+  {
+    "previousWord": "a",
+    "word": "lexicon"
+  },
+  {
+    "previousWord": "the",
+    "word": "cognate"
+  },
+  {
+    "previousWord": "a",
+    "word": "cognate"
+  },
+  {
+    "previousWord": "the",
+    "word": "diphthong"
+  },
+  {
+    "previousWord": "a",
+    "word": "diphthong"
+  },
+  {
+    "previousWord": "the",
+    "word": "fricative"
+  },
+  {
+    "previousWord": "a",
+    "word": "fricative"
+  },
+  {
+    "previousWord": "the",
+    "word": "plosive"
+  },
+  {
+    "previousWord": "a",
+    "word": "plosive"
+  },
+  {
+    "previousWord": "the",
+    "word": "velar"
+  },
+  {
+    "previousWord": "a",
+    "word": "velar"
+  },
+  {
+    "previousWord": "the",
+    "word": "alveolar"
+  },
+  {
+    "previousWord": "an",
+    "word": "alveolar"
+  },
+  {
+    "previousWord": "the",
+    "word": "bilabial"
+  },
+  {
+    "previousWord": "a",
+    "word": "bilabial"
+  },
+  {
+    "previousWord": "the",
+    "word": "palatal"
+  },
+  {
+    "previousWord": "a",
+    "word": "palatal"
+  },
+  {
+    "previousWord": "the",
+    "word": "glottal"
+  },
+  {
+    "previousWord": "a",
+    "word": "glottal"
+  },
+  {
+    "previousWord": "the",
+    "word": "sonorant"
+  },
+  {
+    "previousWord": "a",
+    "word": "sonorant"
+  },
+  {
+    "previousWord": "the",
+    "word": "sibilant"
+  },
+  {
+    "previousWord": "a",
+    "word": "sibilant"
+  },
+  {
+    "previousWord": "the",
+    "word": "trigraph"
+  },
+  {
+    "previousWord": "a",
+    "word": "trigraph"
+  },
+  {
+    "previousWord": "a",
+    "word": "digraph"
+  },
+  {
+    "previousWord": "the",
+    "word": "digraph"
+  },
+  {
+    "previousWord": "the",
+    "word": "monophthong"
+  },
+  {
+    "previousWord": "a",
+    "word": "monophthong"
+  },
+  {
+    "previousWord": "the",
+    "word": "allophone"
+  },
+  {
+    "previousWord": "an",
+    "word": "allophone"
+  },
+  {
+    "previousWord": "the",
+    "word": "morpheme"
+  },
+  {
+    "previousWord": "a",
+    "word": "morpheme"
+  },
+  {
+    "previousWord": "the",
+    "word": "phonology"
+  },
+  {
+    "previousWord": "a",
+    "word": "phonology"
+  },
+  {
+    "previousWord": "the",
+    "word": "orthography"
+  },
+  {
+    "previousWord": "an",
+    "word": "orthography"
+  },
+  {
+    "previousWord": "the",
+    "word": "etymology"
+  },
+  {
+    "previousWord": "an",
+    "word": "etymology"
+  },
+  {
+    "previousWord": "the",
+    "word": "lexicography"
+  },
+  {
+    "previousWord": "a",
+    "word": "lexicography"
+  },
+  {
+    "previousWord": "the",
+    "word": "sociolinguistics"
+  },
+  {
+    "previousWord": "a",
+    "word": "sociolinguistics"
+  },
+  {
+    "previousWord": "the",
+    "word": "kitten"
+  },
+  {
+    "previousWord": "a",
+    "word": "kitten"
+  },
+  {
+    "previousWord": "the",
+    "word": "puppy"
+  },
+  {
+    "previousWord": "a",
+    "word": "puppy"
+  },
+  {
+    "previousWord": "the",
+    "word": "bird"
+  },
+  {
+    "previousWord": "a",
+    "word": "bird"
+  },
+  {
+    "previousWord": "the",
+    "word": "fish"
+  },
+  {
+    "previousWord": "a",
+    "word": "fish"
+  }
+]
