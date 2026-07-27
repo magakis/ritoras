@@ -55,7 +55,7 @@ final class SymSpellProvider: SuggestionProvider {
     }
 
     func suggest(for context: SuggestionContext, limit: Int) -> [Suggestion] {
-        let word = context.lookupWord.lowercased()
+        let word = ApostropheNormalizer.canonicalize(context.lookupWord.lowercased())
         guard !word.isEmpty else { return [] }
 
         // Compute isRealWord once — drives both the verbatim-candidate display
@@ -78,6 +78,20 @@ final class SymSpellProvider: SuggestionProvider {
                 isUnknownVerbatim: !isRealWord
             )
         ]
+
+        // Contraction fast-path: checked BEFORE trie/SymSpell so that
+        // apostrophe-less forms like "dont" produce "don't" deterministically.
+        // Real-word status is irrelevant here — "dont" IS a real word in our
+        // lexicon but the user very likely meant "don't".
+        if let contraction = Contractions.expansion(for: word) {
+            let capped = Self.applyCapitalizationTemplate(from: context.currentWord, to: contraction)
+            results.append(Suggestion(
+                text: capped,
+                score: 0.9,
+                source: .symspell,
+                isUnknownVerbatim: false
+            ))
+        }
 
         if isRealWord {
             // Prefix completions from trie.

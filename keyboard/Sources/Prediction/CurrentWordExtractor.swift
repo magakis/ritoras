@@ -53,7 +53,11 @@ enum CurrentWordExtractor {
         } else {
             // Cursor is mid-word → completions of the current word.
             let currentWord = tokens.last ?? ""
-            let lookupWord = stripTrailingNonApostrophePunctuation(from: currentWord)
+            let lookupWord = ApostropheNormalizer.canonicalize(
+                stripTrailingNonApostrophePunctuation(
+                    from: stripLeadingPunctuation(from: currentWord)
+                )
+            )
 
             let previousWord: String?
             if tokens.count >= 2 {
@@ -86,12 +90,26 @@ enum CurrentWordExtractor {
         return result.isEmpty ? nil : result
     }
 
-    /// Strip trailing punctuation from a word, but preserve apostrophes
+    /// Strip trailing punctuation from a word, but preserve apostrophe variants
     /// (contractions like don't, names like O'Brien, possessives).
     private static func stripTrailingNonApostrophePunctuation(from word: String) -> String {
         var result = word
-        while let last = result.last, last != "'", last.isPunctuation {
+        while let last = result.last,
+              !ApostropheNormalizer.isApostropheVariant(last),
+              last.isPunctuation {
             result = String(result.dropLast())
+        }
+        return result
+    }
+
+    /// Strip leading boundary-quote punctuation from an in-progress token.
+    /// Apostrophes at the leading edge are also stripped (they cannot be word-internal
+    /// without a preceding letter). Inter-letter apostrophes are preserved by the
+    /// caller's separate logic — this function only strips from the leading edge.
+    private static func stripLeadingPunctuation(from word: String) -> String {
+        var result = word
+        while let first = result.first, WordBoundaryPunctuation.boundaryQuotes.contains(first) {
+            result = String(result.dropFirst())
         }
         return result
     }

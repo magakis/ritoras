@@ -37,8 +37,9 @@ final class LearnedWordsStore {
             let trimmed = stored.count > Self.maxLearnedWords
                 ? Array(stored.suffix(Self.maxLearnedWords))
                 : stored
-            self.cache = Set(trimmed)
-            self.insertionOrder = trimmed
+            let canonicalized = trimmed.map { ApostropheNormalizer.canonicalize($0) }
+            self.cache = Set(canonicalized)
+            self.insertionOrder = canonicalized
         } else {
             self.cache = []
             self.insertionOrder = []
@@ -71,7 +72,7 @@ final class LearnedWordsStore {
     /// UserDefaults (write-through) and mirrored to `UITextChecker.learnWord(_:)`
     /// so the system spell checker stops flagging it for the current session.
     func add(_ word: String) {
-        let lower = word.lowercased().trimmingCharacters(in: .whitespaces)
+        let lower = ApostropheNormalizer.canonicalize(word.lowercased().trimmingCharacters(in: .whitespaces))
         guard !lower.isEmpty else { return }
         if cache.contains(lower) { return }
 
@@ -87,9 +88,9 @@ final class LearnedWordsStore {
         UITextChecker.learnWord(lower)
     }
 
-    /// Returns `true` when the word has been learned (case-insensitive).
+    /// Returns `true` when the word has been learned (case-insensitive, canonicalized).
     func contains(_ word: String) -> Bool {
-        return cache.contains(word.lowercased().trimmingCharacters(in: .whitespaces))
+        return cache.contains(ApostropheNormalizer.canonicalize(word.lowercased().trimmingCharacters(in: .whitespaces)))
     }
 
     /// Returns all learned words in sorted order.
@@ -123,7 +124,7 @@ final class LearnedWordsStore {
     /// unlearn API, so the system-resident learned word persists until the
     /// keyboard process terminates — same caveat as `clear()`.
     func remove(_ word: String) {
-        let lower = word.lowercased().trimmingCharacters(in: .whitespaces)
+        let lower = ApostropheNormalizer.canonicalize(word.lowercased().trimmingCharacters(in: .whitespaces))
         guard cache.contains(lower) else { return }
         cache.remove(lower)
         insertionOrder.removeAll { $0 == lower }
@@ -149,8 +150,9 @@ final class LearnedWordsStore {
             let trimmed = stored.count > Self.maxLearnedWords
                 ? Array(stored.suffix(Self.maxLearnedWords))
                 : stored
-            cache = Set(trimmed)
-            insertionOrder = trimmed
+            let canonicalized = trimmed.map { ApostropheNormalizer.canonicalize($0) }
+            cache = Set(canonicalized)
+            insertionOrder = canonicalized
         } else {
             cache = []
             insertionOrder = []

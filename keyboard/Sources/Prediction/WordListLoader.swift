@@ -42,7 +42,7 @@ enum WordListLoader {
             let countStr = String(trimmed[trimmed.index(after: spaceIndex)...])
 
             guard let count = Int64(countStr) else { continue }
-            entries.append(Entry(word: word, count: count))
+            entries.append(Entry(word: ApostropheNormalizer.canonicalize(word), count: count))
         }
 
         return entries
@@ -102,8 +102,9 @@ enum WordListLoader {
                     // Apply frequency pruning if configured.
                     if let minFreq = pruneBelow, count < minFreq { return false }
 
-                    symSpell.createDictionaryEntry(key: word, count: count)
-                    trie.insert(word: word)
+                    let canonicalWord = ApostropheNormalizer.canonicalize(word)
+                    symSpell.createDictionaryEntry(key: canonicalWord, count: count)
+                    trie.insert(word: canonicalWord)
                     return true
                 }
 
