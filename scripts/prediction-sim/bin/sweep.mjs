@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SymSpell } from '../lib/symspell.mjs';
+import { SymSpellProvider } from '../lib/symspell-provider.mjs';
 import { expansion } from '../lib/contractions.mjs';
 import { topCorrection } from '../lib/top-correction.mjs';
 import { fusionIsActive } from '../lib/fusion-is-active.mjs';
@@ -24,69 +25,11 @@ function loadJSON(relativePath) {
   return JSON.parse(readFileSync(resolve(__dirname, '..', relativePath), 'utf8'));
 }
 
-/** Score a SymSpell candidate.
- *
- *  Uses nonlinear frequency weighting (freqScore^1.2) to differentiate
- *  candidates, with mild distance penalty and length-similarity factor.
- *
- *  Length-similarity prevents egregious false positives (e.g. "cat" → "a")
- *  that the real system blocks via Apple UITextChecker + QWERTY geometry
- *  which are absent from this JS port.
- *
- *  distance=0 → 1.0 (the typed word itself).
- *
- *  Typical ranges:
- *    d=1, same-length, very common (both):  ~0.71 — near 0.70 unfused
- *    d=1, same-length, common (definitely): ~0.53 — below most thresholds
- *    d=2, same-length, highest-freq (the):   ~0.87 — above 0.70 unfused
- */
-function candidateScore(distance, count, logMaxCount, typedWord, candidateWord) {
-  if (distance === 0) return 1.0;
-
-  const freqScore = Math.log10(count + 1) / logMaxCount;
-  const base = Math.pow(freqScore, 1.2);
-  const distPenalty = 1.0 + 0.15 * Math.max(0, distance - 1);
-
-  // Length similarity: min(tlen, clen) / max(tlen, clen)
-  const typedLen = typedWord.length;
-  const candLen = candidateWord.length;
-  const lenSim = candLen >= typedLen * 0.5 && candLen <= typedLen * 2
-    ? Math.min(typedLen, candLen) / Math.max(typedLen, candLen)
-    : 0.1;
-
-  return Math.max(0.05, Math.min(1.0, (base / distPenalty) * lenSim));
-}
-
-/** Build a full suggestion pool for `typedWord`. The pool includes:
- *   - A verbatim entry (score 1.0) for the typed word itself
- *   - SymSpell candidates scored by distance + frequency
- *   - Contraction expansions at score 0.9
- * The pool is the same regardless of sweep parameters — only the fusion
- * scoring changes per combination. */
-function buildPool(typedWord, symspell, logMaxCount) {
-  const pool = [];
-  const lowerTyped = typedWord.toLowerCase();
-
-  // Contraction expansions (score 0.9)
-  const contract = expansion(lowerTyped);
-  if (contract) {
-    pool.push({ text: contract, score: 0.9, source: 'symspell' });
-  }
-
-  // SymSpell candidates
-  const candidates = symspell.lookup(typedWord, undefined, 'all');
-  for (const c of candidates) {
-    const score = candidateScore(c.distance, c.count, logMaxCount, typedWord, c.term);
-    pool.push({ text: c.term, score, source: 'symspell' });
-  }
-
-  // Always include the typed word itself (verbatim entry that topCorrection
-  // filters out). This mirrors the Apple spell-checker behaviour.
-  if (!pool.some(s => s.text.toLowerCase() === lowerTyped)) {
-    pool.push({ text: typedWord, score: 1.0, source: 'symspell' });
-  }
-
-  return pool;
+/** Build a full suggestion pool for `typedWord` using the SymSpellProvider
+ *  with QwertyGeometry-aware scoring. Matches the Swift SymSpellProvider
+ *  behavior: verbatim (1.0) + contraction (0.9) + top SymSpell correction. */
+function buildPool(typedWord, symspellProvider) {
+  return symspellProvider.suggest(typedWord);
 }
 
 /** SymSpell dictionary reference for in-dictionary checks.
@@ -149,26 +92,26 @@ function main() {
   console.log('Building SymSpell index from frequency dictionary...');
   const symspell = new SymSpell(2, 7);
   const dictEntries = loadDictionary();
-  let maxCount = 0;
   for (const { word, count } of dictEntries) {
     symspell.createDictionaryEntry(word, count);
-    if (count > maxCount) maxCount = count;
   }
-  const logMaxCount = Math.log10(maxCount + 1);
-  console.log(`  Indexed ${dictEntries.length} entries, maxCount=${maxCount}, logMaxCount=${logMaxCount.toFixed(2)}.\n`);
+  console.log(`  Indexed ${dictEntries.length} entries.\n`);
 
   // Build the in-dictionary lookup for the Apple-like guard.
   _symspellDict = new Map(dictEntries.map(e => [e.word, { count: e.count }]));
+
+  // Create the SymSpellProvider with QwertyGeometry-aware scoring.
+  const symspellProvider = new SymSpellProvider(symspell, _symspellDict);
 
   // ---- Pre-compute pools ----
   // Pools don't depend on sweep parameters, so build once.
   console.log('Pre-computing suggestion pools...');
   const typoPools = typoCorpus.map((e, i) => {
-    const pool = buildPool(e.typedWord, symspell, logMaxCount);
+    const pool = buildPool(e.typedWord, symspellProvider);
     return { entry: e, pool };
   });
   const legitPools = legitCorpus.map((e, i) => {
-    const pool = buildPool(e.word, symspell, logMaxCount);
+    const pool = buildPool(e.word, symspellProvider);
     return { entry: e, pool };
   });
   console.log(`  Pre-computed ${typoPools.length} typo pools + ${legitPools.length} legit pools.\n`);
