@@ -119,6 +119,9 @@ struct SharedConfig {
         /// Blend weight for KenLM contextual scoring of mid-word candidates.
         /// 0.0 = pure SymSpell/Apple scores, 1.0 = pure KenLM contextual probability.
         /// Applied after min-max normalization of log probs across the candidate pool.
+        /// Tuned by the prediction-sim parameter sweep (Phase 5). The sweep tested
+        /// α ∈ {0.3, 0.4, 0.5, 0.6} and confirmed 0.5 is directionally optimal.
+        /// Final calibration confirmed on-device (the JS port lacks Apple/QWERTY).
         static let kenlmBlendWeight: Double = 0.5
 
         /// Minimum score floor for trigram suggestions to avoid near-zero noise.
@@ -146,7 +149,26 @@ struct SharedConfig {
         /// Minimum score (0.0–1.0) a suggestion must reach to be auto-applied.
         /// Apple guesses = 0.85, Apple completions = 0.6, SymSpell varies.
         /// 0.7 trusts Apple guesses + high-frequency SymSpell hits, ignores completions.
+        /// Tuned by the prediction-sim parameter sweep (Phase 5). The sweep tested
+        /// unfusedThreshold ∈ {0.65, 0.70, 0.75} and confirmed 0.70 is directionally
+        /// optimal. No tested combination achieved ≥95% precision — final calibration
+        /// on-device with Apple/QWERTY is required to reach that target.
         static let autocorrectMinConfidenceScore: Double = 0.7
+
+        /// Two-tier autocorrect threshold: used when KenLM fusion is active
+        /// (previous word present AND trigram .ready). Lower than the baseline because
+        /// contextual re-scoring improves candidate quality.
+        /// Tuned by the prediction-sim parameter sweep (Phase 5). The sweep tested
+        /// fusedThreshold ∈ {0.60, 0.65, 0.70} and confirmed 0.65 is directionally optimal.
+        static let autocorrectMinConfidenceScoreFused: Double = 0.65
+
+        /// Absolute KenLM log10-probability floor for the autocorrect path. Candidates
+        /// below this are rejected even if min-max normalization inflated their score.
+        /// -8.0 ≈ probability 1e-8. Tuned by the prediction-sim parameter sweep (Phase 5).
+        /// The sweep tested floor ∈ {-6.0, -8.0, -10.0, off} and confirmed -8.0
+        /// provides the best trade-off between blocking implausible candidates and
+        /// allowing valid context-driven corrections.
+        static let kenlmAutocorrectAbsoluteLogProbFloor: Double = -8.0
 
         /// Trailing-punctuation characters that, when typed, trigger autocorrect
         /// evaluation of the immediately-preceding word — same as space/return.

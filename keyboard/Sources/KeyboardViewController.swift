@@ -1858,12 +1858,22 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 previousWord2: previousWord2
             )
 
+            let fusionActive = engine.fusionIsActive(previousWord: previousWord)
+            let config = AutocorrectController.Config(
+                minWordLength: SharedConfig.Defaults.autocorrectMinWordLength,
+                maxWordLength: SharedConfig.Defaults.autocorrectMaxWordLength,
+                minConfidenceScore: fusionActive
+                    ? SharedConfig.Defaults.autocorrectMinConfidenceScoreFused
+                    : SharedConfig.Defaults.autocorrectMinConfidenceScore
+            )
+
             let decision = AutocorrectController.evaluate(
                 typedWord: typedWord,
                 origin: originAtDispatch,
                 topCorrection: top,
                 isLearned: isLearned,
-                isMisspelled: isMisspelled
+                isMisspelled: isMisspelled,
+                config: config
             )
 
             // --- Back to main thread for guard + apply ---

@@ -72,12 +72,90 @@ final class PredictionEngine {
         // ──────────────────────────────────────────────
         // MID-WORD CASE: user is typing a word
         // ──────────────────────────────────────────────
-        // Build with the full provider result limit and cache the pool.
-        // Callers (suggestions, topCorrection) trim/filter downstream.
+        let allSuggestions = fusedPool(
+            forCurrentWord: currentWord,
+            lookupWord: lookupWord,
+            previousWord: previousWord,
+            previousWord2: previousWord2
+        )
+
+        // — Sort by score descending, take limit —
+        let sorted = allSuggestions
+            .sorted { $0.score > $1.score }
+            .prefix(limit)
+            .map { suggestion -> String in
+                if suggestion.isUnknownVerbatim {
+                    return "\"\(suggestion.text)\""
+                }
+                return suggestion.text
+            }
+
+        return sorted
+    }
+
+    // MARK: - Autocorrect Support
+
+    /// Returns the highest-scoring suggestion for `lookupWord` (excluding the
+    /// typed word itself), or nil if no provider offers a correction. Used by
+    /// AutocorrectController to make confidence-gated replacement decisions on
+    /// separator press.
+    ///
+    /// Unlike `suggestions(...)`, this returns the full `Suggestion` (with score)
+    /// rather than just the text, so callers can apply a confidence threshold.
+    /// Excludes `.trigram` source — trigrams predict the NEXT word, not corrections.
+    func topCorrection(
+        forCurrentWord currentWord: String,
+        lookupWord: String,
+        previousWord: String? = nil,
+        previousWord2: String? = nil
+    ) -> Suggestion? {
+        guard !currentWord.isEmpty, !lookupWord.isEmpty else { return nil }
+        let pool = fusedPool(
+            forCurrentWord: currentWord,
+            lookupWord: lookupWord,
+            previousWord: previousWord,
+            previousWord2: previousWord2
+        )
+        let lowerTyped = currentWord.lowercased()
+        guard let winner = pool
+            .filter { $0.source != .trigram && $0.text.lowercased() != lowerTyped }
+            .max(by: { $0.score < $1.score })
+        else { return nil }
+
+        // Absolute KenLM floor: reject if the winner is contextually implausible even
+        // after min-max normalization inflated its relative score. Only applies when
+        // fusion is active (trigram ready); otherwise there's no KenLM score to check.
+        if fusionIsActive(previousWord: previousWord),
+           let trigramProvider = providers.compactMap({ $0 as? TrigramProvider }).first(where: { $0.isReady }) {
+            let logProb = trigramProvider.rawLogProb(
+                for: winner.text,
+                previousWord: previousWord,
+                previousWord2: previousWord2
+            ) ?? -10.0
+            if logProb < SharedConfig.Defaults.kenlmAutocorrectAbsoluteLogProbFloor {
+                return nil
+            }
+        }
+        return winner
+    }
+
+    // MARK: - Fusion Pool
+
+    /// Apple-boost + KenLM re-score + dedup. Pure function over the input pool.
+    /// NOT cached (the cache lives in `mergedPool`). Called by both `suggestions()`
+    /// and `topCorrection()` so autocorrect decisions use the same context-aware
+    /// scoring as the suggestion bar.
+    private func fusedPool(
+        forCurrentWord currentWord: String,
+        lookupWord: String,
+        previousWord: String?,
+        previousWord2: String?
+    ) -> [Suggestion] {
         var allSuggestions = mergedPool(
             forCurrentWord: currentWord,
             lookupWord: lookupWord,
-            previousWord: previousWord
+            previousWord: previousWord,
+            previousWord2: previousWord2
         )
 
         // — Boost Apple suggestions when SymSpell is uncertain —
@@ -149,47 +227,17 @@ final class PredictionEngine {
             }
         }
 
-        // — Sort by score descending, take limit —
-        let sorted = bestByText.values
-            .sorted { $0.score > $1.score }
-            .prefix(limit)
-            .map { suggestion -> String in
-                if suggestion.isUnknownVerbatim {
-                    return "\"\(suggestion.text)\""
-                }
-                return suggestion.text
-            }
-
-        return sorted
+        return Array(bestByText.values)
     }
 
-    // MARK: - Autocorrect Support
+    // MARK: - Fusion State
 
-    /// Returns the highest-scoring suggestion for `lookupWord` (excluding the
-    /// typed word itself), or nil if no provider offers a correction. Used by
-    /// AutocorrectController to make confidence-gated replacement decisions on
-    /// separator press.
-    ///
-    /// Unlike `suggestions(...)`, this returns the full `Suggestion` (with score)
-    /// rather than just the text, so callers can apply a confidence threshold.
-    /// Excludes `.trigram` source — trigrams predict the NEXT word, not corrections.
-    func topCorrection(
-        forCurrentWord currentWord: String,
-        lookupWord: String,
-        previousWord: String? = nil,
-        previousWord2: String? = nil
-    ) -> Suggestion? {
-        guard !currentWord.isEmpty, !lookupWord.isEmpty else { return nil }
-        let pool = mergedPool(
-            forCurrentWord: currentWord,
-            lookupWord: lookupWord,
-            previousWord: previousWord,
-            previousWord2: previousWord2
-        )
-        let lowerTyped = currentWord.lowercased()
-        return pool
-            .filter { $0.source != .trigram && $0.text.lowercased() != lowerTyped }
-            .max { $0.score < $1.score }
+    /// True when KenLM fusion would actually run: a previous word exists to give
+    /// context AND the trigram provider is loaded. Used by `KeyboardViewController`
+    /// to pick the two-tier autocorrect threshold (0.65 fused / 0.70 unfused).
+    func fusionIsActive(previousWord: String?) -> Bool {
+        guard let prev = previousWord, !prev.isEmpty else { return false }
+        return providers.compactMap { $0 as? TrigramProvider }.first(where: { $0.isReady }) != nil
     }
 
     // MARK: - Shared Pool Builder
