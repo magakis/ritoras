@@ -112,7 +112,7 @@ actor AudioRecorder {
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: 16000,
             AVNumberOfChannelsKey: 1,
-            AVEncoderAudioQualityKey: AVAudioQuality.medium.rawValue
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue // .high ~64 kbps at 16 kHz mono — transparent for speech, well above Whisper's needs
         ]
 
         // 5. Create recorder
