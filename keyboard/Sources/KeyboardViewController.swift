@@ -121,6 +121,14 @@ class KeyboardViewController: UIInputViewController {
     private var consecutiveConnectionFailures: Int = 0
     private var darwinStateChangedToken: DarwinObserverToken?
     private var localhostPollDeadline: Date = .distantFuture
+    /// Stored Task for refreshStateFromLocalhost, cancelled on teardown and
+    /// superseded on each new spawn to prevent interleaved concurrent executions.
+    private var appearRefreshTask: Task<Void, Never>?
+
+    /// The `documentIdentifier` of the text field that started the current
+    /// dictation. Gate on this in `insertDictationResult` to defer results
+    /// that arrive after the user switched text fields.
+    private var dictationTargetDocId: UUID? = nil
 
     // Settings cache (refreshed by Darwin notification from container app)
     private let settingsCache = KeyboardSettingsCache()
@@ -328,7 +336,10 @@ class KeyboardViewController: UIInputViewController {
         keyboardView.updateFullAccess(hasFullAccess)
 
         // Localhost transport (primary under SideStore where app group is broken).
-        Task { await self.refreshStateFromLocalhost() }
+        appearRefreshTask?.cancel()
+        appearRefreshTask = Task { [weak self] in
+            await self?.refreshStateFromLocalhost()
+        }
         startLocalhostPolling()
 
         // Defensive: never resume in search mode after keyboard dismiss/reappear
@@ -357,6 +368,7 @@ class KeyboardViewController: UIInputViewController {
                 FileLogger.shared.debug(.keyboard, "viewDidAppear — pending dictation stale",
                                         payload: ["age": age, "pendingRequestId": id.uuidString])
                 pendingRequestId = nil
+                dictationTargetDocId = nil
                 state = .idle
             } else {
                 FileLogger.shared.info(.keyboard, "viewDidAppear — resuming pending dictation",
@@ -445,26 +457,7 @@ class KeyboardViewController: UIInputViewController {
         // when the keyboard reappears without waiting for server polling.
         // The observer auto-unregisters in deinit; stale notifications after a
         // resolved dictation are filtered by pendingRequestId.
-        waitTimer?.invalidate()
-        pollTimer?.invalidate()
-        clipboardPollTimer?.invalidate()
-        serverPollTimer?.invalidate()
-        serverPollWorkItem?.cancel()
-        serverPollWorkItem = nil
-        currentPollTask?.cancel()
-        currentPollTask = nil
-        confirmStopTimer?.invalidate()
-        confirmStopTimer = nil
-        errorResetWorkItem?.cancel()
-        backspaceTimer?.invalidate()
-        backspaceTimer = nil
-        backspacePhase = nil
-        backspaceSingleCharCount = 0
-        backspaceNilContextRetries = 0
-        stopLocalhostPolling()
-        keyboardView.cancelSuggestionLookup()
-        autocorrectWorkItem?.cancel()
-        autocorrectWorkItem = nil
+        cancelOutstandingAsyncWork()
     }
 
     override func viewDidDisappear(_ animated: Bool) {
@@ -478,21 +471,10 @@ class KeyboardViewController: UIInputViewController {
                       "buildId": Self.buildGeneration])
         KeyboardLogShipper.shared.stop()
         FileLogger.broadcast = nil
+        cancelOutstandingAsyncWork()
         darwinToken = nil
         darwinStateChangedToken = nil
         darwinSettingsChangedToken = nil
-        stopLocalhostPolling()
-        waitTimer?.invalidate()
-        pollTimer?.invalidate()
-        clipboardPollTimer?.invalidate()
-        serverPollTimer?.invalidate()
-        serverPollWorkItem?.cancel()
-        serverPollWorkItem = nil
-        confirmStopTimer?.invalidate()
-        confirmStopTimer = nil
-        errorResetWorkItem?.cancel()
-        backspaceTimer?.invalidate()
-        backspaceNilContextRetries = 0
     }
 
     // MARK: - Setup
@@ -617,6 +599,10 @@ class KeyboardViewController: UIInputViewController {
         pendingRequestId = id
         pendingRequestStart = Date().timeIntervalSince1970
 
+        // Capture the document identifier of the current text field so
+        // insertDictationResult can defer the result if the field changed.
+        dictationTargetDocId = textDocumentProxy.documentIdentifier
+
         FileLogger.shared.debug(.keyboard, "dictation start footprint",
             payload: ["id": id.uuidString, "footprint": MemoryMonitor.currentFootprint()])
 
@@ -629,6 +615,7 @@ class KeyboardViewController: UIInputViewController {
         components.queryItems = [URLQueryItem(name: "id", value: id.uuidString)]
         guard let url = components.url else {
             pendingRequestId = nil
+            dictationTargetDocId = nil
             state = .error("Couldn't create dictation URL.")
             return
         }
@@ -644,6 +631,7 @@ class KeyboardViewController: UIInputViewController {
             FileLogger.shared.error(.keyboard, "Failed to traverse responder chain",
                                     payload: ["url": url.absoluteString, "id": id.uuidString])
             pendingRequestId = nil
+            dictationTargetDocId = nil
             state = .error("Couldn't open Ritoras app. Make sure it's installed.")
         }
     }
@@ -685,13 +673,19 @@ class KeyboardViewController: UIInputViewController {
 
         // Register Darwin notification observer
         darwinToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinNotificationName) { [weak self] in
-            Task { await self?.refreshStateFromLocalhost() }
+            self?.appearRefreshTask?.cancel()
+            self?.appearRefreshTask = Task { [weak self] in
+                await self?.refreshStateFromLocalhost()
+            }
         }
 
         // Register localhost state-changed observer
         darwinStateChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinStateChangedNotificationName) { [weak self] in
             // State-changed notification: poll localhost for updated state.
-            Task { await self?.refreshStateFromLocalhost() }
+            self?.appearRefreshTask?.cancel()
+            self?.appearRefreshTask = Task { [weak self] in
+                await self?.refreshStateFromLocalhost()
+            }
         }
 
         // Start timeout timer
@@ -742,12 +736,14 @@ class KeyboardViewController: UIInputViewController {
             FileLogger.shared.info(.keyboard, "Dictation cancelled",
                                    payload: ["pendingRequestId": id.uuidString])
             pendingRequestId = nil
+            dictationTargetDocId = nil
             state = .idle
         case .error:
             FileLogger.shared.error(.keyboard, "Dictation completed with error",
                                     payload: ["pendingRequestId": id.uuidString,
                                               "errorMessage": payload.errorMessage ?? "unknown"])
             pendingRequestId = nil
+            dictationTargetDocId = nil
             state = .error(payload.errorMessage ?? "Transcription failed.")
         case .recording, .transcribing:
             // Premature signal \u{2014} keep waiting
@@ -767,6 +763,7 @@ class KeyboardViewController: UIInputViewController {
             await MainActor.run {
                 self.stopDictationTransports()
                 self.pendingRequestId = nil
+                self.dictationTargetDocId = nil
                 FileLogger.shared.debug(.keyboard, "Localhost polling timed out",
                                         payload: ["timeoutSec": SharedConfig.Defaults.dictationTimeoutSeconds])
                 self.state = .error("Dictation timed out. Try again.")
@@ -778,6 +775,11 @@ class KeyboardViewController: UIInputViewController {
         }
         do {
             let snapshot = try await LocalhostClient.getState(id: id)
+            if Task.isCancelled {
+                // STRIP-BEFORE-COMMIT
+                FileLogger.shared.warn(.keyboard, "crash-probe: refreshStateFromLocalhost cancelled at checkpoint N", payload: ["checkpoint": 1])
+                return
+            }
             consecutiveConnectionFailures = 0
             guard let snapshot = snapshot else { return }
             await MainActor.run {
@@ -786,6 +788,11 @@ class KeyboardViewController: UIInputViewController {
                 if snapshot.phase == "recording" || snapshot.phase == "transcribing" {
                     self.localhostPollDeadline = Date().addingTimeInterval(120.0)
                 }
+            }
+            if Task.isCancelled {
+                // STRIP-BEFORE-COMMIT
+                FileLogger.shared.warn(.keyboard, "crash-probe: refreshStateFromLocalhost cancelled at checkpoint N", payload: ["checkpoint": 2])
+                return
             }
             if snapshot.phase == "done" || snapshot.phase == "error" {
                 // Terminal — fetch the result
@@ -860,6 +867,7 @@ class KeyboardViewController: UIInputViewController {
             lastProcessedPayloadId = UUID(uuidString: result.id)
             stopDictationTransports()
             pendingRequestId = nil
+            dictationTargetDocId = nil
             state = .error(result.errorMessage ?? "Transcription failed")
         default:
             break
@@ -890,6 +898,7 @@ class KeyboardViewController: UIInputViewController {
         darwinToken = nil
         waitTimer = nil
         pendingRequestId = nil
+        dictationTargetDocId = nil
         state = .error("Dictation timed out. Try again.")
     }
 
@@ -983,13 +992,13 @@ class KeyboardViewController: UIInputViewController {
                     case .error:
                         FileLogger.shared.warn(.keyboard, "resolve: appgroup error",
                                                payload: ["id": id.uuidString, "errorMessage": payload.errorMessage ?? "unknown"])
-                        self.stopDictationTransports(); self.pendingRequestId = nil
+                        self.stopDictationTransports(); self.pendingRequestId = nil; self.dictationTargetDocId = nil
                         self.state = .error(payload.errorMessage ?? "Transcription failed.")
                         completion(true); return
                     case .cancelled:
                         FileLogger.shared.info(.keyboard, "resolve: appgroup cancelled",
                                                payload: ["id": id.uuidString])
-                        self.stopDictationTransports(); self.pendingRequestId = nil
+                        self.stopDictationTransports(); self.pendingRequestId = nil; self.dictationTargetDocId = nil
                         self.state = .idle
                         completion(true); return
                     case .recording, .transcribing:
@@ -1014,13 +1023,13 @@ class KeyboardViewController: UIInputViewController {
                         case "error":
                             FileLogger.shared.error(.keyboard, "resolve: clipboard error",
                                                    payload: ["id": id.uuidString])
-                             self.stopDictationTransports(); self.pendingRequestId = nil
+                             self.stopDictationTransports(); self.pendingRequestId = nil; self.dictationTargetDocId = nil
                             self.state = .error(clip["errorMessage"] as? String ?? "Transcription failed.")
                             completion(true); return
                         case "cancelled":
                             FileLogger.shared.info(.keyboard, "resolve: clipboard cancelled",
                                                    payload: ["id": id.uuidString])
-                            self.stopDictationTransports(); self.pendingRequestId = nil
+                            self.stopDictationTransports(); self.pendingRequestId = nil; self.dictationTargetDocId = nil
                             self.state = .idle
                             completion(true); return
                         default:
@@ -1051,14 +1060,20 @@ class KeyboardViewController: UIInputViewController {
         // Re-register the Darwin observer (it was torn down in viewWillDisappear).
         if darwinToken == nil {
             darwinToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinNotificationName) { [weak self] in
-                Task { await self?.refreshStateFromLocalhost() }
+                self?.appearRefreshTask?.cancel()
+                self?.appearRefreshTask = Task { [weak self] in
+                    await self?.refreshStateFromLocalhost()
+                }
             }
         }
 
         // Re-register the localhost state-changed observer.
         if darwinStateChangedToken == nil {
             darwinStateChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinStateChangedNotificationName) { [weak self] in
-                Task { await self?.refreshStateFromLocalhost() }
+                self?.appearRefreshTask?.cancel()
+                self?.appearRefreshTask = Task { [weak self] in
+                    await self?.refreshStateFromLocalhost()
+                }
             }
         }
 
@@ -1104,6 +1119,58 @@ class KeyboardViewController: UIInputViewController {
         stopLocalhostPolling()
     }
 
+    /// Cancels the common subset of outstanding async work across both
+    /// viewWillDisappear and deinit. Does NOT touch the three Darwin tokens
+    /// (darwinToken, darwinStateChangedToken, darwinSettingsChangedToken),
+    /// which are intentionally kept alive across disappear and nilled only in deinit.
+    private func cancelOutstandingAsyncWork() {
+        // STRIP-BEFORE-COMMIT
+        FileLogger.shared.warn(.lifecycle, "crash-probe: cancelOutstandingAsyncWork entered", payload: [:])
+
+        // Timers
+        waitTimer?.invalidate()
+        waitTimer = nil
+        pollTimer?.invalidate()
+        pollTimer = nil
+        clipboardPollTimer?.invalidate()
+        clipboardPollTimer = nil
+        serverPollTimer?.invalidate()
+        serverPollTimer = nil
+        confirmStopTimer?.invalidate()
+        confirmStopTimer = nil
+
+        // DispatchWorkItems
+        serverPollWorkItem?.cancel()
+        serverPollWorkItem = nil
+        errorResetWorkItem?.cancel()
+        errorResetWorkItem = nil
+        suggestionRefreshWorkItem?.cancel()
+        suggestionRefreshWorkItem = nil
+        autocorrectWorkItem?.cancel()
+        autocorrectWorkItem = nil
+
+        // URLSessionDataTask
+        currentPollTask?.cancel()
+        currentPollTask = nil
+
+        // Backspace state
+        backspaceTimer?.invalidate()
+        backspaceTimer = nil
+        backspacePhase = nil
+        backspaceSingleCharCount = 0
+        backspaceNilContextRetries = 0
+
+        // Localhost polling
+        stopLocalhostPolling()
+
+        // Stored Tasks (supersession-by-cancellation)
+        appearRefreshTask?.cancel()
+        appearRefreshTask = nil
+
+        // Suggestion lookup (releases the engine-capturing work item)
+        keyboardView?.cancelSuggestionLookup()
+    }
+
     /// Cancels the current dictation: stops all polling, clears the pending
     /// request (both in-memory and UserDefaults), and resets the keyboard to
     /// idle. This is a local-only operation — it does NOT attempt to notify
@@ -1117,6 +1184,7 @@ class KeyboardViewController: UIInputViewController {
         FileLogger.shared.debug(.keyboard, "Dictation cancelled by user",
                                 payload: ["pendingRequestId": pendingRequestId?.uuidString ?? "nil"])
         pendingRequestId = nil
+        dictationTargetDocId = nil
         state = .idle
     }
 
@@ -1125,6 +1193,8 @@ class KeyboardViewController: UIInputViewController {
     /// every other transport is stopped first (prevents double-insert now that the
     /// Darwin observer and server polling can run concurrently on resume).
     private func insertDictationResult(text: String) {
+        // STRIP-BEFORE-COMMIT
+        FileLogger.shared.warn(.keyboard, "crash-probe: insertDictationResult entered", payload: ["len": text.count])
         FileLogger.shared.debug(.keyboard, "dictation stop footprint",
             payload: ["footprint": MemoryMonitor.currentFootprint()])
 
@@ -1145,6 +1215,7 @@ class KeyboardViewController: UIInputViewController {
             storeDeferredResult(text: text)
             stopDictationTransports()
             pendingRequestId = nil
+            dictationTargetDocId = nil
             return
         }
 
@@ -1160,10 +1231,29 @@ class KeyboardViewController: UIInputViewController {
                 uiMode = .emoji
             }
         }
+
+        // Wrong-target gate: if the current text field's documentIdentifier
+        // differs from the one captured at dictation start, defer the result
+        // instead of pasting into the wrong field.
+        if let targetId = dictationTargetDocId, targetId != UUID() {
+            guard textDocumentProxy.documentIdentifier == targetId else {
+                FileLogger.shared.warn(.keyboard, "Dictation target mismatch — deferring",
+                                       payload: ["expected": targetId.uuidString,
+                                                 "actual": textDocumentProxy.documentIdentifier.uuidString])
+                storeDeferredResult(text: text)
+                stopDictationTransports()
+                pendingRequestId = nil
+                dictationTargetDocId = nil
+                state = .idle
+                return
+            }
+        }
+
         FileLogger.shared.info(.keyboard, "insertDictationResult entry",
                                payload: ["length": text.count, "preview": String(text.prefix(30))])
         stopDictationTransports()
         pendingRequestId = nil
+        dictationTargetDocId = nil
         if text.isEmpty {
             state = .error("Nothing was heard. Try again.")
             return
@@ -1242,6 +1332,7 @@ class KeyboardViewController: UIInputViewController {
                                    payload: ["pendingRequestId": pendingRequestId?.uuidString ?? "nil",
                                              "serverPollUnresponsiveCount": serverPollUnresponsiveCount])
             pendingRequestId = nil
+            dictationTargetDocId = nil
             state = .error("Dictation timed out. Try again.")
             return
         }
@@ -1365,6 +1456,7 @@ class KeyboardViewController: UIInputViewController {
                     self.stopDictationTransports()
                     self.lastProcessedTimestamp = timestamp
                     self.pendingRequestId = nil
+                    self.dictationTargetDocId = nil
                     self.state = .error(json["errorMessage"] as? String ?? "Transcription failed.")
 
                 case "cancelled":
@@ -1373,6 +1465,7 @@ class KeyboardViewController: UIInputViewController {
                     self.stopDictationTransports()
                     self.lastProcessedTimestamp = timestamp
                     self.pendingRequestId = nil
+                    self.dictationTargetDocId = nil
                     self.state = .idle
 
                 case "transcribing", "recording":
@@ -1486,6 +1579,7 @@ class KeyboardViewController: UIInputViewController {
                                            payload: ["jobId": id.uuidString.lowercased()])
                     self.stopDictationTransports()
                     self.pendingRequestId = nil
+                    self.dictationTargetDocId = nil
                     self.state = .error("Transcription failed.")
 
                 case "pending", "transcribing":
@@ -1879,6 +1973,18 @@ extension KeyboardViewController: KeyboardViewDelegate {
             // --- Back to main thread for guard + apply ---
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
+                // STRIP-BEFORE-COMMIT
+                FileLogger.shared.warn(.keyboard, "crash-probe: autocorrect dispatch-back entered", payload: [:])
+
+                // Liveness gate: if the keyboard is no longer in a window,
+                // the textDocumentProxy is dead — reading it in
+                // AutocorrectApplicationGuard.shouldApply (which reads
+                // documentContextBeforeInput) would crash with SIGSEGV.
+                if self.view.window == nil {
+                    // STRIP-BEFORE-COMMIT
+                    FileLogger.shared.warn(.keyboard, "crash-probe: autocorrect dispatch-back gate tripped (window nil)", payload: [:])
+                    return
+                }
 
                 // Application guard: all three must hold or the result is stale.
                 guard AutocorrectApplicationGuard.shouldApply(
