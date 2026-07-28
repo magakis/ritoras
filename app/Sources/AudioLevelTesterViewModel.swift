@@ -16,7 +16,7 @@ final class AudioLevelTesterViewModel: ObservableObject {
         guard !isMonitoring else { return }
 
         // Check microphone permission
-        let permission = AVAudioApplication.shared.recordPermission
+        let permission = AVAudioSession.sharedInstance().recordPermission
         switch permission {
         case .granted:
             break
@@ -25,7 +25,7 @@ final class AudioLevelTesterViewModel: ObservableObject {
             return
         case .undetermined:
             let granted = await withCheckedContinuation { continuation in
-                AVAudioApplication.shared.requestRecordPermission { allowed in
+                AVAudioSession.sharedInstance().requestRecordPermission { allowed in
                     continuation.resume(returning: allowed)
                 }
             }
@@ -79,7 +79,7 @@ final class AudioLevelTesterViewModel: ObservableObject {
     }
 
     func recheckPermission() async {
-        if AVAudioApplication.shared.recordPermission == .granted {
+        if AVAudioSession.sharedInstance().recordPermission == .granted {
             permissionDenied = false
         }
     }

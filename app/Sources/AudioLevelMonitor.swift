@@ -61,6 +61,12 @@ private final class ConverterCache: @unchecked Sendable {
         lastInputFormat = nil
         isInvalidated = true
     }
+
+    /// Resets the invalidation flag (but keeps the converter — it's reusable
+    /// after a fresh session).
+    func reset() {
+        isInvalidated = false
+    }
 }
 
 // MARK: - Mutable Level State (queue-serial access only)
@@ -164,7 +170,7 @@ actor AudioLevelMonitor {
         }
 
         // Reset state for a fresh capture session
-        converterCache.isInvalidated = false
+        converterCache.reset()
         levelState.isInvalidated = false
         levelState.peak = 0
 
