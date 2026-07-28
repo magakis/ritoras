@@ -33,6 +33,41 @@ Unsigned by design — CI produces an unsigned `.ipa` for SideStore on-device si
 
 No `make`, `just`, `fastlane`, or pre-commit hooks. Custom scripts live in `scripts/`.
 
+## Local Swift syntax check — mandatory pre-commit gate
+
+**Before every commit that touches any `.swift` file, run this script. If it exits non-zero, fix the error — do not commit.** This is not optional.
+
+```bash
+node scripts/parse-check.mjs
+```
+
+The full sweep parses ALL git-tracked `.swift` files with `swiftc -parse` (~3–5 s). This is the authoritative commit gate.
+
+### Invocation modes
+
+```bash
+# Full sweep — MANDATORY commit gate (all git-tracked .swift files)
+node scripts/parse-check.mjs
+
+# Changed-only — files modified vs HEAD (falls back to full sweep if none changed)
+node scripts/parse-check.mjs --changed
+
+# Explicit paths — files and/or directories (non-.swift silently ignored, missing paths warned)
+node scripts/parse-check.mjs keyboard/Sources/KeyboardViewController.swift shared/
+```
+
+### What it does NOT catch
+
+**Type errors are uncatchable on Linux** — there is no iOS SDK, so `swiftc -typecheck` cannot run on UIKit imports. This is permanent on this hardware. The only real type-check gate is GitHub Actions CI on push (see [CI / deploy](#ci--deploy)).
+
+### Reassurance for agents
+
+You do NOT need to manually inspect Swift syntax, eyeball code for typos, or stress about catching syntax errors by eye. The script is the authoritative local gate. Run it, read its output, fix what it reports. That's it.
+
+### Prerequisite
+
+[Swiftly](https://github.com/swiftlang/swiftly) (`swiftly install latest --use`). The script auto-discovers the toolchain or prints install instructions.
+
 ## Architecture
 
 Two XcodeGen targets share one project:
@@ -114,6 +149,10 @@ The keyboard extension is killed without warning if it exceeds ~48 MB resident m
 - `NSExtension.NSExtensionAttributes.PrimaryLanguage` must be present — omitting it crashes iOS 27.
 
 Do not switch `GENERATE_INFOPLIST_FILE` to `YES` — XcodeGen will overwrite the custom plist.
+
+### Pre-commit parse check
+
+Before every commit touching `.swift` files, run the mandatory syntax check (see [Local Swift syntax check](#local-swift-syntax-check)). A non-zero exit means a Swift syntax error — fix it, do not commit.
 
 ## Git workflow
 
