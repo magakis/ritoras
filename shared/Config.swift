@@ -52,15 +52,27 @@ struct SharedConfig {
         /// RMS threshold for VAD speech detection. Higher = less sensitive.
         static let streamVadSpeechRmsKey = "streamVadSpeechRms"
         static let streamVadSpeechRmsDefault: Float = 0.02
-        /// Silence duration (ms) before a chunk is finalized (~1.5 s).
+        /// Silence duration (ms) before a chunk is finalized (~2.5 s).
         static let streamVadSilenceMsKey = "streamVadSilenceMs"
-        static let streamVadSilenceMsDefault: Int = 1500
+        static let streamVadSilenceMsDefault: Int = 2500
         /// Minimum speech duration (ms) to accept a chunk.
         static let streamVadMinSpeechMsKey = "streamVadMinSpeechMs"
         static let streamVadMinSpeechMsDefault: Int = 300
         /// Maximum audio segment length before forced chunk finalization.
         static let streamMaxChunkSecondsKey = "streamMaxChunkSeconds"
         static let streamMaxChunkSecondsDefault: TimeInterval = 8.0
+        /// Hysteresis ratio: exit threshold = speechRms × ratio. Lower = wider speech-hold band.
+        static let streamVadHysteresisRatioKey = "streamVadHysteresisRatio"
+        static let streamVadHysteresisRatioDefault: Float = 0.6
+        /// Pre-roll (lookback) prepended to each chunk on speech onset, in ms (~300 = faster-whisper/OpenAI convention).
+        static let streamVadPreRollMsKey = "streamVadPreRollMs"
+        static let streamVadPreRollMsDefault: Int = 300
+        /// When forced to split a long utterance at maxChunkSeconds, search backward for a low-energy gap of at least this length (faster-whisper convention ~100 ms).
+        static let streamVadMinSilenceAtMaxSpeechMsKey = "streamVadMinSilenceAtMaxSpeechMs"
+        static let streamVadMinSilenceAtMaxSpeechMsDefault: Int = 100
+        /// Trailing silence retained in each pause-emitted chunk (detection window is streamVadSilenceMs; this is the emission tail). ~400 ms = faster-whisper/OpenAI convention.
+        static let streamVadPostRollMsKey = "streamVadPostRollMs"
+        static let streamVadPostRollMsDefault: Int = 400
         /// WebSocket connection timeout.
         static let streamWsConnectTimeout: TimeInterval = 8.0
         /// How long to wait for a final transcription after the last audio chunk.
@@ -345,13 +357,57 @@ struct SharedConfig {
 
     /// Reads the streaming VAD silence threshold (ms) from the App Group.
     /// Used by the keyboard extension, which cannot link `AppSettings`.
-    /// Returns the default (`1500`) when the App Group is unavailable or the key is unset.
+    /// Returns the default (`2500`) when the App Group is unavailable or the key is unset.
     static func streamVadSilenceMs() -> Int {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
             return Defaults.streamVadSilenceMsDefault
         }
         return (defaults.object(forKey: Defaults.streamVadSilenceMsKey) as? Int)
             ?? Defaults.streamVadSilenceMsDefault
+    }
+
+    /// Reads the streaming VAD hysteresis ratio from the App Group.
+    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Returns the default (`0.6`) when the App Group is unavailable or the key is unset.
+    static func streamVadHysteresisRatio() -> Float {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadHysteresisRatioDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadHysteresisRatioKey) as? Float)
+            ?? Defaults.streamVadHysteresisRatioDefault
+    }
+
+    /// Reads the streaming VAD pre-roll (lookback) duration (ms) from the App Group.
+    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Returns the default (`300`) when the App Group is unavailable or the key is unset.
+    static func streamVadPreRollMs() -> Int {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadPreRollMsDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadPreRollMsKey) as? Int)
+            ?? Defaults.streamVadPreRollMsDefault
+    }
+
+    /// Reads the streaming VAD minimum silence-at-max-speech split duration (ms) from the App Group.
+    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Returns the default (`100`) when the App Group is unavailable or the key is unset.
+    static func streamVadMinSilenceAtMaxSpeechMs() -> Int {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadMinSilenceAtMaxSpeechMsDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadMinSilenceAtMaxSpeechMsKey) as? Int)
+            ?? Defaults.streamVadMinSilenceAtMaxSpeechMsDefault
+    }
+
+    /// Reads the streaming VAD post-roll (trailing silence retained) duration (ms) from the App Group.
+    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Returns the default (`400`) when the App Group is unavailable or the key is unset.
+    static func streamVadPostRollMs() -> Int {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadPostRollMsDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadPostRollMsKey) as? Int)
+            ?? Defaults.streamVadPostRollMsDefault
     }
 
     /// Reads the streaming VAD minimum speech duration (ms) from the App Group.

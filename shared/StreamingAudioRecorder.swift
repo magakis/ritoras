@@ -39,9 +39,13 @@ struct VADEmission {
 private final class VADContext: @unchecked Sendable {
     // MARK: Configuration (constants)
     let speechRms: Float
+    let exitRms: Float
+    let preRollCapacity: Int
     let silenceThresholdSamples: Int
     let minSpeechSamples: Int
     let maxChunkSamples: Int
+    let minSilenceAtMaxSpeechSamples: Int
+    let postRollSamples: Int
 
     // MARK: Lock
     private var unfairLock = os_unfair_lock()
@@ -53,11 +57,20 @@ private final class VADContext: @unchecked Sendable {
     var silenceSampleCount: Int = 0
     var chunkId: UInt32 = 0
 
-    init(speechRms: Float, silenceThresholdSamples: Int, minSpeechSamples: Int, maxChunkSamples: Int) {
+    /// Rolling ring buffer for pre-roll lookback. Retains the last `preRollCapacity`
+    /// samples across chunk boundaries so speech onsets can be prepended.
+    /// Memory: 300 ms × 16 kHz × 4 bytes = ~19 KB — trivial (0.04% of 48 MB Jetsam cap).
+    private var preRollBuffer: [Float] = []
+
+    init(speechRms: Float, exitRms: Float, preRollCapacity: Int, silenceThresholdSamples: Int, minSpeechSamples: Int, maxChunkSamples: Int, minSilenceAtMaxSpeechSamples: Int, postRollSamples: Int) {
         self.speechRms = speechRms
+        self.exitRms = exitRms
+        self.preRollCapacity = preRollCapacity
         self.silenceThresholdSamples = silenceThresholdSamples
         self.minSpeechSamples = minSpeechSamples
         self.maxChunkSamples = maxChunkSamples
+        self.minSilenceAtMaxSpeechSamples = minSilenceAtMaxSpeechSamples
+        self.postRollSamples = postRollSamples
     }
 
     /// Process one audio frame. Returns an `VADEmission` if a chunk boundary
@@ -65,7 +78,22 @@ private final class VADContext: @unchecked Sendable {
     func process(frame: [Float], frameLength: Int, rms: Float) -> VADEmission? {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
-        accumulator.append(contentsOf: frame)
+        // Only accumulate during active speech. During idle/onset, the preRollBuffer
+        // captures audio; on the silence→speech transition, the accumulator is seeded
+        // from the ring. This prevents inter-utterance silence from becoming leading
+        // silence in the next chunk, and avoids duplication with the preRollBuffer.
+        if isSpeaking {
+            accumulator.append(contentsOf: frame)
+        }
+
+        // Rolling ring buffer: keep last preRollCapacity samples for speech-onset lookback
+        if preRollCapacity > 0 {
+            preRollBuffer.append(contentsOf: frame)
+            if preRollBuffer.count > preRollCapacity {
+                preRollBuffer.removeFirst(preRollBuffer.count - preRollCapacity)
+            }
+        }
+
         let totalSamples = accumulator.count
 
         if rms >= speechRms {
@@ -76,40 +104,98 @@ private final class VADContext: @unchecked Sendable {
                 speechSampleCount += frameLength
                 if speechSampleCount >= minSpeechSamples {
                     isSpeaking = true
-                    FileLogger.shared.debug(.audio, "VAD: idle → speaking")
+                    // Seed the accumulator with the ring's contents (the lead-in). The accumulator
+                    // was empty during idle (conditional append), so this is a seed, not a prepend —
+                    // no duplication. The ring's current frame was already appended above, so the
+                    // seed includes the frame that triggered this transition.
+                    accumulator = preRollBuffer
+                    FileLogger.shared.info(.audio, "VAD: idle → speaking",
+                                           payload: ["preRollSamplesApplied": preRollBuffer.count,
+                                                     "preRollCapacity": preRollCapacity])
                 }
             }
-        } else {
-            // --- Silence / noise frame ---
+        } else if rms < exitRms {
+            // --- Silence frame ---
             silenceSampleCount += frameLength
 
             if isSpeaking && silenceSampleCount >= silenceThresholdSamples {
                 let silenceMs = Double(silenceSampleCount) / 16.0
-                FileLogger.shared.debug(.audio, "VAD: pause → emit",
-                                        payload: ["silenceMs": silenceMs])
-                return emit()
+                FileLogger.shared.info(.audio, "VAD: pause → emit",
+                                       payload: ["silenceMs": silenceMs,
+                                                 "postRollMs": Double(postRollSamples) / 16.0,
+                                                 "trimmedExcessSamples": silenceSampleCount > postRollSamples ? silenceSampleCount - postRollSamples : 0])
+                return emit(reason: "pause", trimToPostRoll: true)
+            }
+        } else {
+            // --- Hold zone (exitRms <= rms < speechRms) ---
+            if isSpeaking {
+                silenceSampleCount = 0  // hold-zone doesn't terminate speech
+            } else {
+                speechSampleCount = 0   // hold-zone while idle resets onset gating
             }
         }
 
-        // Force-flush at max chunk size regardless of VAD state
+        // Silence-aware max-length split — search backward for a low-energy gap
         if totalSamples >= maxChunkSamples {
-            FileLogger.shared.debug(.audio, "VAD: force-flush",
-                                    payload: ["totalSamples": totalSamples])
-            return emit()
+            if let splitIdx = findSplitPoint() {
+                // Split at the gap: emit everything before it, carry the tail forward.
+                let tail = Array(accumulator[splitIdx...])
+                accumulator = Array(accumulator[..<splitIdx])
+                let emission = emit(reason: "split-gap")
+                // The carried tail is the lead-in for the next chunk — DON'T also prepend
+                // the preRollBuffer (would double the lead-in). Clear the ring so the next
+                // silence→speech transition doesn't prepend stale audio on top of the tail.
+                preRollBuffer.removeAll(keepingCapacity: true)
+                accumulator = tail
+                FileLogger.shared.info(.audio, "VAD: force-flush (split-gap)",
+                                       payload: ["splitOffset": splitIdx, "tailSamples": tail.count])
+                return emission
+            } else {
+                // No gap found in lookback — hard-cut at the boundary.
+                let tail = Array(accumulator[maxChunkSamples...])
+                accumulator = Array(accumulator[..<maxChunkSamples])
+                let emission = emit(reason: "split-hardcut")
+                preRollBuffer.removeAll(keepingCapacity: true)
+                accumulator = tail
+                FileLogger.shared.info(.audio, "VAD: force-flush (split-hardcut)",
+                                       payload: ["reason": "no gap in lookback", "tailSamples": tail.count])
+                return emission
+            }
         }
 
         return nil
     }
 
     /// Emit current accumulator and reset all VAD state.
-    func emit() -> VADEmission {
-        let snapshot = accumulator
+    /// - parameter reason: Label for log distinguishability ("pause", "split-gap", "split-hardcut", "flush").
+    /// - parameter trimToPostRoll: When true, trim trailing silence down to `postRollSamples`.
+    ///   Only pause-triggered emits trim; split paths and stop-flush pass false.
+    func emit(reason: String = "pause", trimToPostRoll: Bool = false) -> VADEmission {
+        var snapshot = accumulator
+
+        // Pause-triggered emits trim the trailing silence down to postRollSamples,
+        // discarding the inter-utterance thinking pause.
+        if trimToPostRoll, silenceSampleCount > postRollSamples {
+            let excess = silenceSampleCount - postRollSamples
+            let speechEnd = snapshot.count - silenceSampleCount
+            if speechEnd >= 0, speechEnd + excess <= snapshot.count {
+                snapshot.removeSubrange(speechEnd..<(speechEnd + excess))
+            }
+        }
+        if trimToPostRoll {
+            FileLogger.shared.debug(.audio, "VAD: emit trim",
+                                    payload: ["silenceSamples": silenceSampleCount,
+                                              "postRollSamples": postRollSamples,
+                                              "trimmedExcess": silenceSampleCount > postRollSamples ? silenceSampleCount - postRollSamples : 0])
+        }
+
         let id = chunkId
         chunkId &+= 1
         accumulator = []
         isSpeaking = false
         speechSampleCount = 0
         silenceSampleCount = 0
+        // NOTE: preRollBuffer is intentionally NOT reset here (Phase 2 requirement).
         return VADEmission(chunkId: id, samples: snapshot)
     }
 
@@ -118,9 +204,43 @@ private final class VADContext: @unchecked Sendable {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         guard !accumulator.isEmpty else { return nil }
-        FileLogger.shared.debug(.audio, "VAD: flush trailing samples",
-                                payload: ["count": accumulator.count])
-        return emit()
+        FileLogger.shared.info(.audio, "VAD: flush trailing samples",
+                               payload: ["count": accumulator.count])
+        return emit(reason: "flush")
+    }
+
+    /// Searches backward through the accumulator for the most recent run of
+    /// consecutive below-exitRms 10 ms windows whose length >= minSilenceAtMaxSpeechMs.
+    /// Returns the sample index of the LATEST (most-recent) window of the qualifying
+    /// run — the split lands near the end of the silence gap, giving the emitted chunk
+    /// trailing silence and the carried tail a brief lead-in.
+    private func findSplitPoint() -> Int? {
+        let lookbackLimit = max(0, accumulator.count - 32000)  // last 2 s
+        let windowSize = 160                                     // 10 ms at 16 kHz
+        let minWindowsNeeded = max(1, minSilenceAtMaxSpeechSamples / windowSize)
+        var runLatest: Int? = nil
+        var runLength = 0
+        var i = accumulator.count - windowSize
+        while i >= lookbackLimit {
+            var sumSq: Float = 0
+            for j in i..<(i + windowSize) {
+                let s = accumulator[j]
+                sumSq += s * s
+            }
+            let rms = sqrt(sumSq / Float(windowSize))
+            if rms < exitRms {
+                if runLatest == nil { runLatest = i }
+                runLength += 1
+                if runLength >= minWindowsNeeded {
+                    return runLatest  // most recent qualifying run's latest window
+                }
+            } else {
+                runLatest = nil
+                runLength = 0
+            }
+            i -= windowSize
+        }
+        return nil
     }
 }
 
@@ -274,11 +394,20 @@ actor StreamingAudioRecorder {
         let silenceSamples = Int(Double(SharedConfig.streamVadSilenceMs()) * 16.0)
         let minSpeechSamples = Int(Double(SharedConfig.streamVadMinSpeechMs()) * 16.0)
         let maxChunkSamples = Int(SharedConfig.streamMaxChunkSeconds() * 16000.0)
+        let preRollCapacity = Int(Double(SharedConfig.streamVadPreRollMs()) * 16.0)
+        let minSilenceAtMaxSpeechSamples = Int(Double(SharedConfig.streamVadMinSilenceAtMaxSpeechMs()) * 16.0)
+        let postRollSamples = Int(Double(SharedConfig.streamVadPostRollMs()) * 16.0)
+        let speechRms = SharedConfig.streamVadSpeechRms()
+        let exitRms = speechRms * SharedConfig.streamVadHysteresisRatio()
         vad = VADContext(
-            speechRms: SharedConfig.streamVadSpeechRms(),
+            speechRms: speechRms,
+            exitRms: exitRms,
+            preRollCapacity: preRollCapacity,
             silenceThresholdSamples: silenceSamples,
             minSpeechSamples: minSpeechSamples,
-            maxChunkSamples: maxChunkSamples
+            maxChunkSamples: maxChunkSamples,
+            minSilenceAtMaxSpeechSamples: minSilenceAtMaxSpeechSamples,
+            postRollSamples: postRollSamples
         )
     }
 

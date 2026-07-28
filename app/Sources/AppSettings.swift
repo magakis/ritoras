@@ -16,6 +16,10 @@ class AppSettings: ObservableObject {
     @Published var streamVadSilenceMs: Int = SharedConfig.Defaults.streamVadSilenceMsDefault
     @Published var streamVadMinSpeechMs: Int = SharedConfig.Defaults.streamVadMinSpeechMsDefault
     @Published var streamMaxChunkSeconds: TimeInterval = SharedConfig.Defaults.streamMaxChunkSecondsDefault
+    @Published var streamVadHysteresisRatio: Float = SharedConfig.Defaults.streamVadHysteresisRatioDefault
+    @Published var streamVadPreRollMs: Int = SharedConfig.Defaults.streamVadPreRollMsDefault
+    @Published var streamVadMinSilenceAtMaxSpeechMs: Int = SharedConfig.Defaults.streamVadMinSilenceAtMaxSpeechMsDefault
+    @Published var streamVadPostRollMs: Int = SharedConfig.Defaults.streamVadPostRollMsDefault
 
     private var appGroupDefaults: UserDefaults?
     private var cancellables = Set<AnyCancellable>()
@@ -35,6 +39,10 @@ class AppSettings: ObservableObject {
         streamVadSilenceMs = SharedConfig.streamVadSilenceMs()
         streamVadMinSpeechMs = SharedConfig.streamVadMinSpeechMs()
         streamMaxChunkSeconds = SharedConfig.streamMaxChunkSeconds()
+        streamVadHysteresisRatio = SharedConfig.streamVadHysteresisRatio()
+        streamVadPreRollMs = SharedConfig.streamVadPreRollMs()
+        streamVadMinSilenceAtMaxSpeechMs = SharedConfig.streamVadMinSilenceAtMaxSpeechMs()
+        streamVadPostRollMs = SharedConfig.streamVadPostRollMs()
 
         $servers.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving servers",
@@ -91,6 +99,26 @@ class AppSettings: ObservableObject {
                                    payload: ["value": newValue])
             self?.saveStreamMaxChunkSeconds(newValue)
         }.store(in: &cancellables)
+        $streamVadHysteresisRatio.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadHysteresisRatio",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadHysteresisRatio(newValue)
+        }.store(in: &cancellables)
+        $streamVadPreRollMs.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadPreRollMs",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadPreRollMs(newValue)
+        }.store(in: &cancellables)
+        $streamVadMinSilenceAtMaxSpeechMs.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadMinSilenceAtMaxSpeechMs",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadMinSilenceAtMaxSpeechMs(newValue)
+        }.store(in: &cancellables)
+        $streamVadPostRollMs.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadPostRollMs",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadPostRollMs(newValue)
+        }.store(in: &cancellables)
     }
 
     /// Synchronous write to App Group — backs the explicit Save button.
@@ -112,6 +140,10 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(streamVadSilenceMs, forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
         appGroupDefaults?.set(streamVadMinSpeechMs, forKey: SharedConfig.Defaults.streamVadMinSpeechMsKey)
         appGroupDefaults?.set(streamMaxChunkSeconds, forKey: SharedConfig.Defaults.streamMaxChunkSecondsKey)
+        appGroupDefaults?.set(streamVadHysteresisRatio, forKey: SharedConfig.Defaults.streamVadHysteresisRatioKey)
+        appGroupDefaults?.set(streamVadPreRollMs, forKey: SharedConfig.Defaults.streamVadPreRollMsKey)
+        appGroupDefaults?.set(streamVadMinSilenceAtMaxSpeechMs, forKey: SharedConfig.Defaults.streamVadMinSilenceAtMaxSpeechMsKey)
+        appGroupDefaults?.set(streamVadPostRollMs, forKey: SharedConfig.Defaults.streamVadPostRollMsKey)
         postSettingsChanged()
     }
 
@@ -172,6 +204,26 @@ class AppSettings: ObservableObject {
         postSettingsChanged()
     }
 
+    private func saveStreamVadHysteresisRatio(_ value: Float) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadHysteresisRatioKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamVadPreRollMs(_ value: Int) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadPreRollMsKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamVadMinSilenceAtMaxSpeechMs(_ value: Int) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadMinSilenceAtMaxSpeechMsKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamVadPostRollMs(_ value: Int) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadPostRollMsKey)
+        postSettingsChanged()
+    }
+
     private func postSettingsChanged() {
         DarwinNotifier.post(SharedConfig.Defaults.darwinSettingsChangedNotificationName)
     }
@@ -192,5 +244,9 @@ class AppSettings: ObservableObject {
         streamVadSilenceMs = SharedConfig.Defaults.streamVadSilenceMsDefault
         streamVadMinSpeechMs = SharedConfig.Defaults.streamVadMinSpeechMsDefault
         streamMaxChunkSeconds = SharedConfig.Defaults.streamMaxChunkSecondsDefault
+        streamVadHysteresisRatio = SharedConfig.Defaults.streamVadHysteresisRatioDefault
+        streamVadPreRollMs = SharedConfig.Defaults.streamVadPreRollMsDefault
+        streamVadMinSilenceAtMaxSpeechMs = SharedConfig.Defaults.streamVadMinSilenceAtMaxSpeechMsDefault
+        streamVadPostRollMs = SharedConfig.Defaults.streamVadPostRollMsDefault
     }
 }
