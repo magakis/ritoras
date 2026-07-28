@@ -476,6 +476,9 @@ private class SuggestionBar: UIView {
 class KeyboardView: UIView {
     weak var delegate: KeyboardViewDelegate?
 
+    /// Called when the emoji panel's ABC button is tapped; the controller sets this to route through uiMode.
+    var onReturnToLetters: (() -> Void)?
+
     // Subviews
     private var _suggestionBar: SuggestionBar?
     private var suggestionBar: SuggestionBar {
@@ -511,7 +514,7 @@ class KeyboardView: UIView {
             self.delegate?.keyboardView(self, didPerform: .insertText(emoji))
         }
         panel.onDismiss = { [weak self] in
-            self?.apply(mode: .letters)
+            self?.onReturnToLetters?() // route through uiMode so the toggle state stays in sync with the view
         }
         panel.onBackspace = { [weak self] in
             guard let self else { return }

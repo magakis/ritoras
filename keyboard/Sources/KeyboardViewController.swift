@@ -504,6 +504,7 @@ class KeyboardViewController: UIInputViewController {
             guard let self = self else { return }
             self.inputTarget = .hostApp
             self.keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
+            self.keyboardView.emojiPanelView.searchField.resignFirstResponder() // resign trigger field so textFieldDidBeginEditing re-fires on next tap
             self.uiMode = .emoji
         }
 
@@ -511,6 +512,7 @@ class KeyboardViewController: UIInputViewController {
             guard let self = self else { return }
             self.inputTarget = .hostApp
             self.keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
+            self.keyboardView.emojiPanelView.searchField.resignFirstResponder() // resign trigger field so textFieldDidBeginEditing re-fires on next tap
             self.uiMode = .emoji
         }
 
@@ -526,7 +528,13 @@ class KeyboardViewController: UIInputViewController {
             guard let self = self else { return }
             self.inputTarget = .hostApp
             self.keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
+            self.keyboardView.emojiPanelView.searchField.resignFirstResponder() // resign trigger field so textFieldDidBeginEditing re-fires on next tap
             self.uiMode = .emoji
+        }
+
+        // Route emoji-panel ABC button dismissal through uiMode so toggle state stays in sync
+        keyboardView.onReturnToLetters = { [weak self] in
+            self?.uiMode = .letters
         }
     }
 
