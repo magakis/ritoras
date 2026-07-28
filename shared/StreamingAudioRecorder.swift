@@ -271,11 +271,11 @@ actor StreamingAudioRecorder {
     // MARK: - Initialization
 
     init() {
-        let silenceSamples = Int(Double(SharedConfig.Defaults.streamVadSilenceMs) * 16.0)
-        let minSpeechSamples = Int(Double(SharedConfig.Defaults.streamVadMinSpeechMs) * 16.0)
-        let maxChunkSamples = Int(SharedConfig.Defaults.streamMaxChunkSeconds * 16000.0)
+        let silenceSamples = Int(Double(SharedConfig.streamVadSilenceMs()) * 16.0)
+        let minSpeechSamples = Int(Double(SharedConfig.streamVadMinSpeechMs()) * 16.0)
+        let maxChunkSamples = Int(SharedConfig.streamMaxChunkSeconds() * 16000.0)
         vad = VADContext(
-            speechRms: SharedConfig.Defaults.streamVadSpeechRms,
+            speechRms: SharedConfig.streamVadSpeechRms(),
             silenceThresholdSamples: silenceSamples,
             minSpeechSamples: minSpeechSamples,
             maxChunkSamples: maxChunkSamples
@@ -435,10 +435,10 @@ actor StreamingAudioRecorder {
         isRecording = true
 
         FileLogger.shared.info(.audio, "Started",
-                               payload: ["rms": SharedConfig.Defaults.streamVadSpeechRms,
-                                         "silenceMs": SharedConfig.Defaults.streamVadSilenceMs,
-                                         "minSpeechMs": SharedConfig.Defaults.streamVadMinSpeechMs,
-                                         "maxChunkSeconds": SharedConfig.Defaults.streamMaxChunkSeconds])
+                               payload: ["rms": SharedConfig.streamVadSpeechRms(),
+                                         "silenceMs": SharedConfig.streamVadSilenceMs(),
+                                         "minSpeechMs": SharedConfig.streamVadMinSpeechMs(),
+                                         "maxChunkSeconds": SharedConfig.streamMaxChunkSeconds()])
     }
 
     // MARK: - Process Tap Buffer

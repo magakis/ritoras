@@ -12,6 +12,11 @@ class AppSettings: ObservableObject {
     @Published var verboseLogging: Bool = SharedConfig.Defaults.verboseLoggingDefault
     @Published var hapticsEnabled: Bool = SharedConfig.Defaults.hapticsEnabledDefault
 
+    @Published var streamVadSpeechRms: Float = SharedConfig.Defaults.streamVadSpeechRmsDefault
+    @Published var streamVadSilenceMs: Int = SharedConfig.Defaults.streamVadSilenceMsDefault
+    @Published var streamVadMinSpeechMs: Int = SharedConfig.Defaults.streamVadMinSpeechMsDefault
+    @Published var streamMaxChunkSeconds: TimeInterval = SharedConfig.Defaults.streamMaxChunkSecondsDefault
+
     private var appGroupDefaults: UserDefaults?
     private var cancellables = Set<AnyCancellable>()
 
@@ -26,6 +31,10 @@ class AppSettings: ObservableObject {
         dictationMode = SharedConfig.dictationMode()
         verboseLogging = SharedConfig.verboseLoggingEnabled()
         hapticsEnabled = SharedConfig.hapticsEnabled()
+        streamVadSpeechRms = SharedConfig.streamVadSpeechRms()
+        streamVadSilenceMs = SharedConfig.streamVadSilenceMs()
+        streamVadMinSpeechMs = SharedConfig.streamVadMinSpeechMs()
+        streamMaxChunkSeconds = SharedConfig.streamMaxChunkSeconds()
 
         $servers.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving servers",
@@ -62,6 +71,26 @@ class AppSettings: ObservableObject {
                                    payload: ["value": newValue])
             self?.saveHapticsEnabled(newValue)
         }.store(in: &cancellables)
+        $streamVadSpeechRms.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadSpeechRms",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadSpeechRms(newValue)
+        }.store(in: &cancellables)
+        $streamVadSilenceMs.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadSilenceMs",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadSilenceMs(newValue)
+        }.store(in: &cancellables)
+        $streamVadMinSpeechMs.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadMinSpeechMs",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadMinSpeechMs(newValue)
+        }.store(in: &cancellables)
+        $streamMaxChunkSeconds.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamMaxChunkSeconds",
+                                   payload: ["value": newValue])
+            self?.saveStreamMaxChunkSeconds(newValue)
+        }.store(in: &cancellables)
     }
 
     /// Synchronous write to App Group — backs the explicit Save button.
@@ -79,6 +108,10 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(dictationMode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
         appGroupDefaults?.set(verboseLogging, forKey: SharedConfig.Defaults.verboseLoggingKey)
         appGroupDefaults?.set(hapticsEnabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
+        appGroupDefaults?.set(streamVadSpeechRms, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
+        appGroupDefaults?.set(streamVadSilenceMs, forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
+        appGroupDefaults?.set(streamVadMinSpeechMs, forKey: SharedConfig.Defaults.streamVadMinSpeechMsKey)
+        appGroupDefaults?.set(streamMaxChunkSeconds, forKey: SharedConfig.Defaults.streamMaxChunkSecondsKey)
         postSettingsChanged()
     }
 
@@ -119,6 +152,26 @@ class AppSettings: ObservableObject {
         postSettingsChanged()
     }
 
+    private func saveStreamVadSpeechRms(_ value: Float) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamVadSilenceMs(_ value: Int) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamVadMinSpeechMs(_ value: Int) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadMinSpeechMsKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamMaxChunkSeconds(_ value: TimeInterval) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamMaxChunkSecondsKey)
+        postSettingsChanged()
+    }
+
     private func postSettingsChanged() {
         DarwinNotifier.post(SharedConfig.Defaults.darwinSettingsChangedNotificationName)
     }
@@ -131,5 +184,13 @@ class AppSettings: ObservableObject {
         dictationMode = .batch
         verboseLogging = SharedConfig.Defaults.verboseLoggingDefault
         hapticsEnabled = SharedConfig.Defaults.hapticsEnabledDefault
+        resetVadToDefaults()
+    }
+
+    func resetVadToDefaults() {
+        streamVadSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
+        streamVadSilenceMs = SharedConfig.Defaults.streamVadSilenceMsDefault
+        streamVadMinSpeechMs = SharedConfig.Defaults.streamVadMinSpeechMsDefault
+        streamMaxChunkSeconds = SharedConfig.Defaults.streamMaxChunkSecondsDefault
     }
 }

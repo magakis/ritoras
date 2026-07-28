@@ -139,10 +139,14 @@ struct SettingsView: View {
                 Text("Stream (live)").tag(SharedConfig.DictationMode.stream)
             }
             .pickerStyle(.segmented)
+
+            NavigationLink("Streaming VAD") {
+                VADSettingsView()
+            }
         } header: {
             Text("Dictation")
         } footer: {
-            Text("Batch records the whole clip then transcribes (most reliable). Stream transcribes live as you pause — faster feedback, needs a stable connection.")
+            Text("Batch records the whole clip then transcribes (most reliable). Stream transcribes live as you pause — faster feedback, needs a stable connection. Streaming VAD settings only affect Stream mode.")
         }
     }
 

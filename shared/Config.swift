@@ -50,13 +50,17 @@ struct SharedConfig {
         // MARK: - Streaming / VAD Tunables
 
         /// RMS threshold for VAD speech detection. Higher = less sensitive.
-        static let streamVadSpeechRms: Float = 0.02
+        static let streamVadSpeechRmsKey = "streamVadSpeechRms"
+        static let streamVadSpeechRmsDefault: Float = 0.02
         /// Silence duration (ms) before a chunk is finalized (~1.5 s).
-        static let streamVadSilenceMs: Int = 1500
+        static let streamVadSilenceMsKey = "streamVadSilenceMs"
+        static let streamVadSilenceMsDefault: Int = 1500
         /// Minimum speech duration (ms) to accept a chunk.
-        static let streamVadMinSpeechMs: Int = 300
+        static let streamVadMinSpeechMsKey = "streamVadMinSpeechMs"
+        static let streamVadMinSpeechMsDefault: Int = 300
         /// Maximum audio segment length before forced chunk finalization.
-        static let streamMaxChunkSeconds: TimeInterval = 8.0
+        static let streamMaxChunkSecondsKey = "streamMaxChunkSeconds"
+        static let streamMaxChunkSecondsDefault: TimeInterval = 8.0
         /// WebSocket connection timeout.
         static let streamWsConnectTimeout: TimeInterval = 8.0
         /// How long to wait for a final transcription after the last audio chunk.
@@ -326,6 +330,50 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.hapticsEnabledKey) as? Bool)
             ?? Defaults.hapticsEnabledDefault
+    }
+
+    /// Reads the streaming VAD speech RMS threshold from the App Group.
+    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Returns the default (`0.02`) when the App Group is unavailable or the key is unset.
+    static func streamVadSpeechRms() -> Float {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadSpeechRmsDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadSpeechRmsKey) as? Float)
+            ?? Defaults.streamVadSpeechRmsDefault
+    }
+
+    /// Reads the streaming VAD silence threshold (ms) from the App Group.
+    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Returns the default (`1500`) when the App Group is unavailable or the key is unset.
+    static func streamVadSilenceMs() -> Int {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadSilenceMsDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadSilenceMsKey) as? Int)
+            ?? Defaults.streamVadSilenceMsDefault
+    }
+
+    /// Reads the streaming VAD minimum speech duration (ms) from the App Group.
+    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Returns the default (`300`) when the App Group is unavailable or the key is unset.
+    static func streamVadMinSpeechMs() -> Int {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadMinSpeechMsDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadMinSpeechMsKey) as? Int)
+            ?? Defaults.streamVadMinSpeechMsDefault
+    }
+
+    /// Reads the streaming maximum chunk duration (seconds) from the App Group.
+    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Returns the default (`8.0`) when the App Group is unavailable or the key is unset.
+    static func streamMaxChunkSeconds() -> TimeInterval {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamMaxChunkSecondsDefault
+        }
+        return (defaults.object(forKey: Defaults.streamMaxChunkSecondsKey) as? Double)
+            ?? Defaults.streamMaxChunkSecondsDefault
     }
 
     /// Reads the probe-selected server URL for the current/next dictation.
