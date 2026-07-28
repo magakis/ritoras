@@ -16,16 +16,26 @@ enum AudioSession {
     /// speech, producing robotic, chopped-up audio that Whisper transcribes poorly.
     /// `.record` yields unprocessed capture ideal for speech-to-text.
     ///
-    /// **Ordering:** `setCategory` → `setPreferredSampleRate` → `setActive(true)`,
-    /// then construct `AVAudioRecorder` / start the engine. `setPreferredSampleRate`
-    /// must be set before activation to be honored, and activating the session before
-    /// the recorder is configured can trigger
+    /// **Ordering:** `setCategory` → `setActive(true)`, then construct
+    /// `AVAudioRecorder` / start the engine. Activating the session before the
+    /// recorder is configured can trigger
     /// `AVAudioSessionErrorCodeCannotStartRecording` (OSStatus 561145187).
+    ///
+    /// - Note: `setPreferredSampleRate` is deliberately **not** called — forcing
+    /// 16 kHz engages a lower-gain hardware path that captures ~7 dB quieter
+    /// than the native 48 kHz rate. Recording at the native rate and letting
+    /// `AVAudioRecorder` / `AVAudioConverter` resample preserves full hardware
+    /// gain staging, matching iOS Shortcuts. Commit `cb024ca` moved this call
+    /// before `setActive` to ensure it was honored; that change inadvertently
+    /// caused this gain regression.
     static func configure() throws {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.record, mode: .default)
-        try session.setPreferredSampleRate(16000)
         try session.setActive(true, options: .notifyOthersOnDeactivation)
+        FileLogger.shared.info(.audio, "session configured", payload: [
+            "sampleRate": session.sampleRate,
+            "category": session.category.rawValue
+        ])
     }
 
     /// Deactivates the shared audio session.
