@@ -724,11 +724,13 @@ final class DictationViewModel: ObservableObject {
             }
 
             // Signal recording done and drain queue
-            chunkSendQueue.setRecordingActive(false)
-
             await streamRecorder?.stop()
 
-            guard activeID == id else { return }
+            guard activeID == id else {
+                await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
+                return
+            }
+            chunkSendQueue.setRecordingActive(false)
 
             var queueDrained = false
             var finalOverflowed = false

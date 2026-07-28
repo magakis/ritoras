@@ -214,6 +214,17 @@ private final class DiskWriterHolder: @unchecked Sendable {
     }
 }
 
+// MARK: - Stopped Flag (access via vadQueue serialization)
+
+/// Lockless stopped flag for preventing orphaned tap callbacks after stop().
+/// All access is from `vadQueue` (serial), so no lock is needed.
+/// Set in stop()'s vadQueue.async block, read in processTapBuffer (also on vadQueue).
+private final class StoppedFlag: @unchecked Sendable {
+    private var stopped = false
+    func set(_ value: Bool) { stopped = value }
+    var isStopped: Bool { stopped }
+}
+
 // MARK: - Streaming Audio Recorder
 
 /// Captures microphone audio via `AVAudioEngine`, runs an energy-based VAD
@@ -229,7 +240,7 @@ private final class DiskWriterHolder: @unchecked Sendable {
 /// work (RMS, VAD, chunk emission) to a dedicated serial `vadQueue`. VAD
 /// state is protected internally by `os_unfair_lock`.
 actor StreamingAudioRecorder {
-    typealias ChunkHandler = @Sendable (UInt32, [Float]) async -> Void
+    typealias ChunkHandler = @Sendable (UInt32, [Float]) -> Void
 
     // MARK: - Private Properties
 
@@ -244,6 +255,9 @@ actor StreamingAudioRecorder {
     /// Thread-safe holder for the WAV disk writer; accessed only from
     /// `vadQueue` (serial) — no additional locking needed.
     private let diskWriter = DiskWriterHolder()
+
+    /// Lockless stopped flag; set on vadQueue in stop(), read on vadQueue in processTapBuffer.
+    private let stoppedFlag = StoppedFlag()
 
     /// Tracks whether a tap is installed, enabling idempotent teardown.
     private var tapInstalled = false
@@ -272,7 +286,7 @@ actor StreamingAudioRecorder {
 
     /// Begins streaming audio capture.
     ///
-    /// - Parameter onChunk: Called asynchronously for each detected speech
+    /// - Parameter onChunk: Called on vadQueue for each detected speech
     ///   segment. The first argument is a monotonically increasing chunk ID
     ///   (starting at 0); the second is float32 PCM samples at 16 kHz mono.
     /// - Throws: `AudioRecorder.AudioRecorderError.permissionDenied` or `.permissionNotRequested`
@@ -351,6 +365,7 @@ actor StreamingAudioRecorder {
         let vadQueue = self.vadQueue
         let converterHolder = self.converterHolder
         let diskWriter = self.diskWriter
+        let stoppedFlag = self.stoppedFlag
 
         // 6. Install tap with NATIVE format (REMOVES the format-mismatch crash)
         let tapBlock: AVAudioNodeTapBlock = { buffer, _ in
@@ -393,7 +408,8 @@ actor StreamingAudioRecorder {
                     targetFormat: targetFormat,
                     vad: vad,
                     handler: handler,
-                    diskWriter: diskWriter
+                    diskWriter: diskWriter,
+                    stoppedFlag: stoppedFlag
                 )
             }
         }
@@ -440,9 +456,13 @@ actor StreamingAudioRecorder {
         converterHolder: ConverterHolder,
         targetFormat: AVAudioFormat,
         vad: VADContext,
-        handler: @escaping ChunkHandler,
-        diskWriter: DiskWriterHolder
+        handler: ChunkHandler,
+        diskWriter: DiskWriterHolder,
+        stoppedFlag: StoppedFlag
     ) {
+        // Discard any emission from a late tap callback that runs after stop() set the flag.
+        guard !stoppedFlag.isStopped else { return }
+
         // --- Lazy converter construction / route-change rebuild ---
         // Log a warning if the format changed since the previous buffer.
         let oldFormat = converterHolder.currentInputFormat()
@@ -542,14 +562,12 @@ actor StreamingAudioRecorder {
         // frameLength = post-conversion (16 kHz) — VAD tunables are in 16 kHz samples
         let emission = vad.process(frame: convertedSamples, frameLength: convertedLength, rms: rms)
 
-        // Emit chunk if ready (Task created off the audio thread)
+        // Emit chunk if ready (handler runs synchronously on vadQueue)
         if let emission = emission {
             FileLogger.shared.debug(.audio, "vadQueue: emission",
                                     payload: ["chunkId": emission.chunkId,
                                               "sampleCount": emission.samples.count])
-            Task {
-                await handler(emission.chunkId, emission.samples)
-            }
+            handler(emission.chunkId, emission.samples)
         }
     }
 
@@ -584,17 +602,19 @@ actor StreamingAudioRecorder {
         let vadQueue = self.vadQueue
         let vad = self.vad
         let diskWriter = self.diskWriter
+        let stoppedFlag = self.stoppedFlag
         let emission: VADEmission? = await withCheckedContinuation { continuation in
             vadQueue.async {
+                stoppedFlag.set(true)
                 let result = vad.flush()
                 diskWriter.close()
                 continuation.resume(returning: result)
             }
         }
 
-        // Dispatch final chunk
+        // Dispatch final chunk (synchronous call — stoppedFlag is already set)
         if let emission = emission, let handler = onChunk {
-            await handler(emission.chunkId, emission.samples)
+            handler(emission.chunkId, emission.samples)
         }
 
         onChunk = nil
