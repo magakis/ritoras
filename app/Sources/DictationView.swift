@@ -26,6 +26,8 @@ struct DictationView: View {
                     doneContent(text: text)
                 case .error(let message):
                     errorContent(message: message)
+                case .cancelled:
+                    cancelledContent
                 }
 
                 Spacer()
@@ -47,6 +49,11 @@ struct DictationView: View {
                 // During transcribing the background task keeps the app alive
                 // until transcription completes — do not cancel mid-flight.
                 break
+            }
+        }
+        .onChange(of: viewModel.phase) { _, newPhase in
+            if case .cancelled = newPhase {
+                dismiss()
             }
         }
     }
@@ -234,6 +241,20 @@ struct DictationView: View {
                     .buttonStyle(.borderedProminent)
                 }
             }
+        }
+    }
+
+    // MARK: - Cancelled State
+
+    private var cancelledContent: some View {
+        VStack(spacing: 24) {
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 48))
+                .foregroundColor(.secondary)
+
+            Text("Cancelled")
+                .font(.title2)
+                .fontWeight(.medium)
         }
     }
 
