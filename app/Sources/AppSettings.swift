@@ -9,6 +9,7 @@ class AppSettings: ObservableObject {
     @Published var autoCapitalizationEnabled: Bool = true
     @Published var autocorrectOnSpaceEnabled: Bool = true
     @Published var dictationMode: SharedConfig.DictationMode = .batch
+    @Published var audioFormat: SharedConfig.AudioFormat = .aac
     @Published var verboseLogging: Bool = SharedConfig.Defaults.verboseLoggingDefault
     @Published var hapticsEnabled: Bool = SharedConfig.Defaults.hapticsEnabledDefault
 
@@ -33,6 +34,7 @@ class AppSettings: ObservableObject {
         autoCapitalizationEnabled = SharedConfig.autoCapitalizationEnabled()
         autocorrectOnSpaceEnabled = SharedConfig.autocorrectOnSpaceEnabled()
         dictationMode = SharedConfig.dictationMode()
+        audioFormat = SharedConfig.audioFormat()
         verboseLogging = SharedConfig.verboseLoggingEnabled()
         hapticsEnabled = SharedConfig.hapticsEnabled()
         streamVadSpeechRms = SharedConfig.streamVadSpeechRms()
@@ -68,6 +70,11 @@ class AppSettings: ObservableObject {
             FileLogger.shared.info(.settings, "saving dictationMode",
                                    payload: ["value": newValue.rawValue])
             self?.saveDictationMode(newValue)
+        }.store(in: &cancellables)
+        $audioFormat.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving audioFormat",
+                                   payload: ["value": newValue.rawValue])
+            self?.saveAudioFormat(newValue)
         }.store(in: &cancellables)
         $verboseLogging.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving verboseLogging",
@@ -134,6 +141,7 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(autoCapitalizationEnabled, forKey: SharedConfig.Defaults.autoCapitalizationEnabledKey)
         appGroupDefaults?.set(autocorrectOnSpaceEnabled, forKey: SharedConfig.Defaults.autocorrectOnSpaceEnabledKey)
         appGroupDefaults?.set(dictationMode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
+        appGroupDefaults?.set(audioFormat.rawValue, forKey: SharedConfig.Defaults.audioFormatKey)
         appGroupDefaults?.set(verboseLogging, forKey: SharedConfig.Defaults.verboseLoggingKey)
         appGroupDefaults?.set(hapticsEnabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
         appGroupDefaults?.set(streamVadSpeechRms, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
@@ -171,6 +179,11 @@ class AppSettings: ObservableObject {
 
     private func saveDictationMode(_ mode: SharedConfig.DictationMode) {
         appGroupDefaults?.set(mode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
+        postSettingsChanged()
+    }
+
+    private func saveAudioFormat(_ format: SharedConfig.AudioFormat) {
+        appGroupDefaults?.set(format.rawValue, forKey: SharedConfig.Defaults.audioFormatKey)
         postSettingsChanged()
     }
 
@@ -234,6 +247,7 @@ class AppSettings: ObservableObject {
         autoCapitalizationEnabled = SharedConfig.Defaults.autoCapitalizationEnabledDefault
         autocorrectOnSpaceEnabled = SharedConfig.Defaults.autocorrectOnSpaceEnabledDefault
         dictationMode = .batch
+        audioFormat = .aac
         verboseLogging = SharedConfig.Defaults.verboseLoggingDefault
         hapticsEnabled = SharedConfig.Defaults.hapticsEnabledDefault
         resetVadToDefaults()

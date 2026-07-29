@@ -2,13 +2,16 @@ import Foundation
 
 /// Manages recording audio files in the Application Support directory.
 ///
-/// Files are stored at `{application-support}/Recordings/{jobId}.m4a`.
+/// Files are stored at `{application-support}/Recordings/{jobId}.{ext}` (ext is `m4a` or `wav` per the AudioFormat setting).
 /// The directory is created lazily on first access. Application Support is
 /// persistent (survives app suspension and process death) and works under
 /// all installation methods (App Store, SideStore, AltStore, Simulator).
 final class RecordingStore {
     static let shared = RecordingStore()
     private init() {}
+
+    /// Extensions a batch recording may be stored under (depends on AudioFormat setting).
+    private static let batchExtensions = ["m4a", "wav"]
 
     /// The recordings directory URL, created lazily. Uses Application Support
     /// (always available on iOS, no entitlement needed, survives process death).
@@ -25,23 +28,22 @@ final class RecordingStore {
         return dir
     }
 
-    /// Returns the expected file URL for the given job ID, or nil if the
-    /// directory is unavailable.
-    func url(for jobId: UUID) -> URL? {
-        directoryURL?.appendingPathComponent("\(jobId.uuidString).m4a")
-    }
-
     /// Returns true if a recording file exists for the given job ID.
     func exists(jobId: UUID) -> Bool {
-        guard let url = url(for: jobId) else { return false }
-        return FileManager.default.fileExists(atPath: url.path)
+        for ext in Self.batchExtensions {
+            guard let url = directoryURL?.appendingPathComponent("\(jobId.uuidString).\(ext)") else { continue }
+            if FileManager.default.fileExists(atPath: url.path) { return true }
+        }
+        return false
     }
 
     /// Deletes the recording file for the given job ID. No-op if the file
     /// does not exist or the directory is unavailable.
     func delete(jobId: UUID) {
-        guard let url = url(for: jobId) else { return }
-        try? FileManager.default.removeItem(at: url)
+        for ext in Self.batchExtensions {
+            guard let url = directoryURL?.appendingPathComponent("\(jobId.uuidString).\(ext)") else { continue }
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     /// Returns the expected WAV stream file URL for the given job ID, or nil

@@ -47,6 +47,16 @@ struct SharedConfig {
         static let dictationModeKey = "dictationMode"
         static let dictationModeDefault: DictationMode = .batch
 
+        // MARK: - Audio Format (Batch recorder)
+
+        /// User-selected container format for batch recordings. Read by AudioRecorder
+        /// at recording start. Stored in the App Group so both the app and a future
+        /// keyboard-side recorder can read it. Default `.aac` for backward compat and
+        /// minimal upload size; the server re-encodes regardless, so AAC vs WAV does
+        /// not change transcription accuracy — WAV is opt-in for lossless/parity.
+        static let audioFormatKey = "audioFormat"
+        static let audioFormatDefault: AudioFormat = .aac
+
         // MARK: - Streaming / VAD Tunables
 
         /// RMS threshold for VAD speech detection. Higher = less sensitive.
@@ -261,6 +271,24 @@ struct SharedConfig {
         case stream
     }
 
+    // MARK: - Audio Format
+
+    /// Container format for batch recordings. AVAudioRecorder encoder settings are
+    /// owned by AudioRecorder (they reference AVFoundation symbols); this enum
+    /// only carries the persistable identity + file extension.
+    enum AudioFormat: String, CaseIterable {
+        case aac
+        case wav
+
+        /// Filename extension (without dot) for files written in this format.
+        var fileExtension: String {
+            switch self {
+            case .aac: return "m4a"
+            case .wav: return "wav"
+            }
+        }
+    }
+
     let servers: [String]
     let timeoutSeconds: TimeInterval
 
@@ -297,6 +325,20 @@ struct SharedConfig {
             return Defaults.dictationModeDefault
         }
         return DictationMode(rawValue: raw) ?? Defaults.dictationModeDefault
+    }
+
+    /// Reads the batch audio format from the App Group.
+    /// Used by AudioRecorder (and any future keyboard-side recorder), which cannot
+    /// assume `AppSettings` is linked. Returns `.aac` when the App Group is
+    /// unavailable or the key is unset (backward compat with pre-setting installs).
+    static func audioFormat() -> AudioFormat {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.audioFormatDefault
+        }
+        guard let raw = defaults.string(forKey: Defaults.audioFormatKey) else {
+            return Defaults.audioFormatDefault
+        }
+        return AudioFormat(rawValue: raw) ?? Defaults.audioFormatDefault
     }
 
     /// Reads the auto-capitalization enabled flag from the App Group.

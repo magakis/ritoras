@@ -85,7 +85,7 @@ enum WhisperClient {
     /// in order and returning the first successful result.
     ///
     /// - Parameters:
-    ///   - audioURL:      Local file URL of the recorded audio (.m4a).
+    ///   - audioURL:      Local file URL of the recorded audio (.m4a or .wav).
     ///   - config:        Server configuration from `SharedConfig`.
     ///   - correlationId: Optional UUID to correlate this request across processes.
     /// - Returns: The transcribed text string.
@@ -148,7 +148,7 @@ enum WhisperClient {
     /// 30s timeout in the iterating transcribe. If this throws, callers should
     /// fall back to the iterating transcribe(audioURL:config:) for safety.
     /// - Parameters:
-    ///   - audioURL:      Local file URL of the recorded audio (.m4a).
+    ///   - audioURL:      Local file URL of the recorded audio (.m4a or .wav).
     ///   - serverURL:     The target server base URL.
     ///   - correlationId: Optional UUID to correlate this request across processes.
     /// - Returns: The transcribed text string.
@@ -267,7 +267,7 @@ enum WhisperClient {
 
     /// Submits a transcription job to the async endpoint.
     /// - Parameters:
-    ///   - audioURL:      Local file URL of the recorded audio (.m4a).
+    ///   - audioURL:      Local file URL of the recorded audio (.m4a or .wav).
     ///   - serverURL:     The target server base URL.
     ///   - bodyFileURL:   Temp file containing the multipart body.
     ///   - boundary:      Boundary string matching the body.
@@ -435,7 +435,7 @@ enum WhisperClient {
     /// redundant probing when a background probe already selected a healthy server.
     ///
     /// - Parameters:
-    ///   - audioURL:        Local file URL of the recorded audio (.m4a).
+    ///   - audioURL:        Local file URL of the recorded audio (.m4a or .wav).
     ///   - jobId:           UUID for this dictation (used as Idempotency-Key).
     ///   - config:          Server configuration from `SharedConfig`.
     ///   - correlationId:   Optional UUID to correlate this request across processes.

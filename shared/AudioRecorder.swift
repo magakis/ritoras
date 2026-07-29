@@ -43,23 +43,27 @@ actor AudioRecorder {
 
     // MARK: - Start Recording
 
-    /// Starts recording speech to a persistent M4A/AAC file (16 kHz, mono)
+    /// Starts recording speech to the configured audio format (AAC or WAV, 16 kHz mono)
     /// in the Application Support directory under the given job ID.
     ///
-    /// The recording is written directly to `{application-support}/Recordings/{jobId}.m4a`
-    /// so the audio survives process death and transcription failures.
+    /// The recording is written directly to `{application-support}/Recordings/{jobId}.{ext}`
+    /// where `ext` follows the user's `AudioFormat` setting, so the audio survives process
+    /// death and transcription failures.
     ///
     /// This method:
     /// 1. Checks microphone permission status (must be pre-granted by the container app).
     /// 2. Configures `AVAudioSession` (must happen before creating the recorder
     ///    to avoid `AVAudioSessionErrorCodeCannotStartRecording` / 561145187).
-    /// 3. Creates the recorder with Whisper‑friendly settings.
-    /// 4. Calls `prepareToRecord()` before `record()` — skipping this is a
+    /// 3. Reads the user's `AudioFormat` setting (AAC or WAV) for the encoder settings.
+    /// 4. Resolves the destination URL with the correct file extension.
+    /// 5. Creates the recorder with Whisper‑friendly settings matching the format.
+    /// 6. Calls `prepareToRecord()` before `record()` — skipping this is a
     ///    documented cause of `record()` returning false.
-    /// 5. Calls `record()` with a single retry on failure: reconfigures the audio
+    /// 7. Calls `record()` with a single retry on failure: reconfigures the audio
     ///    session and retries once to handle the first-activation race.
     ///
-    /// - Parameter jobId: The dictation job ID. The file is named `{jobId}.m4a`.
+    /// - Parameter jobId: The dictation job ID. The file is named `{jobId}.{ext}`
+    ///   where ext follows the `AudioFormat` setting.
     /// - Returns: The file URL of the recording in progress.
     /// - Throws: `AudioRecorderError` if permission is denied, session configuration
     ///   fails, or the recorder cannot start.
@@ -90,7 +94,11 @@ actor AudioRecorder {
             throw AudioRecorderError.invalidSessionConfiguration(error)
         }
 
-        // 3. Resolve destination URL — write directly to the persistent
+        // 3. Read the user's AudioFormat setting (AAC or WAV) ONCE — the format,
+        //    file extension, and encoder settings for this recording are now fixed.
+        let format = SharedConfig.audioFormat()
+
+        // 4. Resolve destination URL — write directly to the persistent
         //    Application Support directory so audio survives process death.
         guard let recordingsDir = RecordingStore.shared.directoryURL else {
             // Application Support should NEVER be unavailable. If it is, fail loudly.
@@ -99,7 +107,7 @@ actor AudioRecorder {
                 NSError(domain: "AudioRecorder", code: 0,
                         userInfo: [NSLocalizedDescriptionKey: "storage unavailable"]))
         }
-        let tempURL = recordingsDir.appendingPathComponent("\(jobId.uuidString).m4a")
+        let tempURL = recordingsDir.appendingPathComponent("\(jobId.uuidString).\(format.fileExtension)")
         currentFileURL = tempURL
 
         FileLogger.shared.debug(.audio, "recording started", payload: [
@@ -107,15 +115,34 @@ actor AudioRecorder {
             "path": tempURL.path
         ])
 
-        // 4. Whisper-friendly recording settings: 16 kHz mono AAC
-        let settings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 16000,
-            AVNumberOfChannelsKey: 1,
-            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue // .high ~64 kbps at 16 kHz mono — transparent for speech, well above Whisper's needs
-        ]
+        // 5. Recording settings — 16 kHz mono. Format follows the user's AudioFormat
+        //    setting; the Whisper server re-encodes to 16 kHz mono WAV regardless, so
+        //    the choice affects file size / losslessness, not transcription accuracy.
+        //      .aac: MPEG-4 AAC, quality .high → measured ~25 kbps at 16 kHz mono
+        //            (despite .high's nominal ~64 kbps).
+        //      .wav: 16-bit little-endian PCM → ~256 kbps, lossless.
+        let settings: [String: Any]
+        switch format {
+        case .aac:
+            settings = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 16000,
+                AVNumberOfChannelsKey: 1,
+                AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+            ]
+        case .wav:
+            settings = [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVSampleRateKey: 16000,
+                AVNumberOfChannelsKey: 1,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false,
+            ]
+        }
 
-        // 5. Create recorder
+        // 6. Create recorder
         let newRecorder: AVAudioRecorder
         do {
             newRecorder = try AVAudioRecorder(url: tempURL, settings: settings)
@@ -125,7 +152,7 @@ actor AudioRecorder {
             throw AudioRecorderError.recorderSetupFailed(error)
         }
 
-        // 6. Prepare the recorder before recording — skipping prepareToRecord()
+        // 7. Prepare the recorder before recording — skipping prepareToRecord()
         //    is a documented cause of record() returning false.
         guard newRecorder.prepareToRecord() else {
             currentFileURL = nil
@@ -136,7 +163,7 @@ actor AudioRecorder {
             )
         }
 
-        // 7. Start recording with a single retry for first-activation race.
+        // 8. Start recording with a single retry for first-activation race.
         //    The first setActive(true) after the keyboard appears can silently fail,
         //    causing record() to return false. Reconfiguring the session and retrying
         //    resolves this.
