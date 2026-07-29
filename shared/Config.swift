@@ -18,7 +18,6 @@ struct SharedConfig {
         }
         static let urlScheme = "ritoras"
         static let dictateURLPath = "dictate"
-        static let darwinNotificationName = "com.ritoras.dictationCompleted"
         static let darwinStateChangedNotificationName = "com.ritoras.dictationStateChanged"
         static let darwinSettingsChangedNotificationName = "com.ritoras.settingsChanged"
         static let localhostServerPort: UInt16 = 47321
