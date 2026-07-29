@@ -61,7 +61,7 @@ struct SharedConfig {
 
         /// RMS threshold for VAD speech detection. Higher = less sensitive.
         static let streamVadSpeechRmsKey = "streamVadSpeechRms"
-        static let streamVadSpeechRmsDefault: Float = 0.02
+        static let streamVadSpeechRmsDefault: Float = 0.025
         /// Silence duration (ms) before a chunk is finalized (~2.5 s).
         static let streamVadSilenceMsKey = "streamVadSilenceMs"
         static let streamVadSilenceMsDefault: Int = 2500
@@ -70,7 +70,7 @@ struct SharedConfig {
         static let streamVadMinSpeechMsDefault: Int = 300
         /// Maximum audio segment length before forced chunk finalization.
         static let streamMaxChunkSecondsKey = "streamMaxChunkSeconds"
-        static let streamMaxChunkSecondsDefault: TimeInterval = 8.0
+        static let streamMaxChunkSecondsDefault: TimeInterval = 30.0
         /// Hysteresis ratio: exit threshold = speechRms × ratio. Lower = wider speech-hold band.
         static let streamVadHysteresisRatioKey = "streamVadHysteresisRatio"
         static let streamVadHysteresisRatioDefault: Float = 0.6
@@ -388,7 +388,7 @@ struct SharedConfig {
 
     /// Reads the streaming VAD speech RMS threshold from the App Group.
     /// Used by the keyboard extension, which cannot link `AppSettings`.
-    /// Returns the default (`0.02`) when the App Group is unavailable or the key is unset.
+    /// Returns the default (`0.025`) when the App Group is unavailable or the key is unset.
     static func streamVadSpeechRms() -> Float {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
             return Defaults.streamVadSpeechRmsDefault
@@ -465,7 +465,7 @@ struct SharedConfig {
 
     /// Reads the streaming maximum chunk duration (seconds) from the App Group.
     /// Used by the keyboard extension, which cannot link `AppSettings`.
-    /// Returns the default (`8.0`) when the App Group is unavailable or the key is unset.
+    /// Returns the default (`30.0`) when the App Group is unavailable or the key is unset.
     static func streamMaxChunkSeconds() -> TimeInterval {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
             return Defaults.streamMaxChunkSecondsDefault

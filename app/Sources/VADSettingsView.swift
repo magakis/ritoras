@@ -153,13 +153,16 @@ struct VADSettingsView: View {
             HStack {
                 Text("Speech RMS Threshold")
                 Spacer()
-                Text(String(format: "%.3f", settings.streamVadSpeechRms))
-                    .foregroundColor(.secondary)
+                TextField("0.025", value: $settings.streamVadSpeechRms, format: .number.precision(.fractionLength(3...4)))
+                .keyboardType(.decimalPad)
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .frame(width: 84)
             }
             Text("lower = more sensitive")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Slider(value: $settings.streamVadSpeechRms, in: 0.005...0.10, step: 0.005)
+            Slider(value: $settings.streamVadSpeechRms, in: 0.005...0.10, step: 0.001)
         }
     }
 
@@ -185,7 +188,7 @@ struct VADSettingsView: View {
             Text("longer = fewer, larger chunks")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Slider(value: $settings.streamMaxChunkSeconds, in: 2...15, step: 0.5)
+            Slider(value: $settings.streamMaxChunkSeconds, in: 5...60, step: 1.0)
         }
     }
 
