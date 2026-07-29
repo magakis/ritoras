@@ -130,6 +130,7 @@ class KeyboardViewController: UIInputViewController {
     // Settings cache (refreshed by Darwin notification from container app)
     private let settingsCache = KeyboardSettingsCache()
     private var darwinSettingsChangedToken: DarwinObserverToken?
+    private var darwinLearnedWordsChangedToken: DarwinObserverToken?
 
     // Persisted across keyboard process restarts
     private var lastProcessedPayloadId: UUID? {
@@ -299,7 +300,9 @@ class KeyboardViewController: UIInputViewController {
         KeyboardLogShipper.shared.start()
 
         // Log the resolved app-group identifier via FileLogger (post-resolution, safe to use FileLogger now).
-        FileLogger.shared.info(.keyboard, "AppGroupResolver outcome", payload: [
+        // Promoted to .warn so it survives a keyboard process kill (Jetsam) and reaches
+        // the DebugLogView via the log shipper — critical for SideStore diagnostic triage.
+        FileLogger.shared.warn(.keyboard, "AppGroupResolver outcome", payload: [
             "resolvedIdentifier": SharedConfig.Defaults.appGroupId,
             "bundleId": Bundle.main.bundleIdentifier ?? "?"
         ])
@@ -321,6 +324,13 @@ class KeyboardViewController: UIInputViewController {
                 HapticsManager.shared.reloadEnabledFromAppGroup()
             }
         }
+        darwinLearnedWordsChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinLearnedWordsChangedNotificationName) { [weak self] in
+            guard let self = self else { return }
+            DispatchQueue.main.async {
+                LearnedWordsStore.shared.absorbRemoteSnapshot()
+                self.scheduleSuggestionRefresh()
+            }
+        }
         buildPredictionEngine()
         state = .idle
         FileLogger.shared.debug(.lifecycle, "process launch",
@@ -340,6 +350,10 @@ class KeyboardViewController: UIInputViewController {
             await self?.refreshFromSharedState()
         }
         startSnapshotPolling()
+
+        // Absorb any learned-words changes made by the container app while
+        // the keyboard was dead (e.g. app-side deletes from DictionaryView).
+        LearnedWordsStore.shared.absorbRemoteSnapshot()
 
         // Defensive: never resume in search mode after keyboard dismiss/reappear
         inputTarget = .hostApp
@@ -473,6 +487,7 @@ class KeyboardViewController: UIInputViewController {
         cancelOutstandingAsyncWork()
         darwinStateChangedToken = nil
         darwinSettingsChangedToken = nil
+        darwinLearnedWordsChangedToken = nil
     }
 
     // MARK: - Setup
@@ -1259,6 +1274,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 }
                 // Re-insert the originally-typed word (NO trailing space — cursor lands mid-word).
                 insertTargeted(correction.typed)
+                // User rejected the autocorrect → keep their spelling (mirrors stock iOS behavior).
+                LearnedWordsStore.shared.add(correction.typed)
                 lastAutoCorrection = nil
                 wordOrigin.resetToTyping()  // user is now back to editing a .typing word
             } else {
@@ -1328,6 +1345,24 @@ extension KeyboardViewController: KeyboardViewDelegate {
         }
     }
 
+    /// Strips display-only quotes wrapping an unknown-verbatim candidate.
+    /// The quotes exist only in the suggestion-bar rendering; the document
+    /// and the learned-words store must see the bare word.
+    private func deQuotedSuggestion(_ text: String) -> String {
+        let isQuoted = text.count >= 2 && text.hasPrefix("\"") && text.hasSuffix("\"")
+        return isQuoted ? String(text.dropFirst().dropLast()) : text
+    }
+
+    func keyboardView(_ view: KeyboardView, didLongPressSuggestion text: String) {
+        let bareWord = deQuotedSuggestion(text)
+
+        // Learn-only gesture — must NOT insert or modify text.
+        LearnedWordsStore.shared.add(bareWord)
+
+        // Haptic confirmation so the user knows the word was learned.
+        HapticsManager.shared.tapImpact()
+    }
+
     func keyboardView(_ view: KeyboardView, didTapSuggestion text: String) {
         let context = textDocumentProxy.documentContextBeforeInput ?? ""
 
@@ -1337,12 +1372,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
         // Strip display-only quotes wrapping an unknown-verbatim candidate.
         // The quotes exist only in the suggestion-bar rendering (Step 2.3);
         // the document and the learned-words store must see the bare word.
-        let isQuotedVerbatim = text.count >= 2
-            && text.hasPrefix("\"")
-            && text.hasSuffix("\"")
-        let insertText = isQuotedVerbatim
-            ? String(text.dropFirst().dropLast())
-            : text
+        let insertText = deQuotedSuggestion(text)
+        let isQuotedVerbatim = (insertText != text)
 
         var deleteCount = 0
         for char in context.reversed() {
@@ -1635,6 +1666,13 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
                 switch decision {
                 case .correct(_, let correction):
+                    // No word learned here — intentionally.
+                    //
+                    // The correction target is already a valid dictionary word
+                    // (learning it is a no-op), and the user's typed input was a
+                    // misspelling that would pollute the dictionary. Only the
+                    // revert-on-backspace path (L-revert) or an explicit long-press
+                    // (L-longpress) should learn — not passive autocorrect-accept.
                     // Delete typedWord + triggerChar and re-insert correction + triggerChar.
                     // Byte-identical to today's synchronous outcome: document ends with
                     // `correction<triggerChar>` and cursor is at the end.

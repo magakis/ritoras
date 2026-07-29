@@ -51,6 +51,7 @@ struct SuggestionInputSnapshot {
 protocol KeyboardViewDelegate: AnyObject {
     func keyboardView(_ view: KeyboardView, didPerform action: KeyAction)
     func keyboardView(_ view: KeyboardView, didTapSuggestion text: String)
+    func keyboardView(_ view: KeyboardView, didLongPressSuggestion text: String)
     func keyboardViewSuggestionSnapshot(_ view: KeyboardView) -> SuggestionInputSnapshot?
     func keyboardViewPredictionEngine(_ view: KeyboardView) -> PredictionEngine?
     func keyboardViewMicState(_ view: KeyboardView) -> KeyboardState
@@ -62,6 +63,7 @@ protocol KeyboardViewDelegate: AnyObject {
 extension KeyboardViewDelegate {
     func keyboardViewBackspaceDidBegin(_ view: KeyboardView) {}
     func keyboardViewBackspaceDidEnd(_ view: KeyboardView) {}
+    func keyboardView(_ view: KeyboardView, didLongPressSuggestion text: String) {}
     func keyboardContextToken(_ view: KeyboardView) -> UInt64 { return 0 }
 }
 
@@ -399,6 +401,7 @@ private class KeyboardRowView: UIView {
 
 private class SuggestionBar: UIView {
     var suggestionTapped: ((Int) -> Void)?
+    var suggestionLongPressed: ((Int) -> Void)?
 
     private let stack = UIStackView()
     private var segments: [UIButton] = []
@@ -449,6 +452,10 @@ private class SuggestionBar: UIView {
                     : UIColor(white: 0.92, alpha: 1)
             }
             segment.addTarget(self, action: #selector(segmentTapped(_:)), for: .touchUpInside)
+            let longPress = UILongPressGestureRecognizer(target: self, action: #selector(segmentLongPressed(_:)))
+            longPress.minimumPressDuration = 0.4
+            longPress.allowableMovement = 10
+            segment.addGestureRecognizer(longPress)
             stack.addArrangedSubview(segment)
             segments.append(segment)
         }
@@ -456,6 +463,11 @@ private class SuggestionBar: UIView {
 
     @objc private func segmentTapped(_ sender: UIButton) {
         suggestionTapped?(sender.tag)
+    }
+
+    @objc private func segmentLongPressed(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began, let button = gesture.view as? UIButton else { return }
+        suggestionLongPressed?(button.tag)
     }
 
     func update(with suggestions: [String]) {
@@ -625,6 +637,15 @@ class KeyboardView: UIView {
                 return
             }
             self.delegate?.keyboardView(self, didTapSuggestion: suggestion)
+        }
+        suggestionBar.suggestionLongPressed = { [weak self] index in
+            guard let self = self else { return }
+            let liveToken = self.delegate?.keyboardContextToken(self) ?? 0
+            guard let suggestion = decideSuggestionTap(cache: self.suggestionCache, liveToken: liveToken, index: index) else {
+                FileLogger.shared.debug(.keyboard, "suggestion cache stale long-press ignored", payload: ["idx": index, "cacheToken": self.suggestionCache.token, "liveToken": liveToken])
+                return
+            }
+            self.delegate?.keyboardView(self, didLongPressSuggestion: suggestion)
         }
         addSubview(suggestionBar)
     }
