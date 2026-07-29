@@ -529,7 +529,7 @@ struct SharedConfig {
 ///
 /// This resolver tries multiple strategies to find a working identifier:
 ///   1. The original unsuffixed identifier (works on App Store / TrollStore / Simulator)
-///   2. A team-suffixed identifier constructed from the bundle ID's TeamID suffix
+///   2. A team-suffixed identifier constructed from the TeamID in `embedded.mobileprovision`
 ///   3. The actual app-group string from `embedded.mobileprovision` (most authoritative)
 ///
 /// The first strategy that returns a non-nil containerURL wins. The result is
@@ -544,6 +544,22 @@ final class AppGroupResolver {
 
     private let lock = NSLock()
     private var cached: String?
+    private var _containerAvailable: Bool?
+
+    /// The resolved app-group identifier. Returns the cached result of
+    /// `resolve()`, triggering resolution on first access.
+    var resolvedIdentifier: String {
+        resolve()
+    }
+
+    /// Whether the resolved app-group container is currently available.
+    /// Cached after the first computation (which happens inside `resolve()`).
+    var containerAvailable: Bool {
+        resolve()  // ensures _containerAvailable is cached
+        lock.lock()
+        defer { lock.unlock() }
+        return _containerAvailable ?? false
+    }
 
     func resolve() -> String {
         lock.lock()
@@ -556,6 +572,7 @@ final class AppGroupResolver {
         let original = SharedConfig.Defaults.originalAppGroupId
         let result = performResolution(original: original)
         cached = result
+        _containerAvailable = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: result) != nil
         return result
     }
 
@@ -570,19 +587,22 @@ final class AppGroupResolver {
             return original
         }
 
-        // Strategy 2: construct team-suffixed identifier from bundle ID.
-        // Under SideStore, the bundle ID gets the TeamID appended (e.g.,
-        // com.ritoras.app.64GGL77Z3X). The same TeamID is appended to app-group
-        // identifiers in the same resign operation.
-        if let teamId = extractTeamIdFromBundleId(bundleId) {
+        // Strategy 2: construct team-suffixed identifier from mobileprovision TeamID.
+        // Under SideStore, app-group entitlements are rewritten from
+        // `group.com.ritoras.app` to `group.com.ritoras.app.<TeamID>` at resign time.
+        // Read the TeamID from embedded.mobileprovision (ApplicationIdentifierPrefix
+        // or Entitlements["com.apple.developer.team-identifier"]) and construct
+        // the suffixed identifier. This is the correct approach — SideStore suffixes
+        // the app-group entitlement, NOT the bundle ID.
+        if let teamId = extractTeamIdFromMobileProvision() {
             let suffixed = "\(original).\(teamId)"
             if FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: suffixed) != nil {
-                NSLog("AppGroupResolver: strategy=bundle-id-suffix identifier=\(suffixed) teamId=\(teamId) bundleId=\(bundleId)")
+                NSLog("AppGroupResolver: strategy=mobileprovision-teamid identifier=\(suffixed) teamId=\(teamId) bundleId=\(bundleId)")
                 return suffixed
             }
-            NSLog("AppGroupResolver: bundle-id-suffix attempted but containerURL nil identifier=\(suffixed) bundleId=\(bundleId)")
+            NSLog("AppGroupResolver: mobileprovision-teamid attempted but containerURL nil identifier=\(suffixed) bundleId=\(bundleId)")
         } else {
-            NSLog("AppGroupResolver: no TeamID suffix detected in bundleId=\(bundleId)")
+            NSLog("AppGroupResolver: no TeamID found in embedded.mobileprovision bundleId=\(bundleId)")
         }
 
         // Strategy 3: read embedded.mobileprovision and extract the actual
@@ -600,36 +620,75 @@ final class AppGroupResolver {
         return original
     }
 
-    /// Extracts the TeamID suffix from a bundle ID.
-    /// SideStore rewrites `com.ritoras.app` → `com.ritoras.app.64GGL77Z3X`.
-    /// Returns the suffix (`64GGL77Z3X`) or nil if the bundle ID doesn't have
-    /// a suffix matching the expected pattern (uppercase alphanumeric).
-    private func extractTeamIdFromBundleId(_ bundleId: String) -> String? {
-        let parts = bundleId.split(separator: ".")
-        guard parts.count >= 2 else { return nil }
-        let suffix = String(parts.last!)
-        // TeamID is a 10-character alphanumeric string (uppercase letters + digits).
-        // Validate format to avoid false positives (e.g., a non-SideStore bundle
-        // that happens to have a 4th segment).
-        guard suffix.count >= 8 && suffix.count <= 12 else { return nil }
-        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
-        guard suffix.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return nil }
-        return suffix
+    /// Extracts the TeamID from `embedded.mobileprovision`.
+    ///
+    /// Checks two sources in order:
+    ///   1. `Entitlements["com.apple.developer.team-identifier"]` — the team ID string
+    ///   2. Top-level `ApplicationIdentifierPrefix` array — first element (10-char alphanumeric)
+    ///
+    /// SideStore rewrites app-group entitlements to `group.com.ritoras.app.<TeamID>`,
+    /// so we use this TeamID to construct the suffixed identifier and validate it
+    /// via `containerURL(forSecurityApplicationGroupIdentifier:)`.
+    private func extractTeamIdFromMobileProvision() -> String? {
+        guard let plist = parseMobileProvisionPlist() else { return nil }
+
+        // Strategy A: Entitlements["com.apple.developer.team-identifier"]
+        if let entitlements = plist["Entitlements"] as? [String: Any],
+           let teamId = entitlements["com.apple.developer.team-identifier"] as? String,
+           !teamId.isEmpty {
+            return teamId
+        }
+
+        // Strategy B: top-level ApplicationIdentifierPrefix array
+        if let prefixes = plist["ApplicationIdentifierPrefix"] as? [String],
+           let prefix = prefixes.first,
+           !prefix.isEmpty {
+            return prefix
+        }
+
+        return nil
     }
 
-    /// Reads `embedded.mobileprovision` from the app bundle and extracts the
-    /// app-group identifier. The file is CMS-signed but contains an XML plist
-    /// inside the binary wrapper. We use `.isoLatin1` encoding (which maps every
-    /// byte 1:1 — never fails on binary data, unlike `.ascii`).
-    /// Returns the first app-group identifier found, or nil if anything fails.
-    private func readFromMobileProvision() -> String? {
-        guard let profileURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
-              let data = try? Data(contentsOf: profileURL),
-              let raw = String(data: data, encoding: .isoLatin1),
+    /// Parses `embedded.mobileprovision` and returns the full plist dictionary.
+    /// Tries `Bundle.main.url(forResource:withExtension:)` first; if that returns
+    /// nil (common in keyboard extensions), falls back to a direct bundle path.
+    private func parseMobileProvisionPlist() -> [String: Any]? {
+        // Try standard resource lookup first
+        if let profileURL = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
+           let data = try? Data(contentsOf: profileURL),
+           let plist = parseMobileProvisionData(data) {
+            return plist
+        }
+        // Fallback: direct bundle path (keyboard extension workaround)
+        let directURL = Bundle.main.bundleURL.appendingPathComponent("embedded.mobileprovision")
+        guard let data = try? Data(contentsOf: directURL),
+              let plist = parseMobileProvisionData(data) else {
+            return nil
+        }
+        return plist
+    }
+
+    /// Extracts the XML plist from CMS-signed mobileprovision data and deserializes it.
+    /// Uses `.isoLatin1` encoding (maps every byte 1:1 — never fails on binary data).
+    private func parseMobileProvisionData(_ data: Data) -> [String: Any]? {
+        guard let raw = String(data: data, encoding: .isoLatin1),
               let xmlStart = raw.range(of: "<?xml"),
               let xmlEnd = raw.range(of: "</plist>"),
               let plistData = String(raw[xmlStart.lowerBound..<xmlEnd.upperBound]).data(using: .utf8),
-              let plist = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil) as? [String: Any],
+              let plist = try? PropertyListSerialization.propertyList(from: plistData, options: [], format: nil) as? [String: Any] else {
+            return nil
+        }
+        return plist
+    }
+
+    /// Reads `embedded.mobileprovision` and extracts the first app-group
+    /// identifier from `Entitlements["com.apple.security.application-groups"]`.
+    /// Delegates file-lookup and plist-parsing to `parseMobileProvisionPlist()`,
+    /// which includes the keyboard-extension fallback path.
+    /// Returns the first identifier that resolves to a container, or the first
+    /// string if none resolve — caller handles containerURL nil downstream.
+    private func readFromMobileProvision() -> String? {
+        guard let plist = parseMobileProvisionPlist(),
               let entitlements = plist["Entitlements"] as? [String: Any],
               let appGroups = entitlements["com.apple.security.application-groups"] as? [String],
               !appGroups.isEmpty else {
