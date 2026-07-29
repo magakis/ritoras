@@ -20,6 +20,9 @@ struct SharedConfig {
         static let dictateURLPath = "dictate"
         static let darwinStateChangedNotificationName = "com.ritoras.dictationStateChanged"
         static let darwinSettingsChangedNotificationName = "com.ritoras.settingsChanged"
+        static let learnedWordsPasteboardName = "com.ritoras.learnedWordsSync"
+        static let learnedWordsPasteboardType = "com.ritoras.learnedwords"
+        static let darwinLearnedWordsChangedNotificationName = "com.ritoras.learnedWordsChanged"
         static let localhostServerPort: UInt16 = 47321
         static let dictationPayloadKey = "dictation.payload"
         /// UX-guard timeout for the keyboard extension's return-to-idle.

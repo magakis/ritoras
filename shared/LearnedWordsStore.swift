@@ -1,11 +1,35 @@
 import Foundation
 import UIKit
 
-/// Persists user-accepted corrections to App Group UserDefaults and mirrors
-/// them to `UITextChecker` for the current process lifetime.
+/// Snapshot payload exchanged via the named pasteboard.
+///
+/// The pasteboard holds the authoritative versioned set. Each writer
+/// read-modify-writes the full set with `version+1`. Readers adopt on
+/// `version > localVersion`.
+///
+/// Accepted limitation: a rare simultaneous (keyboard-add ‖ app-delete-
+/// of-different-word) race can drop the keyboard's add until the next
+/// mutation re-includes it — vanishingly rare for a personal dictionary,
+/// and self-healing on the next mutation.
+struct LearnedWordsSnapshot: Codable {
+    var version: Int
+    var words: [String]
+}
+
+/// Persists user-accepted corrections and syncs them across processes
+/// via a named pasteboard + Darwin notification.
+///
+/// Layers (bottom to top):
+///   1. Per-process cache in `UserDefaults.standard` — synchronous local
+///      source for `contains()`/prediction/autocorrect. Always available.
+///   2. Named pasteboard `com.ritoras.learnedWordsSync` — durable
+///      cross-process blackboard. Holds the authoritative versioned set.
+///   3. Darwin notification `com.ritoras.learnedWordsChanged` — push
+///      signal for live refresh.
 ///
 /// Threading: all public methods are designed to be called from the main
 /// thread only (KeyboardViewController methods run on the main queue).
+/// `absorbRemoteSnapshot()` and the Darwin callback dispatch to main.
 final class LearnedWordsStore {
 
     // MARK: - Shared Instance
@@ -14,26 +38,22 @@ final class LearnedWordsStore {
 
     // MARK: - State
 
-    private let defaults: UserDefaults
     private let storeKey = "learnedWords"
+    private let versionKey = "learnedWordsVersion"
     private static let maxLearnedWords = 1000
+    private let lock = NSLock()
     private var cache: Set<String>
     private var insertionOrder: [String] = []
+    /// Local version tracking. Persisted alongside the word array so we
+    /// can detect when the pasteboard holds a newer snapshot.
+    private var localVersion: Int = 0
 
     // MARK: - Init
 
     private init() {
-        // Fall back to standard UserDefaults when the app group suite is
-        // unavailable (e.g. in the test bundle without the host app).
-        self.defaults = UserDefaults(suiteName: SharedConfig.Defaults.appGroupId)
-            ?? UserDefaults.standard
-
-        if let stored = defaults.array(forKey: storeKey) as? [String] {
-            // The persisted array is in insertion order (written by
-            // persist()). During migration from the old unbounded version
-            // the order is arbitrary; suffix simply keeps the first N for
-            // the cap. Either way, trimming is safe — the cap holds and
-            // subsequent persist() calls will write ordered data.
+        // Load local cache from UserDefaults.standard (per-process, always
+        // available — no app-group dependency, works under SideStore).
+        if let stored = UserDefaults.standard.array(forKey: storeKey) as? [String] {
             let trimmed = stored.count > Self.maxLearnedWords
                 ? Array(stored.suffix(Self.maxLearnedWords))
                 : stored
@@ -45,6 +65,11 @@ final class LearnedWordsStore {
             self.insertionOrder = []
         }
 
+        self.localVersion = UserDefaults.standard.integer(forKey: versionKey)
+
+        // Absorb any newer snapshot from the pasteboard (cross-process sync).
+        absorbRemoteSnapshot()
+
         // Re-register every persisted word with UITextChecker — learned words
         // are process-local and reset when the keyboard extension is terminated.
         for word in cache {
@@ -52,26 +77,109 @@ final class LearnedWordsStore {
         }
     }
 
+    // MARK: - Pasteboard Sync
+
+    /// Returns the shared named pasteboard (created if it doesn't exist).
+    /// Named pasteboards are visible across processes within the same team
+    /// ID, never touch the user's general clipboard, and trigger no paste banner.
+    /// The custom pasteboard type (not a standard UTI) keeps it off Universal
+    /// Clipboard as well.
+    private var syncPasteboard: UIPasteboard? {
+        UIPasteboard(
+            name: UIPasteboard.Name(SharedConfig.Defaults.learnedWordsPasteboardName),
+            create: true
+        )
+    }
+
+    /// Publishes the current in-memory state to the named pasteboard as the
+    /// authoritative versioned set. Increments the version from the highest
+    /// known (remote or local). Posts a Darwin notification so the other
+    /// process can absorb immediately.
+    ///
+    /// Read-modify-write race window is accepted (see the limitation
+    /// documented on `LearnedWordsSnapshot`).
+    /// Caller MUST hold `lock`.
+    private func publish() {
+        // Read current pasteboard snapshot to determine remote version.
+        var remoteVersion = 0
+        if let data = syncPasteboard?.data(forPasteboardType: SharedConfig.Defaults.learnedWordsPasteboardType),
+           let snapshot = try? JSONDecoder().decode(LearnedWordsSnapshot.self, from: data) {
+            remoteVersion = snapshot.version
+        }
+
+        // Our current state is authoritative — write the full set.
+        let newVersion = max(remoteVersion, localVersion) + 1
+        let snapshot = LearnedWordsSnapshot(version: newVersion, words: insertionOrder)
+        guard let data = try? JSONEncoder().encode(snapshot) else { return }
+
+        syncPasteboard?.setData(data, forPasteboardType: SharedConfig.Defaults.learnedWordsPasteboardType)
+        localVersion = newVersion
+        UserDefaults.standard.set(localVersion, forKey: versionKey)
+
+        // Notify the other process.
+        DarwinNotifier.post(SharedConfig.Defaults.darwinLearnedWordsChangedNotificationName)
+    }
+
+    /// Reads the pasteboard snapshot. If `snapshot.version > localVersion`,
+    /// adopts `snapshot.words` as the new authoritative set (replace, not
+    /// union — so app-side deletes propagate).
+    ///
+    /// Safe to call from the main thread (all call sites are main-thread).
+    /// Darwin callbacks must dispatch to main before calling this.
+    func absorbRemoteSnapshot() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let data = syncPasteboard?.data(forPasteboardType: SharedConfig.Defaults.learnedWordsPasteboardType),
+              let snapshot = try? JSONDecoder().decode(LearnedWordsSnapshot.self, from: data) else {
+            return
+        }
+
+        guard snapshot.version > localVersion else { return }
+
+        // Diff the old cache vs the new for UITextChecker registration.
+        let oldCache = cache
+
+        // Authoritative replace.
+        let trimmed = snapshot.words.count > Self.maxLearnedWords
+            ? Array(snapshot.words.suffix(Self.maxLearnedWords))
+            : snapshot.words
+        let canonicalized = trimmed.map { ApostropheNormalizer.canonicalize($0) }
+        cache = Set(canonicalized)
+        insertionOrder = canonicalized
+        localVersion = snapshot.version
+
+        // Persist locally.
+        UserDefaults.standard.set(insertionOrder, forKey: storeKey)
+        UserDefaults.standard.set(localVersion, forKey: versionKey)
+
+        // Register ONLY newly-seen words with UITextChecker (perf: avoid
+        // re-registering all 1000 words under the 48 MB Jetsam cap).
+        let newWords = cache.subtracting(oldCache)
+        for word in newWords {
+            UITextChecker.learnWord(word)
+        }
+    }
+
     // MARK: - Persistence
 
-    /// Writes the current cache to UserDefaults, synchronizes, and verifies
-    /// the write succeeded by reading back. Logs an error on failure.
-    ///
-    /// `synchronize()` is deprecated on modern iOS but is used defensively
-    /// here because in keyboard extension contexts (App Group containers),
-    /// it can surface write failures that would otherwise be silently lost.
+    /// Writes the current insertionOrder to UserDefaults.standard.
+    /// Synchronize is deprecated but used defensively — see original code.
+    /// Caller MUST hold `lock`.
     private func persist() {
-        defaults.set(insertionOrder, forKey: storeKey)
+        UserDefaults.standard.set(insertionOrder, forKey: storeKey)
     }
 
     // MARK: - Public API
 
     /// Adds a word to the learned-words store.
     ///
-    /// The word is lowercased for deduplication. Persisted to App Group
-    /// UserDefaults (write-through) and mirrored to `UITextChecker.learnWord(_:)`
-    /// so the system spell checker stops flagging it for the current session.
+    /// The word is lowercased for deduplication. Persisted locally and
+    /// published to the cross-process pasteboard. Mirrored to
+    /// `UITextChecker.learnWord(_:)` so the system spell checker stops
+    /// flagging it for the current session.
     func add(_ word: String) {
+        lock.lock()
+        defer { lock.unlock() }
         let lower = ApostropheNormalizer.canonicalize(word.lowercased().trimmingCharacters(in: .whitespaces))
         guard !lower.isEmpty else { return }
         if cache.contains(lower) { return }
@@ -86,15 +194,20 @@ final class LearnedWordsStore {
 
         persist()
         UITextChecker.learnWord(lower)
+        publish()
     }
 
     /// Returns `true` when the word has been learned (case-insensitive, canonicalized).
     func contains(_ word: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
         return cache.contains(ApostropheNormalizer.canonicalize(word.lowercased().trimmingCharacters(in: .whitespaces)))
     }
 
     /// Returns all learned words in sorted order.
     func allWords() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
         return Array(cache).sorted()
     }
 
@@ -105,57 +218,49 @@ final class LearnedWordsStore {
     /// the 1000-word cap, which evicts the oldest on overflow — see `add(_:)`).
     /// Words are lowercased (the store normalizes on add), matching `allWords()`.
     func allWordsMostRecentFirst() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
         return insertionOrder.reversed()
     }
 
-    /// Removes all learned words from the local store and UserDefaults.
-    /// Does NOT unlearn from `UITextChecker` (no bulk-unlearn API exists);
-    /// the system-resident learned words will be forgotten when the keyboard
-    /// extension process is terminated naturally.
+    /// Removes all learned words from the local store, UserDefaults, and
+    /// the cross-process pasteboard. Does NOT unlearn from `UITextChecker`
+    /// (no bulk-unlearn API exists); the system-resident learned words will
+    /// be forgotten when the keyboard extension process is terminated naturally.
     func clear() {
+        lock.lock()
+        defer { lock.unlock() }
         cache.removeAll()
         insertionOrder.removeAll()
-        defaults.removeObject(forKey: storeKey)
+        UserDefaults.standard.removeObject(forKey: storeKey)
+        publish()
     }
 
     /// Removes a single word from the learned-words store.
     ///
-    /// Persists immediately. Note: `UITextChecker` exposes no single-word
-    /// unlearn API, so the system-resident learned word persists until the
-    /// keyboard process terminates — same caveat as `clear()`.
+    /// Persists and publishes immediately. Note: `UITextChecker` exposes no
+    /// single-word unlearn API, so the system-resident learned word persists
+    /// until the keyboard process terminates — same caveat as `clear()`.
     func remove(_ word: String) {
+        lock.lock()
+        defer { lock.unlock() }
         let lower = ApostropheNormalizer.canonicalize(word.lowercased().trimmingCharacters(in: .whitespaces))
         guard cache.contains(lower) else { return }
         cache.remove(lower)
         insertionOrder.removeAll { $0 == lower }
         persist()
+        publish()
     }
 
-    /// Re-reads the persisted word list from App Group UserDefaults into the
-    /// in-memory cache. Use when this process may have been outlived by
-    /// writes from the other process (e.g. the container app refreshing its
-    /// dictionary view to show words the keyboard recently learned).
+    /// Re-reads the authoritative word list from the pasteboard (absorbing
+    /// any newer snapshot), then falls back to the local cache.
     ///
-    /// Does NOT re-register words with `UITextChecker` (unlike `init`). Today
-    /// only the container app calls this, and the app never queries
-    /// `UITextChecker` — so the omission is harmless. A future keyboard-side
-    /// caller would desync the store's `cache` (used for `isLearned` in the
-    /// autocorrect path) from `UITextChecker`'s resident state (used for
-    /// `isMisspelled`). Do not call this from the keyboard process without
-    /// also re-registering with `UITextChecker.learnWord`.
+    /// Call when this process may have been outlived by writes from the
+    /// other process (e.g. the container app refreshing its dictionary view
+    /// to show words the keyboard recently learned).
     ///
     /// Main-thread-only (same threading contract as the rest of this class).
     func reload() {
-        if let stored = defaults.array(forKey: storeKey) as? [String] {
-            let trimmed = stored.count > Self.maxLearnedWords
-                ? Array(stored.suffix(Self.maxLearnedWords))
-                : stored
-            let canonicalized = trimmed.map { ApostropheNormalizer.canonicalize($0) }
-            cache = Set(canonicalized)
-            insertionOrder = canonicalized
-        } else {
-            cache = []
-            insertionOrder = []
-        }
+        absorbRemoteSnapshot()
     }
 }
