@@ -3,20 +3,10 @@ import Network
 
 // MARK: - LocalhostServer
 
-/// Lightweight HTTP/1.1 server on a localhost port that exposes dictation
-/// state and result endpoints.
-///
-/// ## Thread safety
-/// `NWConnection.receive` callbacks fire on a `DispatchQueue`. The
-/// `stateProvider` and `resultProvider` closures are invoked from those
-/// background queues. To avoid `@MainActor` crashes, `DictationViewModel`
-/// captures its state into a lock-guarded snapshot before calling
-/// `startLocalhostServer()`. The providers read that snapshot — they never
-/// touch the live `@Published` properties.
+/// Lightweight HTTP/1.1 server on a localhost port that exposes health
+/// and log-shipping endpoints.
 final class LocalhostServer {
     private let port: UInt16
-    private let stateProvider: () -> DictationStateSnapshot
-    private let resultProvider: @Sendable (UUID) -> DictationResultSnapshot?
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "com.ritoras.localhostserver", qos: .utility)
 
@@ -29,12 +19,8 @@ final class LocalhostServer {
 
     private static let maxRequestSize = 65536
 
-    init(port: UInt16,
-         stateProvider: @escaping () -> DictationStateSnapshot,
-         resultProvider: @escaping @Sendable (UUID) -> DictationResultSnapshot?) {
+    init(port: UInt16) {
         self.port = port
-        self.stateProvider = stateProvider
-        self.resultProvider = resultProvider
     }
 
     // MARK: - Lifecycle
@@ -233,58 +219,15 @@ final class LocalhostServer {
     // MARK: - Routing
 
     private func handleRoute(_ rawPath: String) -> Data {
-        let (pathComponent, queryItems) = Self.parsePath(rawPath)
         FileLogger.shared.debug(.network, "LocalhostServer: handled request",
-                               payload: ["path": pathComponent])
+                               payload: ["path": rawPath])
 
-        switch pathComponent {
+        switch rawPath {
         case "/health":
             return Self.makeJSONResponse(status: 200, body: [
                 "status": "ok",
                 "port": actualPort ?? port
             ])
-
-        case "/state":
-            let snapshot = stateProvider()
-
-            if let idStr = queryItems?.first(where: { $0.name == "id" })?.value,
-               let requestedID = UUID(uuidString: idStr) {
-                guard let activeIDStr = snapshot.activeID,
-                      let activeID = UUID(uuidString: activeIDStr),
-                      activeID == requestedID else {
-                    return Self.makeJSONResponse(status: 404, body: [
-                        "error": "not found",
-                        "detail": "No active dictation with the specified ID"
-                    ])
-                }
-            }
-
-            if snapshot.phase == "idle" {
-                return Self.makeJSONResponse(status: 404, body: [
-                    "error": "not found",
-                    "detail": "No active dictation"
-                ])
-            }
-
-            return Self.makeJSONResponse(status: 200, body: snapshot)
-
-        case "/result":
-            guard let idStr = queryItems?.first(where: { $0.name == "id" })?.value,
-                  let id = UUID(uuidString: idStr) else {
-                return Self.makeJSONResponse(status: 400, body: [
-                    "error": "bad request",
-                    "detail": "Missing or invalid 'id' query parameter"
-                ])
-            }
-
-            guard let result = resultProvider(id) else {
-                return Self.makeJSONResponse(status: 404, body: [
-                    "error": "not found",
-                    "detail": "No result for the specified ID"
-                ])
-            }
-
-            return Self.makeJSONResponse(status: 200, body: result)
 
         default:
             return Self.makeJSONResponse(status: 404, body: [
