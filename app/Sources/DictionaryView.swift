@@ -7,14 +7,17 @@ struct DictionaryView: View {
     @State private var presentingEditor = false
     @State private var editingWord: String? = nil
     @State private var showClearConfirmation = false
+    @State private var learnedWordsObserver: DarwinObserverToken?
 
     var body: some View {
         NavigationView {
-            Group {
+            VStack(spacing: 0) {
                 if words.isEmpty {
+                    Spacer()
                     Text("No words in your personal dictionary yet.\nTap + to add one.")
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
+                    Spacer()
                 } else {
                     List {
                         ForEach(filteredWords, id: \.self) { word in
@@ -32,6 +35,8 @@ struct DictionaryView: View {
                         .onDelete(perform: delete)
                     }
                 }
+
+                diagnosticFooter
             }
             .navigationTitle("Personal Dictionary")
             .navigationBarTitleDisplayMode(.inline)
@@ -74,7 +79,46 @@ struct DictionaryView: View {
                 Button("Cancel", role: .cancel) {}
             }
         }
-        .onAppear { refresh() }
+        .onAppear {
+            refresh()
+            learnedWordsObserver = DarwinNotifier.observe(
+                SharedConfig.Defaults.darwinLearnedWordsChangedNotificationName
+            ) {
+                DispatchQueue.main.async {
+                    LearnedWordsStore.shared.reload()
+                    words = LearnedWordsStore.shared.allWordsMostRecentFirst()
+                }
+            }
+        }
+        .onDisappear {
+            learnedWordsObserver = nil
+        }
+    }
+
+    // MARK: - Diagnostic Footer
+
+    /// Small unobtrusive footer showing app-group resolver diagnostics.
+    /// Enables on-device verification of the app-group container state
+    /// without device logs (SideStore entitlement-rewriting diagnostic).
+    @ViewBuilder
+    private var diagnosticFooter: some View {
+        let resolvedId = AppGroupResolver.shared.resolvedIdentifier
+        let containerOk = AppGroupResolver.shared.containerAvailable
+        let wordCount = LearnedWordsStore.shared.allWordsMostRecentFirst().count
+
+        VStack(alignment: .leading, spacing: 1) {
+            Text("App Group: \(resolvedId)")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            Text("Container: \(containerOk ? "Available" : "Unavailable")")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            Text("Learned words: \(wordCount)")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 4)
     }
 
     // MARK: - Derived
