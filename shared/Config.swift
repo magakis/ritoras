@@ -497,6 +497,26 @@ struct SharedConfig {
             defaults.removeObject(forKey: Defaults.selectedServerKey)
         }
     }
+
+    // MARK: - Dictation Snapshot
+
+    /// Reads the current dictation snapshot from the App Group.
+    /// Written by the container app; read by the keyboard extension.
+    /// Returns nil when the App Group is unavailable or no snapshot has been stored.
+    static func dictationSnapshot() -> DictationPayload? {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return nil }
+        guard let data = defaults.data(forKey: Defaults.dictationPayloadKey) else { return nil }
+        return try? JSONDecoder().decode(DictationPayload.self, from: data)
+    }
+
+    /// Writes a dictation snapshot to the App Group. Called by the container
+    /// app's DictationViewModel to publish transcription state to the keyboard.
+    static func setDictationSnapshot(_ payload: DictationPayload) {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return }
+        if let data = try? JSONEncoder().encode(payload) {
+            defaults.set(data, forKey: Defaults.dictationPayloadKey)
+        }
+    }
 }
 
 // MARK: - AppGroupResolver

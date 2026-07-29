@@ -14,5 +14,6 @@ struct DictationPayload: Codable, Equatable {
     var text: String?
     var errorMessage: String?
     let timestamp: Date
+    var revision: UInt64?
 
 }
