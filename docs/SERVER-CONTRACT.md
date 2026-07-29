@@ -6,28 +6,32 @@
 
 ---
 
-## 1. Localhost IPC (in-process)
+## 1. Cross-process IPC (app-group UserDefaults)
 
-> **Primary in-flight transport for dictation state and results.**
+> **Canonical transport for dictation state and results: app-group UserDefaults.**
 > Full architecture spec: [`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md).
 
-The container app runs a lightweight HTTP server on `127.0.0.1:47321` using
-Apple's Network framework. The keyboard extension polls this server for
-dictation state and result data. This replaces the broken app-group shared
-container (which SideStore resigning cannot provision).
+The container app writes a `DictationPayload` snapshot to app-group UserDefaults
+on every phase transition, guarded by a `stateLock` with a monotonically
+increasing `revision` counter. The write happens **before** the Darwin
+notification is posted (write-before-signal ordering). The keyboard reads the
+snapshot via `SharedConfig.dictationSnapshot()` + `readSharedSnapshot(for:)`.
 
-- Localhost IPC is the **primary transport** for all dictation results during
-  a live session (~1 ms latency).
-- Darwin notifications (`com.ritoras.dictationCompleted`,
-  `com.ritoras.dictationStateChanged`) trigger immediate localhost polling,
-  reducing wait time.
-- The **remote Whisper server** (`POST /dictation_result` + `GET /dictation_result/latest`) is the **fallback** when the container app is killed
-  mid-transcription and the result was already posted upstream.
-- The **clipboard** (`org.ritoras.dictation` pasteboard type) is an additional
-  fallback, used primarily under SideStore where the app-group container is
-  unavailable.
+- **App-group UserDefaults** is the single canonical channel — proven reliable
+  under SideStore via `AppGroupResolver` (which handles the Team-ID suffix
+  that SideStore appends to app-group identifiers at resign time).
+- **Darwin notification** (`com.ritoras.dictationStateChanged`) is the sole
+  trigger — posted by the container app after the snapshot write, observed by
+  the keyboard, which calls `refreshFromSharedState()`. It is payload-free by
+  iOS design.
+- **Emergency fallback** — `GET /jobs/{id}` on the Whisper server, activated
+  only after 6 consecutive app-group snapshot misses (proving the container
+  app is genuinely not writing). Both paths route through the same
+  `handleTerminalResult(id:text:errorMessage:)` handler with id-based dedup.
+- **Idempotency** — id-based (`ritoras_last_pid` UserDefaults key), not
+  wall-clock. The old timestamp guard (`ritoras_last_ts`) has been deleted.
 
-For the complete architecture, endpoint reference, state machines, and
+For the complete architecture, snapshot data model, state machines, and
 troubleshooting guide, see [`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md).
 
 ---
@@ -408,10 +412,12 @@ transcript as `initial_prompt` for each new chunk (`server.py:828`).
 
 ### Result delivery invariant
 
-In stream mode, exactly **one** `completed` payload is POSTed to
-`/dictation_result` per session, carrying the server's `final` (normalized)
-text. The payload shape is identical to batch mode. The keyboard extension
-receives it via the same `/dictation_result/latest` poll.
+In stream mode, exactly **one** terminal `DictationPayload` is written to the
+app-group UserDefaults snapshot per session, carrying the server's `final`
+(normalized) text. The keyboard extension reads it from the shared store via
+`readSharedSnapshot(for:)`. If the container app is killed before the terminal
+snapshot is written, the keyboard falls back to `GET /jobs/{id}` on the Whisper
+server (see [`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md) §7).
 
 Live `partial` transcriptions are display-only in the container app and are
 **never** sent to the keyboard extension.
@@ -655,24 +661,23 @@ transient failure.
 
 ---
 
-## 15. Deprecation notice
+## 15. Removed endpoints
 
-### Endpoint
+### Endpoint (REMOVED — client side)
 
 ```
 GET {BASE_URL}/dictation_result/latest
+POST {BASE_URL}/dictation_result
 ```
 
-### What it does
+### What they did
 
-The keyboard extension currently polls this endpoint as a fallback transport
-when the primary localhost IPC path ([`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md))
-does not produce a result (container app killed mid-transcription). The
-container app writes dictation results to this endpoint after transcription
-completes (in both batch and stream modes), and the keyboard reads them via
-polling at ~500 ms intervals.
+The keyboard extension polled `GET /dictation_result/latest` as a fallback
+transport when the container app was killed mid-transcription. The container app
+wrote dictation results to `POST /dictation_result` after transcription
+completed (in both batch and stream modes).
 
-### Response shape
+### Response shape (historical, for server-only compatibility)
 
 ```json
 {
@@ -690,33 +695,25 @@ polling at ~500 ms intervals.
 | `errorMessage` | `string` or `null` | Present when `status` is `error`. |
 | `detail` | `string` or `null` | Present on 404 — value is `"Not Found"`. |
 
-If no result is available, the server returns HTTP 404 with
+If no result was available, the server returned HTTP 404 with
 `{"detail": "Not Found"}`.
 
-### Deprecation status
+### Status
 
-**DEPRECATED**
+**REMOVED (client-side)** — deprecated in Phase 5, removed in Phase 6.
 
-This endpoint is a polling-based transport that was introduced as a workaround
-before the localhost IPC and clipboard transports were available. It will be
-**removed** in a future update once the keyboard extension no longer requires
-it.
+The keyboard extension no longer uses these endpoints. All dictation result
+delivery now flows through the app-group UserDefaults canonical channel (see
+[`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md)). The emergency fallback when the
+container app cannot deliver the result via app-group is now `GET /jobs/{id}`
+(see [§13](#13-job-status-polling)) — polled only after 6 consecutive
+app-group snapshot misses, using the same id-dedup guard.
 
-### Migration path
+### Server-side status
 
-New code must use the localhost IPC transport (see
-[`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md)) for cross-target delivery instead
-of this endpoint. The localhost HTTP transport provides ~1 ms latency without
-polling, works offline, and is not subject to network latency or server
-availability.
-
-### Timeline
-
-| Phase | Action |
-|-------|--------|
-| Phase 5 | This deprecation notice published |
-| Phase 6 | Client-side reliance on this endpoint removed. Keyboard stops polling `/dictation_result/latest`. |
-| Future (TBD) | Server-side endpoint removed |
+The server may retain these endpoints for backward compatibility with older
+clients, but no active Ritoras client relies on them. Server teams may remove
+them at their discretion.
 
 ---
 
@@ -728,18 +725,19 @@ The following table summarises the state of all documented server endpoints:
 |----------|------|--------|---------|
 | `POST /transcribe` | Sync | Stable — primary batch endpoint | Container app (batch mode) |
 | `WS /stream` | Streaming | Stable — primary streaming endpoint | Container app (stream mode) |
-| `POST /transcriptions` + `GET /jobs/{id}` | Async (request-reply) | New — recommended for constrained clients and crash recovery | Not yet adopted by iOS client (planned for Phase 7) |
-| `GET /dictation_result/latest` | Sync polling | **DEPRECATED** — see §15 | Keyboard extension (fallback; to be removed in Phase 6) |
+| `POST /transcriptions` + `GET /jobs/{id}` | Async (request-reply) | **ADOPTED** — emergency fallback for crash recovery | Keyboard extension (read-only via `GET /jobs/{id}`) |
+| `GET /dictation_result/latest` | Sync polling | **REMOVED** (client-side) — see §15 | None |
 
 ### Key design rationale
 
 - **`POST /transcribe`** and **`WS /stream`** remain the primary endpoints for
   the container app today. They are synchronous, well-tested, and unchanged.
-- **`POST /transcriptions`** + **`GET /jobs/{id}`** are optional async
-  endpoints. They are not yet used by any Ritoras client. They are documented
-  now so the server team can implement them in parallel. Future clients —
-  especially those that may be killed by the OS mid-request — should prefer this
-  pattern.
-- **`GET /dictation_result/latest`** is deprecated and will be removed once the
-  keyboard extension no longer relies on it (Phase 6). Do not build new
-  dependencies on this endpoint.
+- **`POST /transcriptions`** + **`GET /jobs/{id}`** are adopted as the
+  emergency fallback transport. The keyboard polls `GET /jobs/{id}` only when
+  the app-group UserDefaults path fails after 6 consecutive misses (proving the
+  container app is genuinely not writing). Both paths route through the same
+  `handleTerminalResult(id:text:errorMessage:)` handler with id-based dedup,
+  preventing double-insertion.
+- **`GET /dictation_result/latest`** has been removed from the client. The
+  server may retain the endpoint for backward compatibility, but no active
+  Ritoras client relies on it.

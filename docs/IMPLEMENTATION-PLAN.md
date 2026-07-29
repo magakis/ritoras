@@ -488,7 +488,7 @@ recording → tap stop → stop recorder, get m4a URL (P6) → transcribing
 
 | # | Gotcha | Phase(s) | Mitigation |
 |---|---|---|---|
-| G1 | **App Group not provisionable on free/SideStore** | P4, P8 | Spike first; build-time `Config.swift` fallback; $99/year unlocks it |
+| G1 | **App Group not provisionable on free/SideStore** | P4, P8, P6B | **RESOLVED** — `AppGroupResolver` (original, bundle-ID-suffixed, and `embedded.mobileprovision` strategies) proven reliable across all tested SideStore versions. App-group UserDefaults is now the canonical transport. See [`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md). |
 | G2 | **Free-Apple-ID signature needs SideStore (not ideviceinstaller)** | P2, P3 | CI emits ad-hoc/unsigned `.ipa`; SideStore signs on-device |
 | G3 | **`OSStatus 561145187` audio error** | P6 | `.default` mode (not `.spokenAudio`); activate-before-init; deactivate-on-stop; handle re-entrancy |
 | G4 | **ATS blocks Tailscale 100.64.0.0/10 (CGNAT)** | P7 | Tailscale `*.ts.net` LE HTTPS (best) or `NSAllowsArbitraryLoads` (v1) |
@@ -512,34 +512,81 @@ recording → tap stop → stop recorder, get m4a URL (P6) → transcribing
 
 ---
 
-## 7. Superseded: Phase 4 (App-Group Inbox Migration)
+## 7. Superseded IPC architectures (two migrations)
 
-The original Phase 4 design called for an **app-group inbox** (`shared/TranscriptionInbox.swift`)
-as the cross-process transport for dictation results. This was replaced by the
-**localhost HTTP IPC** architecture, which is more reliable under SideStore
-signing (SideStore rewrites entitlements, breaking app-group container access).
+The cross-process IPC between the container app and the keyboard extension has
+undergone two architectural migrations.
 
-### What changed
+### Migration 1: App-group inbox → Localhost HTTP (Phase 4 → Phase 5)
 
-| Original approach | Current approach |
+The original Phase 4 design called for an **app-group inbox**
+(`shared/TranscriptionInbox.swift`) as the cross-process transport for dictation
+results. This was replaced by the **localhost HTTP IPC** architecture when early
+testing found that SideStore's entitlement rewriting could break app-group
+container access.
+
+| Original approach | Phase 5 approach |
 |---|---|
 | App Group shared container (UserDefaults + file coordination) | Localhost HTTP server on `127.0.0.1:47321` (`NWListener`) |
 | `TranscriptionInbox.swift` push-style delivery | `LocalhostServer` + `LocalhostClient` polling every 500 ms |
 | Darwin notification `com.ritoras.dictationCompleted` only | Both `com.ritoras.dictationCompleted` and `com.ritoras.dictationStateChanged` |
 | Clipboard as primary under SideStore | Clipboard as auxiliary fallback; localhost HTTP is primary |
 
-### Why the change
+### Migration 2: Three-channel fallback chain → Single-channel app-group (Phase 6B)
 
-1. **SideStore entitlement rewriting** — SideStore appends a TeamID suffix to
-   app-group identifiers (`group.com.ritoras.app` → `group.com.ritoras.app.<TeamID>`).
-   The `AppGroupResolver` workaround (trying original, suffixed, and
-   `embedded.mobileprovision` strategies) was fragile and failed under some
-   SideStore versions.
-2. **Latency** — localhost HTTP delivers results in ~1 ms vs ~50 ms for
-   clipboard and ~300–1200 ms for remote server polling.
-3. **No shared container requirement** — localhost IPC works on any signing
-   configuration (free Apple ID, SideStore, Developer Program) because it
-   requires only a TCP connection to `127.0.0.1`, which iOS never blocks.
+The Phase 5 localhost-HTTP architecture relied on three competing transports
+(localhost HTTP → Darwin notification + clipboard → remote server `/dictation_result`
+polling), which was complex and redundant. Phase 6B collapsed this into a
+**single canonical channel** with one emergency fallback.
+
+| Phase 5 approach | Current (Phase 6B) approach |
+|---|---|
+| Three-channel fallback chain (localhost → clipboard → server polling) | **Single canonical channel:** app-group UserDefaults |
+| `/state` and `/result` localhost endpoints | Localhost serves `/health` and `/logs` only |
+| Clipboard transport (`org.ritoras.dictation` UTI on `UIPasteboard.general`) | **Removed** |
+| `POST /dictation_result` + `GET /dictation_result/latest` | **Removed** (client-side) |
+| `com.ritoras.dictationCompleted` notification | **Deleted** (was premature) |
+| Wall-clock timestamp dedup (`ritoras_last_ts`) | **Deleted** — now id-based (`ritoras_last_pid`) |
+| `AppGroupResolver` for settings only | `AppGroupResolver` proven working for **all** app-group data, including dictation results |
+| Server polling unconditionally when localhost unavailable | `GET /jobs/{id}` fallback only after **6 consecutive** app-group misses |
+
+### Why the second migration
+
+1. **AppGroupResolver matured** — The `AppGroupResolver` workaround (trying
+   original, bundle-ID-suffixed, and `embedded.mobileprovision` strategies) was
+   proven reliable across all tested SideStore versions. It now successfully
+   resolves the TeamID-suffixed app-group identifier, restoring full app-group
+   UserDefaults functionality for dictation transport.
+2. **Simplification** — Three competing transports created complexity,
+   race-condition surface, and code that was hard to reason about. A single
+   canonical channel (app-group snapshot → Darwin trigger → keyboard read)
+   eliminates these issues.
+3. **Write-before-signal ordering** — Writing the snapshot to UserDefaults
+   **before** posting the Darwin notification eliminates the race between
+   the write and the keyboard's read, which the localhost polling approach
+   worked around with a 500 ms poll interval.
+4. **Id-based dedup** — Replacing the wall-clock timestamp guard with an
+   id-based guard (`lastProcessedPayloadId` backed by `ritoras_last_pid`)
+   is simpler and more robust across process restarts.
+
+### Current architecture
+
+The current design is fully documented in
+[`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md):
+
+- **Canonical channel:** `DictationPayload` snapshot in app-group UserDefaults,
+  written by `SharedConfig.setDictationSnapshot(...)` under `stateLock` with a
+  monotonically increasing `revision` counter.
+- **Trigger:** Darwin notification `com.ritoras.dictationStateChanged` —
+  payload-free, posted after the snapshot write.
+- **Keyboard read:** `SharedConfig.dictationSnapshot()` via
+  `readSharedSnapshot(for:)` — checks both id-match and revision-freshness.
+- **Idempotency:** `lastProcessedPayloadId` (key `ritoras_last_pid`) — once a
+  terminal result is processed, it is not re-inserted.
+- **Emergency fallback:** `GET /jobs/{id}` on the Whisper server — activated
+  only after 6 consecutive app-group misses, routes through the same
+  `handleTerminalResult` handler for id-dedup.
+- **Localhost server:** `/health` and `/logs` only (log shipper).
 
 ### File references
 
@@ -550,10 +597,3 @@ signing (SideStore rewrites entitlements, breaking app-group container access).
 (via the existing `project.yml` recursive glob). Three new public methods
 were added: `remove(_:)`, `reload()`, and `allWordsMostRecentFirst()` to
 support the upcoming dictionary-management UI (Phase 3 of this sub-track).
-
-The new architecture is fully documented in
-[`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md). The `AppGroupResolver` remains in
-`shared/Config.swift` for reading settings (server URL, dictation mode) but is
-no longer the primary transport for dictation results. The
-`TranscriptionInbox.swift` file still exists but is unused by the current
-transport paths.
