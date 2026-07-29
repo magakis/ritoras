@@ -103,25 +103,22 @@ class KeyboardViewController: UIInputViewController {
 
     // MARK: - Dictation State
 
-    private var darwinToken: DarwinObserverToken?
     private var waitTimer: Timer?
     private var errorResetWorkItem: DispatchWorkItem?
     private var suggestionRefreshWorkItem: DispatchWorkItem?
     private var autocorrectWorkItem: DispatchWorkItem?
     private var pollTimer: Timer?
     private var pollCount = 0
-    private var clipboardPollTimer: Timer?
-    private var clipboardPollCount = 0
     private var confirmStopTimer: Timer?
 
-    // MARK: - Localhost Transport (Phase 2)
+    // MARK: - Snapshot Polling & Darwin Notifications
 
-    private var localhostPollTimer: DispatchSourceTimer?
-    private var lastSeenPhase: String = ""
-    private var consecutiveConnectionFailures: Int = 0
+    private var snapshotPollTimer: DispatchSourceTimer?
     private var darwinStateChangedToken: DarwinObserverToken?
-    private var localhostPollDeadline: Date = .distantFuture
-    /// Stored Task for refreshStateFromLocalhost, cancelled on teardown and
+    /// Tracks consecutive snapshot misses (app-group read returned nil). When this
+    /// reaches 6, /jobs server polling starts as an emergency fallback.
+    private var consecutiveSnapshotMisses: Int = 0
+    /// Stored Task for refreshFromSharedState, cancelled on teardown and
     /// superseded on each new spawn to prevent interleaved concurrent executions.
     private var appearRefreshTask: Task<Void, Never>?
 
@@ -142,12 +139,14 @@ class KeyboardViewController: UIInputViewController {
 
     // MARK: - Server Polling
 
-    // Persisted across keyboard process restarts to prevent re-processing
-    // the same dictation result when the user switches apps.
-    private var lastProcessedTimestamp: Double {
-        get { UserDefaults.standard.double(forKey: "ritoras_last_ts") }
-        set { UserDefaults.standard.set(newValue, forKey: "ritoras_last_ts") }
-    }
+    /// In-memory dedup timestamp for server polling (not persisted — only the
+    /// id-based dedup guard in handleTerminalResult crosses process restarts).
+    private var lastProcessedTimestamp: Double = 0
+
+    /// Tracks the highest revision seen from the app-group snapshot to avoid
+    /// re-processing in-progress updates that have already been reflected in the
+    /// UI. Reset to 0 when a new dictation starts.
+    private var lastSeenSnapshotRevision: UInt64 = 0
 
     /// The active dictation request ID, persisted so the keyboard can resume
     /// waiting for its result even after iOS terminates the extension process
@@ -335,12 +334,12 @@ class KeyboardViewController: UIInputViewController {
         super.viewDidAppear(animated)
         keyboardView.updateFullAccess(hasFullAccess)
 
-        // Localhost transport (primary under SideStore where app group is broken).
+        // App-group snapshot polling (primary transport).
         appearRefreshTask?.cancel()
         appearRefreshTask = Task { [weak self] in
-            await self?.refreshStateFromLocalhost()
+            await self?.refreshFromSharedState()
         }
-        startLocalhostPolling()
+        startSnapshotPolling()
 
         // Defensive: never resume in search mode after keyboard dismiss/reappear
         inputTarget = .hostApp
@@ -472,7 +471,6 @@ class KeyboardViewController: UIInputViewController {
         KeyboardLogShipper.shared.stop()
         FileLogger.broadcast = nil
         cancelOutstandingAsyncWork()
-        darwinToken = nil
         darwinStateChangedToken = nil
         darwinSettingsChangedToken = nil
     }
@@ -580,9 +578,7 @@ class KeyboardViewController: UIInputViewController {
             cancelDictation()
         case .error:
             state = .idle
-            clipboardPollTimer?.invalidate()
             serverPollTimer?.invalidate()
-            clearClipboardDictation()
         default:
             break   // ignore taps while openingApp/inserting
         }
@@ -591,17 +587,15 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Dictation via Container App
 
     private func openContainerAppForDictation() {
-        // Clear any stale clipboard/server data from previous sessions
-        clearClipboardDictation()
+        // Clear any stale data from previous sessions
         clearDeferredResult()
-        lastProcessedTimestamp = 0
-        clipboardPollTimer?.invalidate()
-        clipboardPollTimer = nil
         serverPollTimer?.invalidate()
         serverPollTimer = nil
         serverPollUnresponsiveCount = 0
         serverPollWorkItem?.cancel()
         serverPollWorkItem = nil
+        lastSeenSnapshotRevision = 0
+        consecutiveSnapshotMisses = 0
 
         let id = UUID()
         pendingRequestId = id
@@ -679,20 +673,13 @@ class KeyboardViewController: UIInputViewController {
             "id": id.uuidString
         ])
 
-        // Register Darwin notification observer
-        darwinToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinNotificationName) { [weak self] in
-            self?.appearRefreshTask?.cancel()
-            self?.appearRefreshTask = Task { [weak self] in
-                await self?.refreshStateFromLocalhost()
-            }
-        }
-
-        // Register localhost state-changed observer
+        // Register state-changed Darwin observer to trigger app-group snapshot refresh
         darwinStateChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinStateChangedNotificationName) { [weak self] in
-            // State-changed notification: poll localhost for updated state.
-            self?.appearRefreshTask?.cancel()
-            self?.appearRefreshTask = Task { [weak self] in
-                await self?.refreshStateFromLocalhost()
+            DispatchQueue.main.async { [weak self] in
+                self?.appearRefreshTask?.cancel()
+                self?.appearRefreshTask = Task { [weak self] in
+                    await self?.refreshFromSharedState()
+                }
             }
         }
 
@@ -704,185 +691,102 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
-    /// Called when a Darwin notification fires. The payload should be pre-fetched
-    /// on a background queue (see Darwin observer registration) — if nil, falls
-    /// back to a synchronous read for the legacy code path.
-    private func handleDictationCompleted(payload preFetchedPayload: DictationPayload? = nil) {
-        let elapsedSincePost = pendingRequestStart > 0
-            ? (Date().timeIntervalSince1970 - pendingRequestStart) * 1000 : 0
-        FileLogger.shared.info(.keyboard, "darwin received", payload: [
-            "id": pendingRequestId?.uuidString ?? "nil",
-            "elapsed_ms_since_post": elapsedSincePost
-        ])
-        stopDictationTransports()
+    // MARK: - App-Group Snapshot Polling
 
-        // Try pre-fetched payload first (works if properly signed)
-        guard let payload = preFetchedPayload else {
-            // No payload yet — poll the server and keep polling.
-            FileLogger.shared.debug(.keyboard, "handleDictationCompleted — no payload yet, falling back to server poll")
-            pollServerForDictation()
-            if state == .idle {
-                state = .waiting
-                startServerPolling()
-            }
-            return
-        }
-
-        // Ignore stale payloads (wrong request ID, or no pending request at all)
-        guard let id = pendingRequestId, payload.id == id else {
-            FileLogger.shared.debug(.keyboard, "Ignoring stale dictation payload",
-                                    payload: ["payloadId": payload.id.uuidString,
-                                              "pendingRequestId": pendingRequestId?.uuidString ?? "nil"])
-            return
-        }
-
-        switch payload.status {
-        case .completed:
-            insertDictationResult(text: payload.text ?? "")
-            return
-        case .cancelled:
-            FileLogger.shared.info(.keyboard, "Dictation cancelled",
-                                   payload: ["pendingRequestId": id.uuidString])
-            pendingRequestId = nil
-            dictationTargetDocId = nil
-            state = .idle
-        case .error:
-            FileLogger.shared.error(.keyboard, "Dictation completed with error",
-                                    payload: ["pendingRequestId": id.uuidString,
-                                              "errorMessage": payload.errorMessage ?? "unknown"])
-            pendingRequestId = nil
-            dictationTargetDocId = nil
-            state = .error(payload.errorMessage ?? "Transcription failed.")
-        case .recording, .transcribing:
-            // Premature signal \u{2014} keep waiting
-            startWaitingForDictation(id: id)
-            return
-        }
+    /// Reads the current dictation snapshot from the app-group UserDefaults and
+    /// returns it only if it matches `id` and carries a higher revision than
+    /// `lastSeenSnapshotRevision` (preventing re-processing of stale data).
+    /// Updates `lastSeenSnapshotRevision` on match so the same snapshot is not
+    /// returned twice.
+    private func readSharedSnapshot(for id: UUID) -> DictationPayload? {
+        guard let payload = SharedConfig.dictationSnapshot(),
+              payload.id == id,
+              (payload.revision ?? 0) > lastSeenSnapshotRevision
+        else { return nil }
+        lastSeenSnapshotRevision = payload.revision ?? 0
+        return payload
     }
 
-    // MARK: - Localhost Transport (Phase 2)
-
-    /// Polls the localhost server for the current dictation state. Called from
-    /// the polling timer and from the Darwin state-changed notification.
-    /// Falls back to legacy server polling after 3 consecutive connection
-    /// failures (container app not running).
-    private func refreshStateFromLocalhost() async {
-        if Date() >= localhostPollDeadline {
-            await MainActor.run {
-                self.stopDictationTransports()
-                self.pendingRequestId = nil
-                self.dictationTargetDocId = nil
-                FileLogger.shared.debug(.keyboard, "Localhost polling timed out",
-                                        payload: ["timeoutSec": SharedConfig.Defaults.dictationTimeoutSeconds])
-                self.state = .error("Dictation timed out. Try again.")
-            }
-            return
-        }
+    /// Reads the current dictation snapshot from the app-group. Called from
+    /// the snapshot poll timer and from the Darwin state-changed notification.
+    /// The app-group snapshot (via `readSharedSnapshot`) is the sole channel.
+    private func refreshFromSharedState() async {
         guard let id = pendingRequestId else {
             return
         }
-        do {
-            let snapshot = try await LocalhostClient.getState(id: id)
-            if Task.isCancelled {
-                // STRIP-BEFORE-COMMIT
-                FileLogger.shared.warn(.keyboard, "crash-probe: refreshStateFromLocalhost cancelled at checkpoint N", payload: ["checkpoint": 1])
-                return
+
+        // App-group snapshot is the PRIMARY channel
+        if let payload = readSharedSnapshot(for: id) {
+            switch payload.status {
+            case .completed:
+                handleTerminalResult(id: payload.id, text: payload.text, errorMessage: nil)
+            case .error:
+                handleTerminalResult(id: payload.id, text: nil, errorMessage: payload.errorMessage ?? "Transcription failed")
+            case .cancelled:
+                stopDictationTransports()
+                pendingRequestId = nil
+                dictationTargetDocId = nil
+                state = .idle
+            case .recording, .transcribing:
+                updateRecordingInProgressUI(phase: payload.status.rawValue)
             }
-            consecutiveConnectionFailures = 0
-            guard let snapshot = snapshot else { return }
-            await MainActor.run {
-                self.lastSeenPhase = snapshot.phase
-                self.updateRecordingInProgressUI(phase: snapshot.phase)
-                if snapshot.phase == "recording" || snapshot.phase == "transcribing" {
-                    self.localhostPollDeadline = Date().addingTimeInterval(120.0)
-                }
-            }
-            if Task.isCancelled {
-                // STRIP-BEFORE-COMMIT
-                FileLogger.shared.warn(.keyboard, "crash-probe: refreshStateFromLocalhost cancelled at checkpoint N", payload: ["checkpoint": 2])
-                return
-            }
-            if snapshot.phase == "done" || snapshot.phase == "error" {
-                // Terminal — fetch the result
-                do {
-                    if let result = try await LocalhostClient.getResult(id: id) {
-                        await MainActor.run {
-                            self.handleLocalhostResult(result)
-                        }
-                    }
-                } catch {
-                    FileLogger.shared.info(.keyboard, "Failed to fetch result from localhost", payload: [
-                        "id": id.uuidString,
-                        "error": String(describing: error)
-                    ])
-                }
-            }
-        } catch LocalhostClient.LocalhostError.connectionRefused {
-            consecutiveConnectionFailures += 1
-            if consecutiveConnectionFailures >= 3 {
-                // Container app is dead — fall back to legacy server polling
-                stopLocalhostPolling()
-                startServerPolling()
-            }
-        } catch {
-            // Other errors — log and continue polling
-            FileLogger.shared.info(.keyboard, "LocalhostClient error", payload: ["error": String(describing: error)])
+            consecutiveSnapshotMisses = 0
+            return
+        }
+
+        // Miss — no matching snapshot this poll cycle. Increment counter and
+        // start /jobs server polling if the threshold is reached and polling
+        // is not already running.
+        consecutiveSnapshotMisses += 1
+        if consecutiveSnapshotMisses >= 6, serverPollWorkItem == nil {
+            startServerPolling()
         }
     }
 
-    /// Starts a 0.5s repeating timer that calls `refreshStateFromLocalhost`.
+    /// Starts a 0.5s repeating timer that calls `refreshFromSharedState`.
     /// Uses `DispatchSourceTimer` (negligible memory overhead) instead of
     /// `Timer` to avoid RunLoop coupling in the keyboard extension.
-    private func startLocalhostPolling() {
-        stopLocalhostPolling()
-        // 2 min localhost deadline — if the container app hasn't answered, it's dead; server polling handles the long tail.
-        localhostPollDeadline = Date().addingTimeInterval(120.0)
+    /// This is a safety net against dropped Darwin notifications.
+    private func startSnapshotPolling() {
+        stopSnapshotPolling()
+        // Snapshot poll runs until the dictation resolves or the 900s dictation timeout fires.
+        // /jobs server polling starts only after 6 consecutive snapshot misses
+        // (container app is not writing snapshots).
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
         timer.setEventHandler { [weak self] in
-            Task { await self?.refreshStateFromLocalhost() }
+            Task { await self?.refreshFromSharedState() }
         }
         timer.resume()
-        localhostPollTimer = timer
+        snapshotPollTimer = timer
     }
 
-    private func stopLocalhostPolling() {
-        localhostPollTimer?.cancel()
-        localhostPollTimer = nil
+    private func stopSnapshotPolling() {
+        snapshotPollTimer?.cancel()
+        snapshotPollTimer = nil
     }
 
-    /// Processes a terminal `DictationResultSnapshot` received from the
-    /// localhost server. Idempotent: checks `lastProcessedTimestamp` to
-    /// prevent double-insertion.
+    /// Shared terminal handler for both app-group and localhost result paths.
+    /// Uses `lastProcessedPayloadId` for idempotency across transports — once
+    /// a payload ID is processed, no other path will re-insert or re-state it.
+    /// Text takes priority: if non-empty, inserts and transitions via
+    /// `insertDictationResult`. Otherwise transitions to the error state
+    /// (preventing silent hangs from empty-text results).
     @MainActor
-    private func handleLocalhostResult(_ result: DictationResultSnapshot) {
-        // Idempotency guard
-        let lastTimestamp = lastProcessedTimestamp
-        if result.timestamp.timeIntervalSince1970 <= lastTimestamp {
-            return  // already processed
-        }
-
-        switch result.status {
-        case "completed":
-            if let text = result.text, !text.isEmpty {
-                lastProcessedTimestamp = result.timestamp.timeIntervalSince1970
-                lastProcessedPayloadId = UUID(uuidString: result.id)
-                stopDictationTransports()
-                insertDictationResult(text: text)  // existing method
-            }
-        case "error":
-            lastProcessedTimestamp = result.timestamp.timeIntervalSince1970
-            lastProcessedPayloadId = UUID(uuidString: result.id)
-            stopDictationTransports()
+    private func handleTerminalResult(id: UUID, text: String?, errorMessage: String?) {
+        guard id != lastProcessedPayloadId else { return }
+        lastProcessedPayloadId = id
+        stopDictationTransports()
+        if let text = text, !text.isEmpty {
+            insertDictationResult(text: text)
+        } else {
             pendingRequestId = nil
             dictationTargetDocId = nil
-            state = .error(result.errorMessage ?? "Transcription failed")
-        default:
-            break
+            state = .error(errorMessage ?? "Transcription failed")
         }
     }
 
-    /// Updates the recording-in-progress UI based on the localhost phase string.
+    /// Updates the recording-in-progress UI based on the phase string.
     /// This is the Symptom 4 fix: transitions from `.idle` to `.waiting` when
     /// the server reports "recording" or "transcribing", so the mic button
     /// shows the active state without waiting for a localhost response.
@@ -893,17 +797,18 @@ class KeyboardViewController: UIInputViewController {
         case "transcribing":
             state = .waiting
         case "idle", "done", "error":
-            // Don't change state here — handleLocalhostResult will handle terminal states
+            // Don't change state here — handleTerminalResult handles terminal states
             break
         default:
-            break
+            // Treat any unrecognized non-terminal phase as in-flight rather than
+            // leaving the UI stuck in a stale state.
+            state = .waiting
         }
     }
 
     private func handleTimeout() {
         FileLogger.shared.warn(.keyboard, "Dictation timed out",
                                payload: ["pendingRequestId": pendingRequestId?.uuidString ?? "nil"])
-        darwinToken = nil
         waitTimer = nil
         pendingRequestId = nil
         dictationTargetDocId = nil
@@ -928,134 +833,6 @@ class KeyboardViewController: UIInputViewController {
 
     // MARK: - Pending Dictation (Recovery on Keyboard Reappear)
 
-    /// Resumes waiting for an in-progress dictation after the keyboard process was
-    /// suspended/terminated and relaunched \u{2014} e.g. the user switched apps and came
-    /// back. `pendingRequestId` survives in UserDefaults, so a fully relaunched
-    /// keyboard process can still recover the result.
-    /// Reads the tagged Ritoras dictation payload from the clipboard. The
-    /// clipboard is the reliable cross-process channel under SideStore (where the
-    /// App Group is NOT shared), so the container app writes the result here as a
-    /// custom `org.ritoras.dictation` pasteboard type alongside the plain text.
-    /// Reads the Ritoras clipboard payload synchronously. Safe to call from any
-    /// queue (UIPasteboard reads are thread-safe on iOS 10+).
-    private static func clipboardPayloadSync() -> [String: Any]? {
-        guard let data = UIPasteboard.general.data(forPasteboardType: "org.ritoras.dictation") else { return nil }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        guard json["source"] as? String == "ritoras" else { return nil }
-        return json
-    }
-
-    private func clipboardPayload() -> [String: Any]? {
-        Self.clipboardPayloadSync()
-    }
-
-    /// Checks the clipboard (primary under SideStore) and the App Group payload for
-    /// a terminal result matching `id`. Reads both stores on a background queue,
-    /// dispatches to main for UI updates, and calls `completion(true)` on a terminal
-    /// status or `completion(false)` while still in progress.
-    private func tryResolveFromStores(id: UUID, completion: @escaping (Bool) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { completion(false); return }
-            let t0 = Date()
-
-            // Read both stores on background (synchronous I/O: file + UserDefaults + UIPasteboard).
-            let appGroupPayload: DictationPayload? = nil
-            let clipPayload = KeyboardViewController.clipboardPayloadSync()
-
-            let elapsed = Date().timeIntervalSince(t0) * 1000
-
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self, self.pendingRequestId != nil else {
-                    completion(false)
-                    return
-                }
-
-                var didHitAppGroup = false
-                var didHitClipboard = false
-                if let payload = appGroupPayload, payload.id == id {
-                    didHitAppGroup = true
-                }
-                if let clip = clipPayload, let clipId = UUID(uuidString: clip["id"] as? String ?? ""),
-                   clipId == id {
-                    let ts = clip["timestamp"] as? Double ?? 0
-                    let age = ts > 0 ? Date().timeIntervalSince1970 - ts : 0
-                    if age < 300 { didHitClipboard = true }
-                }
-
-                FileLogger.shared.debug(.keyboard, "stores check", payload: [
-                    "appGroupHit": didHitAppGroup,
-                    "clipboardHit": didHitClipboard,
-                    "elapsed_ms": elapsed,
-                    "id": id.uuidString
-                ])
-
-                // 1. App Group payload (file + UserDefaults) \u{2014} works on App Store builds.
-                if let payload = appGroupPayload, payload.id == id {
-                    switch payload.status {
-                    case .completed:
-                        FileLogger.shared.info(.keyboard, "resolve: appgroup completed → insert",
-                                               payload: ["id": id.uuidString, "length": payload.text?.count ?? 0])
-                        self.insertDictationResult(text: payload.text ?? "")
-                        completion(true); return
-                    case .error:
-                        FileLogger.shared.warn(.keyboard, "resolve: appgroup error",
-                                               payload: ["id": id.uuidString, "errorMessage": payload.errorMessage ?? "unknown"])
-                        self.stopDictationTransports(); self.pendingRequestId = nil; self.dictationTargetDocId = nil
-                        self.state = .error(payload.errorMessage ?? "Transcription failed.")
-                        completion(true); return
-                    case .cancelled:
-                        FileLogger.shared.info(.keyboard, "resolve: appgroup cancelled",
-                                               payload: ["id": id.uuidString])
-                        self.stopDictationTransports(); self.pendingRequestId = nil; self.dictationTargetDocId = nil
-                        self.state = .idle
-                        completion(true); return
-                    case .recording, .transcribing:
-                        break
-                    }
-                }
-
-                // 2. Clipboard (primary channel under SideStore).
-                if let clip = clipPayload {
-                    let clipId = UUID(uuidString: clip["id"] as? String ?? "")
-                    let status = clip["status"] as? String ?? ""
-                    let ts = clip["timestamp"] as? Double ?? 0
-                    let age = ts > 0 ? Date().timeIntervalSince1970 - ts : 0
-                    if clipId == id, age < 300 {
-                        didHitClipboard = true
-                        switch status {
-                        case "completed":
-                            FileLogger.shared.info(.keyboard, "resolve: clipboard completed → insert",
-                                                   payload: ["id": id.uuidString])
-                            self.insertDictationResult(text: clip["text"] as? String ?? "")
-                            completion(true); return
-                        case "error":
-                            FileLogger.shared.error(.keyboard, "resolve: clipboard error",
-                                                   payload: ["id": id.uuidString])
-                             self.stopDictationTransports(); self.pendingRequestId = nil; self.dictationTargetDocId = nil
-                            self.state = .error(clip["errorMessage"] as? String ?? "Transcription failed.")
-                            completion(true); return
-                        case "cancelled":
-                            FileLogger.shared.info(.keyboard, "resolve: clipboard cancelled",
-                                                   payload: ["id": id.uuidString])
-                            self.stopDictationTransports(); self.pendingRequestId = nil; self.dictationTargetDocId = nil
-                            self.state = .idle
-                            completion(true); return
-                        default:
-                            break  // recording/transcribing — keep polling
-                        }
-                    } else if clipId != id {
-                        FileLogger.shared.debug(.keyboard, "resolve: clipboard id mismatch",
-                                               payload: ["expected": id.uuidString,
-                                                         "actual": clipId?.uuidString ?? "nil",
-                                                         "age": age])
-                    }
-                }
-
-                completion(false)
-            }
-        }
-    }
-
     private func checkForPendingDictation() {
         guard let id = pendingRequestId else {
             state = .idle
@@ -1065,28 +842,20 @@ class KeyboardViewController: UIInputViewController {
                                payload: ["pendingRequestId": id.uuidString])
         state = .waiting
 
-        // Re-register the Darwin observer (it was torn down in viewWillDisappear).
-        if darwinToken == nil {
-            darwinToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinNotificationName) { [weak self] in
-                self?.appearRefreshTask?.cancel()
-                self?.appearRefreshTask = Task { [weak self] in
-                    await self?.refreshStateFromLocalhost()
-                }
-            }
-        }
-
-        // Re-register the localhost state-changed observer.
+        // Re-register the state-changed Darwin observer (it was torn down in viewWillDisappear).
         if darwinStateChangedToken == nil {
             darwinStateChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinStateChangedNotificationName) { [weak self] in
-                self?.appearRefreshTask?.cancel()
-                self?.appearRefreshTask = Task { [weak self] in
-                    await self?.refreshStateFromLocalhost()
+                DispatchQueue.main.async { [weak self] in
+                    self?.appearRefreshTask?.cancel()
+                    self?.appearRefreshTask = Task { [weak self] in
+                        await self?.refreshFromSharedState()
+                    }
                 }
             }
         }
 
-        // Start localhost polling.
-        startLocalhostPolling()
+        // Start snapshot polling.
+        startSnapshotPolling()
 
         // Recreate the waitTimer if it was invalidated in viewWillDisappear.
         // Use the remaining time from the original 900s dictation timeout.
@@ -1100,13 +869,6 @@ class KeyboardViewController: UIInputViewController {
             }
         }
 
-        // Clipboard (primary under SideStore) + App Group payload.
-        tryResolveFromStores(id: id) { [weak self] resolved in
-            guard let self = self else { return }
-            if resolved { return }
-            // Fallback: poll the server.
-            self.startServerPolling()
-        }
     }
 
     /// Tears down every active result-transport (timers + Darwin observer) so that
@@ -1117,31 +879,24 @@ class KeyboardViewController: UIInputViewController {
         waitTimer?.invalidate()
         pollTimer?.invalidate()
         serverPollTimer?.invalidate()
-        clipboardPollTimer?.invalidate()
-        darwinToken = nil
         darwinStateChangedToken = nil
         confirmStopTimer?.invalidate()
         confirmStopTimer = nil
         serverPollWorkItem?.cancel()
         serverPollWorkItem = nil
-        stopLocalhostPolling()
+        stopSnapshotPolling()
     }
 
     /// Cancels the common subset of outstanding async work across both
-    /// viewWillDisappear and deinit. Does NOT touch the three Darwin tokens
-    /// (darwinToken, darwinStateChangedToken, darwinSettingsChangedToken),
-    /// which are intentionally kept alive across disappear and nilled only in deinit.
+    /// viewWillDisappear and deinit. Does NOT touch Darwin tokens
+    /// (darwinStateChangedToken, darwinSettingsChangedToken), which are
+    /// intentionally kept alive across disappear and nilled only in deinit.
     private func cancelOutstandingAsyncWork() {
-        // STRIP-BEFORE-COMMIT
-        FileLogger.shared.warn(.lifecycle, "crash-probe: cancelOutstandingAsyncWork entered", payload: [:])
-
         // Timers
         waitTimer?.invalidate()
         waitTimer = nil
         pollTimer?.invalidate()
         pollTimer = nil
-        clipboardPollTimer?.invalidate()
-        clipboardPollTimer = nil
         serverPollTimer?.invalidate()
         serverPollTimer = nil
         confirmStopTimer?.invalidate()
@@ -1168,8 +923,8 @@ class KeyboardViewController: UIInputViewController {
         backspaceSingleCharCount = 0
         backspaceNilContextRetries = 0
 
-        // Localhost polling
-        stopLocalhostPolling()
+        // Snapshot polling
+        stopSnapshotPolling()
 
         // Stored Tasks (supersession-by-cancellation)
         appearRefreshTask?.cancel()
@@ -1201,8 +956,6 @@ class KeyboardViewController: UIInputViewController {
     /// every other transport is stopped first (prevents double-insert now that the
     /// Darwin observer and server polling can run concurrently on resume).
     private func insertDictationResult(text: String) {
-        // STRIP-BEFORE-COMMIT
-        FileLogger.shared.warn(.keyboard, "crash-probe: insertDictationResult entered", payload: ["len": text.count])
         FileLogger.shared.debug(.keyboard, "dictation stop footprint",
             payload: ["footprint": MemoryMonitor.currentFootprint()])
 
@@ -1240,21 +993,17 @@ class KeyboardViewController: UIInputViewController {
             }
         }
 
-        // Wrong-target gate: if the current text field's documentIdentifier
-        // differs from the one captured at dictation start, defer the result
-        // instead of pasting into the wrong field.
-        if let targetId = dictationTargetDocId, targetId != UUID() {
-            guard textDocumentProxy.documentIdentifier == targetId else {
-                FileLogger.shared.warn(.keyboard, "Dictation target mismatch — deferring",
-                                       payload: ["expected": targetId.uuidString,
-                                                 "actual": textDocumentProxy.documentIdentifier.uuidString])
-                storeDeferredResult(text: text)
-                stopDictationTransports()
-                pendingRequestId = nil
-                dictationTargetDocId = nil
-                state = .idle
-                return
-            }
+        // No-field gate: if there is genuinely no focused text field (zero UUID),
+        // defer the result so it can be inserted when the user taps into a field.
+        if textDocumentProxy.documentIdentifier == UUID() {
+            FileLogger.shared.warn(.keyboard, "Dictation result arrived with no focused field — deferring",
+                                   payload: ["documentIdentifier": textDocumentProxy.documentIdentifier.uuidString])
+            storeDeferredResult(text: text)
+            stopDictationTransports()
+            pendingRequestId = nil
+            dictationTargetDocId = nil
+            state = .waiting
+            return
         }
 
         FileLogger.shared.info(.keyboard, "insertDictationResult entry",
@@ -1296,8 +1045,7 @@ class KeyboardViewController: UIInputViewController {
 
     /// Polls with adaptive backoff: fast (0.3s) for the first 5 polls to catch
     /// quick results, then backs off to 1.2s to limit server load. Each cycle
-    /// checks the clipboard + App Group payload FIRST, then the server as a
-    /// fallback. Resolves as soon as ANY yields a terminal status.
+    /// polls the Whisper /jobs/{id} endpoint directly.
     private func startServerPolling() {
         serverPollCount = 0
         serverPollUnresponsiveCount = 0
@@ -1320,13 +1068,10 @@ class KeyboardViewController: UIInputViewController {
         DispatchQueue.main.asyncAfter(deadline: .now() + interval, execute: workItem)
     }
 
-    /// One cycle of server polling. Increments the poll counter, checks three
-    /// resolution tiers in order, then schedules the next poll. Tier order:
-    ///   1. Local stores (clipboard + App Group payload)
-    ///   2. Whisper /jobs/{id} direct (source of truth)
-    ///   3. /dictation_result/latest relay (downstream fallback the container app writes to)
-    /// Always schedules the next poll at the end; cancellation is handled by
-    /// the `pendingRequestId` guard in `scheduleNextServerPoll`.
+    /// One cycle of server polling. Increments the poll counter, polls
+    /// the Whisper /jobs/{id} endpoint directly (source of truth), then
+    /// schedules the next poll. Cancellation is handled by the
+    /// `pendingRequestId` guard in `scheduleNextServerPoll`.
     private func performServerPollCycle() {
         guard let id = pendingRequestId else { return }
         serverPollCount += 1
@@ -1345,156 +1090,18 @@ class KeyboardViewController: UIInputViewController {
             return
         }
 
-        // Primary channels: clipboard + App Group payload.
-        tryResolveFromStores(id: id) { [weak self] resolved in
-            guard let self = self else { return }
-            if !resolved {
-                // Tier 2: Whisper /jobs/{id} direct (source of truth).
-                // Falls through to Tier 3 (/dictation_result/latest relay) internally
-                // for non-terminal results (404, pending, transcribing).
-                self.pollWhisperJobStatus(id: id)
-            }
-        }
+        // Whisper /jobs/{id} direct (source of truth).
+        pollWhisperJobStatus(id: id)
 
-        // Schedule the next poll regardless of resolution — if the request was
-        // resolved by the async tryResolveFromStores completion handler, the
-        // guard inside scheduleNextServerPoll will cancel this cascade.
         scheduleNextServerPoll()
     }
 
-    /// One-shot HTTP GET to the server for the current dictation result.
-    private func pollServerForDictation() {
-        let config = SharedConfig.load()
-        // Prefer the probe-selected server (written by the container app on recording
-        // start). Fall back to config.servers.first if the probe hasn't run, returned
-        // nil, or the selected server is no longer in the configured list (user
-        // removed it mid-dictation).
-        let selected = SharedConfig.selectedServer().flatMap { s -> String? in
-            config.servers.contains(s) ? s : nil
-        }
-        guard let server = selected ?? config.servers.first else { return }
-        guard let url = URL(string: "\(server)/dictation_result/latest") else { return }
 
-        let now = Date()
-        let elapsedSinceLastPoll = lastPollStartTime.map { now.timeIntervalSince($0) * 1000 } ?? 0
-        lastPollStartTime = now
-        FileLogger.shared.debug(.keyboard, "server poll", payload: [
-            "pollCount": serverPollCount,
-            "elapsed_ms_since_last_poll": elapsedSinceLastPoll,
-            "id": pendingRequestId?.uuidString ?? "nil"
-        ])
-        FileLogger.shared.debug(.network, "poll target", payload: [
-            "server": server,
-            "source": selected != nil ? "probe" : "fallback_first"
-        ])
-
-        currentPollTask?.cancel()
-        var request = URLRequest(url: url)
-        request.timeoutInterval = SharedConfig.AsyncTranscription.pollRequestTimeout
-        let task = SessionHolder.shared.get().dataTask(with: request) { [weak self] data, response, error in
-            guard let self = self else { return }
-            let httpT0 = Date()
-            if let error = error {
-                FileLogger.shared.debug(.network, "poll: network error",
-                                        payload: ["url": url.absoluteString, "error": error.localizedDescription])
-                return
-            }
-            guard let data = data else {
-                FileLogger.shared.debug(.network, "poll: empty response",
-                                        payload: ["url": url.absoluteString])
-                return
-            }
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                FileLogger.shared.debug(.network, "poll: unparseable body",
-                                        payload: ["url": url.absoluteString,
-                                                  "bodyPreview": String(data: data, encoding: .utf8).map { String($0.prefix(100)) } ?? "?"])
-                return
-            }
-
-            let status = json["status"] as? String ?? "none"
-            let timestamp = json["timestamp"] as? Double ?? 0
-            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-            let pollElapsed = Date().timeIntervalSince(httpT0) * 1000
-
-            FileLogger.shared.debug(.keyboard, "server poll response", payload: [
-                "statusCode": statusCode,
-                "elapsed_ms": pollElapsed,
-                "status": status,
-                "id": self.pendingRequestId?.uuidString ?? "nil"
-            ])
-
-            // If the server returned {"detail":"Not Found"} (404), keep polling silently.
-            if status == "none" && json["detail"] != nil {
-                FileLogger.shared.debug(.network, "poll: 404/detail",
-                                        payload: ["url": url.absoluteString])
-                return
-            }
-
-            DispatchQueue.main.async {
-                // If this dictation was already resolved via the App Group / Darwin
-                // path, ignore the stale server response (prevents double-insert).
-                guard self.pendingRequestId != nil else { return }
-
-                guard timestamp > 0 else {
-                    FileLogger.shared.debug(.network, "poll: timestamp 0",
-                                           payload: ["url": url.absoluteString])
-                    return
-                }
-                let age = Date().timeIntervalSince1970 - timestamp
-                guard age < 120 else {
-                    FileLogger.shared.debug(.network, "poll: result stale",
-                                            payload: ["age": age, "url": url.absoluteString])
-                    return
-                }
-                if timestamp <= self.lastProcessedTimestamp { return }
-
-                switch status {
-                case "completed":
-                    FileLogger.shared.info(.network, "poll: server status=completed",
-                                           payload: ["url": url.absoluteString,
-                                                     "textLength": (json["text"] as? String)?.count ?? 0,
-                                                     "timestamp": timestamp])
-                    self.lastProcessedTimestamp = timestamp
-                    self.insertDictationResult(text: json["text"] as? String ?? "")
-
-                case "error":
-                    FileLogger.shared.info(.network, "poll: server status=error",
-                                           payload: ["url": url.absoluteString,
-                                                     "errorMessage": json["errorMessage"] as? String ?? "unknown"])
-                    self.stopDictationTransports()
-                    self.lastProcessedTimestamp = timestamp
-                    self.pendingRequestId = nil
-                    self.dictationTargetDocId = nil
-                    self.state = .error(json["errorMessage"] as? String ?? "Transcription failed.")
-
-                case "cancelled":
-                    FileLogger.shared.info(.network, "poll: server status=cancelled",
-                                           payload: ["url": url.absoluteString])
-                    self.stopDictationTransports()
-                    self.lastProcessedTimestamp = timestamp
-                    self.pendingRequestId = nil
-                    self.dictationTargetDocId = nil
-                    self.state = .idle
-
-                case "transcribing", "recording":
-                    self.serverPollUnresponsiveCount = 0
-                    break  // keep polling
-
-                default:
-                    FileLogger.shared.debug(.network, "poll: unknown status",
-                                            payload: ["status": status, "url": url.absoluteString])
-                    break
-                }
-            }
-        }
-        currentPollTask = task
-        task.resume()
-    }
 
     /// One-shot HTTP GET to Whisper's /jobs/{id} endpoint (source of truth).
     /// On terminal status (ready/failed), resolves the dictation directly.
-    /// On non-terminal status (pending/transcribing/404), falls through to
-    /// the relay-based pollServerForDictation() as the final fallback.
+    /// On non-terminal status (pending/transcribing/404/error), returns
+    /// silently — the next poll cycle will retry.
     private func pollWhisperJobStatus(id: UUID) {
         let config = SharedConfig.load()
         // Prefer the probe-selected server (written by the container app on recording
@@ -1522,42 +1129,37 @@ class KeyboardViewController: UIInputViewController {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
 
             DispatchQueue.main.async {
-                // 404 — server doesn't expose /jobs/{id} or job not found;
-                // fall through to the relay without resetting unresponsive count.
+                // 404 — job not found yet; keep polling.
                 if statusCode == 404 {
-                    FileLogger.shared.debug(.network, "poll job: 404, falling back to relay",
+                    FileLogger.shared.debug(.network, "poll job: 404, retrying next cycle",
                                             payload: ["statusCode": statusCode,
                                                       "jobId": id.uuidString.lowercased()])
-                    self.pollServerForDictation()
                     return
                 }
 
-                // Superseded by the next poll cycle — do NOT spawn a relay task (would cascade).
+                // Superseded by the next poll cycle.
                 if let urlError = error as? URLError, urlError.code == .cancelled {
                     return
                 }
 
                 if error != nil {
-                    FileLogger.shared.debug(.network, "poll job: network error, falling back to relay",
+                    FileLogger.shared.debug(.network, "poll job: network error, retrying next cycle",
                                             payload: ["statusCode": statusCode,
                                                       "error": error?.localizedDescription ?? "nil",
                                                       "jobId": id.uuidString.lowercased()])
-                    self.pollServerForDictation()
                     return
                 }
 
                 guard let data = data else {
-                    FileLogger.shared.debug(.network, "poll job: empty response, falling back to relay",
+                    FileLogger.shared.debug(.network, "poll job: empty response, retrying next cycle",
                                             payload: ["jobId": id.uuidString.lowercased()])
-                    self.pollServerForDictation()
                     return
                 }
 
                 guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    FileLogger.shared.debug(.network, "poll job: unparseable body, falling back to relay",
+                    FileLogger.shared.debug(.network, "poll job: unparseable body, retrying next cycle",
                                             payload: ["jobId": id.uuidString.lowercased(),
                                                       "bodyPreview": String(data: data, encoding: .utf8).map { String($0.prefix(100)) } ?? "?"])
-                    self.pollServerForDictation()
                     return
                 }
 
@@ -1579,37 +1181,28 @@ class KeyboardViewController: UIInputViewController {
                     FileLogger.shared.info(.network, "poll job: status=ready",
                                            payload: ["jobId": id.uuidString.lowercased(),
                                                      "textLength": text?.count ?? 0])
-                    self.insertDictationResult(text: text ?? "")
+                    self.handleTerminalResult(id: id, text: text, errorMessage: nil)
 
                 case "failed":
                     guard self.pendingRequestId != nil else { return }
                     FileLogger.shared.info(.network, "poll job: status=failed",
                                            payload: ["jobId": id.uuidString.lowercased()])
-                    self.stopDictationTransports()
-                    self.pendingRequestId = nil
-                    self.dictationTargetDocId = nil
-                    self.state = .error("Transcription failed.")
+                    self.handleTerminalResult(id: id, text: nil, errorMessage: "Transcription failed.")
 
                 case "pending", "transcribing":
                     self.serverPollUnresponsiveCount = 0
-                    FileLogger.shared.debug(.network, "poll job: still processing, falling back to relay",
+                    FileLogger.shared.debug(.network, "poll job: still processing",
                                             payload: ["status": status, "jobId": id.uuidString.lowercased()])
-                    self.pollServerForDictation()
+                    // Next poll cycle will retry
 
                 default:
-                    FileLogger.shared.debug(.network, "poll job: unexpected status, falling back to relay",
+                    FileLogger.shared.debug(.network, "poll job: unexpected status, retrying next cycle",
                                             payload: ["status": status, "jobId": id.uuidString.lowercased()])
-                    self.pollServerForDictation()
                 }
             }
         }
         currentPollTask = task
         task.resume()
-    }
-
-    /// Clears the clipboard dictation payload to prevent re-processing.
-    private func clearClipboardDictation() {
-        UIPasteboard.general.string = ""
     }
 
     // MARK: - Error Auto-Reset
@@ -1859,6 +1452,26 @@ extension KeyboardViewController: KeyboardViewDelegate {
         // updates immediately — debounce here would feel laggy after external edits.
         keyboardView.refreshSuggestions()
         recomputeAutoCap()
+
+        // Flush deferred dictation result if one exists (the user has now
+        // focused/activated a text field).
+        if let deferredText = UserDefaults.standard.string(forKey: "ritoras_deferred_text"),
+           !deferredText.isEmpty {
+            let deferredTs = UserDefaults.standard.double(forKey: "ritoras_deferred_ts")
+            let age = deferredTs > 0 ? Date().timeIntervalSince1970 - deferredTs : 0
+            guard age < 300 else {
+                clearDeferredResult()
+                return
+            }
+            FileLogger.shared.info(.keyboard, "Inserting deferred dictation result (textDidChange)",
+                                   payload: ["length": deferredText.count, "age": age])
+            clearDeferredResult()
+            state = .inserting
+            textDocumentProxy.insertText(normalizedDictationInsertion(of: deferredText))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.state = .idle
+            }
+        }
     }
 
     override func textWillChange(_ textInput: UITextInput?) {
@@ -1881,6 +1494,26 @@ extension KeyboardViewController: KeyboardViewDelegate {
         lastAutoCorrection = nil  // cursor move invalidates any pending revert
         backspaceNilContextRetries = 0
         recomputeAutoCap()
+
+        // Flush deferred dictation result if one exists (the user has now
+        // focused/activated a text field).
+        if let deferredText = UserDefaults.standard.string(forKey: "ritoras_deferred_text"),
+           !deferredText.isEmpty {
+            let deferredTs = UserDefaults.standard.double(forKey: "ritoras_deferred_ts")
+            let age = deferredTs > 0 ? Date().timeIntervalSince1970 - deferredTs : 0
+            guard age < 300 else {
+                clearDeferredResult()
+                return
+            }
+            FileLogger.shared.info(.keyboard, "Inserting deferred dictation result (selectionDidChange)",
+                                   payload: ["length": deferredText.count, "age": age])
+            clearDeferredResult()
+            state = .inserting
+            textDocumentProxy.insertText(normalizedDictationInsertion(of: deferredText))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.state = .idle
+            }
+        }
     }
 
     // MARK: - Autocorrect-on-space
@@ -1981,16 +1614,11 @@ extension KeyboardViewController: KeyboardViewDelegate {
             // --- Back to main thread for guard + apply ---
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
-                // STRIP-BEFORE-COMMIT
-                FileLogger.shared.warn(.keyboard, "crash-probe: autocorrect dispatch-back entered", payload: [:])
-
                 // Liveness gate: if the keyboard is no longer in a window,
                 // the textDocumentProxy is dead — reading it in
                 // AutocorrectApplicationGuard.shouldApply (which reads
                 // documentContextBeforeInput) would crash with SIGSEGV.
                 if self.view.window == nil {
-                    // STRIP-BEFORE-COMMIT
-                    FileLogger.shared.warn(.keyboard, "crash-probe: autocorrect dispatch-back gate tripped (window nil)", payload: [:])
                     return
                 }
 

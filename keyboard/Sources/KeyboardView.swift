@@ -1145,14 +1145,10 @@ class KeyboardView: UIView {
             )
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
-                // STRIP-BEFORE-COMMIT
-                FileLogger.shared.warn(.keyboard, "crash-probe: suggestion dispatch-back entered", payload: [:])
                 // Liveness gate: if the keyboard is no longer in a window,
                 // the textDocumentProxy is dead — reading it via keyboardContextToken
                 // (which reads documentContextBeforeInput) would crash with SIGSEGV.
                 if self.window == nil {
-                    // STRIP-BEFORE-COMMIT
-                    FileLogger.shared.warn(.keyboard, "crash-probe: suggestion dispatch-back gate tripped (window nil)", payload: [:])
                     return
                 }
                 let liveToken = self.delegate?.keyboardContextToken(self) ?? 0
@@ -1220,7 +1216,7 @@ class KeyboardView: UIView {
         if window == nil {
             shedHeavyState()
         }
-        FileLogger.shared.warn(.keyboard, "KeyboardView didMoveToWindow",
+        FileLogger.shared.info(.keyboard, "KeyboardView didMoveToWindow",
             payload: ["hasWindow": window != nil])
     }
 
