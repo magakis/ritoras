@@ -52,21 +52,27 @@ enum Contractions {
         "theyve": "they" + apostrophe + "ve",
         "theyll": "they" + apostrophe + "ll",
         "theyd": "they" + apostrophe + "d",
+        "thats": "that" + apostrophe + "s",
+        "whats": "what" + apostrophe + "s",
+        "heres": "here" + apostrophe + "s",
+        "theres": "there" + apostrophe + "s",
+        "whos": "who" + apostrophe + "s",
+        "hes": "he" + apostrophe + "s",
+        "shes": "she" + apostrophe + "s",
         "maam": "ma" + apostrophe + "am",
         "yall": "y" + apostrophe + "all",
         "tis": apostrophe + "tis",
         "twas": apostrophe + "twas",
 
-        // EXPLICITLY EXCLUDED (real words or ambiguous — DO NOT add):
+        // EXPLICITLY EXCLUDED (real standalone English words — DO NOT add):
         //   well (→ we'll), were (→ we're), its (→ it's), lets (→ let's),
-        //   whos (→ who's), im (→ I'm), ive (→ I've), ill (→ I'll),
-        //   id (→ I'd), hes (→ he's), shes (→ she's), hell (→ he'll),
-        //   shell (→ she'll), wed (→ we'd), heres (→ here's),
-        //   theres (→ there's), thats (→ that's), whats (→ what's),
+        //   im (→ I'm), ive (→ I've), ill (→ I'll), id (→ I'd),
+        //   hell (→ he'll), shell (→ she'll), wed (→ we'd),
         //   cant (→ can't; "cant" = hypocritical talk), cause (→ 'cause),
         //   bout (→ 'bout), em (→ 'em)
-        // These rely on the user typing the apostrophe or on SymSpell's
-        // edit-distance path.
+        // These are genuine standalone English words with their own meaning,
+        // so the deterministic fast-path is inappropriate for them. They are
+        // handled by the LM-gated ambiguous-contraction path, not this table.
     ]
 
     /// Returns the canonical contraction for the given canonicalized-lowercase

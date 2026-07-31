@@ -17,7 +17,6 @@ const KNOWN_AMBIGUOUS = new Set([
   'were',    // past tense of "be" (→ we're)
   'its',     // possessive (→ it's)
   'lets',    // verb "allow" (→ let's)
-  'whos',    // possessive "whose" is the proper form; "whos" ambiguous
   'cant',    // hypocritical talk / jargon (→ can't)
   'cause',   // reason (→ 'cause)
   'bout',    // short period / contest (→ 'bout)
@@ -26,15 +25,9 @@ const KNOWN_AMBIGUOUS = new Set([
   'ive',     // (→ I've) — too short, avoid
   'ill',     // sick (→ I'll)
   'id',      // abbreviation for identification (→ I'd)
-  'hes',     // (→ he's) — archaic plural
-  'shes',    // (→ she's)
   'hell',    // underworld (→ he'll)
   'shell',   // seashell / casing (→ she'll)
   'wed',     // to marry (→ we'd)
-  'heres',   // (→ here's)
-  'theres',  // (→ there's)
-  'thats',   // (→ that's)
-  'whats',   // (→ what's)
 ]);
 
 describe('Contractions', () => {
@@ -89,6 +82,13 @@ describe('Contractions', () => {
         ['theyve', `they${APOSTROPHE}ve`],
         ['theyll', `they${APOSTROPHE}ll`],
         ['theyd', `they${APOSTROPHE}d`],
+        ['thats', `that${APOSTROPHE}s`],
+        ['whats', `what${APOSTROPHE}s`],
+        ['heres', `here${APOSTROPHE}s`],
+        ['theres', `there${APOSTROPHE}s`],
+        ['whos', `who${APOSTROPHE}s`],
+        ['hes', `he${APOSTROPHE}s`],
+        ['shes', `she${APOSTROPHE}s`],
         ['maam', `ma${APOSTROPHE}am`],
         ['yall', `y${APOSTROPHE}all`],
         ['tis', `${APOSTROPHE}tis`],
