@@ -503,8 +503,8 @@ final class DictationViewModel: ObservableObject {
                                                 payload: ["textLength": text.count])
                     } catch WhisperError.asyncUnsupported {
                         FileLogger.shared.info(.network, "async unsupported (404), falling back to sync", payload: [:])
-                        if let server = chosenServer, config.servers.contains(server) {
-                            text = try await WhisperClient.transcribe(audioURL: url, serverURL: server, correlationId: activeID)
+                        if config.servers.contains(chosenServer) {
+                            text = try await WhisperClient.transcribe(audioURL: url, serverURL: chosenServer, correlationId: activeID)
                         } else {
                             text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
                         }
