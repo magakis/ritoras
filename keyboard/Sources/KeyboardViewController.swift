@@ -721,6 +721,24 @@ class KeyboardViewController: UIInputViewController {
     /// Updates `lastSeenSnapshotRevision` on match so the same snapshot is not
     /// returned twice.
     private func readSharedSnapshot(for id: UUID) -> DictationPayload? {
+        // Fast path: terminal-result file in the app-group container.
+        // Data(contentsOf:) reads committed filesystem state with no caching layer,
+        // bypassing the ~1–2s cfprefsd propagation lag of UserDefaults. Only
+        // terminal payloads are written to the file, so a hit here is always
+        // terminal. On any miss/stale/id-mismatch, fall through to UserDefaults.
+        if let filePayload = SharedConfig.terminalResultFile(),
+           filePayload.id == id {
+            let fileRev = filePayload.revision ?? 0
+            if fileRev > lastSeenSnapshotRevision {
+                lastSeenSnapshotRevision = fileRev
+                FileLogger.shared.debug(.keyboard, "snapshot read: hit (file fast path)",
+                                        payload: ["status": filePayload.status.rawValue,
+                                                  "rev": fileRev,
+                                                  "id": String(filePayload.id.uuidString.prefix(8))])
+                return filePayload
+            }
+        }
+        // Fallback: app-group UserDefaults snapshot (cfprefsd, ~1–2s propagation).
         guard let payload = SharedConfig.dictationSnapshot() else {
             FileLogger.shared.debug(.keyboard, "snapshot read: miss no snapshot")
             return nil
@@ -822,6 +840,7 @@ class KeyboardViewController: UIInputViewController {
     private func handleTerminalResult(id: UUID, text: String?, errorMessage: String?) {
         guard id != lastProcessedPayloadId else { return }
         lastProcessedPayloadId = id
+        SharedConfig.clearTerminalResultFile()   // hygiene — keep file from lingering for next dictation
         stopDictationTransports()
         if let text = text, !text.isEmpty {
             insertDictationResult(text: text)

@@ -186,6 +186,18 @@ final class DictationViewModel: ObservableObject {
             timestamp: Date(),
             revision: snapshotRevision
         )
+        // Terminal results also go to the app-group container FILE (cfprefsd bypass)
+        // so the keyboard discovers them sub-second instead of waiting ~2s for
+        // cfprefsd to propagate the UserDefaults snapshot. Order is deliberate: file
+        // BEFORE UserDefaults, both before the Darwin post. Intermediate states stay
+        // UserDefaults-only.
+        if status == .completed || status == .error {
+            SharedConfig.setTerminalResultFile(payload)
+            FileLogger.shared.debug(.app, "terminal result file written",
+                                    payload: ["status": status.rawValue,
+                                              "rev": snapshotRevision,
+                                              "id": String(activeID.uuidString.prefix(8))])
+        }
         SharedConfig.setDictationSnapshot(payload)
     }
 
