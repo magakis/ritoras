@@ -129,6 +129,7 @@ actor AudioRecorder {
                 AVSampleRateKey: 16000,
                 AVNumberOfChannelsKey: 1,
                 AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+                AVEncoderBitRateKey: 48000,
             ]
         case .wav:
             settings = [

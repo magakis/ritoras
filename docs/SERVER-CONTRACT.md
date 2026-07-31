@@ -153,7 +153,8 @@ Ritoras records audio using `AVAudioRecorder` with these settings:
 | File extension | `.m4a` |
 | Sample rate | 16 kHz |
 | Channels | 1 (mono) |
-| Quality | Medium |
+| Bit rate | 48 kbps |
+| Quality | `.high` |
 
 ### Server-side processing
 
