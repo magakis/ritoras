@@ -506,14 +506,12 @@ struct SharedConfig {
     /// Written by the container app; read by the keyboard extension.
     /// Returns nil when the App Group is unavailable or no snapshot has been stored.
     ///
-    /// Forces a reload from disk before reading, defeating per-process cache
-    /// staleness after the keyboard resumes from suspension: UserDefaults serves
-    /// values from an in-memory cache, and a suspended keyboard that missed the
-    /// Darwin wake-up can read stale data for ~2s after resume until iOS re-syncs
-    /// the cache from the on-disk app-group plist.
+    /// Do NOT add `synchronize()` to this function. Cross-process reads go through
+    /// the `cfprefsd` daemon, which holds the fresh value in memory; `synchronize()`
+    /// reloads from the on-disk plist (which lags behind `cfprefsd`) and traps the
+    /// reader in stale data — see the regression in commit f4c6832.
     static func dictationSnapshot() -> DictationPayload? {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return nil }
-        defaults.synchronize()  // force disk reload — deprecated, but no non-deprecated alternative for app-group IPC
         guard let data = defaults.data(forKey: Defaults.dictationPayloadKey) else { return nil }
         return try? JSONDecoder().decode(DictationPayload.self, from: data)
     }
@@ -521,18 +519,14 @@ struct SharedConfig {
     /// Writes a dictation snapshot to the App Group. Called by the container
     /// app's DictationViewModel to publish transcription state to the keyboard.
     ///
-    /// Cross-process suspension-resume staleness workaround: the keyboard is a
-    /// separate process that may be suspended when this write happens (e.g. the
-    /// container app finishes the transcription while the keyboard is in the
-    /// background). A suspended keyboard never receives the Darwin wake-up, so on
-    /// resume it must read the terminal snapshot from disk rather than its own
-    /// stale per-process cache. `synchronize()` flushes this write to the on-disk
-    /// app-group plist immediately so the keyboard sees the terminal snapshot.
+    /// Do NOT add `synchronize()` to this function. Cross-process reads go through
+    /// the `cfprefsd` daemon, which holds the fresh value in memory; `synchronize()`
+    /// reloads from the on-disk plist (which lags behind `cfprefsd`) and traps the
+    /// reader in stale data — see the regression in commit f4c6832.
     static func setDictationSnapshot(_ payload: DictationPayload) {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return }
         if let data = try? JSONEncoder().encode(payload) {
             defaults.set(data, forKey: Defaults.dictationPayloadKey)
-            defaults.synchronize()  // cross-process flush — deprecated, but no non-deprecated alternative for app-group IPC
         }
     }
 }
