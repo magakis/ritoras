@@ -767,8 +767,12 @@ class KeyboardViewController: UIInputViewController {
         // Snapshot poll runs until the dictation resolves or the 900s dictation timeout fires.
         // /jobs server polling starts only after 6 consecutive snapshot misses
         // (container app is not writing snapshots).
+        // First fire is at +0.2s to catch an in-flight terminal result quickly
+        // after wake (viewDidAppear already did an immediate refresh), then
+        // settles to the normal 0.5s cadence.
+        let initialDelay: TimeInterval = 0.2
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-        timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
+        timer.schedule(deadline: .now() + initialDelay, repeating: 0.5)
         timer.setEventHandler { [weak self] in
             Task { await self?.refreshFromSharedState() }
         }
