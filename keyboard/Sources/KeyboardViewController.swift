@@ -351,6 +351,13 @@ class KeyboardViewController: UIInputViewController {
         }
         startSnapshotPolling()
 
+        // T_wake — diagnostic anchor for the paste-delay timeline: wake event with
+        // the pending request (or nil), snapshot revision, and the appear refresh.
+        FileLogger.shared.debug(.keyboard, "viewDidAppear — wake",
+                                payload: ["pendingRequestId": pendingRequestId?.uuidString ?? "nil",
+                                          "lastSeenRevision": lastSeenSnapshotRevision,
+                                          "appearRefresh": true])
+
         // Absorb any learned-words changes made by the container app while
         // the keyboard was dead (e.g. app-side deletes from DictionaryView).
         LearnedWordsStore.shared.absorbRemoteSnapshot()
@@ -714,11 +721,27 @@ class KeyboardViewController: UIInputViewController {
     /// Updates `lastSeenSnapshotRevision` on match so the same snapshot is not
     /// returned twice.
     private func readSharedSnapshot(for id: UUID) -> DictationPayload? {
-        guard let payload = SharedConfig.dictationSnapshot(),
-              payload.id == id,
-              (payload.revision ?? 0) > lastSeenSnapshotRevision
-        else { return nil }
-        lastSeenSnapshotRevision = payload.revision ?? 0
+        guard let payload = SharedConfig.dictationSnapshot() else {
+            FileLogger.shared.debug(.keyboard, "snapshot read: miss no snapshot")
+            return nil
+        }
+        guard payload.id == id else {
+            FileLogger.shared.debug(.keyboard, "snapshot read: miss id mismatch",
+                                    payload: ["expected": String(id.uuidString.prefix(8)),
+                                              "got": String(payload.id.uuidString.prefix(8))])
+            return nil
+        }
+        let rev = payload.revision ?? 0
+        guard rev > lastSeenSnapshotRevision else {
+            FileLogger.shared.debug(.keyboard, "snapshot read: miss revision stale",
+                                    payload: ["lastSeen": lastSeenSnapshotRevision, "payload": rev])
+            return nil
+        }
+        lastSeenSnapshotRevision = rev
+        FileLogger.shared.debug(.keyboard, "snapshot read: hit",
+                                payload: ["status": payload.status.rawValue,
+                                          "rev": rev,
+                                          "id": String(payload.id.uuidString.prefix(8))])
         return payload
     }
 
@@ -729,6 +752,8 @@ class KeyboardViewController: UIInputViewController {
         guard let id = pendingRequestId else {
             return
         }
+        FileLogger.shared.debug(.keyboard, "refreshFromSharedState entry",
+                                payload: ["id": String(id.uuidString.prefix(8))])
 
         // App-group snapshot is the PRIMARY channel
         if let payload = readSharedSnapshot(for: id) {
@@ -753,6 +778,8 @@ class KeyboardViewController: UIInputViewController {
         // start /jobs server polling if the threshold is reached and polling
         // is not already running.
         consecutiveSnapshotMisses += 1
+        FileLogger.shared.debug(.keyboard, "snapshot miss",
+                                payload: ["consecutive": consecutiveSnapshotMisses])
         if consecutiveSnapshotMisses >= 6, serverPollWorkItem == nil {
             startServerPolling()
         }
@@ -980,6 +1007,8 @@ class KeyboardViewController: UIInputViewController {
 
         let totalElapsed = pendingRequestStart > 0
             ? (Date().timeIntervalSince1970 - pendingRequestStart) * 1000 : 0
+        FileLogger.shared.debug(.keyboard, "insert elapsed",
+                                payload: ["total_elapsed_ms": totalElapsed])
         FileLogger.shared.info(.keyboard, "insert", payload: [
             "id": pendingRequestId?.uuidString ?? "nil",
             "length": text.count,
