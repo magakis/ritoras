@@ -33,13 +33,17 @@ final class PredictionEngine {
     ///   - previousWord: The word before the current word (nil if no prior word).
     ///   - previousWord2: The word two before the current word (nil if fewer than 2 prior words).
     ///   - limit: Maximum number of suggestions to return.
+    ///   - previousSuggestions: The suggestion strings displayed on the previous
+    ///     keystroke (nil for stateless callers). Used by the sticky-rescue pass
+    ///     to keep long completions visible as the user types.
     /// - Returns: Sorted array of suggestion strings.
     func suggestions(
         forCurrentWord currentWord: String,
         lookupWord: String,
         previousWord: String? = nil,
         previousWord2: String? = nil,
-        limit: Int = 3
+        limit: Int = 3,
+        previousSuggestions: [String]? = nil
     ) -> [String] {
         let context = SuggestionContext(
             currentWord: currentWord,
@@ -93,7 +97,7 @@ final class PredictionEngine {
             pinned = Array(corrections.prefix(limit))
         }
 
-        return pinned
+        var result = pinned
             .prefix(limit)
             .map { suggestion -> String in
                 if suggestion.isUnknownVerbatim {
@@ -101,6 +105,43 @@ final class PredictionEngine {
                 }
                 return suggestion.text
             }
+
+        // — Sticky-rescue pass —
+        // Keep any suggestion shown on the previous keystroke that still has the
+        // current word as a strict prefix. KenLM min-max normalization is relative
+        // to the current pool, so long completions can fall below the display
+        // ceiling even as they become better prefix matches. Rescued items are
+        // appended after the pinned list and, when the list is full, displace only
+        // the lowest-ranked non-verbatim corrections — the verbatim stays #1.
+        if !currentWord.isEmpty, let previous = previousSuggestions {
+            var rescueCount = 0
+            for previousSuggestion in previous {
+                let lowerPrevious = previousSuggestion.lowercased()
+                // Strict prefix (longer than the typed word with the typed word
+                // as a prefix). Also excludes the current verbatim, pinned above.
+                guard lowerPrevious.count > lowerCurrent.count,
+                      lowerPrevious.hasPrefix(lowerCurrent) else { continue }
+                // Skip anything already displayed (verbatim or a fresh correction).
+                guard !result.contains(where: { $0.lowercased() == lowerPrevious }) else { continue }
+
+                if result.count < limit {
+                    result.append(previousSuggestion)
+                    rescueCount += 1
+                } else {
+                    // List is full — displace the lowest-ranked non-verbatim
+                    // correction. Indices [0, count - rescueCount) hold the pinned
+                    // list; the lowest-ranked correction sits just above the
+                    // rescued block. Never displace index 0 (verbatim / top pick).
+                    let lowestCorrectionIndex = result.count - rescueCount - 1
+                    guard lowestCorrectionIndex > 0 else { break }
+                    result.remove(at: lowestCorrectionIndex)
+                    result.append(previousSuggestion)
+                    rescueCount += 1
+                }
+            }
+        }
+
+        return result
     }
 
     // MARK: - Autocorrect Support

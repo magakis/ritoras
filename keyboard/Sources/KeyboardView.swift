@@ -1150,6 +1150,11 @@ class KeyboardView: UIView {
             return
         }
 
+        // Capture the last-shown suggestion set synchronously (main thread)
+        // before the async lookup hop. The sticky-rescue pass in the engine
+        // uses it to keep long completions visible as the user types.
+        let previousDisplayed = suggestionCache.displayed
+
         // Cancel any in-flight lookup before issuing a new one.
         // Guarantees at most one lookup in flight (48 MB Jetsam: no parallel
         // SymSpell result sets).
@@ -1162,7 +1167,8 @@ class KeyboardView: UIView {
                 lookupWord: snapshot.lookupWord,
                 previousWord: snapshot.previousWord,
                 previousWord2: snapshot.previousWord2,
-                limit: 3
+                limit: 3,
+                previousSuggestions: previousDisplayed
             )
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }

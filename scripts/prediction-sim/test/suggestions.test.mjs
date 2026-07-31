@@ -198,3 +198,180 @@ describe('suggestions — KenLM interaction (T8)', () => {
     assert.notStrictEqual(result[0], 'typo', 'typo should NOT be at position 0');
   });
 });
+
+describe('suggestions — sticky rescue (previous keystroke completions)', () => {
+  it('SR1: long completion survives at the next longer prefix', () => {
+    // At "app" the bar showed [app, application, apply]. The user types "l"
+    // → "appl". The fresh pool ranks short corrections above "application"
+    // (KenLM's long-word bias), so without the rescue "application" drops out.
+    const pool = [
+      { text: 'appl', score: 1.0, source: 'symspell', isUnknownVerbatim: false },
+      { text: 'apple', score: 0.9, source: 'symspell', isUnknownVerbatim: false },
+      { text: 'apples', score: 0.8, source: 'symspell', isUnknownVerbatim: false },
+      { text: 'application', score: 0.5, source: 'symspell', isUnknownVerbatim: false },
+    ];
+
+    const result = suggestions({
+      pool,
+      currentWord: 'appl',
+      limit: 3,
+      previousSuggestions: ['app', 'application', 'apply'],
+    });
+
+    assert.strictEqual(result.length, 3);
+    assert.strictEqual(result[0], 'appl'); // verbatim pinned #1
+    assert.ok(result.includes('application'), 'application should survive');
+  });
+
+  it('SR2: previous suggestion that no longer matches the prefix is dropped', () => {
+    // "apple"/"application" were shown at "app"; the user typed "appr", which
+    // is not their prefix, so neither may be rescued.
+    const pool = [
+      { text: 'appr', score: 1.0, source: 'symspell', isUnknownVerbatim: false },
+      { text: 'approve', score: 0.9, source: 'symspell', isUnknownVerbatim: false },
+    ];
+
+    const result = suggestions({
+      pool,
+      currentWord: 'appr',
+      limit: 3,
+      previousSuggestions: ['app', 'apple', 'application'],
+    });
+
+    assert.strictEqual(result.length, 2);
+    assert.strictEqual(result[0], 'appr');
+    assert.ok(!result.includes('apple'));
+    assert.ok(!result.includes('application'));
+  });
+
+  it('SR3: verbatim stays #1, rescued items fill remaining slots; previous suggestion equal to the current word is skipped', () => {
+    const pool = [
+      { text: 'appl', score: 1.0, source: 'symspell', isUnknownVerbatim: false },
+      { text: 'apple', score: 0.9, source: 'symspell', isUnknownVerbatim: false },
+    ];
+
+    // 'appl' itself was shown before and equals the current word — the strict
+    // prefix check drops it; 'application' fills the remaining slot.
+    const result = suggestions({
+      pool,
+      currentWord: 'appl',
+      limit: 3,
+      previousSuggestions: ['appl', 'application'],
+    });
+
+    assert.strictEqual(result.length, 3);
+    assert.strictEqual(result[0], 'appl');
+    assert.strictEqual(result[1], 'apple');
+    assert.strictEqual(result[2], 'application');
+  });
+
+  it('SR4: result never exceeds limit when rescued items displace corrections', () => {
+    const pool = [
+      { text: 'appl', score: 1.0, source: 'symspell', isUnknownVerbatim: false },
+      { text: 'apple', score: 0.9, source: 'symspell', isUnknownVerbatim: false },
+      { text: 'apples', score: 0.8, source: 'symspell', isUnknownVerbatim: false },
+      { text: 'applause', score: 0.7, source: 'symspell', isUnknownVerbatim: false },
+    ];
+
+    const result = suggestions({
+      pool,
+      currentWord: 'appl',
+      limit: 3,
+      previousSuggestions: ['app', 'application', 'apply', 'appliance'],
+    });
+
+    assert.ok(result.length <= 3, 'result must never exceed limit');
+    assert.strictEqual(result[0], 'appl');
+    assert.ok(result.includes('application'));
+  });
+
+  it('SR5: case-insensitive prefix match, original case preserved', () => {
+    const pool = [
+      { text: 'Appl', score: 1.0, source: 'symspell', isUnknownVerbatim: false },
+      { text: 'Apple', score: 0.9, source: 'symspell', isUnknownVerbatim: false },
+    ];
+
+    const result = suggestions({
+      pool,
+      currentWord: 'appl',
+      limit: 3,
+      previousSuggestions: ['Application', 'Apply'],
+    });
+
+    assert.strictEqual(result[0], 'Appl'); // verbatim keeps its cased form
+    assert.ok(result.includes('Application'), 'rescued with original casing');
+  });
+
+  it('SR6: empty currentWord → no rescue', () => {
+    const pool = [
+      { text: 'hello', score: 0.9, source: 'symspell' },
+      { text: 'world', score: 0.5, source: 'symspell' },
+    ];
+
+    const result = suggestions({
+      pool,
+      currentWord: '',
+      limit: 3,
+      previousSuggestions: ['application', 'apply'],
+    });
+
+    assert.deepStrictEqual(result, ['hello', 'world']);
+  });
+
+  it('SR7: default previousSuggestions (null) → identical to pre-rescue behavior', () => {
+    const pool = [
+      { text: 'appl', score: 1.0, source: 'symspell', isUnknownVerbatim: false },
+      { text: 'apple', score: 0.9, source: 'symspell', isUnknownVerbatim: false },
+      { text: 'apples', score: 0.8, source: 'symspell', isUnknownVerbatim: false },
+    ];
+
+    const withoutRescue = suggestions({ pool, currentWord: 'appl', limit: 3 });
+    assert.deepStrictEqual(withoutRescue, ['appl', 'apple', 'apples']);
+  });
+
+  it('SR8: no verbatim in the pool — rescue appends to the top corrections (verbatim == null branch)', () => {
+    // Pool has only corrections (nothing equals "appl"), so the pinning logic
+    // takes the verbatim == null branch (corrections.slice(0, limit)). A still
+    // valid prefix completion from the previous keystroke is appended into the
+    // unfilled slot.
+    const pool = [
+      { text: 'apple', score: 0.9, source: 'symspell', isUnknownVerbatim: false },
+      { text: 'apply', score: 0.8, source: 'symspell', isUnknownVerbatim: false },
+    ];
+
+    const result = suggestions({
+      pool,
+      currentWord: 'appl',
+      limit: 3,
+      previousSuggestions: ['application'],
+    });
+
+    assert.strictEqual(result.length, 3);
+    assert.strictEqual(result[0], 'apple'); // no verbatim — top correction leads
+    assert.strictEqual(result[1], 'apply');
+    assert.strictEqual(result[2], 'application');
+  });
+
+  it('SR9: fill-then-displace — a 2nd rescue item displaces the lowest-ranked correction', () => {
+    // Result starts short (2 items vs limit 3): the 1st rescue fills the slot,
+    // the 2nd rescue triggers the displacement path, pushing out the
+    // lowest-ranked non-verbatim correction.
+    const pool = [
+      { text: 'apple', score: 0.9, source: 'symspell', isUnknownVerbatim: false },
+      { text: 'apples', score: 0.7, source: 'symspell', isUnknownVerbatim: false },
+    ];
+
+    const result = suggestions({
+      pool,
+      currentWord: 'appl',
+      limit: 3,
+      previousSuggestions: ['application', 'appliance'],
+    });
+
+    assert.strictEqual(result.length, 3);
+    assert.strictEqual(result[0], 'apple'); // top pick never displaced
+    assert.ok(result.includes('application'), '1st rescue filled the short list');
+    assert.ok(result.includes('appliance'), '2nd rescue present after displacement');
+    assert.ok(!result.includes('apples'), 'lowest-ranked correction displaced');
+  });
+});

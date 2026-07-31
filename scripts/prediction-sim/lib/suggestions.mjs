@@ -23,9 +23,12 @@ import { fusedPool } from './fused-pool.mjs';
  * @param {function|null} opts.kenlmScorer - (candidate, prev, prev2) => log10 probability or null.
  * @param {number} [opts.blendWeight=0.5] - KenLM blend weight.
  * @param {number} [opts.limit=3] - Maximum number of suggestions to return.
+ * @param {string[]|null|undefined} [opts.previousSuggestions=null] - Suggestion strings
+ *   displayed on the previous keystroke; the sticky-rescue pass keeps matching
+ *   completions visible as the user types.
  * @returns {string[]} Sorted suggestion strings.
  */
-export function suggestions({ pool, currentWord, previousWord, previousWord2, kenlmScorer, blendWeight = 0.5, limit = 3 }) {
+export function suggestions({ pool, currentWord, previousWord, previousWord2, kenlmScorer, blendWeight = 0.5, limit = 3, previousSuggestions = null }) {
   // ──────────────────────────────────────────────
   // EMPTY-PREFIX CASE: cursor is after whitespace
   // ──────────────────────────────────────────────
@@ -58,7 +61,41 @@ export function suggestions({ pool, currentWord, previousWord, previousWord2, ke
     pinned = corrections.slice(0, limit);
   }
 
-  return pinned
+  const result = pinned
     .slice(0, limit)
     .map(s => s.isUnknownVerbatim ? `"${s.text}"` : s.text);
+
+  // — Sticky-rescue pass — (mirrors PredictionEngine.suggestions)
+  // Keep any suggestion shown on the previous keystroke that still has the
+  // current word as a strict prefix. Rescued items are appended after the
+  // pinned list and, when the list is full, displace only the lowest-ranked
+  // non-verbatim corrections — the verbatim stays #1.
+  if (currentWord && previousSuggestions) {
+    let rescueCount = 0;
+    for (const previousSuggestion of previousSuggestions) {
+      const lowerPrevious = previousSuggestion.toLowerCase();
+      // Strict prefix (longer than the typed word with the typed word as a
+      // prefix). Also excludes the current verbatim, pinned at #1 above.
+      if (!(lowerPrevious.length > lowerCurrent.length && lowerPrevious.startsWith(lowerCurrent))) continue;
+      // Skip anything already displayed (verbatim or a fresh correction).
+      if (result.some(s => s.toLowerCase() === lowerPrevious)) continue;
+
+      if (result.length < limit) {
+        result.push(previousSuggestion);
+        rescueCount += 1;
+      } else {
+        // List is full — displace the lowest-ranked non-verbatim correction.
+        // Indices [0, length - rescueCount) hold the pinned list; the lowest-
+        // ranked correction sits just above the rescued block. Never displace
+        // index 0 (verbatim / top pick).
+        const lowestCorrectionIndex = result.length - rescueCount - 1;
+        if (lowestCorrectionIndex <= 0) break;
+        result.splice(lowestCorrectionIndex, 1);
+        result.push(previousSuggestion);
+        rescueCount += 1;
+      }
+    }
+  }
+
+  return result;
 }
