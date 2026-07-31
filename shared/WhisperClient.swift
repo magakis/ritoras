@@ -11,6 +11,7 @@ enum WhisperError: Error, LocalizedError {
     case cancelled
     case networkError(Error)
     case allServersFailed([String])
+    case serverUnreachable
     case asyncUnsupported
     case jobFailed(String)
     case stuck
@@ -27,6 +28,8 @@ enum WhisperError: Error, LocalizedError {
             return "Failed to decode server response: \(detail)"
         case .timeout:
             return "Server unreachable. Check your connection and server address."
+        case .serverUnreachable:
+            return "Server unreachable. Check your connection or the server URL in Settings."
         case .cancelled:
             return "Transcription was cancelled."
         case .networkError(let error):

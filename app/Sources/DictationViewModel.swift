@@ -474,10 +474,18 @@ final class DictationViewModel: ObservableObject {
                 do {
                     let audioBytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? UInt64 ?? 0
 
-                    // Use probe result if already available, otherwise let transcribe iterate servers.
-                    let chosenServer = selectedServer
-                    serverSelectionTask?.cancel()
+                    // Fail-fast: await the health probe started in start(). The probe completes
+                    // during recording, so this is ~0s on the happy path. If no server is
+                    // reachable, abort BEFORE uploading so the user sees a clear error in ~3s
+                    // instead of hanging in .transcribing.
+                    let probedServer = await serverSelectionTask?.value
                     serverSelectionTask = nil
+                    guard let chosenServer = probedServer else {
+                        FileLogger.shared.warn(.network, "transcription abort: no reachable server",
+                                               payload: ["id": id.uuidString,
+                                                         "serverCount": config.servers.count])
+                        throw WhisperError.serverUnreachable
+                    }
 
                     FileLogger.shared.info(.transcription, "upload start", payload: [
                         "id": id.uuidString,
