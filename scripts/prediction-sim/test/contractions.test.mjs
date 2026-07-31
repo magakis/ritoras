@@ -220,8 +220,10 @@ describe('Contractions', () => {
       // Mock KenLM: contraction and verbatim get similar log probs.
       // With α=0.5 blend, contraction (1.0 base → 0.5 blended) still
       // outranks verbatim (0.5 base → 0.25 blended plus KenLM portion).
+      // The scorer models the ASCII-only KenLM vocabulary: fusedPool
+      // normalizes the U+2019 candidate to U+0027 before scoring.
       const kenlmScorer = (text) => {
-        if (text === `don${APOSTROPHE}t`) return -1.5;
+        if (text === "don't") return -1.5;
         if (text === 'dont') return -2.0;
         return -10;
       };

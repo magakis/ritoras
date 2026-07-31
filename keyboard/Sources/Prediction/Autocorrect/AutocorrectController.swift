@@ -60,12 +60,20 @@ enum AutocorrectController {
         // ("dont" → "don't").
         let isContraction = topCorrection?.source == .contraction
 
+        // Ambiguous-contraction candidates (its → it's) bypass ONLY the
+        // isMisspelled gate: the typed token is a real dictionary word, so
+        // UITextChecker reports it as correctly spelled and would otherwise
+        // block the correction. They still respect isLearned and the confidence
+        // threshold — the LM-margin gate in topCorrection already established
+        // the contraction is strongly favored by context.
+        let isAmbiguousContraction = topCorrection?.source == .ambiguousContraction
+
         // User has explicitly accepted this word before.
         if !isContraction, isLearned { return .leaveAsIs }
 
         // Only correct genuinely misspelled words. This prevents "me" → "message",
         // "and" → "Andrew", etc.
-        if !isContraction {
+        if !isContraction, !isAmbiguousContraction {
             guard isMisspelled else { return .leaveAsIs }
         }
 
@@ -108,12 +116,21 @@ enum AutocorrectController {
     ///   (e.g., German ß → SS under uppercase, Turkish İ dotted/dotless).
     private static func preserveCase(of typed: String, appliedTo correction: String) -> String {
         guard !typed.isEmpty else { return correction }
+        let result: String
         if typed == typed.uppercased() {
-            return correction.uppercased()
+            result = correction.uppercased()
+        } else if typed == typed.capitalized {
+            result = correction.capitalized
+        } else {
+            result = correction.lowercased()
         }
-        if typed == typed.capitalized {
-            return correction.capitalized
+        // English orthography: the standalone pronoun "i" is always capitalized
+        // ("I") even after lowercase case-preservation — "id" → "I'd", not "i'd".
+        if result.first == "i",
+           let second = result.dropFirst().first,
+           second == "'" || second == "\u{2019}" {
+            return "I" + result.dropFirst()
         }
-        return correction.lowercased()
+        return result
     }
 }

@@ -226,16 +226,39 @@ final class TrigramProvider: SuggestionProvider {
 
         var sentence = ""
         if let prev2 = previousWord2?.lowercased(), !prev2.isEmpty {
-            sentence += prev2 + " "
+            sentence += Self.normalizeForKenLM(prev2) + " "
         }
         if let prev1 = previousWord?.lowercased(), !prev1.isEmpty {
-            sentence += prev1 + " "
+            sentence += Self.normalizeForKenLM(prev1) + " "
         }
-        sentence += candidate.lowercased()
+        sentence += Self.normalizeForKenLM(candidate).lowercased()
 
         return sentence.withCString { ptr in
             kenlm_score_sentence(model, ptr)
         }
+    }
+
+    /// KenLM-specific apostrophe normalization: U+2019/U+2018 → U+0027.
+    ///
+    /// The shipped trigram model vocabulary is ASCII-only (e.g. "don't" with
+    /// the straight apostrophe, zero curly-apostrophe tokens), while prediction
+    /// candidates carry the display-canonical U+2019. Without this, every
+    /// contraction scores as KenLM <unk> (large negative), which makes the
+    /// ambiguous-contraction margin gate provably always-negative and degrades
+    /// contraction ranking in fusedPool. Note the direction: the shared
+    /// ApostropheNormalizer canonicalizes TOWARDS U+2019 (the display form) —
+    /// this goes the opposite way for the KenLM lookup and so stays local here.
+    private static func normalizeForKenLM(_ s: String) -> String {
+        var out = ""
+        out.reserveCapacity(s.count)
+        for ch in s {
+            if ch == "\u{2019}" || ch == "\u{2018}" {
+                out.append("\u{0027}")
+            } else {
+                out.append(ch)
+            }
+        }
+        return out
     }
 
     // MARK: - Helpers

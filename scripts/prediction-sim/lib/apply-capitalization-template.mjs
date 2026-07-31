@@ -42,6 +42,14 @@ export function applyCapitalizationTemplate(input, suggestion) {
     return suggestion.toUpperCase();
   }
 
+  // English orthography: the standalone pronoun "i" is always capitalized ("I").
+  // Applies only when the result begins with a lowercase "i" immediately
+  // followed by an apostrophe (i'd, i'll, i'm) — never arbitrary leading "i"
+  // ("information").
+  if (suggestion[0] === 'i' && (suggestion[1] === "'" || suggestion[1] === '\u{2019}')) {
+    return 'I' + suggestion.slice(1);
+  }
+
   // Lowercase / mixed: leave suggestion as-is.
   return suggestion;
 }

@@ -195,6 +195,13 @@ struct SharedConfig {
         /// allowing valid context-driven corrections.
         static let kenlmAutocorrectAbsoluteLogProbFloor: Double = -8.0
 
+        /// Minimum KenLM log10-probability advantage the contraction form must hold
+        /// over the typed literal before an ambiguous contraction ("its" → "it's")
+        /// is auto-applied. 1.0 ≈ e^1 ≈ 2.7× probability ratio. The default is a
+        /// conservative starting point; calibrate on-device like the other KenLM
+        /// tunables.
+        static let ambiguousContractionLogProbMargin: Double = 1.0
+
         /// Trailing-punctuation characters that, when typed, trigger autocorrect
         /// evaluation of the immediately-preceding word — same as space/return.
         /// Apostrophes deliberately excluded (mid-word for contractions).

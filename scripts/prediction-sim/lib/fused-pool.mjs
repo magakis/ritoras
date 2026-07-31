@@ -1,6 +1,8 @@
 // Pure-logic JS port of PredictionEngine.fusedPool().
 // Kept in sync per AGENTS.md -> Test policy.
 
+import { normalizeForKenLM } from './kenlm-normalize.mjs';
+
 /**
  * Apple-boost + KenLM re-score + dedup. Pure function over the input pool.
  * Mirrors the Swift `PredictionEngine.fusedPool(forCurrentWord:lookupWord:previousWord:previousWord2:)`.
@@ -30,9 +32,13 @@ export function fusedPool({ pool, currentWord, previousWord, previousWord2, kenl
 
   // — KenLM re-score: min-max normalize log probs, blend with original score —
   if (kenlmScorer) {
+    // KenLM's vocabulary is ASCII-only: normalize the candidate and the context
+    // words to U+0027 before scoring (mirrors TrigramProvider.rawLogProb).
+    const prev = previousWord ? normalizeForKenLM(previousWord) : previousWord;
+    const prev2 = previousWord2 ? normalizeForKenLM(previousWord2) : previousWord2;
     const scored = all.map(s => ({
       s,
-      logProb: kenlmScorer(s.text, previousWord, previousWord2) ?? -10,
+      logProb: kenlmScorer(normalizeForKenLM(s.text), prev, prev2) ?? -10,
     }));
 
     if (scored.length > 0) {

@@ -50,6 +50,16 @@ final class SymSpellProvider: SuggestionProvider {
             return suggestion.uppercased()
         }
 
+        // English orthography: the standalone pronoun "i" is always capitalized
+        // ("I"). Applies only when the result begins with a lowercase "i"
+        // immediately followed by an apostrophe (i'd, i'll, i'm) — never
+        // arbitrary leading "i" ("information").
+        if suggestion.first == "i",
+           let second = suggestion.dropFirst().first,
+           second == "'" || second == "\u{2019}" {
+            return "I" + suggestion.dropFirst()
+        }
+
         // Lowercase / mixed: leave suggestion as-is.
         return suggestion
     }
@@ -104,6 +114,25 @@ final class SymSpellProvider: SuggestionProvider {
                     isUnknownVerbatim: false
                 ),
                 at: 0
+            )
+        }
+
+        // Ambiguous-contraction candidate: the typed token is a real dictionary
+        // word with its own meaning ("its" = possessive, "cant" = hypocritical
+        // talk), so a deterministic flip would corrupt correct usage. Instead the
+        // contraction form is offered as a candidate at 0.5 — injected REGARDLESS
+        // of isRealWord, alongside (not instead of) the trie-completion branch —
+        // and competes via KenLM fusion. Autocorrect applies it only when the
+        // LM-margin gate in PredictionEngine.topCorrection passes.
+        if let ambiguous = AmbiguousContractions.expansion(for: word) {
+            let capped = Self.applyCapitalizationTemplate(from: context.currentWord, to: ambiguous)
+            results.append(
+                Suggestion(
+                    text: capped,
+                    score: 0.5,
+                    source: .ambiguousContraction,
+                    isUnknownVerbatim: false
+                )
             )
         }
 

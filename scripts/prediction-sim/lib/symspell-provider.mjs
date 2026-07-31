@@ -3,6 +3,8 @@
 
 import { score as qwertyScore } from './qwerty-geometry.mjs';
 import { expansion } from './contractions.mjs';
+import { expansion as ambiguousExpansion } from './ambiguous-contractions.mjs';
+import { applyCapitalizationTemplate } from './apply-capitalization-template.mjs';
 
 /**
  * Default parameter values matching SharedConfig.Defaults:
@@ -86,6 +88,24 @@ export class SymSpellProvider {
         text: contract,
         score: 1.0,
         source: 'contraction',
+        distance: 0,
+        isUnknownVerbatim: false,
+      });
+    }
+
+    // Ambiguous contraction: the typed token is a real dictionary word with its
+    // own meaning ("its" = possessive, "cant" = hypocritical talk), so a
+    // deterministic flip would corrupt correct usage. The contraction form is
+    // offered as a candidate at 0.5 — injected REGARDLESS of isRealWord,
+    // alongside (not instead of) the trie-completion branch — and competes via
+    // KenLM fusion. Autocorrect applies it only when the LM-margin gate in
+    // topCorrection passes.
+    const ambiguous = ambiguousExpansion(lower);
+    if (ambiguous) {
+      results.push({
+        text: applyCapitalizationTemplate(currentWord, ambiguous),
+        score: 0.5,
+        source: 'ambiguousContraction',
         distance: 0,
         isUnknownVerbatim: false,
       });

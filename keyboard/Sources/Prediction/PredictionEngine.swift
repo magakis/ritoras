@@ -148,6 +148,31 @@ final class PredictionEngine {
                 return nil
             }
         }
+
+        // Ambiguous-contraction margin gate: never auto-flip a real dictionary
+        // word ("its", "cant", "id") to its contraction form without LM context,
+        // and only when KenLM clearly favors the contraction over the typed
+        // literal. Without context the typed form is the safer default — the
+        // token is a valid word with its own meaning.
+        if winner.source == .ambiguousContraction {
+            guard fusionIsActive(previousWord: previousWord),
+                  let trigramProvider = providers.compactMap({ $0 as? TrigramProvider }).first(where: { $0.isReady }) else {
+                return nil
+            }
+            let contractionLogProb = trigramProvider.rawLogProb(
+                for: winner.text,
+                previousWord: previousWord,
+                previousWord2: previousWord2
+            ) ?? -10.0
+            let typedLiteralLogProb = trigramProvider.rawLogProb(
+                for: currentWord,
+                previousWord: previousWord,
+                previousWord2: previousWord2
+            ) ?? -10.0
+            if contractionLogProb - typedLiteralLogProb < SharedConfig.Defaults.ambiguousContractionLogProbMargin {
+                return nil
+            }
+        }
         return winner
     }
 
