@@ -174,6 +174,40 @@ final class SharedPredictionStack: @unchecked Sendable {
             return
         }
 
+        // Eagerly load the trigram NOW, while footprint is still just the
+        // dictionary (~33 MB) and well under the 40 MB load threshold.
+        // If left lazy (first suggest() call), the load fires after the
+        // engine is published with footprint > 40 MB, its deferral guard
+        // trips, and it NEVER loads — leaving suggestions frequency-only
+        // ("I/the/and"). Dictionary-first order is preserved so the
+        // dictionary's own 40 MB guard never fires earlier.
+        //
+        // warmup() delivers its completion on the main queue; this build runs
+        // on `buildQueue` (a background queue) and no path blocks the main
+        // thread on `buildQueue`, so waiting on the semaphore here cannot
+        // deadlock — the completion is guaranteed to run on a free main.
+        let trigram = TrigramProvider()
+        let trigramDone = DispatchSemaphore(value: 0)
+        trigram.warmup { _ in trigramDone.signal() }
+        trigramDone.wait()
+
+        let dictionaryFootprint = MemoryMonitor.currentFootprint()
+        let trigramState: String
+        switch trigram.loadState {
+        case .ready: trigramState = "ready"
+        case .loading: trigramState = "loading"
+        case .cold: trigramState = "deferred"
+        case .failed: trigramState = "failed"
+        }
+        let finalFootprint = MemoryMonitor.currentFootprint()
+        FileLogger.shared.warn(.prediction, "shared prediction build trigram loaded",
+            payload: [
+                "buildId": generation,
+                "dictionaryFootprint": dictionaryFootprint,
+                "trigramState": trigramState,
+                "finalFootprint": finalFootprint
+            ])
+
         // Create the SymSpell provider.
         let provider = SymSpellProvider(symSpell: symSpell, trie: trie)
 
@@ -182,11 +216,12 @@ final class SharedPredictionStack: @unchecked Sendable {
 
         // Build the engine and register ALL providers before publishing — the
         // engine is published atomically with its provider list so a concurrent
-        // suggest() can never read `providers` mid-mutation.
+        // suggest() can never read `providers` mid-mutation. The trigram was
+        // eagerly loaded right after the dictionary (see above), so it is
+        // `.ready` (or otherwise settled) at registration time — NOT `.cold`.
         let engine = PredictionEngine()
         engine.addProvider(provider)
         engine.addProvider(appleProvider)
-        let trigram = TrigramProvider()
         engine.addProvider(trigram)
 
         DispatchQueue.main.async { [weak self] in
@@ -197,10 +232,7 @@ final class SharedPredictionStack: @unchecked Sendable {
                 state = .ready
             }
 
-            // TrigramProvider registered in .cold state — lazy-loads on first
-            // suggest() call. KenLM model (~8-10 MB) is NOT loaded here, keeping
-            // steady-state ~38-43 MB (well under the 48 MB Jetsam cap).
-            FileLogger.shared.warn(.prediction, "shared prediction ready (trigram deferred)",
+            FileLogger.shared.warn(.prediction, "shared prediction ready (trigram \(trigramState))",
                 payload: ["buildId": generation])
             completion(true)
         }
