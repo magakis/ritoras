@@ -62,20 +62,18 @@ class KeyboardViewController: UIInputViewController {
     enum InputTarget { case hostApp, emojiSearch }
     private var inputTarget: InputTarget = .hostApp
 
-    private var predictionEngine: PredictionEngine?
-    private var trigramProvider: TrigramProvider?
-    private var isPredictionEngineReady = false
+    /// Read-through shims: the prediction stack is process-global and persists
+    /// across show/hide cycles (see SharedPredictionStack). Downstream call
+    /// sites keep working unchanged while the real storage lives in the stack.
+    private var predictionEngine: PredictionEngine? { SharedPredictionStack.shared.engineIfReady() }
+    private var isPredictionEngineReady: Bool { SharedPredictionStack.shared.isReady }
 
     /// Identifies the keyboard process across VC instances. Set once per process launch.
     static let processLaunchId: String = UUID().uuidString
-    /// Process-wide build counter (main-thread-confined: all build calls originate on the main thread).
-    /// Static so multiple KeyboardViewController instances in one process produce buildId 1,2,3,…,
-    /// revealing VC accumulation that a per-instance counter would mask.
-    private static var buildGeneration: Int = 0
-    /// Main-thread-confined in-flight guard. Read/written only on the main thread
-    /// (buildPredictionEngine is called from viewDidLoad and the snapshot path,
-    /// both main; resets happen in the DispatchQueue.main.async completion callbacks).
-    private var isBuildingPrediction = false
+    /// Process-wide build counter. Owned by SharedPredictionStack (the
+    /// process-global holder): advances exactly once per process lifetime,
+    /// so this reads 1 from the first build onward — never 2, 3, … per show.
+    private static var buildGeneration: Int { SharedPredictionStack.shared.generation }
     private let predictionBuildQueue = DispatchQueue(
         label: "com.ritoras.prediction.build",
         qos: .userInitiated
@@ -180,105 +178,19 @@ class KeyboardViewController: UIInputViewController {
 
     // MARK: - Prediction Engine
 
-    /// Builds the prediction engine (SymSpell + Trie) on a background queue.
-    /// Sets `isPredictionEngineReady = true` on the main queue when done.
+    /// Kicks the one-shot prediction stack load. The stack is process-global
+    /// (SharedPredictionStack) and persists across show/hide cycles, so this
+    /// is a no-op once the load has begun — no per-show rebuild.
+    ///
+    /// Gated on cold state: the completion fires for EVERY settled state
+    /// (including `.ready`), so an ungated kick from viewDidLoad would
+    /// refreshSuggestions → snapshot → loadIfNeeded(.ready) → refresh … on
+    /// every run-loop cycle once the stack is ready.
     private func buildPredictionEngine() {
-        isPredictionEngineReady = false
-        guard !isBuildingPrediction else {
-            FileLogger.shared.debug(.prediction, "build skipped: prediction build already in flight",
-                payload: ["buildId": Self.buildGeneration])
-            return
-        }
-        isBuildingPrediction = true
-        Self.buildGeneration &+= 1
-        let generation = Self.buildGeneration
-        let launchId = KeyboardViewController.processLaunchId
-
-        predictionBuildQueue.async { [weak self] in
-            guard let self = self else { return }
-
-            let maxED = SharedConfig.Defaults.symspellMaxEditDistance
-            let prefixLen = SharedConfig.Defaults.symspellPrefixLength
-
-            // Build SymSpell index.
-            let symSpell = SymSpell(maxEditDistance: maxED, prefixLength: prefixLen)
-
-            // Build trie for completion.
-            let trie = Trie()
-
-            let baselineFootprint = MemoryMonitor.currentFootprint()
-            let trigramReady = self.trigramProvider?.isReady ?? false
-            FileLogger.shared.debug(.prediction, "build start footprint",
-                payload: [
-                    "launchId": launchId,
-                    "buildId": generation,
-                    "baselineFootprint": baselineFootprint,
-                    "maxFootprint": SharedConfig.Defaults.maxPhysFootprintDuringLoad,
-                    "trigramReady": trigramReady,
-                    "hadEngineBeforeBuild": self.predictionEngine != nil
-                ])
-
-            // Stream-load the frequency dictionary into both, with memory monitoring.
-            do {
-                guard let url = WordListLoader.bundledURL() else {
-                    throw WordListLoader.WordListError.bundledFileNotFound
-                }
-                let loaded = try WordListLoader.loadStreamed(
-                    from: url,
-                    into: symSpell,
-                    trie: trie,
-                    buildSessionId: "b\(generation)"
-                )
-                let postLoadFootprint = MemoryMonitor.currentFootprint()
-                FileLogger.shared.debug(.prediction, "build result footprint",
-                    payload: [
-                        "launchId": launchId,
-                        "buildId": generation,
-                        "wordsLoaded": loaded,
-                        "postLoadFootprint": postLoadFootprint,
-                        "baselineFootprint": baselineFootprint,
-                        "delta": postLoadFootprint > baselineFootprint ? postLoadFootprint - baselineFootprint : 0,
-                        "trigramReady": trigramReady
-                    ])
-                if loaded < 49000 {
-                    FileLogger.shared.info(.dictionary, "prediction engine loaded partial dictionary", payload: ["wordsLoaded": loaded])
-                }
-            } catch {
-                FileLogger.shared.error(.dictionary, "prediction engine failed to load dictionary", payload: ["error": error.localizedDescription])
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.isBuildingPrediction = false
-                    self.isPredictionEngineReady = true
-                    self.predictionEngine = PredictionEngine()
-                }
-                return
-            }
-
-            // Create the SymSpell provider.
-            let provider = SymSpellProvider(symSpell: symSpell, trie: trie)
-
-            // Create the Apple UITextChecker provider.
-            let appleProvider = AppleSpellCheckerProvider()
-
-            // Build the engine and register providers.
-            let engine = PredictionEngine()
-            engine.addProvider(provider)
-            engine.addProvider(appleProvider)
-
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.isBuildingPrediction = false
-                self.predictionEngine = engine
-                self.isPredictionEngineReady = true
-
-                // Register TrigramProvider in .cold state — lazy-loads on first suggest() call.
-                // KenLM model (~8-10 MB) is NOT loaded here, keeping steady-state ~38-43 MB
-                // (well under the 48 MB Jetsam cap) for short typing sessions.
-                let trigram = TrigramProvider()
-                self.trigramProvider = trigram
-                engine.addProvider(trigram)
-
-                FileLogger.shared.info(.keyboard, "PredictionEngine ready (trigram deferred)")
+        guard !SharedPredictionStack.shared.isReady, !SharedPredictionStack.shared.isLoading else { return }
+        SharedPredictionStack.shared.loadIfNeeded { [weak self] ok in
+            DispatchQueue.main.async {
+                self?.keyboardView?.refreshSuggestions()
             }
         }
     }
@@ -441,28 +353,23 @@ class KeyboardViewController: UIInputViewController {
 
     override func didReceiveMemoryWarning() {
         super.didReceiveMemoryWarning()
+        // Tiered shed: drop only the KenLM trigram (~8-10 MB). The dictionary +
+        // engine persist — rebuilding SymSpell (~25 MB) per memory warning would
+        // reintroduce the per-cycle footprint climb this architecture removes.
         let before = MemoryMonitor.currentFootprint()
-        trigramProvider?.unload()
-        predictionEngine = nil
-        isPredictionEngineReady = false
+        let freed = SharedPredictionStack.shared.unloadTrigram()
         let after = MemoryMonitor.currentFootprint()
         FileLogger.shared.warn(.lifecycle,
-            "didReceiveMemoryWarning: phys_footprint \(before) → \(after) (\(before > after ? before - after : 0) bytes freed)")
+            "didReceiveMemoryWarning: trigram shed \(before) → \(after) (\(freed) freed)")
     }
 
-    /// Sheds the prediction engine + trigram model on keyboard hide. Mirrors
-    /// didReceiveMemoryWarning. The next show rebuilds a fresh engine
-    /// (new VC → viewDidLoad → buildPredictionEngine), so shedding is safe.
+    /// Keyboard hide: the prediction stack is retained (load-once per process).
+    /// Nothing is shed here — the trigram is only shed on memory warning, and
+    /// the dictionary + engine persist across show/hide cycles so the next show
+    /// reuses the already-loaded stack instead of rebuilding ~25 MB.
     private func shedPredictionEngine() {
-        let before = MemoryMonitor.currentFootprint()
-        trigramProvider?.unload()
-        trigramProvider = nil
-        predictionEngine = nil
-        isPredictionEngineReady = false
-        let after = MemoryMonitor.currentFootprint()
-        FileLogger.shared.debug(.lifecycle, "hide shed: phys_footprint",
-            payload: ["before": before, "after": after,
-                      "freed": before > after ? before - after : 0])
+        FileLogger.shared.debug(.lifecycle, "hide — prediction stack retained",
+            payload: ["buildId": Self.buildGeneration])
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -1461,7 +1368,19 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     func keyboardViewSuggestionSnapshot(_ view: KeyboardView) -> SuggestionInputSnapshot? {
         guard inputTarget == .hostApp else { return nil }
-        if predictionEngine == nil { buildPredictionEngine() }
+        // Kick the one-time load ONLY while the stack is still cold. Once
+        // `.ready` (or `.loading`), refreshSuggestions must not re-enter here —
+        // loadIfNeeded fires its completion for every settled state including
+        // `.ready`, so an ungated kick would loop
+        // refresh → snapshot → loadIfNeeded(.ready) → refresh → … forever.
+        // Every subsequent show finds the stack `.ready` and reuses it — no rebuild.
+        if !SharedPredictionStack.shared.isReady, !SharedPredictionStack.shared.isLoading {
+            SharedPredictionStack.shared.loadIfNeeded { [weak self] _ in
+                DispatchQueue.main.async {
+                    self?.keyboardView?.refreshSuggestions()
+                }
+            }
+        }
         guard isPredictionEngineReady, predictionEngine != nil else { return nil }
         let context = textDocumentProxy.documentContextBeforeInput
         let extracted = CurrentWordExtractor.extract(from: context)
