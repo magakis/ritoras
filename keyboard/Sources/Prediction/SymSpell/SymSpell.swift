@@ -43,13 +43,6 @@ final class SymSpell {
         case closest
     }
 
-    // MARK: - Types
-
-    struct Term: Hashable {
-        let term: String
-        let count: Int64
-    }
-
     // MARK: - Configuration
 
     let maxEditDistance: Int
@@ -57,12 +50,17 @@ final class SymSpell {
 
     // MARK: - Index
 
-    /// Maps a delete key (an edited-down string) to the list of dictionary terms
-    /// that produce it. The key is a delete of the dictionary word's prefix.
-    private(set) var deletes: [String: [Term]] = [:]
-
-    /// Maps each dictionary word to its frequency count for O(1) exact-lookup.
-    private(set) var dictionary: [String: Int64] = [:]
+    // Interned storage: each unique dictionary word is stored ONCE in `words`
+    // and referenced everywhere else by its `Int32` index (4 bytes instead of
+    // a duplicated String — ~24 bytes per reference). `deletes` maps a delete
+    // key (an edited-down string) to the list of word indices that produce it.
+    // Counts fit in Int32: the largest frequency in the bundled dictionary is
+    // 53,703,180 ("the"), far below Int32.max (2,147,483,647). The ceiling is
+    // guarded by a precondition at insertion.
+    private(set) var words: [String] = []
+    private(set) var counts: [Int32] = []
+    private(set) var wordToIndex: [String: Int32] = [:]
+    private(set) var deletes: [String: [Int32]] = [:]
 
     // MARK: - Initialization
 
@@ -77,9 +75,20 @@ final class SymSpell {
     func createDictionaryEntry(key: String, count: Int64) {
         let keyLower = key.lowercased()
 
-        // Store the exact entry.
-        if count > dictionary[keyLower] ?? 0 {
-            dictionary[keyLower] = count
+        precondition(count <= Int64(Int32.max), "SymSpell count exceeds Int32.max: \(count)")
+
+        // Intern the word once and reference it by index everywhere else.
+        let idx: Int32
+        if let existing = wordToIndex[keyLower] {
+            idx = existing
+            if count > Int64(counts[Int(idx)]) {
+                counts[Int(idx)] = Int32(count)
+            }
+        } else {
+            idx = Int32(words.count)
+            words.append(keyLower)
+            counts.append(Int32(count))
+            wordToIndex[keyLower] = idx
         }
 
         // The word itself is a delete-key (0 edits) so we can find it by exact
@@ -88,20 +97,29 @@ final class SymSpell {
         let deleteKeys = edits(word: prefix, editDistance: maxEditDistance)
 
         for deleteKey in deleteKeys {
-            let term = Term(term: keyLower, count: count)
             if deletes[deleteKey] != nil {
-                if !deletes[deleteKey]!.contains(where: { $0.term == keyLower }) {
-                    deletes[deleteKey]!.append(term)
+                if !deletes[deleteKey]!.contains(idx) {
+                    deletes[deleteKey]!.append(idx)
                 }
             } else {
-                deletes[deleteKey] = [term]
+                deletes[deleteKey] = [idx]
             }
         }
     }
 
+    /// Returns the frequency count for a dictionary word (0 if not present).
+    /// Keys are stored lowercased, so the caller must lowercase `word` before
+    /// calling (matching the old `dictionary[k]` contract).
+    func count(for word: String) -> Int64 {
+        if let idx = wordToIndex[word] {
+            return Int64(counts[Int(idx)])
+        }
+        return 0
+    }
+
     /// Convenience: bulk-load from an array of (word, count) tuples.
-    func bulkLoad(words: [(String, Int64)]) {
-        for (word, count) in words {
+    func bulkLoad(entries: [(String, Int64)]) {
+        for (word, count) in entries {
             createDictionaryEntry(key: word, count: count)
         }
     }
@@ -123,9 +141,9 @@ final class SymSpell {
         let inputLower = input.lowercased()
         var suggestionSet: [String: (count: Int64, distance: Int)] = [:]
 
-        // Phase 1: exact match (edit distance 0) via dictionary lookup.
-        if let count = dictionary[inputLower] {
-            suggestionSet[inputLower] = (count, 0)
+        // Phase 1: exact match (edit distance 0) via word index.
+        if let idx = wordToIndex[inputLower] {
+            suggestionSet[inputLower] = (Int64(counts[Int(idx)]), 0)
         }
 
         // Phase 2: edit-space search. Generate deletes of the input prefix and
@@ -135,14 +153,14 @@ final class SymSpell {
 
         for deleteKey in inputDeletes {
             guard let matches = deletes[deleteKey] else { continue }
-            for term in matches {
-                let key = term.term
+            for idx in matches {
+                let key = words[Int(idx)]
                 if suggestionSet.keys.contains(key) { continue }
 
                 // Verify actual edit distance.
                 let dist = levenshteinDistance(inputLower, key)
                 if dist <= maxED {
-                    suggestionSet[key] = (term.count, dist)
+                    suggestionSet[key] = (Int64(counts[Int(idx)]), dist)
                 }
             }
         }
@@ -245,6 +263,6 @@ final class SymSpell {
 
     deinit {
         FileLogger.shared.info(.dictionary, "SymSpell deinit",
-            payload: ["dictionaryCount": dictionary.count, "deletesCount": deletes.count])
+            payload: ["wordsCount": words.count, "deletesCount": deletes.count])
     }
 }

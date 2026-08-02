@@ -135,6 +135,62 @@ describe('SymSpell', () => {
     });
   });
 
+  describe('interned representation invariants', () => {
+    it('deletes values are arrays of non-negative integers', () => {
+      const speller = new SymSpell();
+      speller.createDictionaryEntry('the', 1000);
+      speller.createDictionaryEntry('they', 500);
+      speller.createDictionaryEntry('then', 300);
+
+      for (const [key, indices] of speller.deletes) {
+        assert.ok(Array.isArray(indices), `deletes[${key}] is not an array`);
+        for (const idx of indices) {
+          assert.ok(Number.isInteger(idx) && idx >= 0,
+            `deletes[${key}] contains non-integer or negative index ${idx}`);
+        }
+      }
+    });
+
+    it('words has no duplicates', () => {
+      const speller = new SymSpell();
+      speller.createDictionaryEntry('the', 1000);
+      speller.createDictionaryEntry('THE', 500); // lowercase reuse
+      speller.createDictionaryEntry('they', 300);
+      speller.createDictionaryEntry('the', 2000); // re-insert updates count only
+
+      assert.strictEqual(new Set(speller.words).size, speller.words.length);
+      assert.strictEqual(speller.words.length, 2);
+      assert.deepStrictEqual([...speller.words].sort(), ['the', 'they']);
+      // Re-insert of "the" raised the count, not the interned entry count.
+      assert.strictEqual(speller.countFor('the'), 2000);
+    });
+
+    it('words[idx] round-trips through wordToIndex', () => {
+      const speller = new SymSpell();
+      speller.createDictionaryEntry('hello', 100);
+      speller.createDictionaryEntry('world', 200);
+      speller.createDictionaryEntry('foo', 300);
+
+      for (let i = 0; i < speller.words.length; i++) {
+        const word = speller.words[i];
+        assert.strictEqual(speller.wordToIndex.get(word), i);
+        assert.strictEqual(speller.words[speller.wordToIndex.get(word)], word);
+      }
+    });
+
+    it('REGRESSION: lookup("teh") still returns "the" at distance 2', () => {
+      // Guards against an accidental d=1 regression during the rewrite —
+      // qwertyTranspositionDiscount depends on d=2 transposition candidates.
+      const speller = new SymSpell();
+      speller.createDictionaryEntry('the', 1000);
+
+      const result = speller.lookup('teh', undefined, 'top');
+      assert.strictEqual(result.length, 1);
+      assert.strictEqual(result[0].term, 'the');
+      assert.strictEqual(result[0].distance, 2);
+    });
+  });
+
   describe('load-dictionary integration', () => {
     it('real dictionary: lookup("dont") returns "dont" at distance 0', async () => {
       // Build an index from the real dictionary and verify the dont regression.

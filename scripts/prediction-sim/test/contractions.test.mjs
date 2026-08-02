@@ -145,7 +145,7 @@ describe('Contractions', () => {
       const contraction = expansion(canonicalLower);
 
       // Phase 2: verbatim candidate — score demoted to 0.5 when contraction exists
-      const verbatim = { text: input, score: 0.5, source: 'symspell', isUnknownVerbatim: !speller.dictionary.has(canonicalLower) };
+      const verbatim = { text: input, score: 0.5, source: 'symspell', isUnknownVerbatim: !speller.wordToIndex.has(canonicalLower) };
 
       // Phase 3: SymSpell lookup (returns "dont" at distance 0 — same as input)
       const symspellResult = speller.lookup(canonicalLower, undefined, 'top');

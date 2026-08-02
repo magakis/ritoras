@@ -140,7 +140,7 @@ final class SymSpellProvider: SuggestionProvider {
             // Prefix completions from trie.
             let completions = trie.suggest(prefix: word, limit: max(limit, 20))
             // Sort by frequency from SymSpell's canonical dictionary.
-            let sorted = completions.sorted { (symSpell.dictionary[$0.lowercased()] ?? 0) > (symSpell.dictionary[$1.lowercased()] ?? 0) }
+            let sorted = completions.sorted { symSpell.count(for: $0.lowercased()) > symSpell.count(for: $1.lowercased()) }
             for completion in sorted.prefix(limit) {
                 let capped = Self.applyCapitalizationTemplate(from: context.currentWord, to: completion)
                 if capped.lowercased() != word {

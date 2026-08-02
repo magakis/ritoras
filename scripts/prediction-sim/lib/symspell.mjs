@@ -18,11 +18,19 @@ export class SymSpell {
     this.maxEditDistance = maxEditDistance;
     this.prefixLength = prefixLength;
 
-    /** @type {Map<string, Array<{term: string, count: number}>>} */
-    this.deletes = new Map();
+    // Interned storage mirroring the Swift: each unique dictionary word is
+    // stored ONCE in `words` and referenced everywhere else by its index.
+    /** @type {string[]} */
+    this.words = [];
+
+    /** @type {number[]} */
+    this.counts = [];
 
     /** @type {Map<string, number>} */
-    this.dictionary = new Map();
+    this.wordToIndex = new Map();
+
+    /** @type {Map<string, number[]>} */
+    this.deletes = new Map();
   }
 
   // ---------------------------------------------------------------
@@ -37,10 +45,18 @@ export class SymSpell {
   createDictionaryEntry(key, count) {
     const keyLower = key.toLowerCase();
 
-    // Store the exact entry.
-    const existing = this.dictionary.get(keyLower) ?? 0;
-    if (count > existing) {
-      this.dictionary.set(keyLower, count);
+    // Intern the word once and reference it by index everywhere else.
+    let idx;
+    if (this.wordToIndex.has(keyLower)) {
+      idx = this.wordToIndex.get(keyLower);
+      if (count > this.counts[idx]) {
+        this.counts[idx] = count;
+      }
+    } else {
+      idx = this.words.length;
+      this.words.push(keyLower);
+      this.counts.push(count);
+      this.wordToIndex.set(keyLower, idx);
     }
 
     // The word itself is a delete-key (0 edits) so we can find it by exact
@@ -49,16 +65,25 @@ export class SymSpell {
     const deleteKeys = this._edits(prefix, this.maxEditDistance);
 
     for (const deleteKey of deleteKeys) {
-      const term = { term: keyLower, count };
-      if (this.deletes.has(deleteKey)) {
-        const list = this.deletes.get(deleteKey);
-        if (!list.some(t => t.term === keyLower)) {
-          list.push(term);
+      const list = this.deletes.get(deleteKey);
+      if (list) {
+        if (!list.includes(idx)) {
+          list.push(idx);
         }
       } else {
-        this.deletes.set(deleteKey, [term]);
+        this.deletes.set(deleteKey, [idx]);
       }
     }
+  }
+
+  /**
+   * Returns the frequency count for a dictionary word (0 if not present).
+   * @param {string} word
+   * @returns {number}
+   */
+  countFor(word) {
+    const idx = this.wordToIndex.get(word);
+    return idx === undefined ? 0 : this.counts[idx];
   }
 
   /**
@@ -92,10 +117,11 @@ export class SymSpell {
     /** @type {Map<string, {count: number, distance: number}>} */
     const suggestionSet = new Map();
 
-    // Phase 1: exact match (edit distance 0) via dictionary lookup.
-    if (this.dictionary.has(inputLower)) {
+    // Phase 1: exact match (edit distance 0) via word index.
+    const exactIdx = this.wordToIndex.get(inputLower);
+    if (exactIdx !== undefined) {
       suggestionSet.set(inputLower, {
-        count: this.dictionary.get(inputLower),
+        count: this.counts[exactIdx],
         distance: 0,
       });
     }
@@ -109,14 +135,14 @@ export class SymSpell {
       const matches = this.deletes.get(deleteKey);
       if (!matches) continue;
 
-      for (const term of matches) {
-        const key = term.term;
+      for (const idx of matches) {
+        const key = this.words[idx];
         if (suggestionSet.has(key)) continue;
 
         // Verify actual edit distance.
         const dist = this.levenshteinDistance(inputLower, key);
         if (dist <= maxED) {
-          suggestionSet.set(key, { count: term.count, distance: dist });
+          suggestionSet.set(key, { count: this.counts[idx], distance: dist });
         }
       }
     }
