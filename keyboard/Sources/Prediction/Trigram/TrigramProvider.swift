@@ -62,6 +62,11 @@ final class TrigramProvider: SuggestionProvider {
     }
 
     // MARK: - Loading
+    //
+    // NOTE: lifecycle logs below are TEMPORARILY elevated to `.warn` (synchronous —
+    // they survive a Jetsam kill and reach DebugLogView) for on-device diagnosis
+    // of the trigram load-deferral loop. Normalize back to `.info` after on-device
+    // confirmation, per docs/LOGGING.md.
 
     /// Public API to explicitly start loading the KenLM model and side index
     /// on a background queue. Idempotent: subsequent calls are no-ops if
@@ -80,7 +85,7 @@ final class TrigramProvider: SuggestionProvider {
         mutateState { state, _, _ in
             state = .loading
         }
-        FileLogger.shared.info(.prediction, "trigram load started")
+        FileLogger.shared.warn(.prediction, "trigram load started")
         performLoad(completion: completion)
     }
 
@@ -94,7 +99,7 @@ final class TrigramProvider: SuggestionProvider {
         mutateState { state, _, _ in
             state = .loading
         }
-        FileLogger.shared.info(.prediction, "trigram load started")
+        FileLogger.shared.warn(.prediction, "trigram load started")
         performLoad()
     }
 
@@ -113,15 +118,17 @@ final class TrigramProvider: SuggestionProvider {
                 return
             }
 
-            // Guard against Jetsam: skip trigram load if memory is already near the 48 MB cap.
-            // Uses the same 40 MB threshold as the dictionary load (SharedConfig.Defaults).
+            // Guard against Jetsam: skip trigram load if memory is already near the cap.
+            // Uses the trigram-specific threshold (trigramMaxPhysFootprintDuringLoad),
+            // deliberately HIGHER than the dictionary's 40 MB guard so the trigram can
+            // reload after a memory-warning shed (~49 MB) instead of deferring forever.
             // Trigram model + side index adds ~8-10 MB; loading near the threshold risks an
             // immediate Jetsam kill. A skipped load degrades gracefully: next suggest() retries
             // (state stays .cold).
             let currentFootprint = MemoryMonitor.currentFootprint()
-            if currentFootprint > SharedConfig.Defaults.maxPhysFootprintDuringLoad {
-                FileLogger.shared.info(.prediction,
-                    "trigram load deferred: phys_footprint \(currentFootprint) > \(SharedConfig.Defaults.maxPhysFootprintDuringLoad)")
+            if currentFootprint > SharedConfig.Defaults.trigramMaxPhysFootprintDuringLoad {
+                FileLogger.shared.warn(.prediction,
+                    "trigram load deferred: phys_footprint \(currentFootprint) > \(SharedConfig.Defaults.trigramMaxPhysFootprintDuringLoad)")
                 DispatchQueue.main.async { completion?(false) }
                 return
             }
@@ -136,7 +143,7 @@ final class TrigramProvider: SuggestionProvider {
                     model = nil
                     state = .failed
                 }
-                FileLogger.shared.info(.prediction, "trigram load failed: model file not found")
+                FileLogger.shared.warn(.prediction, "trigram load failed: model file not found")
                 DispatchQueue.main.async { completion?(false) }
                 return
             }
@@ -162,7 +169,7 @@ final class TrigramProvider: SuggestionProvider {
                 let vocabSize = self.readState { _, model, _ in
                     model.map { kenlm_vocab_size($0) } ?? 0
                 }
-                FileLogger.shared.info(.prediction, "trigram ready (vocab=\(vocabSize))")
+                FileLogger.shared.warn(.prediction, "trigram ready (vocab=\(vocabSize))")
             } else {
                 let reason: String
                 if model == nil { reason = "kenlm_load returned nil" }

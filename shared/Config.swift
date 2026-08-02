@@ -170,6 +170,16 @@ struct SharedConfig {
         /// partial vocabulary was loaded.
         static let maxPhysFootprintDuringLoad: UInt64 = 40 * 1024 * 1024
 
+        /// Load guard for the KenLM trigram model ONLY. Separate from
+        /// maxPhysFootprintDuringLoad (which guards the much larger ~37 MB dictionary
+        /// load and must stay conservative). The trigram is only ~8–10 MB, so it can
+        /// safely load at a higher footprint — this lets it RELOAD after a memory-
+        /// warning shed (post-shed footprint ~49 MB must clear this bar) instead of
+        /// being deferred forever by the dictionary's 40 MB threshold. Loading at 55 MB
+        /// → ~63–65 MB peak, under the ~70 MB modern-device Jetsam kill threshold.
+        /// Lower if older (~48 MB) devices shed/kill; raise if reload still defers.
+        static let trigramMaxPhysFootprintDuringLoad: UInt64 = 55 * 1024 * 1024
+
         // MARK: - Autocorrect-on-Space
 
         /// Minimum character count for a typed word to be considered for autocorrect.
