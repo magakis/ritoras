@@ -29,8 +29,23 @@ export class SymSpell {
     /** @type {Map<string, number>} */
     this.wordToIndex = new Map();
 
+    // Delete-index storage: `pendingDeletes` during loading; finalize()
+    // freezes it into a CSR layout (sorted keys + offsets + flat values) so
+    // the ~150k separate array headers are released.
     /** @type {Map<string, number[]>} */
-    this.deletes = new Map();
+    this.pendingDeletes = new Map();
+
+    /** @type {string[]} */
+    this.deleteKeys = [];
+
+    /** @type {number[]} */
+    this.deleteOffsets = [];
+
+    /** @type {number[]} */
+    this.deleteValues = [];
+
+    /** @type {boolean} */
+    this.isFinalized = false;
   }
 
   // ---------------------------------------------------------------
@@ -65,13 +80,13 @@ export class SymSpell {
     const deleteKeys = this._edits(prefix, this.maxEditDistance);
 
     for (const deleteKey of deleteKeys) {
-      const list = this.deletes.get(deleteKey);
+      const list = this.pendingDeletes.get(deleteKey);
       if (list) {
         if (!list.includes(idx)) {
           list.push(idx);
         }
       } else {
-        this.deletes.set(deleteKey, [idx]);
+        this.pendingDeletes.set(deleteKey, [idx]);
       }
     }
   }
@@ -94,6 +109,56 @@ export class SymSpell {
     for (const { word, count } of words) {
       this.createDictionaryEntry(word, count);
     }
+  }
+
+  // ---------------------------------------------------------------
+  // CSR Finalization
+  // ---------------------------------------------------------------
+
+  /**
+   * Freeze the pending deletes map into a compact CSR layout and drop the
+   * intermediate map. Idempotent. Called after the load loop; lookup falls
+   * back to `pendingDeletes` until this runs.
+   */
+  finalize() {
+    if (this.isFinalized) return;
+
+    // Sort keys lexicographically; pack values flat; build offsets.
+    const sortedKeys = [...this.pendingDeletes.keys()].sort();
+    let offset = 0;
+    for (const key of sortedKeys) {
+      const bucket = this.pendingDeletes.get(key);
+      this.deleteKeys.push(key);
+      this.deleteOffsets.push(offset);
+      for (const idx of bucket) {
+        this.deleteValues.push(idx);
+      }
+      offset += bucket.length;
+    }
+    this.deleteOffsets.push(offset); // sentinel: offsets.length === keys.length + 1
+    this.pendingDeletes = new Map(); // release the map (and its array headers)
+    this.isFinalized = true;
+  }
+
+  /**
+   * Binary search for `key` in the finalized `deleteKeys` array.
+   * @param {string} key
+   * @returns {number} index of the key, or -1 if absent.
+   */
+  _binarySearchDeleteKey(key) {
+    let low = 0;
+    let high = this.deleteKeys.length - 1;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      const midKey = this.deleteKeys[mid];
+      if (midKey === key) return mid;
+      if (midKey < key) {
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return -1;
   }
 
   // ---------------------------------------------------------------
@@ -132,8 +197,17 @@ export class SymSpell {
     const inputDeletes = this._edits(inputPrefix, maxED);
 
     for (const deleteKey of inputDeletes) {
-      const matches = this.deletes.get(deleteKey);
-      if (!matches) continue;
+      // Resolve the bucket: CSR slice when finalized, pending map otherwise
+      // (lookup-before-finalize fallback, e.g. in tests).
+      let matches;
+      if (this.isFinalized) {
+        const i = this._binarySearchDeleteKey(deleteKey);
+        if (i === -1) continue;
+        matches = this.deleteValues.slice(this.deleteOffsets[i], this.deleteOffsets[i + 1]);
+      } else {
+        matches = this.pendingDeletes.get(deleteKey);
+        if (!matches) continue;
+      }
 
       for (const idx of matches) {
         const key = this.words[idx];

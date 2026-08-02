@@ -117,11 +117,14 @@ enum WordListLoader {
                     let physFootprint = MemoryMonitor.currentFootprint()
                     if physFootprint > maxPhysFootprintBytes {
                         FileLogger.shared.error(.dictionary, "memory threshold exceeded during word list load", payload: ["physFootprint": physFootprint, "maxPhysFootprint": maxPhysFootprintBytes, "wordsLoaded": wordCount, "buildSessionId": buildSessionId ?? "none"])
+                        symSpell.finalize() // release the pending deletes map even on the abort path
                         return wordCount
                     }
                 }
             }
         }
+
+        symSpell.finalize()
 
         return wordCount
     }

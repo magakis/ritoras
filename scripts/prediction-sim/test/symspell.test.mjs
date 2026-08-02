@@ -136,17 +136,17 @@ describe('SymSpell', () => {
   });
 
   describe('interned representation invariants', () => {
-    it('deletes values are arrays of non-negative integers', () => {
+    it('pendingDeletes values are arrays of non-negative integers', () => {
       const speller = new SymSpell();
       speller.createDictionaryEntry('the', 1000);
       speller.createDictionaryEntry('they', 500);
       speller.createDictionaryEntry('then', 300);
 
-      for (const [key, indices] of speller.deletes) {
-        assert.ok(Array.isArray(indices), `deletes[${key}] is not an array`);
+      for (const [key, indices] of speller.pendingDeletes) {
+        assert.ok(Array.isArray(indices), `pendingDeletes[${key}] is not an array`);
         for (const idx of indices) {
           assert.ok(Number.isInteger(idx) && idx >= 0,
-            `deletes[${key}] contains non-integer or negative index ${idx}`);
+            `pendingDeletes[${key}] contains non-integer or negative index ${idx}`);
         }
       }
     });
@@ -191,6 +191,50 @@ describe('SymSpell', () => {
     });
   });
 
+  describe('CSR finalize', () => {
+    it('finalize is idempotent', () => {
+      const speller = new SymSpell();
+      speller.createDictionaryEntry('the', 1000);
+      speller.createDictionaryEntry('they', 500);
+      speller.createDictionaryEntry('then', 300);
+
+      speller.finalize();
+      const keysOnce = [...speller.deleteKeys];
+      const offsetsOnce = [...speller.deleteOffsets];
+      const valuesOnce = [...speller.deleteValues];
+      assert.strictEqual(speller.isFinalized, true);
+      // Sentinel: offsets.length === keys.length + 1.
+      assert.strictEqual(speller.deleteOffsets.length, speller.deleteKeys.length + 1);
+      assert.strictEqual(speller.pendingDeletes.size, 0);
+
+      speller.finalize(); // second call is a no-op
+      assert.strictEqual(speller.isFinalized, true);
+      assert.deepStrictEqual(speller.deleteKeys, keysOnce);
+      assert.deepStrictEqual(speller.deleteOffsets, offsetsOnce);
+      assert.deepStrictEqual(speller.deleteValues, valuesOnce);
+    });
+
+    it('lookup returns identical results before and after finalize', () => {
+      const speller = new SymSpell();
+      speller.createDictionaryEntry('the', 1000);
+      speller.createDictionaryEntry('they', 500);
+      speller.createDictionaryEntry('then', 300);
+      speller.createDictionaryEntry('both', 800);
+
+      // Fallback path (pendingDeletes) vs CSR path must produce the same output.
+      const before = speller.lookup('teh', undefined, 'all');
+      speller.finalize();
+      const after = speller.lookup('teh', undefined, 'all');
+      assert.deepStrictEqual(after, before);
+
+      // The locked regression also holds on the CSR path.
+      const top = speller.lookup('teh', undefined, 'top');
+      assert.strictEqual(top.length, 1);
+      assert.strictEqual(top[0].term, 'the');
+      assert.strictEqual(top[0].distance, 2);
+    });
+  });
+
   describe('load-dictionary integration', () => {
     it('real dictionary: lookup("dont") returns "dont" at distance 0', async () => {
       // Build an index from the real dictionary and verify the dont regression.
@@ -204,6 +248,8 @@ describe('SymSpell', () => {
       for (const { word, count } of entries) {
         speller.createDictionaryEntry(word, count);
       }
+      // Mirror the Swift WordListLoader, which calls finalize() after the load loop.
+      speller.finalize();
 
       const result = speller.lookup('dont', undefined, 'top');
       assert.ok(result.length >= 1, 'expected at least one result for "dont"');

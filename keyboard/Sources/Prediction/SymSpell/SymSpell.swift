@@ -52,15 +52,24 @@ final class SymSpell {
 
     // Interned storage: each unique dictionary word is stored ONCE in `words`
     // and referenced everywhere else by its `Int32` index (4 bytes instead of
-    // a duplicated String — ~24 bytes per reference). `deletes` maps a delete
-    // key (an edited-down string) to the list of word indices that produce it.
-    // Counts fit in Int32: the largest frequency in the bundled dictionary is
-    // 53,703,180 ("the"), far below Int32.max (2,147,483,647). The ceiling is
-    // guarded by a precondition at insertion.
+    // a duplicated String — ~24 bytes per reference). Counts fit in Int32: the
+    // largest frequency in the bundled dictionary is 53,703,180 ("the"), far
+    // below Int32.max (2,147,483,647). The ceiling is guarded by a
+    // precondition at insertion.
     private(set) var words: [String] = []
     private(set) var counts: [Int32] = []
     private(set) var wordToIndex: [String: Int32] = [:]
-    private(set) var deletes: [String: [Int32]] = [:]
+
+    // Delete-index storage: during loading, `pendingDeletes` maps a delete key
+    // (an edited-down string) to the list of word indices that produce it.
+    // finalize() freezes this into a CSR (compressed-sparse-row) layout —
+    // one sorted key array, one offset table, one flat value buffer — so the
+    // ~150k separate `[Int32]` array headers (~4.8 MB) are released.
+    private var pendingDeletes: [String: [Int32]] = [:]
+    private(set) var deleteKeys: [String] = []      // sorted lexicographically
+    private(set) var deleteOffsets: [Int] = []      // keys.count + 1; offsets[i]..<offsets[i+1] into deleteValues
+    private(set) var deleteValues: [Int32] = []     // flat: all index-lists concatenated
+    private(set) var isFinalized = false
 
     // MARK: - Initialization
 
@@ -97,12 +106,12 @@ final class SymSpell {
         let deleteKeys = edits(word: prefix, editDistance: maxEditDistance)
 
         for deleteKey in deleteKeys {
-            if deletes[deleteKey] != nil {
-                if !deletes[deleteKey]!.contains(idx) {
-                    deletes[deleteKey]!.append(idx)
+            if pendingDeletes[deleteKey] != nil {
+                if !pendingDeletes[deleteKey]!.contains(idx) {
+                    pendingDeletes[deleteKey]!.append(idx)
                 }
             } else {
-                deletes[deleteKey] = [idx]
+                pendingDeletes[deleteKey] = [idx]
             }
         }
     }
@@ -122,6 +131,49 @@ final class SymSpell {
         for (word, count) in entries {
             createDictionaryEntry(key: word, count: count)
         }
+    }
+
+    // MARK: - CSR Finalization
+
+    /// Freeze the pending deletes map into a compact CSR layout and drop the
+    /// intermediate map. Idempotent. Called by WordListLoader after the load
+    /// loop; lookup falls back to `pendingDeletes` until this runs.
+    func finalize() {
+        guard !isFinalized else { return }
+        // Sort keys lexicographically; pack values flat; build offsets.
+        let sortedKeys = pendingDeletes.keys.sorted()
+        deleteOffsets.reserveCapacity(sortedKeys.count + 1)
+        deleteValues.reserveCapacity(pendingDeletes.values.reduce(0) { $0 + $1.count })
+        var offset = 0
+        for key in sortedKeys {
+            let bucket = pendingDeletes[key]!
+            deleteKeys.append(key)
+            deleteOffsets.append(offset)
+            deleteValues.append(contentsOf: bucket)
+            offset += bucket.count
+        }
+        deleteOffsets.append(offset)   // sentinel: offsets.count == keys.count + 1
+        pendingDeletes.removeAll()
+        pendingDeletes = [:]           // release the map (and its ~150k array headers)
+        isFinalized = true
+    }
+
+    /// Returns the index of `key` in the finalized `deleteKeys` array, or nil.
+    private func binarySearchDeleteKey(_ key: String) -> Int? {
+        var low = 0
+        var high = deleteKeys.count - 1
+        while low <= high {
+            let mid = (low + high) / 2
+            let midKey = deleteKeys[mid]
+            if midKey == key {
+                return mid
+            } else if midKey < key {
+                low = mid + 1
+            } else {
+                high = mid - 1
+            }
+        }
+        return nil
     }
 
     // MARK: - Lookup
@@ -152,8 +204,18 @@ final class SymSpell {
         let inputDeletes = edits(word: inputPrefix, editDistance: maxED)
 
         for deleteKey in inputDeletes {
-            guard let matches = deletes[deleteKey] else { continue }
-            for idx in matches {
+            // Resolve the bucket: CSR slice when finalized, pending map
+            // otherwise (lookup-before-finalize fallback, e.g. in tests).
+            let bucket: [Int32]
+            if isFinalized {
+                guard let i = binarySearchDeleteKey(deleteKey) else { continue }
+                bucket = Array(deleteValues[deleteOffsets[i]..<deleteOffsets[i + 1]])
+            } else {
+                guard let pendingBucket = pendingDeletes[deleteKey] else { continue }
+                bucket = pendingBucket
+            }
+
+            for idx in bucket {
                 let key = words[Int(idx)]
                 if suggestionSet.keys.contains(key) { continue }
 
@@ -263,6 +325,6 @@ final class SymSpell {
 
     deinit {
         FileLogger.shared.info(.dictionary, "SymSpell deinit",
-            payload: ["wordsCount": words.count, "deletesCount": deletes.count])
+            payload: ["wordsCount": words.count, "deleteKeysCount": deleteKeys.count, "deleteValuesCount": deleteValues.count, "isFinalized": isFinalized])
     }
 }
