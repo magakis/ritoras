@@ -43,7 +43,7 @@ actor AudioRecorder {
 
     // MARK: - Start Recording
 
-    /// Starts recording speech to the configured audio format (AAC or WAV, 16 kHz mono)
+    /// Starts recording speech to the configured audio format (AAC or WAV, 48 kHz mono)
     /// in the Application Support directory under the given job ID.
     ///
     /// The recording is written directly to `{application-support}/Recordings/{jobId}.{ext}`
@@ -115,26 +115,25 @@ actor AudioRecorder {
             "path": tempURL.path
         ])
 
-        // 5. Recording settings — 16 kHz mono. Format follows the user's AudioFormat
+        // 5. Recording settings — 48 kHz mono. Format follows the user's AudioFormat
         //    setting; the Whisper server re-encodes to 16 kHz mono WAV regardless, so
         //    the choice affects file size / losslessness, not transcription accuracy.
-        //      .aac: MPEG-4 AAC, quality .high → measured ~25 kbps at 16 kHz mono
-        //            (despite .high's nominal ~64 kbps).
-        //      .wav: 16-bit little-endian PCM → ~256 kbps, lossless.
+        //      .aac: MPEG-4 AAC, quality .high → configured 64 kbps.
+        //      .wav: 16-bit little-endian PCM → ~768 kbps, lossless.
         let settings: [String: Any]
         switch format {
         case .aac:
             settings = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: 16000,
+                AVSampleRateKey: 48000,
                 AVNumberOfChannelsKey: 1,
                 AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
-                AVEncoderBitRateKey: 48000,
+                AVEncoderBitRateKey: 64000,
             ]
         case .wav:
             settings = [
                 AVFormatIDKey: kAudioFormatLinearPCM,
-                AVSampleRateKey: 16000,
+                AVSampleRateKey: 48000,
                 AVNumberOfChannelsKey: 1,
                 AVLinearPCMBitDepthKey: 16,
                 AVLinearPCMIsFloatKey: false,

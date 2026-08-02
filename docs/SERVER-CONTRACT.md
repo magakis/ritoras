@@ -151,17 +151,17 @@ Ritoras records audio using `AVAudioRecorder` with these settings:
 |----------|-------|
 | Format | AAC (MPEG-4 Audio) |
 | File extension | `.m4a` |
-| Sample rate | 16 kHz |
+| Sample rate | 48 kHz |
 | Channels | 1 (mono) |
-| Bit rate | 48 kbps |
+| Bit rate | 64 kbps |
 | Quality | `.high` |
 
 ### Server-side processing
 
 The server converts uploaded audio to **16 kHz mono WAV** via `ffmpeg` before
 transcribing. Any audio format that `ffmpeg` supports will work — M4A, WAV,
-MP3, OGG, etc. Our M4A/AAC 16 kHz mono recording is already ideal and
-requires no server-side downsampling.
+MP3, OGG, etc. Our M4A/AAC 48 kHz mono recording is already ideal and
+requires no client-side resampling.
 
 ### Post-processing
 
