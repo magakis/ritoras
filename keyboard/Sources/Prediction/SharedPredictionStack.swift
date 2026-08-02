@@ -145,6 +145,7 @@ final class SharedPredictionStack: @unchecked Sendable {
                 from: url,
                 into: symSpell,
                 trie: trie,
+                pruneBelow: SharedConfig.Defaults.symspellMinWordFreq,
                 buildSessionId: "b\(generation)"
             )
             let postLoadFootprint = MemoryMonitor.currentFootprint()

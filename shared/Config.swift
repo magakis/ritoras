@@ -118,6 +118,14 @@ struct SharedConfig {
         static let symspellMaxEditDistance = 2
         /// Prefix length for SymSpell delete generation.
         static let symspellPrefixLength = 7
+        /// Minimum frequency for a dictionary word to be loaded into SymSpell/Trie.
+        /// Words below this count are skipped to cut the index + trie footprint under
+        /// the 48 MB Jetsam cap. Tuned via the scripts/prediction-sim precision/recall
+        /// harness: at 1500, recall loses 1.2pp (12.7% → 11.5%) vs the unpruned
+        /// baseline while pruning 53.7% of the 49,999-word dictionary (~26,800 words).
+        /// Increase for more aggressive pruning (less memory, more recall loss);
+        /// decrease for more coverage.
+        static let symspellMinWordFreq: Int64 = 1500
         /// Internal limit per provider before merging/deduping.
         static let providerResultLimit = 8
 

@@ -31,6 +31,7 @@ function parseArgs() {
     fusedThreshold: 0.65,
     unfusedThreshold: 0.70,
     floor: -8.0,
+    pruneBelow: 0,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -47,6 +48,9 @@ function parseArgs() {
       case '--floor':
         const val = args[++i];
         opts.floor = val === 'off' ? -Infinity : parseFloat(val);
+        break;
+      case '--pruneBelow':
+        opts.pruneBelow = parseInt(args[++i], 10);
         break;
       default:
         console.error(`Unknown option: ${args[i]}`);
@@ -115,6 +119,7 @@ function main() {
   console.log(`  fusedThreshold:      ${opts.fusedThreshold}`);
   console.log(`  unfusedThreshold:    ${opts.unfusedThreshold}`);
   console.log(`  absoluteLogProbFloor: ${floorLabel}`);
+  console.log(`  pruneBelow:          ${opts.pruneBelow}`);
   console.log('');
 
   // Load corpora
@@ -129,11 +134,12 @@ function main() {
   // Build SymSpell index
   console.log('Building SymSpell index...');
   const symspell = new SymSpell(2, 7);
-  const dictEntries = loadDictionary();
+  const allEntries = loadDictionary();
+  const dictEntries = allEntries.filter(e => e.count >= opts.pruneBelow);
   for (const { word, count } of dictEntries) {
     symspell.createDictionaryEntry(word, count);
   }
-  console.log(`  Done. ${dictEntries.length} entries.\n`);
+  console.log(`  Done. ${dictEntries.length} entries (pruned ${allEntries.length - dictEntries.length}).\n`);
 
   // Build in-dictionary lookup for the Apple-like guard.
   _symspellDict = new Map(dictEntries.map(e => [e.word, { count: e.count }]));
