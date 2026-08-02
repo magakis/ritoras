@@ -80,10 +80,7 @@ final class TrigramProvider: SuggestionProvider {
         mutateState { state, _, _ in
             state = .loading
         }
-        // Temporarily at .warn (synchronous, survives a Jetsam kill) so the
-        // on-device deploy can confirm the eager load path; normalized back to
-        // .info after device verification (see docs/LOGGING.md).
-        FileLogger.shared.warn(.prediction, "trigram load started")
+        FileLogger.shared.info(.prediction, "trigram load started")
         performLoad(completion: completion)
     }
 
@@ -97,7 +94,7 @@ final class TrigramProvider: SuggestionProvider {
         mutateState { state, _, _ in
             state = .loading
         }
-        FileLogger.shared.warn(.prediction, "trigram load started")
+        FileLogger.shared.info(.prediction, "trigram load started")
         performLoad()
     }
 
@@ -123,10 +120,7 @@ final class TrigramProvider: SuggestionProvider {
             // (state stays .cold).
             let currentFootprint = MemoryMonitor.currentFootprint()
             if currentFootprint > SharedConfig.Defaults.maxPhysFootprintDuringLoad {
-                // Key diagnostic — .warn (synchronous) so a Jetsam kill cannot
-                // drop it before it reaches DebugLogView; normalized to .info
-                // after on-device verification.
-                FileLogger.shared.warn(.prediction,
+                FileLogger.shared.info(.prediction,
                     "trigram load deferred: phys_footprint \(currentFootprint) > \(SharedConfig.Defaults.maxPhysFootprintDuringLoad)")
                 DispatchQueue.main.async { completion?(false) }
                 return
@@ -142,7 +136,7 @@ final class TrigramProvider: SuggestionProvider {
                     model = nil
                     state = .failed
                 }
-                FileLogger.shared.warn(.prediction, "trigram load failed: model file not found")
+                FileLogger.shared.info(.prediction, "trigram load failed: model file not found")
                 DispatchQueue.main.async { completion?(false) }
                 return
             }
@@ -168,9 +162,7 @@ final class TrigramProvider: SuggestionProvider {
                 let vocabSize = self.readState { _, model, _ in
                     model.map { kenlm_vocab_size($0) } ?? 0
                 }
-                // .warn (synchronous) so the on-device deploy confirms the eager
-                // load reached .ready; normalized back to .info after verification.
-                FileLogger.shared.warn(.prediction, "trigram ready (vocab=\(vocabSize))")
+                FileLogger.shared.info(.prediction, "trigram ready (vocab=\(vocabSize))")
             } else {
                 let reason: String
                 if model == nil { reason = "kenlm_load returned nil" }
@@ -293,12 +285,6 @@ final class TrigramProvider: SuggestionProvider {
 
     var isReady: Bool {
         readState { state, _, _ in state == .ready }
-    }
-
-    /// Current load state (read-only). Exposed so SharedPredictionStack can
-    /// report the eager-load outcome (ready/deferred/failed) in its build log.
-    var loadState: LoadState {
-        readState { state, _, _ in state }
     }
 
     func suggest(for context: SuggestionContext, limit: Int) -> [Suggestion] {
