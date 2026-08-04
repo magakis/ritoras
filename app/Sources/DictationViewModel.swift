@@ -991,6 +991,14 @@ final class DictationViewModel: ObservableObject {
         if let id = activeID {
             RecordingStore.shared.deleteStreamWav(for: id)
         }
+        if case .done = phase {
+            FileLogger.shared.info(.transcription, "cancel: preserving .done from racing task, skipping cancelled publish")
+        } else if case .error = phase {
+            FileLogger.shared.info(.transcription, "cancel: preserving .error from racing task, skipping cancelled publish")
+        } else {
+            FileLogger.shared.info(.transcription, "cancel: publishing cancelled snapshot to keyboard")
+            phase = .cancelled
+        }
         activeID = nil
     }
 }
