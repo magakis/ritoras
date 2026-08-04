@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// The prediction engine that merges suggestions from multiple SuggestionProviders.
 ///
@@ -16,11 +17,25 @@ final class PredictionEngine {
     // MARK: - Providers
 
     private var providers: [SuggestionProvider] = []
+    private var providersLock = os_unfair_lock()
+
+    /// Snapshot of providers, copied under the lock. Safe to iterate off-lock.
+    /// `addProvider` runs once during build; steady-state access is read/read,
+    /// but the lock removes the latent race and any future mutation path.
+    private func snapshotProviders() -> [SuggestionProvider] {
+        os_unfair_lock_lock(&providersLock)
+        let copy = providers
+        os_unfair_lock_unlock(&providersLock)
+        return copy
+    }
+
     private let poolCache = MergedPoolLRU()
 
     // MARK: - Registration
 
     func addProvider(_ provider: SuggestionProvider) {
+        os_unfair_lock_lock(&providersLock)
+        defer { os_unfair_lock_unlock(&providersLock) }
         providers.append(provider)
     }
 
@@ -58,7 +73,7 @@ final class PredictionEngine {
         // ──────────────────────────────────────────────
         if currentWord.isEmpty {
             var pool: [Suggestion] = []
-            for provider in providers {
+            for provider in snapshotProviders() {
                 let results = provider.suggest(for: context, limit: limit)
                 pool.append(contentsOf: results)
             }
@@ -179,7 +194,7 @@ final class PredictionEngine {
         // after min-max normalization inflated its relative score. Only applies when
         // fusion is active (trigram ready); otherwise there's no KenLM score to check.
         if fusionIsActive(previousWord: previousWord),
-           let trigramProvider = providers.compactMap({ $0 as? TrigramProvider }).first(where: { $0.isReady }) {
+           let trigramProvider = snapshotProviders().compactMap({ $0 as? TrigramProvider }).first(where: { $0.isReady }) {
             let logProb = trigramProvider.rawLogProb(
                 for: winner.text,
                 previousWord: previousWord,
@@ -197,7 +212,7 @@ final class PredictionEngine {
         // token is a valid word with its own meaning.
         if winner.source == .ambiguousContraction {
             guard fusionIsActive(previousWord: previousWord),
-                  let trigramProvider = providers.compactMap({ $0 as? TrigramProvider }).first(where: { $0.isReady }) else {
+                  let trigramProvider = snapshotProviders().compactMap({ $0 as? TrigramProvider }).first(where: { $0.isReady }) else {
                 return nil
             }
             let contractionLogProb = trigramProvider.rawLogProb(
@@ -261,7 +276,7 @@ final class PredictionEngine {
         // Score every mid-word candidate with direct KenLM log-probability and
         // blend with the SymSpell/Apple score. Replaces the old binary follower-set
         // boost with true contextual probability for each candidate.
-        if let trigramProvider = providers.compactMap({ $0 as? TrigramProvider }).first(where: { $0.isReady }) {
+        if let trigramProvider = snapshotProviders().compactMap({ $0 as? TrigramProvider }).first(where: { $0.isReady }) {
             // Phase 1: compute raw log probs for all candidates
             var scored: [(suggestion: Suggestion, logProb: Double)] = []
             for s in allSuggestions {
@@ -315,7 +330,7 @@ final class PredictionEngine {
     /// to pick the two-tier autocorrect threshold (0.65 fused / 0.70 unfused).
     func fusionIsActive(previousWord: String?) -> Bool {
         guard let prev = previousWord, !prev.isEmpty else { return false }
-        return providers.compactMap { $0 as? TrigramProvider }.first(where: { $0.isReady }) != nil
+        return snapshotProviders().compactMap { $0 as? TrigramProvider }.first(where: { $0.isReady }) != nil
     }
 
     // MARK: - Shared Pool Builder
@@ -348,7 +363,7 @@ final class PredictionEngine {
             isMidWord: !currentWord.isEmpty
         )
         var allSuggestions: [Suggestion] = []
-        for provider in providers {
+        for provider in snapshotProviders() {
             let results = provider.suggest(for: context, limit: SharedConfig.Defaults.providerResultLimit)
             allSuggestions.append(contentsOf: results)
         }
@@ -358,6 +373,6 @@ final class PredictionEngine {
 
     deinit {
         FileLogger.shared.info(.prediction, "PredictionEngine deinit",
-            payload: ["providerCount": providers.count])
+            payload: ["providerCount": snapshotProviders().count])
     }
 }

@@ -169,7 +169,7 @@ final class TrigramProvider: SuggestionProvider {
                 let vocabSize = self.readState { _, model, _ in
                     model.map { kenlm_vocab_size($0) } ?? 0
                 }
-                FileLogger.shared.warn(.prediction, "trigram ready (vocab=\(vocabSize))")
+                FileLogger.shared.info(.prediction, "trigram ready (vocab=\(vocabSize))")
             } else {
                 let reason: String
                 if model == nil { reason = "kenlm_load returned nil" }

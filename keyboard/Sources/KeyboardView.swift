@@ -1229,7 +1229,7 @@ class KeyboardView: UIView {
         hitTestPressedKey = nil
 
         let after = MemoryMonitor.currentFootprint()
-        FileLogger.shared.warn(.keyboard, "view shell shed",
+        FileLogger.shared.info(.keyboard, "view shell shed",
             payload: ["before": before, "after": after,
                       "freed": before > after ? before - after : 0])
     }

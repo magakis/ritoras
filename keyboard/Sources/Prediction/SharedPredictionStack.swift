@@ -116,8 +116,8 @@ final class SharedPredictionStack: @unchecked Sendable {
 
     /// Shared build implementation, runs on `buildQueue`.
     /// Mirrors the former per-instance `KeyboardViewController.buildPredictionEngine`
-    /// minus per-instance state. Logs at `.warn` so the entries survive a
-    /// Jetsam kill and reach DebugLogView via a dictation cycle.
+    /// minus per-instance state. The degraded-engine fallback logs at `.warn` so
+    /// the entry survives a Jetsam kill and reaches DebugLogView via a dictation cycle.
     private func performBuild(generation: Int, completion: @escaping (Bool) -> Void) {
         let maxED = SharedConfig.Defaults.symspellMaxEditDistance
         let prefixLen = SharedConfig.Defaults.symspellPrefixLength
@@ -129,7 +129,7 @@ final class SharedPredictionStack: @unchecked Sendable {
         let trie = Trie()
 
         let baselineFootprint = MemoryMonitor.currentFootprint()
-        FileLogger.shared.warn(.prediction, "shared prediction build start",
+        FileLogger.shared.debug(.prediction, "shared prediction build start",
             payload: [
                 "buildId": generation,
                 "baselineFootprint": baselineFootprint,
@@ -149,7 +149,7 @@ final class SharedPredictionStack: @unchecked Sendable {
                 buildSessionId: "b\(generation)"
             )
             let postLoadFootprint = MemoryMonitor.currentFootprint()
-            FileLogger.shared.warn(.prediction, "shared prediction build result footprint",
+            FileLogger.shared.info(.prediction, "shared prediction build result footprint",
                 payload: [
                     "buildId": generation,
                     "wordsLoaded": loaded,
@@ -201,7 +201,7 @@ final class SharedPredictionStack: @unchecked Sendable {
             // TrigramProvider registered in .cold state — lazy-loads on first
             // suggest() call. KenLM model (~8-10 MB) is NOT loaded here, keeping
             // steady-state ~38-43 MB (well under the 48 MB Jetsam cap).
-            FileLogger.shared.warn(.prediction, "shared prediction ready (trigram deferred)",
+            FileLogger.shared.info(.prediction, "shared prediction ready (trigram deferred)",
                 payload: ["buildId": generation])
             completion(true)
         }
@@ -222,16 +222,5 @@ final class SharedPredictionStack: @unchecked Sendable {
         trigram?.unload()
         let after = MemoryMonitor.currentFootprint()
         return before > after ? before - after : 0
-    }
-
-    /// Last-resort full shed: drops the engine + trigram and returns to `.cold`
-    /// so the next loadIfNeeded rebuilds from scratch.
-    // Phase 2: last-resort only, wired only if device logs demand it.
-    func emergencyShed() {
-        mutateState { state, storedEngine, storedTrigram in
-            storedEngine = nil
-            storedTrigram = nil
-            state = .cold
-        }
     }
 }
