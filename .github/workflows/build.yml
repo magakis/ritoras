@@ -33,7 +33,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            CURRENT_PROJECT_VERSION=$(git rev-parse --short HEAD) \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             SYMROOT=build
 
       - name: Verify keyboard Info.plist
@@ -70,6 +70,14 @@ jobs:
             echo "✅ CFBundleDisplayName present"
           else
             echo "❌ CFBundleDisplayName MISSING"
+            FAIL=1
+          fi
+          # Check CFBundleVersion is numeric
+          BV=$(plutil -extract CFBundleVersion raw -o - "$PLIST" 2>/dev/null)
+          if [ -n "$BV" ] && echo "$BV" | grep -qE '^[0-9]+$'; then
+            echo "✅ CFBundleVersion is numeric ($BV)"
+          else
+            echo "❌ CFBundleVersion not numeric: $BV"
             FAIL=1
           fi
           if [ $FAIL -eq 1 ]; then
