@@ -13,7 +13,9 @@ Builds before the first numbered section below had no changelog.
 
 ## Unreleased
 
-_Nothing yet._
+### Changed
+
+- The on-screen keyboard now has matching spacing above the top row of keys and below the spacebar, giving the keys a bit more breathing room.
 
 <!-- To cut a build: rename "## Unreleased" to "## Build <run_number> — <YYYY-MM-DD>",
      then open a fresh "## Unreleased" above it. <run_number> = latest CI run
