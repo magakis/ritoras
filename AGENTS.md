@@ -177,6 +177,18 @@ Body required for non-trivial changes, wrapped at 75 columns.
 
 The repo uses the OpenCode committer protocol: dispatch the committer agent for a numbered commit plan, present it to the user, then execute the chosen commits. After execution, verify with `git log --oneline -5` — the committer sometimes returns empty output on success. After commits land, follow [Git workflow](#git-workflow): fast-forward merge into `main` and stop. Never push.
 
+## Changelog
+
+`CHANGELOG.md` at the repo root holds user-facing release notes keyed to CI build numbers.
+
+- **Add a bullet for every user-visible change.** Add at least one bullet under `## Unreleased` in `CHANGELOG.md`, in the appropriate category (`Added`, `Changed`, `Fixed`), in the same commit batch that fast-forward-merges to `main`.
+- **Skip no-ops.** Pure refactors, `ci:`-only, non-user-facing `scripts:`-only, and test-only changes get no entry.
+- **Write for a non-contributor user.** Do not paste commit subjects verbatim — rephrase the user-visible impact in plain language; one bullet may summarize several related commits.
+- **Never perform the build-number cut.** Renaming `## Unreleased` → `## Build <N> — <date>` is the user's manual pre-push step — agents never push, so agents never cut. Agents only add bullets under `## Unreleased`.
+- **Use the `docs:` commit prefix** for changelog edits.
+
+See CONTRIBUTING.md for the full authoring workflow and the build-number-cut ritual.
+
 ## CI / deploy
 
 **Single workflow:** `.github/workflows/build.yml`. Triggers: push to `main`, pull requests, `workflow_dispatch`. Runner: `macos-15` (Xcode 16.4).

@@ -185,7 +185,7 @@ scope of the change):
 | `app` | `app/` — the SwiftUI container app (settings, onboarding) |
 | `shared` | `shared/` — build-time config, shared types |
 | `scripts` | `scripts/` — deployment and utility scripts |
-| `docs` | `docs/` — any documentation file |
+| `docs` | `docs/` — any documentation file (including `CHANGELOG.md`) |
 | `build` | `project.yml`, `ExportOptions.plist` — the build system and XcodeGen spec |
 | `ci` | `.github/workflows/` — CI workflow changes |
 
@@ -417,3 +417,36 @@ the guidance above.
    messages in keyboard-extension code paths must be kept lean to respect the
    48 MB Jetsam cap. When in doubt: `.info` for success paths, `.warn` for
    adaptations/recoverable anomalies, `.error` for failures with user impact.
+
+### (c) Update the changelog
+
+9. **Rule:** Every branch that lands user-visible changes must add at least
+   one bullet under `## Unreleased` in `CHANGELOG.md` (repo root), in the
+   appropriate category, before merging to `main` — in the same commit batch
+   as the merge.
+
+10. **Categories:** Use only `Added` (new features), `Changed` (changes to
+    existing behavior), and `Fixed` (bug fixes). If a genuinely
+    security-sensitive fix ever lands, add a `Security:` callout under
+    `Fixed`, or introduce a `Security` category at that point.
+
+11. **What to skip:** Pure refactors, `ci:`-only changes, non-user-facing
+    `scripts:`-only changes, and test-only changes are not logged — they are
+    no-ops for users.
+
+12. **Voice:** Write for a non-contributor user, not for another developer.
+    Do not paste commit subjects verbatim — commits are technical; the
+    changelog is user-friendly. Rephrase the user-visible impact in plain
+    language. One changelog bullet may summarize several related commits.
+
+13. **Build-number cut ritual (before pushing):** When you are about to push
+    a batch of commits to CI, rename the current `## Unreleased` section to
+    `## Build <N> — <YYYY-MM-DD>`, where `<N>` is the next CI run number
+    (latest run number + 1 — visible on the install page, or query
+    `gh run list --workflow build.yml -L 1`), then open a fresh
+    `## Unreleased` section above it. This rename is the final commit in the
+    pushed batch. If `<N>` turns out wrong after CI completes (e.g. another
+    push sneaked in), correct it on the next push — it is a one-line doc fix.
+
+14. **Commit prefix:** Changelog edits use the `docs:` subsystem prefix (see
+    the subsystem table above).
