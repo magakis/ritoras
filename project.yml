@@ -10,6 +10,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     DEVELOPMENT_TEAM: ""
     GENERATE_INFOPLIST_FILE: NO
+    CURRENT_PROJECT_VERSION: 1
 
 targets:
   Ritoras:
@@ -27,7 +28,6 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.ritoras.app
         INFOPLIST_FILE: app/Info.plist
         PRODUCT_NAME: Ritoras
-        CURRENT_PROJECT_VERSION: 1
         GENERATE_INFOPLIST_FILE: NO
         CODE_SIGN_ENTITLEMENTS: app/Ritoras.entitlements
         ENABLE_TESTABILITY: YES
