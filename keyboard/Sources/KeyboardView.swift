@@ -702,7 +702,7 @@ class KeyboardView: UIView {
             suggestionBar.heightAnchor.constraint(equalToConstant: 36),
 
             // Letter region container — middle (rows 1–3)
-            letterRegionContainer.topAnchor.constraint(equalTo: suggestionBar.bottomAnchor, constant: 3),
+            letterRegionContainer.topAnchor.constraint(equalTo: suggestionBar.bottomAnchor, constant: 6),
             letterRegionContainer.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             letterRegionContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             letterRegionContainer.bottomAnchor.constraint(equalTo: bottomActionRow.topAnchor, constant: -6),
@@ -716,7 +716,7 @@ class KeyboardView: UIView {
             // Bottom action row (Row 4) — always visible, pinned to the bottom
             bottomActionRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             bottomActionRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            bottomActionRow.bottomAnchor.constraint(equalTo: bottomAnchor),
+            bottomActionRow.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
             bottomActionRow.heightAnchor.constraint(equalToConstant: 48),
         ])
     }

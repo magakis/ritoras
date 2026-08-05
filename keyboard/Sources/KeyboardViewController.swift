@@ -467,7 +467,7 @@ class KeyboardViewController: UIInputViewController {
 
     private func installOrUpdateHeightConstraint() {
         if heightConstraint == nil {
-            heightConstraint = view.heightAnchor.constraint(equalToConstant: 256)
+            heightConstraint = view.heightAnchor.constraint(equalToConstant: 265)
             heightConstraint?.priority = .defaultHigh
             heightConstraint?.isActive = true
         }
@@ -475,7 +475,7 @@ class KeyboardViewController: UIInputViewController {
 
     private func updateKeyboardHeight(for mode: UIMode) {
         installOrUpdateHeightConstraint()
-        let base: CGFloat = 256
+        let base: CGFloat = 265
         heightConstraint?.constant = (mode == .emojiSearch) ? base + EmojiSearchOverlay.overlayHeight : base
         view.setNeedsLayout()
         view.layoutIfNeeded()
