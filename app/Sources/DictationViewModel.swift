@@ -114,7 +114,11 @@ final class DictationViewModel: ObservableObject {
             return
         }
 
-        let server = LocalhostServer(port: SharedConfig.Defaults.localhostServerPort)
+        let server = LocalhostServer(
+            port: SharedConfig.Defaults.localhostServerPort,
+            onStop:   { [weak self] in await self?.stop() },
+            onCancel: { [weak self] in await self?.cancel() }
+        )
 
         do {
             try server.start()

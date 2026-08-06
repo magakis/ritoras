@@ -9,6 +9,8 @@ final class LocalhostServer {
     private let port: UInt16
     private var listener: NWListener?
     private let queue = DispatchQueue(label: "com.ritoras.localhostserver", qos: .utility)
+    private let onStop: (() async -> Void)?
+    private let onCancel: (() async -> Void)?
 
     /// The port the listener is actually bound to. Equals `port` when a fixed
     /// port was given; differs when port 0 was passed (OS-assigned).
@@ -19,8 +21,10 @@ final class LocalhostServer {
 
     private static let maxRequestSize = 65536
 
-    init(port: UInt16) {
+    init(port: UInt16, onStop: (() async -> Void)? = nil, onCancel: (() async -> Void)? = nil) {
         self.port = port
+        self.onStop = onStop
+        self.onCancel = onCancel
     }
 
     // MARK: - Lifecycle
@@ -203,10 +207,15 @@ final class LocalhostServer {
         let rawPath = parts[1]
 
         if method == "POST" {
-            guard rawPath == "/logs" else {
+            if rawPath == "/logs" {
+                return handlePostLogs(bodyData: data[headerEndOffset...])
+            } else if rawPath == "/stop" {
+                return handlePostStop()
+            } else if rawPath == "/cancel" {
+                return handlePostCancel()
+            } else {
                 return Self.makeJSONResponse(status: 404, body: ["error": "not found", "path": rawPath])
             }
-            return handlePostLogs(bodyData: data[headerEndOffset...])
         }
 
         guard method == "GET" else {
@@ -268,6 +277,30 @@ final class LocalhostServer {
         }
     }
 
+    // MARK: - POST /stop and POST /cancel
+
+    /// Handles `POST /stop`: asks the container app to stop the active
+    /// dictation session. Fire-and-forget — returns 202 immediately; the
+    /// keyboard learns the outcome via the app-group snapshot pipeline.
+    private func handlePostStop() -> Data {
+        guard let handler = onStop else {
+            return Self.makeJSONResponse(status: 503, body: ["error": "no handler"])
+        }
+        Task { await handler() }
+        return Self.makeJSONResponse(status: 202, body: ["status": "stopRequested"])
+    }
+
+    /// Handles `POST /cancel`: asks the container app to cancel the active
+    /// dictation session. Fire-and-forget — returns 202 immediately; the
+    /// keyboard learns the outcome via the app-group snapshot pipeline.
+    private func handlePostCancel() -> Data {
+        guard let handler = onCancel else {
+            return Self.makeJSONResponse(status: 503, body: ["error": "no handler"])
+        }
+        Task { await handler() }
+        return Self.makeJSONResponse(status: 202, body: ["status": "cancelRequested"])
+    }
+
     // MARK: - Response Helpers
 
     private static func makeJSONResponse<T: Encodable>(status: Int, body: T) -> Data {
@@ -291,9 +324,11 @@ final class LocalhostServer {
         let statusLine: String
         switch status {
         case 200: statusLine = "HTTP/1.1 200 OK"
+        case 202: statusLine = "HTTP/1.1 202 Accepted"
         case 400: statusLine = "HTTP/1.1 400 Bad Request"
         case 404: statusLine = "HTTP/1.1 404 Not Found"
         case 405: statusLine = "HTTP/1.1 405 Method Not Allowed"
+        case 503: statusLine = "HTTP/1.1 503 Service Unavailable"
         default:  statusLine = "HTTP/1.1 \(status)"
         }
 
