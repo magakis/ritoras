@@ -620,12 +620,13 @@ class KeyboardViewController: UIInputViewController {
     /// Updates `lastSeenSnapshotRevision` on match so the same snapshot is not
     /// returned twice.
     private func readSharedSnapshot(for id: UUID) -> DictationPayload? {
-        // Fast path: terminal-result file in the app-group container.
+        // Fast path: snapshot file in the app-group container.
         // Data(contentsOf:) reads committed filesystem state with no caching layer,
-        // bypassing the ~1–2s cfprefsd propagation lag of UserDefaults. Only
-        // terminal payloads are written to the file, so a hit here is always
-        // terminal. On any miss/stale/id-mismatch, fall through to UserDefaults.
-        if let filePayload = SharedConfig.terminalResultFile(),
+        // bypassing the ~1–2s cfprefsd propagation lag of UserDefaults. Any status
+        // (recording, transcribing, completed, error, cancelled) may be present;
+        // refreshFromSharedState dispatches by status. On any miss/stale/id-mismatch,
+        // fall through to UserDefaults.
+        if let filePayload = SharedConfig.snapshotFile(),
            filePayload.id == id {
             let fileRev = filePayload.revision ?? 0
             if fileRev > lastSeenSnapshotRevision {
@@ -739,7 +740,7 @@ class KeyboardViewController: UIInputViewController {
     private func handleTerminalResult(id: UUID, text: String?, errorMessage: String?) {
         guard id != lastProcessedPayloadId else { return }
         lastProcessedPayloadId = id
-        SharedConfig.clearTerminalResultFile()   // hygiene — keep file from lingering for next dictation
+        SharedConfig.clearSnapshotFile()   // hygiene — keep file from lingering for next dictation
         stopDictationTransports()
         if let text = text, !text.isEmpty {
             insertDictationResult(text: text)

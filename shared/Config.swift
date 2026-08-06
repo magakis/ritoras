@@ -555,52 +555,56 @@ struct SharedConfig {
         }
     }
 
-    // MARK: - Terminal-result file channel (cfprefsd-bypass fast path)
+    // MARK: - Snapshot file channel (cfprefsd-bypass fast path)
     //
     // Cross-process app-group UserDefaults reads go through the `cfprefsd` daemon,
     // which delivers fresh data ~1–2s after a write. The suspended keyboard
-    // discovers the terminal snapshot via its 0.5s poll, losing ~2s to cfprefsd lag
-    // before auto-paste. These helpers write/read the SAME `DictationPayload` to a
-    // plain file in the app-group container; `Data(contentsOf:)` reads committed
-    // filesystem state with NO caching layer, so the keyboard's fast path discovers
-    // the terminal result sub-second. Secondary transport sharing the single
-    // `handleTerminalResult` id-dedup — NOT a parallel competing guard.
+    // discovers each snapshot state (recording, transcribing, terminal) via its
+    // 0.5s poll, losing ~2s to cfprefsd lag. These helpers write/read the SAME
+    // `DictationPayload` to a plain file in the app-group container;
+    // `Data(contentsOf:)` reads committed filesystem state with NO caching layer,
+    // so the keyboard's fast path discovers every state sub-second. Secondary
+    // transport sharing the single `handleTerminalResult` id-dedup — NOT a
+    // parallel competing guard.
     //
     // Do NOT add `synchronize()` anywhere here (see warning on dictationSnapshot()
     // above — commit f4c6832 regression).
 
-    /// Writes the terminal result payload (.completed / .error) to a single
-    /// overwrite file in the app-group container. Called by the container app's
-    /// publishSnapshot BEFORE the UserDefaults write and BEFORE the Darwin post.
-    /// No-op when the container is unavailable (SideStore).
-    static func setTerminalResultFile(_ payload: DictationPayload) {
-        guard let url = terminalResultFileURL() else { return }
+    /// Writes the dictation snapshot payload (any status: recording, transcribing,
+    /// completed, error, cancelled) to a single overwrite file in the app-group
+    /// container. Called by the container app's publishSnapshot for EVERY snapshot
+    /// BEFORE the UserDefaults write and BEFORE the Darwin post. No-op when the
+    /// container is unavailable (SideStore).
+    static func setSnapshotFile(_ payload: DictationPayload) {
+        guard let url = snapshotFileURL() else { return }
         if let data = try? JSONEncoder().encode(payload) {
             try? data.write(to: url, options: .atomic)
         }
     }
 
-    /// Reads the terminal result payload from the file, or nil if absent,
+    /// Reads the snapshot payload from the file, or nil if absent,
     /// undecodable, or the container is unavailable (SideStore). The keyboard reads
     /// this BEFORE the UserDefaults snapshot as a sub-second fast path.
-    static func terminalResultFile() -> DictationPayload? {
-        guard let url = terminalResultFileURL(),
+    static func snapshotFile() -> DictationPayload? {
+        guard let url = snapshotFileURL(),
               FileManager.default.fileExists(atPath: url.path) else { return nil }
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(DictationPayload.self, from: data)
     }
 
-    /// Removes the terminal result file. Called by the keyboard after
-    /// handleTerminalResult records lastProcessedPayloadId. No-op if absent.
-    static func clearTerminalResultFile() {
-        guard let url = terminalResultFileURL() else { return }
+    /// Removes the snapshot file. Called by the keyboard after
+    /// handleTerminalResult records lastProcessedPayloadId — only on terminal
+    /// results; intermediate-state files persist and are overwritten by the next
+    /// publish. No-op if absent.
+    static func clearSnapshotFile() {
+        guard let url = snapshotFileURL() else { return }
         try? FileManager.default.removeItem(at: url)
     }
 
-    /// Resolves the single-overwrite terminal-result file URL inside the app-group
+    /// Resolves the single-overwrite snapshot file URL inside the app-group
     /// container, creating the directory if needed. Returns nil (degrades to the
     /// UserDefaults channel) when the container is unavailable under SideStore.
-    private static func terminalResultFileURL() -> URL? {
+    private static func snapshotFileURL() -> URL? {
         guard let container = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: Defaults.appGroupId
         ) else { return nil }
