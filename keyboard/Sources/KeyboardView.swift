@@ -7,7 +7,6 @@ enum KeyboardState: Equatable {
     case openingApp
     case recording
     case waiting
-    case waitingConfirm
     case inserting
     case error(String)
 }
@@ -57,6 +56,7 @@ protocol KeyboardViewDelegate: AnyObject {
     func keyboardViewMicState(_ view: KeyboardView) -> KeyboardState
     func keyboardViewBackspaceDidBegin(_ view: KeyboardView)
     func keyboardViewBackspaceDidEnd(_ view: KeyboardView)
+    func keyboardViewDidRequestCancelDictation(_ view: KeyboardView)
     func keyboardContextToken(_ view: KeyboardView) -> UInt64
 }
 
@@ -64,6 +64,7 @@ extension KeyboardViewDelegate {
     func keyboardViewBackspaceDidBegin(_ view: KeyboardView) {}
     func keyboardViewBackspaceDidEnd(_ view: KeyboardView) {}
     func keyboardView(_ view: KeyboardView, didLongPressSuggestion text: String) {}
+    func keyboardViewDidRequestCancelDictation(_ view: KeyboardView) {}
     func keyboardContextToken(_ view: KeyboardView) -> UInt64 { return 0 }
 }
 
@@ -79,6 +80,10 @@ private class KeyButton: UIButton {
     /// Set true on touch-down so the trailing touchUpInside can be suppressed
     /// (prevents a duplicate backspace when Phase 4 handles it on touch-down).
     var backspaceSuppressTap = false
+
+    /// Set true when the 3s cancel long-press fires on the mic button, so the
+    /// trailing touchUpInside can be suppressed (prevents a cancel + stop).
+    var micLongPressDidFire = false
 
     /// Called whenever isHighlighted transitions. KeyboardView uses this to show/hide
     /// the character preview popup without needing touch-event wiring.
@@ -580,6 +585,10 @@ class KeyboardView: UIView {
     private var currentLayoutMode: KeyboardLayoutMode = .letters
     private var hasShedHeavyState = false
 
+    /// The 3s cancel-progress ring on the mic button. Only populated while the
+    /// finger is held down; removed on every touch-up and on the long-press fire.
+    private var micProgressRing: CAShapeLayer?
+
     /// Height constraint for emojiSearchOverlay — 0 when hidden, overlayHeight when active.
     private var emojiSearchOverlayHeightConstraint: NSLayoutConstraint?
 
@@ -746,6 +755,15 @@ class KeyboardView: UIView {
                 switch def.action {
                 case .mic:
                     micKeyButton = button
+                    // Single-tap → stop (fires through keyTapped → handleMicButtonTap);
+                    // 3s long-press → cancel. Touch-down/up drive the progress ring.
+                    button.addTarget(self, action: #selector(micTouchDown(_:)), for: .touchDown)
+                    button.addTarget(self, action: #selector(micTouchUp(_:)),
+                                     for: [.touchUpInside, .touchUpOutside, .touchCancel, .touchDragExit])
+                    let lp = UILongPressGestureRecognizer(target: self, action: #selector(micLongPressed(_:)))
+                    lp.minimumPressDuration = 3.0
+                    lp.allowableMovement = 40   // default 10 is too tight for a 3s hold — finger drift would silently fail
+                    button.addGestureRecognizer(lp)
                 case .emoji:
                     emojiKeyButton = button
                     if !emojiPanelView.isHidden {
@@ -876,6 +894,10 @@ class KeyboardView: UIView {
             sender.backspaceSuppressTap = false
             return
         }
+        if sender.micLongPressDidFire {
+            sender.micLongPressDidFire = false
+            return
+        }
         switch sender.keyDefinition.action {
         case .insertText, .space, .return:
             DispatchQueue.main.async { HapticsManager.shared.tapImpact() }
@@ -900,6 +922,72 @@ class KeyboardView: UIView {
         button.shiftLongPressDidFire = true
         HapticsManager.shared.tapSelection()
         delegate?.keyboardView(self, didPerform: .shiftLock)
+    }
+
+    /// Touch-down on the mic button. If dictation is active, starts the 3s
+    /// progress ring (a plain start-dictation tap in .idle shows no ring).
+    @objc private func micTouchDown(_ sender: KeyButton) {
+        sender.micLongPressDidFire = false
+        let micState = delegate?.keyboardViewMicState(self)
+        guard micState == .recording || micState == .waiting else { return }
+        startMicHoldProgress(on: sender)
+    }
+
+    /// Touch-up (including outside/cancelled) clears the progress ring. Fires
+    /// before keyTapped, so a quick tap removes the ring and the single-tap
+    /// stop path runs normally.
+    @objc private func micTouchUp(_ sender: KeyButton) {
+        cancelMicHoldProgress(on: sender)
+    }
+
+    /// 3s long-press on the mic button cancels dictation.
+    @objc private func micLongPressed(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began, let button = gesture.view as? KeyButton else { return }
+        let micState = delegate?.keyboardViewMicState(self)
+        cancelMicHoldProgress(on: button)
+        guard micState == .recording || micState == .waiting else { return }
+        button.micLongPressDidFire = true
+        HapticsManager.shared.tapCancelWarning()
+        delegate?.keyboardViewDidRequestCancelDictation(self)
+    }
+
+    // MARK: - Mic Hold Progress Ring
+
+    /// Starts a 3s circular progress ring on the mic button. White stroke is
+    /// high-contrast on BOTH the red recording background (.systemRed) and the
+    /// light/dark gray waiting background.
+    private func startMicHoldProgress(on button: KeyButton) {
+        guard button.bounds.width > 0, button.bounds.height > 0 else { return }
+        cancelMicHoldProgress(on: button)
+        let ring = CAShapeLayer()
+        let radius = min(button.bounds.width, button.bounds.height) / 2 - 4
+        ring.path = UIBezierPath(
+            arcCenter: CGPoint(x: button.bounds.midX, y: button.bounds.midY),
+            radius: radius,
+            startAngle: -CGFloat.pi / 2,
+            endAngle: 3 * CGFloat.pi / 2,
+            clockwise: true
+        ).cgPath
+        ring.lineWidth = 3
+        ring.fillColor = UIColor.clear.cgColor
+        ring.strokeColor = UIColor.white.withAlphaComponent(0.95).cgColor
+        ring.strokeEnd = 0
+        button.layer.addSublayer(ring)
+        micProgressRing = ring
+        let animation = CABasicAnimation(keyPath: "strokeEnd")
+        animation.fromValue = 0
+        animation.toValue = 1
+        animation.duration = 3.0
+        animation.fillMode = .forwards
+        animation.isRemovedOnCompletion = false
+        ring.add(animation, forKey: "micHoldProgress")
+        ring.strokeEnd = 1.0
+    }
+
+    /// Removes the progress ring if one is active. Safe to call with no ring.
+    private func cancelMicHoldProgress(on button: KeyButton) {
+        micProgressRing?.removeFromSuperlayer()
+        micProgressRing = nil
     }
 
     /// Touch-down on backspace sets the suppression flag and signals the controller
@@ -1039,14 +1127,6 @@ class KeyboardView: UIView {
                         ? UIColor(white: 0.3, alpha: 1)
                         : UIColor(white: 0.7, alpha: 1)
                 }
-            )
-            micButton.tintColor = .white
-            micButton.isEnabled = true
-
-        case .waitingConfirm:
-            micButton.applyMicStyle(
-                icon: "questionmark.circle.fill",
-                backgroundColor: .systemOrange
             )
             micButton.tintColor = .white
             micButton.isEnabled = true
@@ -1227,6 +1307,7 @@ class KeyboardView: UIView {
         suggestionCache = SuggestionDisplayCache()
         allKeyButtons = []                                // releases KeyButtons (containers already nil'd)
         hitTestPressedKey = nil
+        micProgressRing = nil
 
         let after = MemoryMonitor.currentFootprint()
         FileLogger.shared.info(.keyboard, "view shell shed",

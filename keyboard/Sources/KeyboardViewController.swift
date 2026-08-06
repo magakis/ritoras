@@ -107,7 +107,6 @@ class KeyboardViewController: UIInputViewController {
     private var autocorrectWorkItem: DispatchWorkItem?
     private var pollTimer: Timer?
     private var pollCount = 0
-    private var confirmStopTimer: Timer?
 
     // MARK: - Snapshot Polling & Darwin Notifications
 
@@ -492,19 +491,12 @@ class KeyboardViewController: UIInputViewController {
             }
             openContainerAppForDictation()
         case .recording:
-            // First tap: enter confirmation state, start 3s timer
-            FileLogger.shared.debug(.keyboard, "Mic: .recording -> .waitingConfirm")
-            state = .waitingConfirm
-            scheduleConfirmStopTimeout()
+            FileLogger.shared.info(.keyboard, "Mic: .recording -> POST /stop")
+            requestStop()
 
         case .waiting:
-            // First tap: enter confirmation state, start 3s timer
-            FileLogger.shared.debug(.keyboard, "Mic: .waiting -> .waitingConfirm")
-            state = .waitingConfirm
-            scheduleConfirmStopTimeout()
-        case .waitingConfirm:
-            // Second tap within 3s: cancel dictation
-            cancelDictation()
+            FileLogger.shared.info(.keyboard, "Mic: .waiting -> POST /stop")
+            requestStop()
         case .error:
             state = .idle
             serverPollTimer?.invalidate()
@@ -787,22 +779,6 @@ class KeyboardViewController: UIInputViewController {
         state = .error("Dictation timed out. Try again.")
     }
 
-    /// Starts a 3-second timeout. If the user does not tap again before it fires,
-    /// the keyboard reverts from .waitingConfirm back to .waiting (still polling).
-    private func scheduleConfirmStopTimeout() {
-        confirmStopTimer?.invalidate()
-        FileLogger.shared.debug(.keyboard, "confirmStopTimer scheduled (3s)")
-        confirmStopTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] _ in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                if self.state == .waitingConfirm {
-                    FileLogger.shared.debug(.keyboard, "confirmStopTimeout fired — reverting to .waiting")
-                    self.state = .waiting  // revert to waiting (still polling)
-                }
-            }
-        }
-    }
-
     // MARK: - Pending Dictation (Recovery on Keyboard Reappear)
 
     private func checkForPendingDictation() {
@@ -852,8 +828,6 @@ class KeyboardViewController: UIInputViewController {
         pollTimer?.invalidate()
         serverPollTimer?.invalidate()
         darwinStateChangedToken = nil
-        confirmStopTimer?.invalidate()
-        confirmStopTimer = nil
         serverPollWorkItem?.cancel()
         serverPollWorkItem = nil
         stopSnapshotPolling()
@@ -871,8 +845,6 @@ class KeyboardViewController: UIInputViewController {
         pollTimer = nil
         serverPollTimer?.invalidate()
         serverPollTimer = nil
-        confirmStopTimer?.invalidate()
-        confirmStopTimer = nil
 
         // DispatchWorkItems
         serverPollWorkItem?.cancel()
@@ -912,8 +884,6 @@ class KeyboardViewController: UIInputViewController {
     /// the container app (which may be crashed). The container app cleans up
     /// via its own timeout/error handling.
     private func cancelDictation() {
-        confirmStopTimer?.invalidate()
-        confirmStopTimer = nil
         stopDictationTransports()
         clearDeferredResult()
         FileLogger.shared.debug(.keyboard, "Dictation cancelled by user",
@@ -921,6 +891,52 @@ class KeyboardViewController: UIInputViewController {
         pendingRequestId = nil
         dictationTargetDocId = nil
         state = .idle
+    }
+
+    /// Requests the container app to stop dictation via POST /stop. The
+    /// app-group pipeline delivers the terminal phase; no local state change
+    /// happens here — the dots keep showing until the transcript lands.
+    private func requestStop() {
+        FileLogger.shared.info(.keyboard, "Mic: requesting stop via /stop")
+        Task { [weak self] in
+            let ok = await LocalhostClient.postStop()
+            guard let self = self else { return }
+            guard ok else {
+                // Only fall back if we're still actively dictating — a concurrent
+                // teardown (dismiss/cancel) may have already reset the state.
+                guard self.state == .recording || self.state == .waiting else { return }
+                FileLogger.shared.warn(.keyboard, "POST /stop failed — local fallback cancel")
+                self.requestFallbackCancel()
+                return
+            }
+            // App-group pipeline drives the terminal state; nothing to do here.
+        }
+    }
+
+    /// Requests the container app to cancel dictation via POST /cancel. The
+    /// app-group pipeline delivers `.cancelled` and resets the keyboard to idle.
+    private func requestCancel() {
+        FileLogger.shared.info(.keyboard, "Mic: requesting cancel via /cancel")
+        Task { [weak self] in
+            let ok = await LocalhostClient.postCancel()
+            guard let self = self else { return }
+            guard ok else {
+                // Only fall back if we're still actively dictating — a concurrent
+                // teardown (dismiss/cancel) may have already reset the state.
+                guard self.state == .recording || self.state == .waiting else { return }
+                FileLogger.shared.warn(.keyboard, "POST /cancel failed — local fallback cancel")
+                self.requestFallbackCancel()
+                return
+            }
+            // Pipeline delivers .cancelled → refreshFromSharedState resets to idle.
+        }
+    }
+
+    /// Server unreachable (app not running / crashed). Reset locally;
+    /// the container app, if alive, cleans up via its own timeout.
+    private func requestFallbackCancel() {
+        cancelDictation()
+        state = .error("Couldn't reach Ritoras app. Stopped locally.")
     }
 
     /// Inserts the transcribed text, clears the pending request, and resets the
@@ -1420,6 +1436,11 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     func keyboardViewMicState(_ view: KeyboardView) -> KeyboardState {
         return state
+    }
+
+    func keyboardViewDidRequestCancelDictation(_ view: KeyboardView) {
+        guard state == .recording || state == .waiting else { return }
+        requestCancel()
     }
 
     // MARK: - Backspace Long-Press

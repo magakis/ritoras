@@ -71,4 +71,13 @@ final class HapticsManager {
         notificationCallCount += 1
         #endif
     }
+
+    /// User-initiated dictation cancel (3s long-press). Semantic warning haptic.
+    func tapCancelWarning() {
+        guard isEnabled else { return }
+        notification.notificationOccurred(.warning)
+        #if DEBUG
+        notificationCallCount += 1
+        #endif
+    }
 }
