@@ -86,14 +86,25 @@ async function ghApi(path, options = {}) {
     'User-Agent': 'ritoras-deploy',
   };
   const url = `https://api.github.com${path}`;
-  const response = await fetch(url, { ...options, headers });
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(
-      `GitHub API ${response.status} ${response.statusText}: ${path}\n${body}`,
-    );
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const response = await fetch(url, { ...options, headers, signal: controller.signal });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `GitHub API ${response.status} ${response.statusText}: ${path}\n${body}`,
+      );
+    }
+    return await response.json();
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error(`GitHub API request timed out after 30s: ${path}`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-  return response.json();
 }
 
 function sleep(ms) {
@@ -406,6 +417,7 @@ async function wait(sha) {
   // Stage 1: wait for the workflow run to appear (CI trigger delay)
   let run = null;
   while (Date.now() - start < timeout) {
+    console.log(`waiting for workflow run to appear… (${Math.round((Date.now() - start) / 1000)}s elapsed)`);
     const data = await ghApi(
       `/repos/${REPO}/actions/runs?head_sha=${sha}&per_page=1`,
     );
@@ -423,6 +435,7 @@ async function wait(sha) {
 
   // Stage 2: wait for the run to complete
   while (Date.now() - start < timeout) {
+    console.log(`waiting for build to complete… (${Math.round((Date.now() - start) / 1000)}s elapsed)`);
     const updated = await ghApi(`/repos/${REPO}/actions/runs/${run.id}`);
     if (updated.status === 'completed') {
       if (updated.conclusion === 'success') {
