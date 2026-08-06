@@ -13,6 +13,10 @@ Builds before the first numbered section below had no changelog.
 
 ## Unreleased
 
+### Added
+
+- Stop a dictation by tapping the mic button, or cancel it by holding the mic button for 3 seconds — no need to switch back to the app.
+
 ### Changed
 
 - The on-screen keyboard now has matching spacing above the top row of keys and below the spacebar, giving the keys a bit more breathing room.
