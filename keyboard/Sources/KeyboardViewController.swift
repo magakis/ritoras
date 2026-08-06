@@ -573,7 +573,6 @@ class KeyboardViewController: UIInputViewController {
                         if success {
                             FileLogger.shared.info(.keyboard, "Container app opened successfully, waiting for dictation",
                                                    payload: ["id": id.uuidString])
-                            self.state = .waiting
                             self.startWaitingForDictation(id: id)
                         } else {
                             FileLogger.shared.error(.keyboard, "Failed to open container app",
@@ -686,6 +685,8 @@ class KeyboardViewController: UIInputViewController {
                 dictationTargetDocId = nil
                 state = .idle
             case .recording, .transcribing:
+                FileLogger.shared.info(.keyboard, "refreshFromSharedState — in-progress",
+                                       payload: ["status": payload.status.rawValue])
                 updateRecordingInProgressUI(phase: payload.status.rawValue)
             }
             consecutiveSnapshotMisses = 0
@@ -789,7 +790,32 @@ class KeyboardViewController: UIInputViewController {
         }
         FileLogger.shared.info(.keyboard, "Resuming pending dictation",
                                payload: ["pendingRequestId": id.uuidString])
-        state = .waiting
+
+        // Read the snapshot to set the correct initial state instead of
+        // defaulting to .waiting, which masks the recording phase.
+        if let payload = readSharedSnapshot(for: id) {
+            FileLogger.shared.info(.keyboard, "checkForPendingDictation snapshot",
+                                   payload: ["status": payload.status.rawValue])
+            switch payload.status {
+            case .recording, .transcribing:
+                updateRecordingInProgressUI(phase: payload.status.rawValue)
+            case .completed:
+                handleTerminalResult(id: payload.id, text: payload.text, errorMessage: nil)
+                return
+            case .error:
+                handleTerminalResult(id: payload.id, text: nil, errorMessage: payload.errorMessage ?? "Transcription failed")
+                return
+            case .cancelled:
+                stopDictationTransports()
+                pendingRequestId = nil
+                dictationTargetDocId = nil
+                state = .idle
+                return
+            }
+        } else {
+            FileLogger.shared.info(.keyboard, "checkForPendingDictation — no snapshot yet, defaulting to .waiting")
+            state = .waiting
+        }
 
         // Re-register the state-changed Darwin observer (it was torn down in viewWillDisappear).
         if darwinStateChangedToken == nil {
