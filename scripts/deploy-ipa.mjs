@@ -37,6 +37,7 @@ import { fileURLToPath } from 'node:url';
 
 const REPO = 'magakis/ritoras';
 const BRANCH = 'main';
+const WORKFLOW_FILE = 'build.yml';
 const ARTIFACT_NAME = 'Ritoras.ipa';
 const TOKEN_PATH = '/home/michael/.config/opencode/gh-token';
 const DEPLOY_DIR = '/tmp/ritoras-deploy';
@@ -96,6 +97,7 @@ async function ghApi(path, options = {}) {
         `GitHub API ${response.status} ${response.statusText}: ${path}\n${body}`,
       );
     }
+    if (response.status === 204) return null;
     return await response.json();
   } catch (err) {
     if (err.name === 'AbortError') {
@@ -386,13 +388,19 @@ async function push() {
 
     // Push HEAD (the rebased commit, regardless of branch/worktree) to remote
     // main. Guaranteed fast-forward since we just rebased onto origin/main.
-    execSync(`git ${cred} push origin HEAD:${BRANCH}`, {
+    // 2>&1 captures stderr so we can detect a no-op "Everything up-to-date"
+    // push and report it honestly instead of claiming a new push happened.
+    const pushOutput = execSync(`git ${cred} push origin HEAD:${BRANCH} 2>&1`, {
       cwd: REPO_DIR,
       env: gitEnv,
-      stdio: 'inherit',
+      encoding: 'utf8',
     });
 
-    console.log(`Pushed ${finalSha}`);
+    if (pushOutput.includes('Everything up-to-date')) {
+      console.log(`main is already up-to-date at ${finalSha}`);
+    } else {
+      console.log(`Pushed ${finalSha}`);
+    }
     return finalSha;
   } finally {
     try {
@@ -401,6 +409,48 @@ async function push() {
       // best-effort cleanup
     }
   }
+}
+
+async function ensureBuild(sha) {
+  // Ask GitHub whether a run already exists for this SHA.
+  const data = await ghApi(
+    `/repos/${REPO}/actions/runs?head_sha=${sha}&per_page=5`,
+  );
+  const runs = data.workflow_runs || [];
+
+  const success = runs.find(
+    (r) => r.status === 'completed' && r.conclusion === 'success',
+  );
+  if (success) {
+    console.log(
+      `SHA ${shortSha(sha)} already built successfully (run #${success.id}); skipping workflow_dispatch`,
+    );
+    return;
+  }
+
+  const active = runs.find(
+    (r) => r.status === 'queued' || r.status === 'in_progress',
+  );
+  if (active) {
+    console.log(
+      `SHA ${shortSha(sha)} already building (run #${active.id}, status: ${active.status}); skipping workflow_dispatch`,
+    );
+    return;
+  }
+
+  // No existing run for this SHA — push didn't trigger one, so dispatch explicitly.
+  console.log(
+    `SHA ${shortSha(sha)} has no CI run; triggering workflow_dispatch on ${BRANCH} (${WORKFLOW_FILE})...`,
+  );
+  await ghApi(
+    `/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/dispatches`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ref: BRANCH }),
+    },
+  );
+  console.log('workflow_dispatch accepted; run should appear within ~30s');
 }
 
 async function wait(sha) {
@@ -588,6 +638,7 @@ async function listRemote(count) {
 
 async function deploy() {
   const sha = await push();
+  await ensureBuild(sha);
   await wait(sha);
   await download();
   await serve();
