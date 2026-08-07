@@ -24,6 +24,7 @@ Builds before the first numbered section below had no changelog.
 ### Fixed
 
 - The dictation button now shows the recording indicator while you speak, instead of jumping straight to the transcribing state.
+- Mic button now shows the red recording dot (instead of the waiting ellipsis) when you switch back to the keyboard during an active dictation.
 
 <!-- To cut a build: rename "## Unreleased" to "## Build <run_number> — <YYYY-MM-DD>",
      then open a fresh "## Unreleased" above it. <run_number> = latest CI run
