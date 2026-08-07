@@ -662,6 +662,40 @@ class KeyboardViewController: UIInputViewController {
         return payload
     }
 
+    /// Reads the current dictation snapshot on keyboard reappear, BYPASSING the
+    /// revision guard of `readSharedSnapshot(for:)`. A concurrent Darwin-driven
+    /// or appearRefreshTask `refreshFromSharedState` may have already consumed
+    /// the current revision before this runs, so gating on `revision >
+    /// lastSeenSnapshotRevision` would return nil and mask an in-progress
+    /// recording. Still advances `lastSeenSnapshotRevision` so the poller does
+    /// not reprocess the same snapshot. Terminal re-reads are deduplicated by
+    /// `lastProcessedPayloadId` in `handleTerminalResult`. Used ONLY on
+    /// reappear, never during continuous polling.
+    private func readSharedSnapshotForReappear(for id: UUID) -> DictationPayload? {
+        // Fast path: snapshot file in the app-group container.
+        if let filePayload = SharedConfig.snapshotFile(),
+           filePayload.id == id {
+            lastSeenSnapshotRevision = max(lastSeenSnapshotRevision, filePayload.revision ?? 0)
+            FileLogger.shared.debug(.keyboard, "snapshot reappear read: hit (file)",
+                                    payload: ["status": filePayload.status.rawValue,
+                                              "rev": filePayload.revision ?? 0,
+                                              "id": String(filePayload.id.uuidString.prefix(8))])
+            return filePayload
+        }
+        // Fallback: app-group UserDefaults snapshot.
+        guard let payload = SharedConfig.dictationSnapshot(),
+              payload.id == id else {
+            FileLogger.shared.debug(.keyboard, "snapshot reappear read: miss no snapshot")
+            return nil
+        }
+        lastSeenSnapshotRevision = max(lastSeenSnapshotRevision, payload.revision ?? 0)
+        FileLogger.shared.debug(.keyboard, "snapshot reappear read: hit (defaults)",
+                                payload: ["status": payload.status.rawValue,
+                                          "rev": payload.revision ?? 0,
+                                          "id": String(payload.id.uuidString.prefix(8))])
+        return payload
+    }
+
     /// Reads the current dictation snapshot from the app-group. Called from
     /// the snapshot poll timer and from the Darwin state-changed notification.
     /// The app-group snapshot (via `readSharedSnapshot`) is the sole channel.
@@ -792,10 +826,13 @@ class KeyboardViewController: UIInputViewController {
                                payload: ["pendingRequestId": id.uuidString])
 
         // Read the snapshot to set the correct initial state instead of
-        // defaulting to .waiting, which masks the recording phase.
-        if let payload = readSharedSnapshot(for: id) {
+        // defaulting to .waiting, which masks the recording phase. Uses the
+        // reappear reader (revision-agnostic) because the appear refresh may
+        // have already consumed the current revision.
+        if let payload = readSharedSnapshotForReappear(for: id) {
             FileLogger.shared.info(.keyboard, "checkForPendingDictation snapshot",
-                                   payload: ["status": payload.status.rawValue])
+                                   payload: ["status": payload.status.rawValue,
+                                             "rev": payload.revision ?? 0])
             switch payload.status {
             case .recording, .transcribing:
                 updateRecordingInProgressUI(phase: payload.status.rawValue)
@@ -813,8 +850,15 @@ class KeyboardViewController: UIInputViewController {
                 return
             }
         } else {
-            FileLogger.shared.info(.keyboard, "checkForPendingDictation — no snapshot yet, defaulting to .waiting")
-            state = .waiting
+            FileLogger.shared.info(.keyboard,
+                "checkForPendingDictation — no snapshot for id; defaulting to .waiting",
+                payload: ["priorState": String(describing: state)])
+            switch state {
+            case .recording, .waiting, .inserting:
+                break   // keep a concrete in-progress state; poll will catch the next snapshot
+            default:
+                state = .waiting   // .idle / .openingApp / .error → genuinely unknown
+            }
         }
 
         // Re-register the state-changed Darwin observer (it was torn down in viewWillDisappear).
