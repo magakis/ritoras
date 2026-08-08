@@ -16,7 +16,8 @@ struct RitorasApp: App {
             "resolvedIdentifier": SharedConfig.Defaults.appGroupId,
             "strategy": AppGroupResolver.shared.resolvedStrategy,
             "bundleId": Bundle.main.bundleIdentifier ?? "?",
-            "containerPath": SharedConfig.snapshotFilePathDescription()
+            "containerPath": SharedConfig.snapshotFilePathDescription(),
+            "resolutionTrace": AppGroupResolver.shared.resolutionTrace
         ])
         MetricKitSubscriber.shared.start()
         FileLogger.shared.info(.app, "MetricKit subscriber started")

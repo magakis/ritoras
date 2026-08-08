@@ -220,7 +220,8 @@ class KeyboardViewController: UIInputViewController {
             "strategy": AppGroupResolver.shared.resolvedStrategy,
             "bundleId": Bundle.main.bundleIdentifier ?? "?",
             "path": SharedConfig.snapshotFilePathDescription(),                 // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
-            "containerAvailable": AppGroupResolver.shared.containerAvailable   // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+            "containerAvailable": AppGroupResolver.shared.containerAvailable,   // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+            "resolutionTrace": AppGroupResolver.shared.resolutionTrace
         ])
 
         NSSetUncaughtExceptionHandler { exception in

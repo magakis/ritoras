@@ -654,6 +654,7 @@ final class AppGroupResolver {
     private var cached: String?
     private var _containerAvailable: Bool?
     private var _resolvedStrategy: String?
+    private var _resolutionTrace: String?
 
     /// The resolved app-group identifier. Returns the cached result of
     /// `resolve()`, triggering resolution on first access.
@@ -679,6 +680,15 @@ final class AppGroupResolver {
         return _resolvedStrategy ?? "unknown"
     }
 
+    /// Compact trace of every identifier probed during resolution. Diagnostic only;
+    /// stored under the lock, safe to read post-resolve. Caller logs at .warn so it
+    /// survives a keyboard Jetsam kill.
+    var resolutionTrace: String {
+        resolve()
+        lock.lock(); defer { lock.unlock() }
+        return _resolutionTrace ?? ""
+    }
+
     func resolve() -> String {
         lock.lock()
         defer { lock.unlock() }
@@ -695,7 +705,35 @@ final class AppGroupResolver {
     }
 
     private func performResolution(original: String) -> String {
+        var trace = ""
+        defer { _resolutionTrace = String(trace.prefix(512)) }
         let bundleId = Bundle.main.bundleIdentifier ?? "<nil>"
+
+        // Strategy 0 (GROUND TRUTH): read the app-group identifiers SideStore embedded
+        // into this bundle's Info.plist under the custom "ALTAppGroups" key.
+        // SideStore's ResignAppOperation.prepare() writes the real (TeamID-suffixed)
+        // identifiers granted by the provisioning profile into Info.plist["ALTAppGroups"]
+        // for BOTH the main app and each appex. Authoritative — no guessing.
+        // Source: SideStore Shared/Extensions/Bundle+AltStore.swift (appGroups = "ALTAppGroups").
+        if let raw = Bundle.main.infoDictionary?["ALTAppGroups"] {
+            let candidates: [String] = (raw as? [String])
+                ?? ((raw as? String).map { [$0] } ?? [])
+            if candidates.isEmpty {
+                trace += "infoplist[ALTAppGroups]=empty; "
+            } else {
+                for id in candidates where !id.isEmpty {
+                    let ok = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: id) != nil
+                    trace += "infoplist[\(id)]=\(ok ? "ok" : "nil"); "
+                    if ok {
+                        NSLog("AppGroupResolver: strategy=infoplist-appgroups identifier=\(id)")
+                        _resolvedStrategy = "infoplist-appgroups"
+                        return id
+                    }
+                }
+            }
+        } else {
+            trace += "infoplist[ALTAppGroups]=absent; "
+        }
 
         // Strategy 1: original unsuffixed identifier.
         // Works on App Store, TrollStore, Simulator, and any environment that
@@ -703,6 +741,7 @@ final class AppGroupResolver {
         if FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: original) != nil {
             NSLog("AppGroupResolver: strategy=original-identifier identifier=\(original) bundleId=\(bundleId)")
             _resolvedStrategy = "original"
+            trace += "original[\(original)]=ok; "
             return original
         }
 
@@ -723,8 +762,10 @@ final class AppGroupResolver {
                 if FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: suffixed) != nil {
                     NSLog("AppGroupResolver: strategy=bundleid-teamid identifier=\(suffixed) teamId=\(teamId) bundleId=\(bundleId)")
                     _resolvedStrategy = "bundleid-teamid"
+                    trace += "bundleid[\(suffixed)]=ok; "
                     return suffixed
                 }
+                trace += "bundleid[\(suffixed)]=nil; "
                 NSLog("AppGroupResolver: bundleid-teamid attempted but containerURL nil identifier=\(suffixed) bundleId=\(bundleId)")
             }
         }
@@ -738,10 +779,13 @@ final class AppGroupResolver {
             if FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: suffixed) != nil {
                 NSLog("AppGroupResolver: strategy=mobileprovision-teamid identifier=\(suffixed) teamId=\(teamId) bundleId=\(bundleId)")
                 _resolvedStrategy = "mobileprovision-teamid"
+                trace += "mprov-teamid[\(suffixed)]=ok; "
                 return suffixed
             }
+            trace += "mprov-teamid[\(suffixed)]=nil; "
             NSLog("AppGroupResolver: mobileprovision-teamid attempted but containerURL nil identifier=\(suffixed) bundleId=\(bundleId)")
         } else {
+            trace += "mprov-teamid=noteamid; "
             NSLog("AppGroupResolver: no TeamID found in embedded.mobileprovision bundleId=\(bundleId)")
         }
 
@@ -751,6 +795,7 @@ final class AppGroupResolver {
         if let fromProvision = readFromMobileProvision() {
             NSLog("AppGroupResolver: strategy=mobileprovision identifier=\(fromProvision) bundleId=\(bundleId)")
             _resolvedStrategy = "mobileprovision-direct"
+            trace += "mprov-direct[\(fromProvision)]=ok; "
             return fromProvision
         }
 
@@ -759,6 +804,7 @@ final class AppGroupResolver {
         // The user will see this in the system log via NSLog.
         NSLog("AppGroupResolver: ⚠️ ALL STRATEGIES FAILED — falling back to original identifier. bundleId=\(bundleId)")
         _resolvedStrategy = "fallback-original"
+        trace += "fallback"
         return original
     }
 
