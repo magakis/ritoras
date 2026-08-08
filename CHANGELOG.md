@@ -23,6 +23,7 @@ Builds before the first numbered section below had no changelog.
 
 ### Fixed
 
+- Fixed the cursor jumping back to its previous position after typing a space or punctuation, and after pasting a dictation result.
 - The dictation button now shows the recording indicator while you speak, instead of jumping straight to the transcribing state.
 - Mic button now shows the red recording dot (instead of the waiting ellipsis) when you switch back to the keyboard during an active dictation.
 - Fixed a SideStore issue where the dictation button never showed the red recording dot (and cross-app sharing silently failed) because the keyboard and app could not locate their shared app-group container.
