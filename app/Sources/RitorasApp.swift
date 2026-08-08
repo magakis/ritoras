@@ -11,9 +11,12 @@ struct RitorasApp: App {
     init() {
         FileLogger.shared.info(.app, "Container app launched", payload: ["version": Bundle.main.infoDictionary?["CFBundleVersion"] ?? "?"])
         // Log the resolved app-group identifier via FileLogger (post-resolution, safe to use FileLogger now).
-        FileLogger.shared.info(.app, "AppGroupResolver outcome", payload: [
+        // Promoted to .warn so this on-device confirmation survives a process kill (log-level-crash-survival).
+        FileLogger.shared.warn(.app, "AppGroupResolver outcome", payload: [
             "resolvedIdentifier": SharedConfig.Defaults.appGroupId,
-            "bundleId": Bundle.main.bundleIdentifier ?? "?"
+            "strategy": AppGroupResolver.shared.resolvedStrategy,
+            "bundleId": Bundle.main.bundleIdentifier ?? "?",
+            "containerPath": SharedConfig.snapshotFilePathDescription()
         ])
         MetricKitSubscriber.shared.start()
         FileLogger.shared.info(.app, "MetricKit subscriber started")

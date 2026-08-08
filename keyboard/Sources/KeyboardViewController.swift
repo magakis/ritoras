@@ -217,6 +217,7 @@ class KeyboardViewController: UIInputViewController {
         // the DebugLogView via the log shipper — critical for SideStore diagnostic triage.
         FileLogger.shared.warn(.keyboard, "AppGroupResolver outcome", payload: [
             "resolvedIdentifier": SharedConfig.Defaults.appGroupId,
+            "strategy": AppGroupResolver.shared.resolvedStrategy,
             "bundleId": Bundle.main.bundleIdentifier ?? "?",
             "path": SharedConfig.snapshotFilePathDescription(),                 // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
             "containerAvailable": AppGroupResolver.shared.containerAvailable   // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)

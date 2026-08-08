@@ -635,8 +635,10 @@ struct SharedConfig {
 ///
 /// This resolver tries multiple strategies to find a working identifier:
 ///   1. The original unsuffixed identifier (works on App Store / TrollStore / Simulator)
-///   2. A team-suffixed identifier constructed from the TeamID in `embedded.mobileprovision`
-///   3. The actual app-group string from `embedded.mobileprovision` (most authoritative)
+///   2. A team-suffixed identifier built from the TeamID derived from the bundle ID
+///      (SideStore appends the same TeamID to the bundle ID and the app-group entitlement)
+///   3. A team-suffixed identifier constructed from the TeamID in `embedded.mobileprovision`
+///   4. The actual app-group string from `embedded.mobileprovision` (most authoritative)
 ///
 /// The first strategy that returns a non-nil containerURL wins. The result is
 /// cached for the lifetime of the process.
@@ -651,6 +653,7 @@ final class AppGroupResolver {
     private let lock = NSLock()
     private var cached: String?
     private var _containerAvailable: Bool?
+    private var _resolvedStrategy: String?
 
     /// The resolved app-group identifier. Returns the cached result of
     /// `resolve()`, triggering resolution on first access.
@@ -665,6 +668,15 @@ final class AppGroupResolver {
         lock.lock()
         defer { lock.unlock() }
         return _containerAvailable ?? false
+    }
+
+    /// Which resolution strategy produced the resolved identifier.
+    /// Diagnostic field: "original", "bundleid-teamid", "mobileprovision-teamid",
+    /// "mobileprovision-direct", or "fallback-original" ("unknown" before first resolve).
+    var resolvedStrategy: String {
+        resolve()
+        lock.lock(); defer { lock.unlock() }
+        return _resolvedStrategy ?? "unknown"
     }
 
     func resolve() -> String {
@@ -690,20 +702,42 @@ final class AppGroupResolver {
         // doesn't rewrite entitlements.
         if FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: original) != nil {
             NSLog("AppGroupResolver: strategy=original-identifier identifier=\(original) bundleId=\(bundleId)")
+            _resolvedStrategy = "original"
             return original
         }
 
-        // Strategy 2: construct team-suffixed identifier from mobileprovision TeamID.
-        // Under SideStore, app-group entitlements are rewritten from
-        // `group.com.ritoras.app` to `group.com.ritoras.app.<TeamID>` at resign time.
-        // Read the TeamID from embedded.mobileprovision (ApplicationIdentifierPrefix
-        // or Entitlements["com.apple.developer.team-identifier"]) and construct
-        // the suffixed identifier. This is the correct approach — SideStore suffixes
-        // the app-group entitlement, NOT the bundle ID.
+        // Strategy 2: team-suffixed identifier, TeamID derived from the BUNDLE ID.
+        // SideStore appends the SAME TeamID to the bundle ID and the app-group
+        // entitlement (source: SideStore FetchProvisioningProfilesOperation.swift),
+        // so the TeamID component of Bundle.main.bundleIdentifier IS the app-group
+        // suffix. This does NOT depend on parsing embedded.mobileprovision (fragile
+        // in the keyboard appex), so it is the most reliable SideStore strategy.
+        let baseBundleId = String(original.dropFirst("group.".count))   // "com.ritoras.app"
+        if let bundleId = Bundle.main.bundleIdentifier,
+           bundleId.hasPrefix(baseBundleId + ".") {
+            let rest = String(bundleId.dropFirst(baseBundleId.count + 1))  // "<TeamID>[.keyboard]"
+            if let teamComponent = rest.split(separator: ".").first,
+               Self.isValidTeamId(teamComponent) {
+                let teamId = String(teamComponent)
+                let suffixed = "\(original).\(teamId)"                     // group.com.ritoras.app.<TeamID>
+                if FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: suffixed) != nil {
+                    NSLog("AppGroupResolver: strategy=bundleid-teamid identifier=\(suffixed) teamId=\(teamId) bundleId=\(bundleId)")
+                    _resolvedStrategy = "bundleid-teamid"
+                    return suffixed
+                }
+                NSLog("AppGroupResolver: bundleid-teamid attempted but containerURL nil identifier=\(suffixed) bundleId=\(bundleId)")
+            }
+        }
+
+        // Strategy 3: team-suffixed identifier, TeamID extracted from the embedded
+        // provisioning profile (may fail in the keyboard appex under SideStore).
+        // The bundle-ID strategy above is preferred because it does not depend on
+        // parsing the mobileprovision.
         if let teamId = extractTeamIdFromMobileProvision() {
             let suffixed = "\(original).\(teamId)"
             if FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: suffixed) != nil {
                 NSLog("AppGroupResolver: strategy=mobileprovision-teamid identifier=\(suffixed) teamId=\(teamId) bundleId=\(bundleId)")
+                _resolvedStrategy = "mobileprovision-teamid"
                 return suffixed
             }
             NSLog("AppGroupResolver: mobileprovision-teamid attempted but containerURL nil identifier=\(suffixed) bundleId=\(bundleId)")
@@ -711,11 +745,12 @@ final class AppGroupResolver {
             NSLog("AppGroupResolver: no TeamID found in embedded.mobileprovision bundleId=\(bundleId)")
         }
 
-        // Strategy 3: read embedded.mobileprovision and extract the actual
+        // Strategy 4: read embedded.mobileprovision and extract the actual
         // app-group string. This is the most authoritative source because it
         // reads the binary's signed entitlements directly.
         if let fromProvision = readFromMobileProvision() {
             NSLog("AppGroupResolver: strategy=mobileprovision identifier=\(fromProvision) bundleId=\(bundleId)")
+            _resolvedStrategy = "mobileprovision-direct"
             return fromProvision
         }
 
@@ -723,7 +758,16 @@ final class AppGroupResolver {
         // so the app still functions (in degraded, pre-fix mode — same as today).
         // The user will see this in the system log via NSLog.
         NSLog("AppGroupResolver: ⚠️ ALL STRATEGIES FAILED — falling back to original identifier. bundleId=\(bundleId)")
+        _resolvedStrategy = "fallback-original"
         return original
+    }
+
+    /// Apple TeamIDs are exactly 10 uppercase alphanumeric characters.
+    /// Used to extract the TeamID from the SideStore-suffixed bundle ID.
+    private static func isValidTeamId(_ s: Substring) -> Bool {
+        guard s.count == 10 else { return false }
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+        return String(s).unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 
     /// Extracts the TeamID from `embedded.mobileprovision`.
