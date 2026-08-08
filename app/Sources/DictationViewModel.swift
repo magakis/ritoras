@@ -55,6 +55,25 @@ final class ChunkSendQueue: @unchecked Sendable {
     }
 }
 
+/// Thread-safe holder of the latest published dictation snapshot. Read by the
+/// localhost server's background `conn_queue` (via the `/state` route), written
+/// by the @MainActor view model. Marked @unchecked Sendable because all access
+/// is serialized via internal NSLock.
+private final class LastPayloadHolder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _payload: DictationPayload?
+
+    func get() -> DictationPayload? {
+        lock.lock(); defer { lock.unlock() }
+        return _payload
+    }
+
+    func set(_ payload: DictationPayload?) {
+        lock.lock(); defer { lock.unlock() }
+        _payload = payload
+    }
+}
+
 @MainActor
 final class DictationViewModel: ObservableObject {
     enum DictationPhase: Equatable {
@@ -78,6 +97,10 @@ final class DictationViewModel: ObservableObject {
     // MARK: - Localhost Server (Phase 1)
 
     private var localhostServer: LocalhostServer?
+
+    /// Locked holder of the latest published snapshot, readable from the
+    /// localhost server's background conn_queue without touching @MainActor state.
+    private let lastPayloadHolder = LastPayloadHolder()
 
     /// Monotonic revision counter for app-group snapshot writes.
     /// Bumped on every write so the keyboard can detect freshness.
@@ -107,6 +130,13 @@ final class DictationViewModel: ObservableObject {
 
     // MARK: - Localhost Server Helpers
 
+    /// Returns the latest published snapshot. `nonisolated` so the localhost
+    /// server's background conn_queue can call it directly — it touches only
+    /// the locked `lastPayloadHolder`, never @MainActor state.
+    nonisolated func currentSnapshot() -> DictationPayload? {
+        lastPayloadHolder.get()
+    }
+
     /// Starts the localhost HTTP server if not already running. Idempotent.
     func startLocalhostServer() {
         guard localhostServer == nil else {
@@ -117,7 +147,8 @@ final class DictationViewModel: ObservableObject {
         let server = LocalhostServer(
             port: SharedConfig.Defaults.localhostServerPort,
             onStop:   { [weak self] in await self?.stop() },
-            onCancel: { [weak self] in await self?.cancel() }
+            onCancel: { [weak self] in await self?.cancel() },
+            onState:  { [weak self] in self?.currentSnapshot() }
         )
 
         do {
@@ -190,6 +221,9 @@ final class DictationViewModel: ObservableObject {
             timestamp: Date(),
             revision: snapshotRevision
         )
+        // Mirror into the locked holder so the localhost /state fallback can serve
+        // the same payload even when the app-group container is nil (SideStore).
+        lastPayloadHolder.set(payload)
         // ALL snapshots go to the app-group container FILE (cfprefsd bypass) so the
         // keyboard discovers each state — recording, transcribing, terminal —
         // sub-second instead of waiting ~2s for cfprefsd. Order is deliberate: file
@@ -1009,5 +1043,9 @@ final class DictationViewModel: ObservableObject {
             phase = .cancelled
         }
         activeID = nil
+        // Clear the localhost /state holder so a stale terminal payload is never
+        // served to a later poll (the keyboard has already consumed the cancelled
+        // snapshot published above, if any).
+        lastPayloadHolder.set(nil)
     }
 }

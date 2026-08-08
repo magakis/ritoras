@@ -58,6 +58,29 @@ enum LocalhostClient {
         }
     }
 
+    /// Fetches the container app's current dictation snapshot via the localhost
+    /// `GET /state` fallback transport — used when the app-group container is
+    /// nil (SideStore) and the file/UserDefaults snapshot paths are unavailable.
+    /// Returns the snapshot payload on HTTP 200, `nil` on 204 (idle, no active
+    /// session) or any transport error. Date decoding uses the default strategy,
+    /// symmetric with the server's plain `JSONEncoder` and the existing snapshot
+    /// file path in `SharedConfig`.
+    static func getState() async -> DictationPayload? {
+        let url = URL(string: "http://127.0.0.1:\(SharedConfig.Defaults.localhostServerPort)/state")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        do {
+            let (data, response) = try await activeSession.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else { return nil }
+            guard httpResponse.statusCode == 200 else { return nil }  // 204 = idle, not an error
+            let decoder = JSONDecoder()
+            return try decoder.decode(DictationPayload.self, from: data)
+        } catch {
+            FileLogger.shared.debug(.network, "GET /state transport error", payload: ["error": error.localizedDescription])
+            return nil
+        }
+    }
+
     /// Ships an array of log entries to the localhost server's `POST /logs`
     /// endpoint. Fire-and-forget: errors are swallowed (connection refused,
     /// timeout, malformed response — all silently dropped). Log shipping is

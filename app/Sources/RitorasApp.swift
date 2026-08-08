@@ -19,6 +19,8 @@ struct RitorasApp: App {
             "containerPath": SharedConfig.snapshotFilePathDescription(),
             "resolutionTrace": AppGroupResolver.shared.resolutionTrace
         ])
+        // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1): full resolution diagnostics incl. ALTAppGroups.
+        SharedConfig.logAppGroupDiagnostics(component: .app)
         MetricKitSubscriber.shared.start()
         FileLogger.shared.info(.app, "MetricKit subscriber started")
         // Phase 4: prune expired failed-job records on launch.

@@ -11,6 +11,7 @@ final class LocalhostServer {
     private let queue = DispatchQueue(label: "com.ritoras.localhostserver", qos: .utility)
     private let onStop: (() async -> Void)?
     private let onCancel: (() async -> Void)?
+    private let onState: (() -> DictationPayload?)?
 
     /// The port the listener is actually bound to. Equals `port` when a fixed
     /// port was given; differs when port 0 was passed (OS-assigned).
@@ -21,10 +22,11 @@ final class LocalhostServer {
 
     private static let maxRequestSize = 65536
 
-    init(port: UInt16, onStop: (() async -> Void)? = nil, onCancel: (() async -> Void)? = nil) {
+    init(port: UInt16, onStop: (() async -> Void)? = nil, onCancel: (() async -> Void)? = nil, onState: (() -> DictationPayload?)? = nil) {
         self.port = port
         self.onStop = onStop
         self.onCancel = onCancel
+        self.onState = onState
     }
 
     // MARK: - Lifecycle
@@ -241,6 +243,12 @@ final class LocalhostServer {
                 "port": actualPort ?? port
             ])
 
+        case "/state":
+            guard let payload = onState?() else {
+                return Self.makeJSONResponse(status: 204, body: ["status": "idle"])
+            }
+            return Self.makeJSONResponse(status: 200, body: payload)
+
         default:
             return Self.makeJSONResponse(status: 404, body: [
                 "error": "not found",
@@ -332,6 +340,7 @@ final class LocalhostServer {
         switch status {
         case 200: statusLine = "HTTP/1.1 200 OK"
         case 202: statusLine = "HTTP/1.1 202 Accepted"
+        case 204: statusLine = "HTTP/1.1 204 No Content"
         case 400: statusLine = "HTTP/1.1 400 Bad Request"
         case 404: statusLine = "HTTP/1.1 404 Not Found"
         case 405: statusLine = "HTTP/1.1 405 Method Not Allowed"
@@ -341,12 +350,16 @@ final class LocalhostServer {
 
         var response = "\(statusLine)\r\n"
         response += "Content-Type: \(contentType)\r\n"
-        response += "Content-Length: \(body.count)\r\n"
+        if status != 204 {
+            response += "Content-Length: \(body.count)\r\n"
+        }
         response += "Connection: close\r\n"
         response += "\r\n"
 
         var data = Data(response.utf8)
-        data.append(body)
+        if status != 204 {
+            data.append(body)
+        }
         return data
     }
 

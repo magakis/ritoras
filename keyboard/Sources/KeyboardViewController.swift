@@ -218,6 +218,8 @@ class KeyboardViewController: UIInputViewController {
             "containerAvailable": AppGroupResolver.shared.containerAvailable,   // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
             "resolutionTrace": AppGroupResolver.shared.resolutionTrace
         ])
+        // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1): full resolution diagnostics incl. ALTAppGroups.
+        SharedConfig.logAppGroupDiagnostics(component: .keyboard)
 
         NSSetUncaughtExceptionHandler { exception in
             let msg = "FATAL: \(exception.name.rawValue): \(exception.reason ?? "unknown")"
@@ -715,7 +717,10 @@ class KeyboardViewController: UIInputViewController {
 
     /// Reads the current dictation snapshot from the app-group. Called from
     /// the snapshot poll timer and from the Darwin state-changed notification.
-    /// The app-group snapshot (via `readSharedSnapshot`) is the sole channel.
+    /// The app-group snapshot (via `readSharedSnapshot`) is the primary channel;
+    /// after 2 consecutive misses the localhost /state endpoint is polled as a
+    /// fallback (container app still alive, app-group container nil under
+    /// SideStore).
     private func refreshFromSharedState() async {
         guard let id = pendingRequestId else {
             return
@@ -725,31 +730,30 @@ class KeyboardViewController: UIInputViewController {
 
         // App-group snapshot is the PRIMARY channel
         if let payload = readSharedSnapshot(for: id) {
-            switch payload.status {
-            case .completed:
-                handleTerminalResult(id: payload.id, text: payload.text, errorMessage: nil)
-            case .error:
-                handleTerminalResult(id: payload.id, text: nil, errorMessage: payload.errorMessage ?? "Transcription failed")
-            case .cancelled:
-                stopDictationTransports()
-                pendingRequestId = nil
-                dictationTargetDocId = nil
-                state = .idle
-            case .recording, .transcribing:
-                FileLogger.shared.info(.keyboard, "refreshFromSharedState — in-progress",
-                                       payload: ["status": payload.status.rawValue])
-                updateRecordingInProgressUI(phase: payload.status.rawValue)
-            }
-            consecutiveSnapshotMisses = 0
+            applySnapshotPayload(payload, source: "appgroup")
             return
         }
 
-        // Miss — no matching snapshot this poll cycle. Increment counter and
-        // start /jobs server polling if the threshold is reached and polling
-        // is not already running.
+        // Miss — no matching snapshot this poll cycle. Increment counter.
         consecutiveSnapshotMisses += 1
         FileLogger.shared.debug(.keyboard, "snapshot miss",
                                 payload: ["consecutive": consecutiveSnapshotMisses])
+
+        // Localhost fallback tier: after 2 consecutive app-group misses, poll the
+        // container app's localhost /state endpoint. Local and instant — the same
+        // payload the app-group path would deliver (id + revision dedup identical).
+        if consecutiveSnapshotMisses >= 2 {
+            if let httpPayload = await LocalhostClient.getState(),
+               httpPayload.id == pendingRequestId,
+               (httpPayload.revision ?? 0) > lastSeenSnapshotRevision {
+                lastSeenSnapshotRevision = httpPayload.revision ?? 0
+                applySnapshotPayload(httpPayload, source: "localhost")
+                return
+            }
+        }
+
+        // Start /jobs server polling if the threshold is reached and polling
+        // is not already running.
         if consecutiveSnapshotMisses >= 6, serverPollWorkItem == nil {
             // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
             FileLogger.shared.warn(.keyboard, "snapshot miss streak",
@@ -760,6 +764,33 @@ class KeyboardViewController: UIInputViewController {
                           "path": SharedConfig.snapshotFilePathDescription()])
             startServerPolling()
         }
+    }
+
+    /// Applies a received snapshot payload: dispatches by status, then resets
+    /// the miss counter. Shared by the app-group (file + defaults) and the
+    /// localhost /state fallback transports.
+    private func applySnapshotPayload(_ payload: DictationPayload, source: String) {
+        switch payload.status {
+        case .completed:
+            handleTerminalResult(id: payload.id, text: payload.text, errorMessage: nil)
+        case .error:
+            handleTerminalResult(id: payload.id, text: nil, errorMessage: payload.errorMessage ?? "Transcription failed")
+        case .cancelled:
+            stopDictationTransports()
+            pendingRequestId = nil
+            dictationTargetDocId = nil
+            state = .idle
+        case .recording, .transcribing:
+            FileLogger.shared.info(.keyboard, "refreshFromSharedState — in-progress",
+                                   payload: ["status": payload.status.rawValue])
+            updateRecordingInProgressUI(phase: payload.status.rawValue)
+        }
+        consecutiveSnapshotMisses = 0
+        FileLogger.shared.debug(.keyboard, "snapshot hit",
+                                payload: ["src": source,
+                                          "status": payload.status.rawValue,
+                                          "rev": payload.revision ?? 0,
+                                          "id": String(payload.id.uuidString.prefix(8))])
     }
 
     /// Starts a 0.5s repeating timer that calls `refreshFromSharedState`.
