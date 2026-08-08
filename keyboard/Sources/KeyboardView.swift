@@ -9,6 +9,18 @@ enum KeyboardState: Equatable {
     case waiting
     case inserting
     case error(String)
+
+    /// DIAGNOSTIC LOGGING — TEMPORARY: lean state tag for crash-survival logs (avoids large .error(msg) strings under Jetsam cap)
+    static func shortTag(_ s: KeyboardState) -> String {
+        switch s {
+        case .idle: return "idle"
+        case .openingApp: return "openingApp"
+        case .recording: return "recording"
+        case .waiting: return "waiting"
+        case .inserting: return "inserting"
+        case .error: return "error"
+        }
+    }
 }
 
 // MARK: - Shift State

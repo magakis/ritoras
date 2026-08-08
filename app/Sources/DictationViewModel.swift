@@ -201,6 +201,13 @@ final class DictationViewModel: ObservableObject {
                                           "rev": snapshotRevision,
                                           "id": String(activeID.uuidString.prefix(8))])
         SharedConfig.setDictationSnapshot(payload)
+        // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+        FileLogger.shared.warn(.app, "snapshot published",
+            payload: ["status": status.rawValue,
+                      "rev": snapshotRevision,
+                      "id": String(activeID.uuidString.prefix(8)),
+                      "group": SharedConfig.Defaults.appGroupId,
+                      "path": SharedConfig.snapshotFilePathDescription()])
     }
 
 

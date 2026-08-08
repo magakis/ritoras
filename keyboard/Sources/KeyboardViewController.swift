@@ -19,6 +19,8 @@ class KeyboardViewController: UIInputViewController {
             }
             FileLogger.shared.debug(.keyboard, "state: \(String(describing: state))",
                                    payload: ["pendingRequestId": pendingRequestId?.uuidString ?? "nil"])
+            // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1) — lean tag, avoids large strings under Jetsam cap
+            FileLogger.shared.warn(.keyboard, "state →", payload: ["state": KeyboardState.shortTag(state), "pendingId": String(pendingRequestId?.uuidString.prefix(8) ?? "nil")])
         }
     }
 
@@ -215,7 +217,9 @@ class KeyboardViewController: UIInputViewController {
         // the DebugLogView via the log shipper — critical for SideStore diagnostic triage.
         FileLogger.shared.warn(.keyboard, "AppGroupResolver outcome", payload: [
             "resolvedIdentifier": SharedConfig.Defaults.appGroupId,
-            "bundleId": Bundle.main.bundleIdentifier ?? "?"
+            "bundleId": Bundle.main.bundleIdentifier ?? "?",
+            "path": SharedConfig.snapshotFilePathDescription(),                 // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+            "containerAvailable": AppGroupResolver.shared.containerAvailable   // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
         ])
 
         NSSetUncaughtExceptionHandler { exception in
@@ -520,6 +524,12 @@ class KeyboardViewController: UIInputViewController {
 
         let id = UUID()
         pendingRequestId = id
+        // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+        FileLogger.shared.warn(.keyboard, "dictation start appgroup",
+            payload: ["id": String(id.uuidString.prefix(8)),
+                      "group": SharedConfig.Defaults.appGroupId,
+                      "path": SharedConfig.snapshotFilePathDescription(),
+                      "containerAvailable": AppGroupResolver.shared.containerAvailable])
         pendingRequestStart = Date().timeIntervalSince1970
 
         // Capture the document identifier of the current text field so
@@ -634,6 +644,8 @@ class KeyboardViewController: UIInputViewController {
                                         payload: ["status": filePayload.status.rawValue,
                                                   "rev": fileRev,
                                                   "id": String(filePayload.id.uuidString.prefix(8))])
+                // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+                FileLogger.shared.warn(.keyboard, "snapshot hit", payload: ["src": "file", "status": filePayload.status.rawValue, "rev": fileRev, "id": String(filePayload.id.uuidString.prefix(8))])
                 return filePayload
             }
         }
@@ -659,6 +671,8 @@ class KeyboardViewController: UIInputViewController {
                                 payload: ["status": payload.status.rawValue,
                                           "rev": rev,
                                           "id": String(payload.id.uuidString.prefix(8))])
+        // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+        FileLogger.shared.warn(.keyboard, "snapshot hit", payload: ["src": "defaults", "status": payload.status.rawValue, "rev": rev, "id": String(payload.id.uuidString.prefix(8))])
         return payload
     }
 
@@ -680,12 +694,16 @@ class KeyboardViewController: UIInputViewController {
                                     payload: ["status": filePayload.status.rawValue,
                                               "rev": filePayload.revision ?? 0,
                                               "id": String(filePayload.id.uuidString.prefix(8))])
+            // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+            FileLogger.shared.warn(.keyboard, "snapshot reappear", payload: ["src": "file", "status": filePayload.status.rawValue, "rev": filePayload.revision ?? 0, "id": String(filePayload.id.uuidString.prefix(8))])
             return filePayload
         }
         // Fallback: app-group UserDefaults snapshot.
         guard let payload = SharedConfig.dictationSnapshot(),
               payload.id == id else {
             FileLogger.shared.debug(.keyboard, "snapshot reappear read: miss no snapshot")
+            // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+            FileLogger.shared.warn(.keyboard, "snapshot reappear miss", payload: ["group": SharedConfig.Defaults.appGroupId, "containerAvailable": AppGroupResolver.shared.containerAvailable, "id": String(id.uuidString.prefix(8))])
             return nil
         }
         lastSeenSnapshotRevision = max(lastSeenSnapshotRevision, payload.revision ?? 0)
@@ -693,6 +711,8 @@ class KeyboardViewController: UIInputViewController {
                                 payload: ["status": payload.status.rawValue,
                                           "rev": payload.revision ?? 0,
                                           "id": String(payload.id.uuidString.prefix(8))])
+        // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+        FileLogger.shared.warn(.keyboard, "snapshot reappear", payload: ["src": "defaults", "status": payload.status.rawValue, "rev": payload.revision ?? 0, "id": String(payload.id.uuidString.prefix(8))])
         return payload
     }
 
@@ -734,6 +754,13 @@ class KeyboardViewController: UIInputViewController {
         FileLogger.shared.debug(.keyboard, "snapshot miss",
                                 payload: ["consecutive": consecutiveSnapshotMisses])
         if consecutiveSnapshotMisses >= 6, serverPollWorkItem == nil {
+            // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+            FileLogger.shared.warn(.keyboard, "snapshot miss streak",
+                payload: ["consecutive": consecutiveSnapshotMisses,
+                          "id": String(id.uuidString.prefix(8)),
+                          "group": SharedConfig.Defaults.appGroupId,
+                          "containerAvailable": AppGroupResolver.shared.containerAvailable,
+                          "path": SharedConfig.snapshotFilePathDescription()])
             startServerPolling()
         }
     }
@@ -822,7 +849,8 @@ class KeyboardViewController: UIInputViewController {
             state = .idle
             return
         }
-        FileLogger.shared.info(.keyboard, "Resuming pending dictation",
+        // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+        FileLogger.shared.warn(.keyboard, "Resuming pending dictation",
                                payload: ["pendingRequestId": id.uuidString])
 
         // Read the snapshot to set the correct initial state instead of
@@ -830,7 +858,8 @@ class KeyboardViewController: UIInputViewController {
         // reappear reader (revision-agnostic) because the appear refresh may
         // have already consumed the current revision.
         if let payload = readSharedSnapshotForReappear(for: id) {
-            FileLogger.shared.info(.keyboard, "checkForPendingDictation snapshot",
+            // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+            FileLogger.shared.warn(.keyboard, "checkForPendingDictation snapshot",
                                    payload: ["status": payload.status.rawValue,
                                              "rev": payload.revision ?? 0])
             switch payload.status {
@@ -850,7 +879,8 @@ class KeyboardViewController: UIInputViewController {
                 return
             }
         } else {
-            FileLogger.shared.info(.keyboard,
+            // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+            FileLogger.shared.warn(.keyboard,
                 "checkForPendingDictation — no snapshot for id; defaulting to .waiting",
                 payload: ["priorState": String(describing: state)])
             switch state {
@@ -1006,6 +1036,8 @@ class KeyboardViewController: UIInputViewController {
     /// Server unreachable (app not running / crashed). Reset locally;
     /// the container app, if alive, cleans up via its own timeout.
     private func requestFallbackCancel() {
+        // DIAGNOSTIC LOGGING — TEMPORARY (Bug 2)
+        FileLogger.shared.warn(.keyboard, "fallback cancel reached", payload: ["state": KeyboardState.shortTag(state)])
         cancelDictation()
         state = .error("Couldn't reach Ritoras app. Stopped locally.")
     }

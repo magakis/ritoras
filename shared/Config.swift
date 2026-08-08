@@ -576,7 +576,12 @@ struct SharedConfig {
     /// BEFORE the UserDefaults write and BEFORE the Darwin post. No-op when the
     /// container is unavailable (SideStore).
     static func setSnapshotFile(_ payload: DictationPayload) {
-        guard let url = snapshotFileURL() else { return }
+        guard let url = snapshotFileURL() else {
+            // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+            FileLogger.shared.warn(.app, "snapshot file write skipped — container nil",
+                payload: ["group": Defaults.appGroupId])
+            return
+        }
         if let data = try? JSONEncoder().encode(payload) {
             try? data.write(to: url, options: .atomic)
         }
@@ -611,6 +616,11 @@ struct SharedConfig {
         let dir = container.appendingPathComponent("DictationResults")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("terminal.json")
+    }
+
+    /// DIAGNOSTIC LOGGING — TEMPORARY (Bug 1): human-readable path or "nil", for publish/read logs.
+    static func snapshotFilePathDescription() -> String {
+        snapshotFileURL()?.path ?? "nil"
     }
 }
 
