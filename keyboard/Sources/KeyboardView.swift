@@ -604,7 +604,7 @@ class KeyboardView: UIView {
     /// Height constraint for emojiSearchOverlay — 0 when hidden, overlayHeight when active.
     private var emojiSearchOverlayHeightConstraint: NSLayoutConstraint?
 
-    // Suggestion lookup concurrency (matching predictionBuildQueue pattern)
+    // Suggestion lookup concurrency
     private let suggestionLookupQueue = DispatchQueue(
         label: "com.ritoras.suggestion.lookup",
         qos: .userInitiated

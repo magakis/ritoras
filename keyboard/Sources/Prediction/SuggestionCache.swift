@@ -59,9 +59,9 @@ struct SuggestionDisplayCache {
 /// `suggestions()` call.
 ///
 /// `PredictionEngine` is a non-isolated `final class` called concurrently
-/// from two queues (`suggestionLookupQueue` and `predictionBuildQueue`).
-/// `@unchecked Sendable` + internal `NSLock` provides safe cross-queue access
-/// without an actor hop (which would serialize the hot path).
+/// from the `suggestionLookupQueue` and from the main thread (the synchronous
+/// autocorrect path). `@unchecked Sendable` + internal `NSLock` provides safe
+/// cross-thread access without an actor hop (which would serialize the hot path).
 final class MergedPoolLRU: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [UInt64: [Suggestion]] = [:]

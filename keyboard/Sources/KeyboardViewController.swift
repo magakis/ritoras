@@ -76,10 +76,6 @@ class KeyboardViewController: UIInputViewController {
     /// process-global holder): advances exactly once per process lifetime,
     /// so this reads 1 from the first build onward — never 2, 3, … per show.
     private static var buildGeneration: Int { SharedPredictionStack.shared.generation }
-    private let predictionBuildQueue = DispatchQueue(
-        label: "com.ritoras.prediction.build",
-        qos: .userInitiated
-    )
 
     /// Tracks the current server-poll data task so it can be cancelled before
     /// the next poll starts or when transports are stopped.
@@ -106,7 +102,6 @@ class KeyboardViewController: UIInputViewController {
     private var waitTimer: Timer?
     private var errorResetWorkItem: DispatchWorkItem?
     private var suggestionRefreshWorkItem: DispatchWorkItem?
-    private var autocorrectWorkItem: DispatchWorkItem?
     private var pollTimer: Timer?
     private var pollCount = 0
 
@@ -956,8 +951,6 @@ class KeyboardViewController: UIInputViewController {
         errorResetWorkItem = nil
         suggestionRefreshWorkItem?.cancel()
         suggestionRefreshWorkItem = nil
-        autocorrectWorkItem?.cancel()
-        autocorrectWorkItem = nil
 
         // URLSessionDataTask
         currentPollTask?.cancel()
@@ -1134,6 +1127,32 @@ class KeyboardViewController: UIInputViewController {
     private func clearDeferredResult() {
         UserDefaults.standard.removeObject(forKey: "ritoras_deferred_text")
         UserDefaults.standard.removeObject(forKey: "ritoras_deferred_ts")
+    }
+
+    /// Reads + age-checks + clears the deferred dictation text synchronously
+    /// (so a re-entrant textDidChange/selectionDidChange cannot double-flush),
+    /// then inserts it on the NEXT run-loop turn so the mutation does not run
+    /// inside the host's own change/selection callback (caret snap-back fix).
+    /// Called from textDidChange / selectionDidChange only. viewDidAppear flushes
+    /// synchronously (lifecycle callback, not a change callback).
+    private func scheduleDeferredDictationFlush(reason: String) {
+        guard let deferredText = UserDefaults.standard.string(forKey: "ritoras_deferred_text"),
+              !deferredText.isEmpty else { return }
+        let deferredTs = UserDefaults.standard.double(forKey: "ritoras_deferred_ts")
+        let age = deferredTs > 0 ? Date().timeIntervalSince1970 - deferredTs : 0
+        guard age < 300 else { clearDeferredResult(); return }
+        clearDeferredResult()
+        let textToInsert = deferredText
+        FileLogger.shared.info(.keyboard, "Scheduling deferred dictation flush",
+                               payload: ["reason": reason, "length": textToInsert.count, "age": age])
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.view.window != nil else { return }
+            self.state = .inserting
+            self.textDocumentProxy.insertText(self.normalizedDictationInsertion(of: textToInsert))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                self?.state = .idle
+            }
+        }
     }
 
     // MARK: - Server Polling (Works when app is backgrounded)
@@ -1330,7 +1349,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             let text = applyShift(to: s)
             insertTargeted(text)
             if shouldAutoCorrect {
-                requestAsyncAutocorrect(triggerChar: text)
+                applyAutocorrectForTrigger(triggerChar: text)
             }
             if shiftState == .upper {
                 shiftState = .lower
@@ -1382,7 +1401,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         case .space:
             insertTargeted(" ")
-            requestAsyncAutocorrect(triggerChar: " ")
+            applyAutocorrectForTrigger(triggerChar: " ")
             recomputeAutoCap()
             scheduleSuggestionRefresh()
             wordOrigin.resetToTyping()
@@ -1392,7 +1411,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 keyboardView.emojiPanelView.onSearchReturn?()
             } else {
                 insertTargeted("\n")
-                requestAsyncAutocorrect(triggerChar: "\n")
+                applyAutocorrectForTrigger(triggerChar: "\n")
                 recomputeAutoCap()
                 wordOrigin.resetToTyping()
                 scheduleSuggestionRefresh()
@@ -1583,23 +1602,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         // Flush deferred dictation result if one exists (the user has now
         // focused/activated a text field).
-        if let deferredText = UserDefaults.standard.string(forKey: "ritoras_deferred_text"),
-           !deferredText.isEmpty {
-            let deferredTs = UserDefaults.standard.double(forKey: "ritoras_deferred_ts")
-            let age = deferredTs > 0 ? Date().timeIntervalSince1970 - deferredTs : 0
-            guard age < 300 else {
-                clearDeferredResult()
-                return
-            }
-            FileLogger.shared.info(.keyboard, "Inserting deferred dictation result (textDidChange)",
-                                   payload: ["length": deferredText.count, "age": age])
-            clearDeferredResult()
-            state = .inserting
-            textDocumentProxy.insertText(normalizedDictationInsertion(of: deferredText))
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                self?.state = .idle
-            }
-        }
+        scheduleDeferredDictationFlush(reason: "textDidChange")
     }
 
     override func textWillChange(_ textInput: UITextInput?) {
@@ -1625,38 +1628,22 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         // Flush deferred dictation result if one exists (the user has now
         // focused/activated a text field).
-        if let deferredText = UserDefaults.standard.string(forKey: "ritoras_deferred_text"),
-           !deferredText.isEmpty {
-            let deferredTs = UserDefaults.standard.double(forKey: "ritoras_deferred_ts")
-            let age = deferredTs > 0 ? Date().timeIntervalSince1970 - deferredTs : 0
-            guard age < 300 else {
-                clearDeferredResult()
-                return
-            }
-            FileLogger.shared.info(.keyboard, "Inserting deferred dictation result (selectionDidChange)",
-                                   payload: ["length": deferredText.count, "age": age])
-            clearDeferredResult()
-            state = .inserting
-            textDocumentProxy.insertText(normalizedDictationInsertion(of: deferredText))
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                self?.state = .idle
-            }
-        }
+        scheduleDeferredDictationFlush(reason: "selectionDidChange")
     }
 
     // MARK: - Autocorrect-on-space
 
-    /// Dispatches an async autocorrect evaluation on the prediction build queue.
+    /// Evaluates and applies autocorrect synchronously for a trigger character.
     ///
     /// The trigger character (space / punct / return) has already been inserted
-    /// by the caller. This method captures a snapshot of the word context on
-    /// the main thread, runs spell-check + engine lookup + scoring off-main,
-    /// then re-validates on the main thread with a strict context guard before
-    /// applying the correction.
+    /// by the caller. Spell-check + engine lookup + scoring run inline on the
+    /// main thread in the same run-loop turn as the keystroke, so the host
+    /// coalesces the delete-burst + re-insert into one transaction (no caret
+    /// snap-back). UITextChecker is a UIKit API and must run on the main thread.
     ///
-    /// Stale results (superseded by further typing, cursor movement, or
-    /// suggestion taps) are silently dropped by the application guard.
-    private func requestAsyncAutocorrect(triggerChar: String) {
+    /// The strict context guard is still applied before the correction, so any
+    /// state change since the keystroke silently drops the result.
+    private func applyAutocorrectForTrigger(triggerChar: String) {
         // --- Synchronous early-return guards (same as today) ---
         guard inputTarget == .hostApp else { return }
         guard settingsCache.autocorrectOnSpace else { return }
@@ -1692,101 +1679,91 @@ extension KeyboardViewController: KeyboardViewDelegate {
         // Defensive: the suffix must match what we expect.
         guard contextAtDispatch.hasSuffix(typedWord + triggerChar) else { return }
 
-        // Cancel any in-flight autocorrect evaluation (bounds SymSpell
-        // concurrency and avoids wasted CPU).
-        autocorrectWorkItem?.cancel()
-
-        let workItem = DispatchWorkItem { [weak self, weak engine] in
-            guard let self = self, let engine = engine else { return }
-
-            // --- Off-main: pure compute only ---
-            let isMisspelled: Bool = {
-                let checker = UITextChecker()
-                let nsString = typedWord as NSString
-                let range = NSRange(location: 0, length: nsString.length)
-                let misspelledRange = checker.rangeOfMisspelledWord(
-                    in: typedWord,
-                    range: range,
-                    startingAt: 0,
-                    wrap: false,
-                    language: "en-US"
-                )
-                return misspelledRange.location != NSNotFound
-            }()
-
-            let top = engine.topCorrection(
-                forCurrentWord: currentWord,
-                lookupWord: typedWord,
-                previousWord: previousWord,
-                previousWord2: previousWord2
+        // --- Main-thread compute (UITextChecker is a UIKit API) ---
+        let computeStart = Date()
+        let isMisspelled: Bool = {
+            let checker = UITextChecker()
+            let nsString = typedWord as NSString
+            let range = NSRange(location: 0, length: nsString.length)
+            let misspelledRange = checker.rangeOfMisspelledWord(
+                in: typedWord,
+                range: range,
+                startingAt: 0,
+                wrap: false,
+                language: "en-US"
             )
+            return misspelledRange.location != NSNotFound
+        }()
+        let uitextcheckerMs = Int(Date().timeIntervalSince(computeStart) * 1000)
 
-            let fusionActive = engine.fusionIsActive(previousWord: previousWord)
-            let config = AutocorrectController.Config(
-                minWordLength: SharedConfig.Defaults.autocorrectMinWordLength,
-                maxWordLength: SharedConfig.Defaults.autocorrectMaxWordLength,
-                minConfidenceScore: fusionActive
-                    ? SharedConfig.Defaults.autocorrectMinConfidenceScoreFused
-                    : SharedConfig.Defaults.autocorrectMinConfidenceScore
-            )
+        let top = engine.topCorrection(
+            forCurrentWord: currentWord,
+            lookupWord: typedWord,
+            previousWord: previousWord,
+            previousWord2: previousWord2
+        )
 
-            let decision = AutocorrectController.evaluate(
-                typedWord: typedWord,
-                origin: originAtDispatch,
-                topCorrection: top,
-                isLearned: isLearned,
-                isMisspelled: isMisspelled,
-                config: config
-            )
+        let fusionActive = engine.fusionIsActive(previousWord: previousWord)
+        let config = AutocorrectController.Config(
+            minWordLength: SharedConfig.Defaults.autocorrectMinWordLength,
+            maxWordLength: SharedConfig.Defaults.autocorrectMaxWordLength,
+            minConfidenceScore: fusionActive
+                ? SharedConfig.Defaults.autocorrectMinConfidenceScoreFused
+                : SharedConfig.Defaults.autocorrectMinConfidenceScore
+        )
 
-            // --- Back to main thread for guard + apply ---
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                // Liveness gate: if the keyboard is no longer in a window,
-                // the textDocumentProxy is dead — reading it in
-                // AutocorrectApplicationGuard.shouldApply (which reads
-                // documentContextBeforeInput) would crash with SIGSEGV.
-                if self.view.window == nil {
-                    return
-                }
+        let decision = AutocorrectController.evaluate(
+            typedWord: typedWord,
+            origin: originAtDispatch,
+            topCorrection: top,
+            isLearned: isLearned,
+            isMisspelled: isMisspelled,
+            config: config
+        )
+        FileLogger.shared.debug(.keyboard, "autocorrect compute",
+            payload: ["ms": Int(Date().timeIntervalSince(computeStart) * 1000),
+                      "uitextcheckerMs": uitextcheckerMs])
 
-                // Application guard: all three must hold or the result is stale.
-                guard AutocorrectApplicationGuard.shouldApply(
-                    snapshot: AutocorrectAsyncSnapshot(
-                        typedWord: typedWord,
-                        triggerChar: triggerChar
-                    ),
-                    liveContext: textDocumentProxy.documentContextBeforeInput ?? "",
-                    isHostApp: inputTarget == .hostApp,
-                    wordOrigin: wordOrigin.current
-                ) else { return }
-
-                switch decision {
-                case .correct(_, let correction):
-                    // No word learned here — intentionally.
-                    //
-                    // The correction target is already a valid dictionary word
-                    // (learning it is a no-op), and the user's typed input was a
-                    // misspelling that would pollute the dictionary. Only the
-                    // revert-on-backspace path (L-revert) or an explicit long-press
-                    // (L-longpress) should learn — not passive autocorrect-accept.
-                    // Delete typedWord + triggerChar and re-insert correction + triggerChar.
-                    // Byte-identical to today's synchronous outcome: document ends with
-                    // `correction<triggerChar>` and cursor is at the end.
-                    let deleteCount = typedWord.count + triggerChar.count
-                    for _ in 0..<deleteCount {
-                        deleteTargetedBackward()
-                    }
-                    insertTargeted(correction + triggerChar)
-                    lastAutoCorrection = (typed: typedWord, replacement: correction)
-                case .leaveAsIs:
-                    lastAutoCorrection = nil
-                }
-            }
+        // Liveness gate: if the keyboard is no longer in a window,
+        // the textDocumentProxy is dead — reading it in
+        // AutocorrectApplicationGuard.shouldApply (which reads
+        // documentContextBeforeInput) would crash with SIGSEGV.
+        if self.view.window == nil {
+            return
         }
 
-        autocorrectWorkItem = workItem
-        predictionBuildQueue.async(execute: workItem)
+        // Application guard: all three must hold or the result is stale.
+        guard AutocorrectApplicationGuard.shouldApply(
+            snapshot: AutocorrectAsyncSnapshot(
+                typedWord: typedWord,
+                triggerChar: triggerChar
+            ),
+            liveContext: textDocumentProxy.documentContextBeforeInput ?? "",
+            isHostApp: inputTarget == .hostApp,
+            wordOrigin: wordOrigin.current
+        ) else { return }
+
+        switch decision {
+        case .correct(_, let correction):
+            // No word learned here — intentionally.
+            //
+            // The correction target is already a valid dictionary word
+            // (learning it is a no-op), and the user's typed input was a
+            // misspelling that would pollute the dictionary. Only the
+            // revert-on-backspace path (L-revert) or an explicit long-press
+            // (L-longpress) should learn — not passive autocorrect-accept.
+            // Delete typedWord + triggerChar and re-insert correction + triggerChar.
+            // Byte-identical to today's synchronous outcome: document ends with
+            // `correction<triggerChar>` and cursor is at the end.
+            let deleteCount = typedWord.count + triggerChar.count
+            for _ in 0..<deleteCount {
+                deleteTargetedBackward()
+            }
+            insertTargeted(correction + triggerChar)
+            lastAutoCorrection = (typed: typedWord, replacement: correction)
+        case .leaveAsIs:
+            lastAutoCorrection = nil
+        }
     }
 
     /// Returns true if the cursor sits immediately after an autocorrect of `word`,
