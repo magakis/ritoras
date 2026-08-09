@@ -107,7 +107,7 @@ final class DictationViewModel: ObservableObject {
     private var snapshotRevision: UInt64 = 0
 
     private var recorder: AudioRecorder?
-    private var activeID: UUID?
+    private(set) var activeID: UUID?
     private var recordingStartTime: Date?
 
     private var streamRecorder: StreamingAudioRecorder?

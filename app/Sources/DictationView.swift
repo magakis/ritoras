@@ -43,7 +43,7 @@ struct DictationView: View {
         .onDisappear {
             timer?.invalidate()
             switch viewModel.phase {
-            case .recording:
+            case .recording where viewModel.activeID != nil:
                 Task { await viewModel.cancel() }
             default:
                 // During transcribing the background task keeps the app alive
