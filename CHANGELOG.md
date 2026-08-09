@@ -19,6 +19,12 @@ Builds before the first numbered section below had no changelog.
 
 ### Fixed
 
+- Starting a new dictation immediately after stopping or cancelling one no longer corrupts the new session — the new recording used to be torn down or left in a broken state.
+- Switching to another text field while a transcription is still being processed no longer inserts the dictated text into the wrong field.
+- Holding the backspace key while a dictation times out no longer causes unwanted deletions in the next text field you focus.
+- Rapidly double-tapping the stop/cancel control no longer fires duplicate cancel requests.
+- Fixed a rare concurrency issue in the local dictation server that could affect running dictations.
+
 <!-- To cut a build: rename "## Unreleased" to "## Build <run_number> — <YYYY-MM-DD>",
      then open a fresh "## Unreleased" above it. <run_number> = latest CI run
      number + 1 (see the install page or `gh run list --workflow build.yml -L 1`). -->
