@@ -31,6 +31,9 @@ Builds before the first numbered section below had no changelog.
 - Fixed dictation results not reaching the keyboard on SideStore installs where the shared app-group container was unavailable — results now arrive through a localhost fallback.
 - The Debug Logs screen no longer jumps back to the top while you're scrolling through older log entries.
 - Fixed an issue where the dictation recording indicator could briefly disappear right after starting, making it seem like the recording had stopped.
+- A dictation result that comes through while you're in a different text field now waits for the original field instead of pasting into the wrong one.
+- When a dictation times out or fails, the keyboard now fully stops its background polling instead of letting it run silently.
+- Under memory pressure, the keyboard now sheds restartable background work alongside its dictionary so iOS is less likely to kill it mid-typing; an in-flight dictation keeps its recovery path.
 
 <!-- To cut a build: rename "## Unreleased" to "## Build <run_number> — <YYYY-MM-DD>",
      then open a fresh "## Unreleased" above it. <run_number> = latest CI run
