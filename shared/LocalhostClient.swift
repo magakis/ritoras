@@ -135,12 +135,10 @@ enum LocalhostClient {
             guard let httpResponse = response as? HTTPURLResponse else { return false }
             let success = httpResponse.statusCode >= 200 && httpResponse.statusCode < 300
             if !success {
-                // DIAGNOSTIC LOGGING — TEMPORARY (Bug 2)
                 FileLogger.shared.warn(.network, "POST\(path) non-2xx", payload: ["status": httpResponse.statusCode])
             }
             return success
         } catch {
-            // DIAGNOSTIC LOGGING — TEMPORARY (Bug 2)
             FileLogger.shared.warn(.network, "POST\(path) transport error", payload: ["error": error.localizedDescription])
             return false
         }

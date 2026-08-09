@@ -577,8 +577,7 @@ struct SharedConfig {
     /// container is unavailable (SideStore).
     static func setSnapshotFile(_ payload: DictationPayload) {
         guard let url = snapshotFileURL() else {
-            // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
-            FileLogger.shared.warn(.app, "snapshot file write skipped — container nil",
+            FileLogger.shared.debug(.app, "snapshot file write skipped — container nil",
                 payload: ["group": Defaults.appGroupId])
             return
         }
@@ -623,10 +622,10 @@ struct SharedConfig {
         snapshotFileURL()?.path ?? "nil"
     }
 
-    /// DIAGNOSTIC LOGGING — TEMPORARY (Bug 1): app-group resolution diagnostics at
-    /// `.warn` level so they survive a Jetsam kill. Must be called by a CALLER after
-    /// `appGroupId` is resolved and FileLogger is initialized — AppGroupResolver cannot
-    /// use FileLogger internally (FileLogger depends on the resolved id → recursion).
+    /// App-group resolution diagnostics (dev dump, gated by Verbose Logging). Must be
+    /// called by a CALLER after `appGroupId` is resolved and FileLogger is initialized —
+    /// AppGroupResolver cannot use FileLogger internally (FileLogger depends on the
+    /// resolved id → recursion).
     static func logAppGroupDiagnostics(component: LogComponent) {
         let resolver = AppGroupResolver.shared
         let trace = resolver.resolutionTrace
@@ -647,7 +646,7 @@ struct SharedConfig {
         } else {
             altAppGroups = "<absent>"
         }
-        FileLogger.shared.warn(component, "app-group resolution diagnostics", payload: [
+        FileLogger.shared.debug(component, "app-group resolution diagnostics", payload: [
             "strategy": strategy,
             "containerAvailable": containerOk,
             "bundleId": bundleId,
