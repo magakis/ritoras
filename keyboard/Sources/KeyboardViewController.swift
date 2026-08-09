@@ -19,8 +19,8 @@ class KeyboardViewController: UIInputViewController {
             }
             FileLogger.shared.debug(.keyboard, "state: \(String(describing: state))",
                                    payload: ["pendingRequestId": pendingRequestId?.uuidString ?? "nil"])
-            // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1) — lean tag, avoids large strings under Jetsam cap
-            FileLogger.shared.warn(.keyboard, "state →", payload: ["state": KeyboardState.shortTag(state), "pendingId": String(pendingRequestId?.uuidString.prefix(8) ?? "nil")])
+            // Lean tag — avoids large strings under Jetsam cap
+            FileLogger.shared.info(.keyboard, "state →", payload: ["state": KeyboardState.shortTag(state), "pendingId": String(pendingRequestId?.uuidString.prefix(8) ?? "nil")])
         }
     }
 
@@ -113,8 +113,27 @@ class KeyboardViewController: UIInputViewController {
 
     private var snapshotPollTimer: DispatchSourceTimer?
     private var darwinStateChangedToken: DarwinObserverToken?
-    /// Tracks consecutive snapshot misses (app-group read returned nil). When this
-    /// reaches 6, /jobs server polling starts as an emergency fallback.
+
+    /// Miss-streak thresholds for the snapshot fallback tiers. Internal
+    /// constants, not user-tunable runtime parameters.
+    private enum SnapshotThresholds {
+        /// After this many consecutive app-group misses, poll the localhost
+        /// /state endpoint. Deliberately 1: on SideStore the app-group
+        /// container is structurally nil and cfprefsd lags ~1–2s, but the
+        /// container app's in-memory payload holder is populated synchronously
+        /// before the Darwin post — so localhost already holds the fresh
+        /// payload when the first Darwin-driven refresh fires. Waiting one
+        /// more cycle would miss the transient `.recording` phase.
+        static let localhostFallbackMisses = 1
+        /// After this many consecutive misses, start /jobs server polling as
+        /// an emergency fallback (container app is not writing snapshots).
+        static let serverPollMisses = 6
+    }
+
+    /// Tracks consecutive snapshot misses (app-group read returned nil).
+    /// The localhost /state fallback fires after
+    /// `SnapshotThresholds.localhostFallbackMisses` miss(es); /jobs server
+    /// polling starts after `SnapshotThresholds.serverPollMisses`.
     private var consecutiveSnapshotMisses: Int = 0
     /// Stored Task for refreshFromSharedState, cancelled on teardown and
     /// superseded on each new spawn to prevent interleaved concurrent executions.
@@ -212,17 +231,15 @@ class KeyboardViewController: UIInputViewController {
         KeyboardLogShipper.shared.start()
 
         // Log the resolved app-group identifier via FileLogger (post-resolution, safe to use FileLogger now).
-        // Promoted to .warn so it survives a keyboard process kill (Jetsam) and reaches
-        // the DebugLogView via the log shipper — critical for SideStore diagnostic triage.
-        FileLogger.shared.warn(.keyboard, "AppGroupResolver outcome", payload: [
+        FileLogger.shared.debug(.keyboard, "AppGroupResolver outcome", payload: [
             "resolvedIdentifier": SharedConfig.Defaults.appGroupId,
             "strategy": AppGroupResolver.shared.resolvedStrategy,
             "bundleId": Bundle.main.bundleIdentifier ?? "?",
-            "path": SharedConfig.snapshotFilePathDescription(),                 // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
-            "containerAvailable": AppGroupResolver.shared.containerAvailable,   // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+            "path": SharedConfig.snapshotFilePathDescription(),
+            "containerAvailable": AppGroupResolver.shared.containerAvailable,
             "resolutionTrace": AppGroupResolver.shared.resolutionTrace
         ])
-        // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1): full resolution diagnostics incl. ALTAppGroups.
+        // Full resolution diagnostics incl. ALTAppGroups.
         SharedConfig.logAppGroupDiagnostics(component: .keyboard)
 
         NSSetUncaughtExceptionHandler { exception in
@@ -538,8 +555,7 @@ class KeyboardViewController: UIInputViewController {
 
         let id = UUID()
         pendingRequestId = id
-        // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
-        FileLogger.shared.warn(.keyboard, "dictation start appgroup",
+        FileLogger.shared.debug(.keyboard, "dictation start appgroup",
             payload: ["id": String(id.uuidString.prefix(8)),
                       "group": SharedConfig.Defaults.appGroupId,
                       "path": SharedConfig.snapshotFilePathDescription(),
@@ -658,8 +674,6 @@ class KeyboardViewController: UIInputViewController {
                                         payload: ["status": filePayload.status.rawValue,
                                                   "rev": fileRev,
                                                   "id": String(filePayload.id.uuidString.prefix(8))])
-                // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
-                FileLogger.shared.warn(.keyboard, "snapshot hit", payload: ["src": "file", "status": filePayload.status.rawValue, "rev": fileRev, "id": String(filePayload.id.uuidString.prefix(8))])
                 return filePayload
             }
         }
@@ -685,8 +699,6 @@ class KeyboardViewController: UIInputViewController {
                                 payload: ["status": payload.status.rawValue,
                                           "rev": rev,
                                           "id": String(payload.id.uuidString.prefix(8))])
-        // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
-        FileLogger.shared.warn(.keyboard, "snapshot hit", payload: ["src": "defaults", "status": payload.status.rawValue, "rev": rev, "id": String(payload.id.uuidString.prefix(8))])
         return payload
     }
 
@@ -708,16 +720,13 @@ class KeyboardViewController: UIInputViewController {
                                     payload: ["status": filePayload.status.rawValue,
                                               "rev": filePayload.revision ?? 0,
                                               "id": String(filePayload.id.uuidString.prefix(8))])
-            // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
-            FileLogger.shared.warn(.keyboard, "snapshot reappear", payload: ["src": "file", "status": filePayload.status.rawValue, "rev": filePayload.revision ?? 0, "id": String(filePayload.id.uuidString.prefix(8))])
             return filePayload
         }
         // Fallback: app-group UserDefaults snapshot.
         guard let payload = SharedConfig.dictationSnapshot(),
               payload.id == id else {
             FileLogger.shared.debug(.keyboard, "snapshot reappear read: miss no snapshot")
-            // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
-            FileLogger.shared.warn(.keyboard, "snapshot reappear miss", payload: ["group": SharedConfig.Defaults.appGroupId, "containerAvailable": AppGroupResolver.shared.containerAvailable, "id": String(id.uuidString.prefix(8))])
+            FileLogger.shared.debug(.keyboard, "snapshot reappear miss", payload: ["group": SharedConfig.Defaults.appGroupId, "containerAvailable": AppGroupResolver.shared.containerAvailable, "id": String(id.uuidString.prefix(8))])
             return nil
         }
         lastSeenSnapshotRevision = max(lastSeenSnapshotRevision, payload.revision ?? 0)
@@ -725,17 +734,20 @@ class KeyboardViewController: UIInputViewController {
                                 payload: ["status": payload.status.rawValue,
                                           "rev": payload.revision ?? 0,
                                           "id": String(payload.id.uuidString.prefix(8))])
-        // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
-        FileLogger.shared.warn(.keyboard, "snapshot reappear", payload: ["src": "defaults", "status": payload.status.rawValue, "rev": payload.revision ?? 0, "id": String(payload.id.uuidString.prefix(8))])
         return payload
     }
 
     /// Reads the current dictation snapshot from the app-group. Called from
     /// the snapshot poll timer and from the Darwin state-changed notification.
     /// The app-group snapshot (via `readSharedSnapshot`) is the primary channel;
-    /// after 2 consecutive misses the localhost /state endpoint is polled as a
+    /// after 1 consecutive miss the localhost /state endpoint is polled as a
     /// fallback (container app still alive, app-group container nil under
-    /// SideStore).
+    /// SideStore). The threshold is 1 because on SideStore the app-group
+    /// container is structurally nil and cfprefsd lags ~1–2s, but the container
+    /// app's in-memory payload holder is populated synchronously before the
+    /// Darwin post — so localhost already holds the fresh payload on the first
+    /// Darwin-driven refresh. Waiting for a second miss would let the transient
+    /// `.recording` phase advance to `.transcribing`.
     private func refreshFromSharedState() async {
         guard let id = pendingRequestId else {
             return
@@ -754,10 +766,15 @@ class KeyboardViewController: UIInputViewController {
         FileLogger.shared.debug(.keyboard, "snapshot miss",
                                 payload: ["consecutive": consecutiveSnapshotMisses])
 
-        // Localhost fallback tier: after 2 consecutive app-group misses, poll the
+        // Localhost fallback tier: after 1 consecutive app-group miss, poll the
         // container app's localhost /state endpoint. Local and instant — the same
         // payload the app-group path would deliver (id + revision dedup identical).
-        if consecutiveSnapshotMisses >= 2 {
+        // On SideStore the app-group container is structurally nil and cfprefsd
+        // lags ~1–2s, but lastPayloadHolder is populated synchronously before the
+        // Darwin post, so localhost already holds the fresh payload on the first
+        // Darwin-driven refresh. Waiting one more cycle would miss the transient
+        // `.recording` phase.
+        if consecutiveSnapshotMisses >= SnapshotThresholds.localhostFallbackMisses {
             if let httpPayload = await LocalhostClient.getState(),
                httpPayload.id == pendingRequestId,
                (httpPayload.revision ?? 0) > lastSeenSnapshotRevision {
@@ -769,8 +786,7 @@ class KeyboardViewController: UIInputViewController {
 
         // Start /jobs server polling if the threshold is reached and polling
         // is not already running.
-        if consecutiveSnapshotMisses >= 6, serverPollWorkItem == nil {
-            // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
+        if consecutiveSnapshotMisses >= SnapshotThresholds.serverPollMisses, serverPollWorkItem == nil {
             FileLogger.shared.warn(.keyboard, "snapshot miss streak",
                 payload: ["consecutive": consecutiveSnapshotMisses,
                           "id": String(id.uuidString.prefix(8)),
@@ -893,8 +909,7 @@ class KeyboardViewController: UIInputViewController {
             state = .idle
             return
         }
-        // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
-        FileLogger.shared.warn(.keyboard, "Resuming pending dictation",
+        FileLogger.shared.info(.keyboard, "Resuming pending dictation",
                                payload: ["pendingRequestId": id.uuidString])
 
         // Read the snapshot to set the correct initial state instead of
@@ -902,8 +917,7 @@ class KeyboardViewController: UIInputViewController {
         // reappear reader (revision-agnostic) because the appear refresh may
         // have already consumed the current revision.
         if let payload = readSharedSnapshotForReappear(for: id) {
-            // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
-            FileLogger.shared.warn(.keyboard, "checkForPendingDictation snapshot",
+            FileLogger.shared.info(.keyboard, "checkForPendingDictation snapshot",
                                    payload: ["status": payload.status.rawValue,
                                              "rev": payload.revision ?? 0])
             switch payload.status {
@@ -923,8 +937,7 @@ class KeyboardViewController: UIInputViewController {
                 return
             }
         } else {
-            // DIAGNOSTIC LOGGING — TEMPORARY (Bug 1)
-            FileLogger.shared.warn(.keyboard,
+            FileLogger.shared.debug(.keyboard,
                 "checkForPendingDictation — no snapshot for id; defaulting to .waiting",
                 payload: ["priorState": String(describing: state)])
             switch state {
@@ -1080,7 +1093,6 @@ class KeyboardViewController: UIInputViewController {
     /// Server unreachable (app not running / crashed). Reset locally;
     /// the container app, if alive, cleans up via its own timeout.
     private func requestFallbackCancel() {
-        // DIAGNOSTIC LOGGING — TEMPORARY (Bug 2)
         FileLogger.shared.warn(.keyboard, "fallback cancel reached", payload: ["state": KeyboardState.shortTag(state)])
         cancelDictation()
         state = .error("Couldn't reach Ritoras app. Stopped locally.")
