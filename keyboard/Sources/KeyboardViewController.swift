@@ -363,6 +363,17 @@ class KeyboardViewController: UIInputViewController {
         let after = MemoryMonitor.currentFootprint()
         FileLogger.shared.warn(.lifecycle,
             "didReceiveMemoryWarning: trigram shed \(before) → \(after) (\(freed) freed)")
+
+        // Under memory pressure, shed restartable background work. When a dictation
+        // is in flight, preserve its recovery path (waitTimer, polling, snapshot) so
+        // the in-flight request can still complete or time out; shed only the
+        // suggestion lookup, which is the heaviest restartable per-keystroke work.
+        // When no dictation is active, the full teardown is safe.
+        if pendingRequestId != nil {
+            keyboardView.cancelSuggestionLookup()
+        } else {
+            cancelOutstandingAsyncWork()
+        }
     }
 
     /// Keyboard hide: the prediction stack is retained (load-once per process).
@@ -501,8 +512,8 @@ class KeyboardViewController: UIInputViewController {
             FileLogger.shared.info(.keyboard, "Mic: .waiting -> POST /stop")
             requestStop()
         case .error:
+            cancelOutstandingAsyncWork()
             state = .idle
-            serverPollTimer?.invalidate()
         default:
             break   // ignore taps while openingApp/inserting
         }
@@ -864,6 +875,7 @@ class KeyboardViewController: UIInputViewController {
     private func handleTimeout() {
         FileLogger.shared.warn(.keyboard, "Dictation timed out",
                                payload: ["pendingRequestId": pendingRequestId?.uuidString ?? "nil"])
+        stopDictationTransports()
         waitTimer = nil
         pendingRequestId = nil
         dictationTargetDocId = nil
