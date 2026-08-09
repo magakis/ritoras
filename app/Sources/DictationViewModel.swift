@@ -503,7 +503,7 @@ final class DictationViewModel: ObservableObject {
                     return
                 }
 
-                defer { self.transcriptionTask = nil }
+                defer { if self.activeID == id { self.transcriptionTask = nil } }
 
                 let uploadT0 = Date()
 
@@ -545,7 +545,7 @@ final class DictationViewModel: ObservableObject {
                             text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
                         }
                     }
-                    guard activeID == id else { return }
+                    guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
 
                     let uploadElapsed = Date().timeIntervalSince(uploadT0) * 1000
                     FileLogger.shared.info(.transcription, "upload complete", payload: [
@@ -562,12 +562,13 @@ final class DictationViewModel: ObservableObject {
                                             payload: ["jobId": deleteJobId.uuidString])
                     phase = .done(text)
                 } catch WhisperError.cancelled {
+                    guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
                     // User cancelled — do not record as failure.
                     FileLogger.shared.debug(.app, "transcription cancelled",
                                             payload: ["jobId": id.uuidString])
                     phase = .cancelled
                 } catch {
-                    guard activeID == id else { return }
+                    guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
                     let message = error.localizedDescription
                     let failedElapsed = Date().timeIntervalSince(uploadT0) * 1000
                     FileLogger.shared.info(.transcription, "upload failed", payload: [
@@ -633,10 +634,7 @@ final class DictationViewModel: ObservableObject {
             // Signal recording done and drain queue
             await streamRecorder?.stop()
 
-            guard activeID == id else {
-                await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
-                return
-            }
+            guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
             chunkSendQueue.setRecordingActive(false)
 
             var queueDrained = false
@@ -646,10 +644,7 @@ final class DictationViewModel: ObservableObject {
                 if chunkSendQueue.isEmpty { queueDrained = true; break }
                 if chunkSendQueue.hasOverflowed { finalOverflowed = true; break }
                 try? await Task.sleep(nanoseconds: 200_000_000)
-                guard activeID == id else {
-                    await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
-                    return
-                }
+                guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
             }
 
             chunkConsumerTask?.cancel()
@@ -668,10 +663,7 @@ final class DictationViewModel: ObservableObject {
 
                     let text = try await receiveTask?.value ?? ""
 
-                    guard activeID == id else {
-                        await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
-                        return
-                    }
+                    guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
 
                     let uploadElapsed = Date().timeIntervalSince(uploadT0) * 1000
                     FileLogger.shared.info(.transcription, "upload complete", payload: [
@@ -684,10 +676,7 @@ final class DictationViewModel: ObservableObject {
                                            payload: ["preview": String(text.prefix(60)),
                                                      "length": text.count])
 
-                    guard activeID == id else {
-                        await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
-                        return
-                    }
+                    guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
 
                     TranscriptionHistory.shared.add(text: text)
                     RecordingStore.shared.deleteStreamWav(for: id)
@@ -695,16 +684,14 @@ final class DictationViewModel: ObservableObject {
                                             payload: ["jobId": id.uuidString])
                     phase = .done(text)
                 } catch WhisperError.cancelled {
+                    guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
                     // User cancelled — do not record as failure.
                     RecordingStore.shared.deleteStreamWav(for: id)
                     FileLogger.shared.debug(.app, "transcription cancelled, wav deleted",
                                             payload: ["jobId": id.uuidString])
                     phase = .cancelled
                 } catch {
-                    guard activeID == id else {
-                        await cleanupStreamSession(backgroundTaskID: &backgroundTaskID)
-                        return
-                    }
+                    guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
                     handleStreamTerminalFailure(jobId: id, error: error.localizedDescription)
                 }
             } else {
@@ -720,6 +707,7 @@ final class DictationViewModel: ObservableObject {
             receiveTask = nil
 
             await streamClient?.disconnect()
+            guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
             streamClient = nil
             streamRecorder = nil
         }
@@ -983,26 +971,21 @@ final class DictationViewModel: ObservableObject {
         phase = .error(error)
     }
 
-    /// Cleans up stream session resources: ends background task, disconnects
-    /// WebSocket, and nils out stream references. Idempotent — safe to call
-    /// multiple times or on already-cleaned-up sessions.
-    private func cleanupStreamSession(backgroundTaskID: inout UIBackgroundTaskIdentifier) async {
-        chunkSendQueue.setRecordingActive(false)
-        chunkConsumerTask?.cancel()
-        chunkConsumerTask = nil
-        receiveTask?.cancel()
-        receiveTask = nil
-        if backgroundTaskID != .invalid {
-            UIApplication.shared.endBackgroundTask(backgroundTaskID)
-            backgroundTaskID = .invalid
+    /// Supersession exit for stop(): ends ONLY the caller-local background task.
+    /// Does NOT cancel streamClient/streamRecorder/receiveTask/chunkConsumerTask —
+    /// a superseding start(id:) has reassigned those to the new session and tearing
+    /// them down here would clobber it. (Replaces the buggy cleanupStreamSession-
+    /// on-supersession calls.)
+    private func endStopBackgroundTask(_ id: inout UIBackgroundTaskIdentifier) {
+        if id != .invalid {
+            UIApplication.shared.endBackgroundTask(id)
+            id = .invalid
         }
-        await streamClient?.disconnect()
-        streamClient = nil
-        streamRecorder = nil
     }
 
     func cancel() async {
         FileLogger.shared.info(.transcription, "cancel: stream teardown")
+        let id = activeID
         chunkConsumerTask?.cancel()
         chunkConsumerTask = nil
         receiveTask?.cancel()
@@ -1011,21 +994,25 @@ final class DictationViewModel: ObservableObject {
         transcriptionTask = nil
         chunkSendQueue.clearAll()
         await streamRecorder?.stop()
+        guard activeID == id else { return }
         await streamClient?.disconnect()
+        guard activeID == id else { return }
         streamClient = nil
         streamRecorder = nil
 
         FileLogger.shared.info(.transcription, "cancel: batch teardown")
         UIApplication.shared.isIdleTimerDisabled = false
         await recorder?.cleanup()
+        guard activeID == id else { return }
         recorder = nil
 
         serverSelectionTask?.cancel()
         serverSelectionTask = nil
         selectedServer = nil
 
-        if let id = activeID {
-            RecordingStore.shared.deleteStreamWav(for: id)
+        guard activeID == id else { return }
+        if let currentId = activeID {
+            RecordingStore.shared.deleteStreamWav(for: currentId)
         }
         if case .done = phase {
             FileLogger.shared.info(.transcription, "cancel: preserving .done from racing task, skipping cancelled publish")
