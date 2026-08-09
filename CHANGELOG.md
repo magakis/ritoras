@@ -15,6 +15,18 @@ Builds before the first numbered section below had no changelog.
 
 ### Added
 
+### Changed
+
+### Fixed
+
+<!-- To cut a build: rename "## Unreleased" to "## Build <run_number> — <YYYY-MM-DD>",
+     then open a fresh "## Unreleased" above it. <run_number> = latest CI run
+     number + 1 (see the install page or `gh run list --workflow build.yml -L 1`). -->
+
+## Build 245 — 2026-08-09
+
+### Added
+
 - Stop a dictation by tapping the mic button, or cancel it by holding the mic button for 3 seconds — no need to switch back to the app.
 - Added diagnostic logging that shows exactly which app-group resolution step fails, making sharing problems easier to track down.
 
@@ -35,7 +47,3 @@ Builds before the first numbered section below had no changelog.
 - A dictation result that comes through while you're in a different text field now waits for the original field instead of pasting into the wrong one.
 - When a dictation times out or fails, the keyboard now fully stops its background polling instead of letting it run silently.
 - Under memory pressure, the keyboard now sheds restartable background work alongside its dictionary so iOS is less likely to kill it mid-typing; an in-flight dictation keeps its recovery path.
-
-<!-- To cut a build: rename "## Unreleased" to "## Build <run_number> — <YYYY-MM-DD>",
-     then open a fresh "## Unreleased" above it. <run_number> = latest CI run
-     number + 1 (see the install page or `gh run list --workflow build.yml -L 1`). -->
