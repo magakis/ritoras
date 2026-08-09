@@ -48,16 +48,13 @@ final class LocalhostServer {
             switch state {
             case .ready:
                 let actual = self?.listener?.port?.rawValue ?? 0
-                // DIAGNOSTIC LOGGING — TEMPORARY (Bug 2)
-                FileLogger.shared.warn(.network, "LocalhostServer: ready",
+                FileLogger.shared.info(.network, "LocalhostServer: ready",
                                        payload: ["port": actual])
             case .failed(let error):
-                // DIAGNOSTIC LOGGING — TEMPORARY (Bug 2)
                 FileLogger.shared.warn(.network, "LocalhostServer: listener failed",
                                        payload: ["error": error.localizedDescription])
             case .cancelled:
-                // DIAGNOSTIC LOGGING — TEMPORARY (Bug 2)
-                FileLogger.shared.warn(.network, "LocalhostServer: cancelled")
+                FileLogger.shared.debug(.network, "LocalhostServer: cancelled")
             default:
                 break
             }
@@ -294,8 +291,7 @@ final class LocalhostServer {
     /// dictation session. Fire-and-forget — returns 202 immediately; the
     /// keyboard learns the outcome via the app-group snapshot pipeline.
     private func handlePostStop() -> Data {
-        // DIAGNOSTIC LOGGING — TEMPORARY (Bug 2)
-        FileLogger.shared.warn(.network, "POST /stop received", payload: ["hasHandler": onStop != nil])
+        FileLogger.shared.info(.network, "POST /stop received", payload: ["hasHandler": onStop != nil])
         guard let handler = onStop else {
             return Self.makeJSONResponse(status: 503, body: ["error": "no handler"])
         }
@@ -307,8 +303,7 @@ final class LocalhostServer {
     /// dictation session. Fire-and-forget — returns 202 immediately; the
     /// keyboard learns the outcome via the app-group snapshot pipeline.
     private func handlePostCancel() -> Data {
-        // DIAGNOSTIC LOGGING — TEMPORARY (Bug 2)
-        FileLogger.shared.warn(.network, "POST /cancel received", payload: ["hasHandler": onCancel != nil])
+        FileLogger.shared.info(.network, "POST /cancel received", payload: ["hasHandler": onCancel != nil])
         guard let handler = onCancel else {
             return Self.makeJSONResponse(status: 503, body: ["error": "no handler"])
         }
