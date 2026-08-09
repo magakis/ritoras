@@ -29,6 +29,7 @@ Builds before the first numbered section below had no changelog.
 - Mic button now shows the red recording dot (instead of the waiting ellipsis) when you switch back to the keyboard during an active dictation.
 - Fixed a SideStore issue where the dictation button never showed the red recording dot (and cross-app sharing silently failed) because the keyboard and app could not locate their shared app-group container.
 - Fixed dictation results not reaching the keyboard on SideStore installs where the shared app-group container was unavailable — results now arrive through a localhost fallback.
+- The Debug Logs screen no longer jumps back to the top while you're scrolling through older log entries.
 
 <!-- To cut a build: rename "## Unreleased" to "## Build <run_number> — <YYYY-MM-DD>",
      then open a fresh "## Unreleased" above it. <run_number> = latest CI run
