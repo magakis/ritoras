@@ -144,6 +144,11 @@ class KeyboardViewController: UIInputViewController {
     /// that arrive after the user switched text fields.
     private var dictationTargetDocId: UUID? = nil
 
+    /// Dedup token: while a /stop or /cancel POST is in flight, ignore further
+    /// stop/cancel requests. Set synchronously (before the Task) so a rapid
+    /// double-tap is observed by the second call.
+    private var stopCancelRequestInFlight = false
+
     // Settings cache (refreshed by Darwin notification from container app)
     private let settingsCache = KeyboardSettingsCache()
     private var darwinSettingsChangedToken: DarwinObserverToken?
@@ -896,6 +901,14 @@ class KeyboardViewController: UIInputViewController {
         FileLogger.shared.warn(.keyboard, "Dictation timed out",
                                payload: ["pendingRequestId": pendingRequestId?.uuidString ?? "nil"])
         stopDictationTransports()
+        // Backspace auto-repeat has no dictation-state guard, so a timeout during a
+        // held backspace would leave backspaceTimer firing deleteBackward() into the
+        // next focused field. Tear it down here (teardown-full-cleanup skill).
+        backspaceTimer?.invalidate()
+        backspaceTimer = nil
+        backspacePhase = nil
+        backspaceSingleCharCount = 0
+        backspaceNilContextRetries = 0
         waitTimer = nil
         pendingRequestId = nil
         dictationTargetDocId = nil
@@ -1056,7 +1069,10 @@ class KeyboardViewController: UIInputViewController {
     /// happens here — the dots keep showing until the transcript lands.
     private func requestStop() {
         FileLogger.shared.info(.keyboard, "Mic: requesting stop via /stop")
+        guard !stopCancelRequestInFlight else { return }
+        stopCancelRequestInFlight = true
         Task { [weak self] in
+            defer { self?.stopCancelRequestInFlight = false }
             let ok = await LocalhostClient.postStop()
             guard let self = self else { return }
             guard ok else {
@@ -1075,7 +1091,10 @@ class KeyboardViewController: UIInputViewController {
     /// app-group pipeline delivers `.cancelled` and resets the keyboard to idle.
     private func requestCancel() {
         FileLogger.shared.info(.keyboard, "Mic: requesting cancel via /cancel")
+        guard !stopCancelRequestInFlight else { return }
+        stopCancelRequestInFlight = true
         Task { [weak self] in
+            defer { self?.stopCancelRequestInFlight = false }
             let ok = await LocalhostClient.postCancel()
             guard let self = self else { return }
             guard ok else {
@@ -1148,6 +1167,23 @@ class KeyboardViewController: UIInputViewController {
             FileLogger.shared.warn(.keyboard, "Dictation result arrived with no focused field — deferring",
                                    payload: ["documentIdentifier": textDocumentProxy.documentIdentifier.uuidString])
             storeDeferredResult(text: text)
+            stopDictationTransports()
+            pendingRequestId = nil
+            dictationTargetDocId = nil
+            state = .waiting
+            return
+        }
+
+        // Target-bound insertion: if the user switched text fields while the
+        // transcription was in flight, do NOT insert into the wrong field. Preserve
+        // the text + target so it flushes when they return to the original field
+        // (mirrors scheduleDeferredDictationFlush's mismatch handling).
+        if let targetId = dictationTargetDocId, targetId != UUID(),
+           textDocumentProxy.documentIdentifier != targetId {
+            FileLogger.shared.warn(.keyboard, "Dictation target mismatch — deferring",
+                                   payload: ["target": targetId.uuidString,
+                                             "current": textDocumentProxy.documentIdentifier.uuidString])
+            storeDeferredResult(text: text, docId: targetId)
             stopDictationTransports()
             pendingRequestId = nil
             dictationTargetDocId = nil
