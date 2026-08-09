@@ -7,7 +7,12 @@ import Network
 /// and log-shipping endpoints.
 final class LocalhostServer {
     private let port: UInt16
-    private var listener: NWListener?
+    private let listenerLock = NSLock()
+    private var _listener: NWListener?
+    private var listener: NWListener? {
+        get { listenerLock.lock(); defer { listenerLock.unlock() }; return _listener }
+        set { listenerLock.lock(); defer { listenerLock.unlock() }; _listener = newValue }
+    }
     private let queue = DispatchQueue(label: "com.ritoras.localhostserver", qos: .utility)
     private let onStop: (() async -> Void)?
     private let onCancel: (() async -> Void)?
@@ -42,12 +47,13 @@ final class LocalhostServer {
         params.allowLocalEndpointReuse = true
         params.requiredInterfaceType = .loopback
 
-        listener = try NWListener(using: params, on: NWEndpoint.Port(integerLiteral: port))
+        let newListener = try NWListener(using: params, on: NWEndpoint.Port(integerLiteral: port))
+        listener = newListener
 
-        listener?.stateUpdateHandler = { [weak self] state in
+        newListener.stateUpdateHandler = { [weak self, weak newListener] state in
             switch state {
             case .ready:
-                let actual = self?.listener?.port?.rawValue ?? 0
+                let actual = newListener?.port?.rawValue ?? 0   // local capture — no self.listener read
                 FileLogger.shared.info(.network, "LocalhostServer: ready",
                                        payload: ["port": actual])
             case .failed(let error):
@@ -60,7 +66,7 @@ final class LocalhostServer {
             }
         }
 
-        listener?.newConnectionHandler = { [weak self] connection in
+        newListener.newConnectionHandler = { [weak self] connection in
             self?.handleConnection(connection)
         }
 
