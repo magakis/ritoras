@@ -16,7 +16,6 @@ Builds before the first numbered section below had no changelog.
 ### Added
 
 - Stop a dictation by tapping the mic button, or cancel it by holding the mic button for 3 seconds — no need to switch back to the app.
-- Added a manual App Group override in Settings, so you can paste the correct identifier if the keyboard and app ever fail to share dictation results.
 - Added diagnostic logging that shows exactly which app-group resolution step fails, making sharing problems easier to track down.
 
 ### Changed

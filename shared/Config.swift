@@ -10,15 +10,6 @@ struct SharedConfig {
         /// Under SideStore, this gets team-suffixed at resign time.
         static let originalAppGroupId = "group.com.ritoras.app"
 
-        /// Manual app-group override, settable from the container app's Settings.
-        /// Empty string means "no override" — the resolver falls through to the
-        /// automatic strategies. Stored in the ORIGINAL (unsuffixed) suite name,
-        /// not the resolved one, so AppGroupResolver can read it during first
-        /// resolution without re-entering resolve() (which would deadlock under
-        /// its lock — see appGroupOverride() reader).
-        static let appGroupOverrideKey = "appGroupOverride"
-        static let appGroupOverrideDefault = ""
-
         /// Resolves the actual app-group identifier at runtime, accounting for
         /// SideStore's resign-time identifier rewriting. Result is cached for the
         /// lifetime of the process. All callers of `appGroupId` automatically benefit.
@@ -375,22 +366,6 @@ struct SharedConfig {
             return Defaults.audioFormatDefault
         }
         return AudioFormat(rawValue: raw) ?? Defaults.audioFormatDefault
-    }
-
-    /// Reads the manual app-group override from the App Group.
-    /// Used by the container app's Settings and by AppGroupResolver as Strategy −1.
-    /// Returns the default (`""`, meaning "no override") when the suite is
-    /// unavailable or the key is unset.
-    /// NOTE: reads from the ORIGINAL (unsuffixed) suite name, NOT the resolved
-    /// `Defaults.appGroupId` — AppGroupResolver.performResolution() calls this
-    /// reader while holding its lock, and `Defaults.appGroupId` would re-enter
-    /// resolve() and deadlock. AppSettings persists to the same original suite,
-    /// so this stays consistent with what the user set.
-    static func appGroupOverride() -> String {
-        guard let defaults = UserDefaults(suiteName: Defaults.originalAppGroupId) else {
-            return Defaults.appGroupOverrideDefault
-        }
-        return defaults.string(forKey: Defaults.appGroupOverrideKey) ?? Defaults.appGroupOverrideDefault
     }
 
     /// Reads the auto-capitalization enabled flag from the App Group.
@@ -768,17 +743,17 @@ final class AppGroupResolver {
         defer { _resolutionTrace = String(trace.prefix(512)) }
         let bundleId = Bundle.main.bundleIdentifier ?? "<nil>"
 
-        // Strategy −1: manual override (user-settable from container app Settings)
-        let override = SharedConfig.appGroupOverride()
-        if !override.isEmpty {
-            if FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: override) != nil {
-                NSLog("AppGroupResolver: strategy=manual-override identifier=\(override)")
-                _resolvedStrategy = "manual-override"
-                trace += "manual-override[\(override)]=ok; "
-                return override
-            }
-            trace += "manual-override[\(override)]=nil; "
-        }
+        // SIDESTORE NOTE: On SideStore installs, the app-group container is
+        // fundamentally unavailable. SideStore appends a TeamID (e.g. 64GGL77Z3X)
+        // to the bundle ID (com.ritoras.app.64GGL77Z3X) and the resolver correctly
+        // derives the suffixed group ID (group.com.ritoras.app.64GGL77Z3X), but
+        // containerURL() returns nil for ALL identifiers — original, suffixed, and
+        // mobileprovision-derived. The ALTAppGroups plist key is absent. The
+        // container simply does not exist under any discoverable name.
+        // Dictation result delivery uses the localhost GET /state fallback transport
+        // (see LocalhostClient.getState / LocalhostServer /state route) which
+        // bypasses the container entirely. Do NOT add a manual override — there is
+        // no valid identifier the user could type. Confirmed empirically 2026-08-09.
 
         // Strategy 0 (GROUND TRUTH): read the app-group identifiers SideStore embedded
         // into this bundle's Info.plist under the custom "ALTAppGroups" key.

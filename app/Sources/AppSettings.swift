@@ -12,7 +12,6 @@ class AppSettings: ObservableObject {
     @Published var audioFormat: SharedConfig.AudioFormat = .aac
     @Published var verboseLogging: Bool = SharedConfig.Defaults.verboseLoggingDefault
     @Published var hapticsEnabled: Bool = SharedConfig.Defaults.hapticsEnabledDefault
-    @Published var appGroupOverride: String = SharedConfig.Defaults.appGroupOverrideDefault
 
     @Published var streamVadSpeechRms: Float = SharedConfig.Defaults.streamVadSpeechRmsDefault
     @Published var streamVadSilenceMs: Int = SharedConfig.Defaults.streamVadSilenceMsDefault
@@ -38,7 +37,6 @@ class AppSettings: ObservableObject {
         audioFormat = SharedConfig.audioFormat()
         verboseLogging = SharedConfig.verboseLoggingEnabled()
         hapticsEnabled = SharedConfig.hapticsEnabled()
-        appGroupOverride = SharedConfig.appGroupOverride()
         streamVadSpeechRms = SharedConfig.streamVadSpeechRms()
         streamVadSilenceMs = SharedConfig.streamVadSilenceMs()
         streamVadMinSpeechMs = SharedConfig.streamVadMinSpeechMs()
@@ -87,11 +85,6 @@ class AppSettings: ObservableObject {
             FileLogger.shared.info(.settings, "saving hapticsEnabled",
                                    payload: ["value": newValue])
             self?.saveHapticsEnabled(newValue)
-        }.store(in: &cancellables)
-        $appGroupOverride.dropFirst().sink { [weak self] newValue in
-            FileLogger.shared.info(.settings, "saving appGroupOverride",
-                                   payload: ["value": newValue])
-            self?.saveAppGroupOverride(newValue)
         }.store(in: &cancellables)
         $streamVadSpeechRms.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving streamVadSpeechRms",
@@ -151,11 +144,6 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(audioFormat.rawValue, forKey: SharedConfig.Defaults.audioFormatKey)
         appGroupDefaults?.set(verboseLogging, forKey: SharedConfig.Defaults.verboseLoggingKey)
         appGroupDefaults?.set(hapticsEnabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
-        // Persist the override to the ORIGINAL suite so AppGroupResolver (which
-        // reads that suite during first resolve) can see it even when the resolved
-        // identifier differs (SideStore fallback state).
-        UserDefaults(suiteName: SharedConfig.Defaults.originalAppGroupId)?
-            .set(appGroupOverride, forKey: SharedConfig.Defaults.appGroupOverrideKey)
         appGroupDefaults?.set(streamVadSpeechRms, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
         appGroupDefaults?.set(streamVadSilenceMs, forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
         appGroupDefaults?.set(streamVadMinSpeechMs, forKey: SharedConfig.Defaults.streamVadMinSpeechMsKey)
@@ -206,12 +194,6 @@ class AppSettings: ObservableObject {
 
     private func saveHapticsEnabled(_ enabled: Bool) {
         appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
-        postSettingsChanged()
-    }
-
-    private func saveAppGroupOverride(_ value: String) {
-        UserDefaults(suiteName: SharedConfig.Defaults.originalAppGroupId)?
-            .set(value, forKey: SharedConfig.Defaults.appGroupOverrideKey)
         postSettingsChanged()
     }
 

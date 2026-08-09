@@ -39,7 +39,6 @@ struct SettingsView: View {
             dictionarySection
             historySection
             diagnosticsSection
-            appGroupSection
             infoSection
         }
         .navigationTitle("Ritoras Settings")
@@ -212,40 +211,6 @@ struct SettingsView: View {
             Text("Diagnostics")
         } footer: {
             Text("Verbose Logging writes additional debug-level entries to the log. Off by default.")
-        }
-    }
-
-    // MARK: - App Group Section
-
-    private var appGroupSection: some View {
-        Section {
-            TextField("group.com.ritoras.app.XXXXXXXXXX", text: $settings.appGroupOverride)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled(true)
-            HStack {
-                Text("Resolved App Group ID")
-                Spacer()
-                Text(SharedConfig.Defaults.appGroupId)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .textSelection(.enabled)
-            }
-            HStack {
-                Text("Container Available")
-                Spacer()
-                Text(AppGroupResolver.shared.containerAvailable ? "Yes" : "No")
-                    .font(.caption)
-                    .foregroundColor(AppGroupResolver.shared.containerAvailable ? .green : .red)
-            }
-            if !settings.appGroupOverride.isEmpty {
-                Button("Clear Override") {
-                    settings.appGroupOverride = ""
-                }
-            }
-        } header: {
-            Text("App Group")
-        } footer: {
-            Text("Only set this if dictation isn't working. Copy the working App Group ID from the diagnostics log and paste it here. Leave blank for automatic detection.")
         }
     }
 
