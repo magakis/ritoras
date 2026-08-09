@@ -158,6 +158,7 @@ struct DebugLogView: View {
     @State private var oldestLoadedId: Int64? = nil
     @State private var newestSeenId: Int64? = nil
     @State private var totalCount: Int = 0
+    @State private var isLoadingMore = false
     @State private var showDeleteConfirmation = false
     @State private var pendingDeleteAction: DeleteAction?
     @State private var showDeleteFeedback = false
@@ -168,7 +169,6 @@ struct DebugLogView: View {
     @State private var refreshGeneration = 0
     @State private var isLoading = false
     @State private var isViewVisible = false
-    @State private var lastRefreshTime: Date = .distantPast
     private let pageSize = 50
 
     private var selectedOrFilteredLines: [LogLine] {
@@ -368,15 +368,6 @@ struct DebugLogView: View {
                         .listRowSeparator(.hidden)
                         .onAppear { loadMore() }
                 }
-                Color.clear
-                    .frame(height: 0)
-                    .listRowSeparator(.hidden)
-                    .onAppear {
-                        let now = Date()
-                        guard now.timeIntervalSince(lastRefreshTime) > 1.0 else { return }
-                        lastRefreshTime = now
-                        refresh()
-                    }
             }
         }
         .listStyle(.plain)
@@ -735,7 +726,12 @@ struct DebugLogView: View {
     // MARK: - Pagination
 
     private func loadMore() {
-        guard let before = oldestLoadedId else { return }
+        guard !isLoadingMore else { return }
+        isLoadingMore = true
+        guard let before = oldestLoadedId else {
+            isLoadingMore = false
+            return
+        }
         let levels = levelFilterToSet()
         let components = componentFilterToSet()
         let since = timeRangeToSinceNs()
@@ -749,11 +745,17 @@ struct DebugLogView: View {
                 components: components,
                 sinceNs: since,
                 search: search)
-            guard !more.isEmpty else { return }
+            guard !more.isEmpty else {
+                DispatchQueue.main.async {
+                    isLoadingMore = false
+                }
+                return
+            }
 
             DispatchQueue.main.async {
                 lines.append(contentsOf: more)
                 oldestLoadedId = more.last?.rowId
+                isLoadingMore = false
 
                 let rawText = lines.map(\.raw).joined(separator: "\n")
                 cachedShareText = piiScrub ? LogScrubber.scrub(rawText) : rawText
