@@ -29,6 +29,7 @@ Builds before the first numbered section below had no changelog.
 - Mic button now shows the red recording dot (instead of the waiting ellipsis) when you switch back to the keyboard during an active dictation.
 - Fixed a SideStore issue where the dictation button never showed the red recording dot (and cross-app sharing silently failed) because the keyboard and app could not locate their shared app-group container.
 - Fixed dictation results not reaching the keyboard on SideStore installs where the shared app-group container was unavailable — results now arrive through a localhost fallback.
+- Made the red recording dot on the dictation button appear more reliably at the start of speech on SideStore installs, where it could previously be missed and the button would jump straight to the transcribing state.
 - The Debug Logs screen no longer jumps back to the top while you're scrolling through older log entries.
 - Fixed an issue where the dictation recording indicator could briefly disappear right after starting, making it seem like the recording had stopped.
 - A dictation result that comes through while you're in a different text field now waits for the original field instead of pasting into the wrong one.
