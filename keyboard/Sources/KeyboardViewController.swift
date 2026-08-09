@@ -105,6 +105,10 @@ class KeyboardViewController: UIInputViewController {
     private var pollTimer: Timer?
     private var pollCount = 0
 
+    /// Cancellable handle for the deferred-dictation flush so it can be
+    /// torn down on disappear / context change. See scheduleDeferredDictationFlush.
+    private var deferredFlushWorkItem: DispatchWorkItem?
+
     // MARK: - Snapshot Polling & Darwin Notifications
 
     private var snapshotPollTimer: DispatchSourceTimer?
@@ -994,6 +998,8 @@ class KeyboardViewController: UIInputViewController {
         errorResetWorkItem = nil
         suggestionRefreshWorkItem?.cancel()
         suggestionRefreshWorkItem = nil
+        deferredFlushWorkItem?.cancel()
+        deferredFlushWorkItem = nil
 
         // URLSessionDataTask
         currentPollTask?.cancel()
@@ -1160,9 +1166,11 @@ class KeyboardViewController: UIInputViewController {
 
     /// Stores a dictation result in UserDefaults when the keyboard is hidden,
     /// so it can be recovered and auto-pasted on the next viewDidAppear.
-    private func storeDeferredResult(text: String) {
+    private func storeDeferredResult(text: String, docId: UUID? = nil) {
+        let idToStore = docId ?? dictationTargetDocId
         UserDefaults.standard.set(text, forKey: "ritoras_deferred_text")
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "ritoras_deferred_ts")
+        UserDefaults.standard.set(idToStore?.uuidString ?? "", forKey: "ritoras_deferred_doc_id")
     }
 
     /// Clears the deferred result from UserDefaults. Called when starting
@@ -1170,6 +1178,7 @@ class KeyboardViewController: UIInputViewController {
     private func clearDeferredResult() {
         UserDefaults.standard.removeObject(forKey: "ritoras_deferred_text")
         UserDefaults.standard.removeObject(forKey: "ritoras_deferred_ts")
+        UserDefaults.standard.removeObject(forKey: "ritoras_deferred_doc_id")
     }
 
     /// Reads + age-checks + clears the deferred dictation text synchronously
@@ -1182,20 +1191,35 @@ class KeyboardViewController: UIInputViewController {
         guard let deferredText = UserDefaults.standard.string(forKey: "ritoras_deferred_text"),
               !deferredText.isEmpty else { return }
         let deferredTs = UserDefaults.standard.double(forKey: "ritoras_deferred_ts")
+        let storedDocIdString = UserDefaults.standard.string(forKey: "ritoras_deferred_doc_id") ?? ""
+        let targetDocId = UUID(uuidString: storedDocIdString)
         let age = deferredTs > 0 ? Date().timeIntervalSince1970 - deferredTs : 0
         guard age < 300 else { clearDeferredResult(); return }
         clearDeferredResult()
         let textToInsert = deferredText
         FileLogger.shared.info(.keyboard, "Scheduling deferred dictation flush",
                                payload: ["reason": reason, "length": textToInsert.count, "age": age])
-        DispatchQueue.main.async { [weak self] in
+        deferredFlushWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
             guard let self = self, self.view.window != nil else { return }
+            if let targetId = targetDocId, targetId != UUID(),
+               self.textDocumentProxy.documentIdentifier != targetId {
+                // Original dictation field no longer focused — preserve text + target
+                // so it flushes when the user returns to that field. Do NOT discard.
+                self.storeDeferredResult(text: textToInsert, docId: targetId)
+                FileLogger.shared.warn(.keyboard, "Deferred flush skipped — original field not focused",
+                                       payload: ["target": targetId.uuidString,
+                                                 "current": self.textDocumentProxy.documentIdentifier.uuidString])
+                return
+            }
             self.state = .inserting
             self.textDocumentProxy.insertText(self.normalizedDictationInsertion(of: textToInsert))
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                 self?.state = .idle
             }
         }
+        deferredFlushWorkItem = workItem
+        DispatchQueue.main.async(execute: workItem)
     }
 
     // MARK: - Server Polling (Works when app is backgrounded)
