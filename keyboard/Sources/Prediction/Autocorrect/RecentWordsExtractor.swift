@@ -52,7 +52,7 @@ enum RecentWordsExtractor {
         // Skip trailing whitespace so `index` lands just after the last token.
         while index > context.startIndex {
             let previous = context.index(before: index)
-            if previous.isWhitespace {
+            if context[previous].isWhitespace {
                 index = previous
             } else {
                 break
@@ -65,7 +65,7 @@ enum RecentWordsExtractor {
         if !endsWithWhitespace {
             while index > context.startIndex {
                 let previous = context.index(before: index)
-                if previous.isWhitespace {
+                if context[previous].isWhitespace {
                     index = previous
                     break
                 }
@@ -79,7 +79,7 @@ enum RecentWordsExtractor {
             var tokenStart = index
             while tokenStart > context.startIndex {
                 let previous = context.index(before: tokenStart)
-                if previous.isWhitespace {
+                if context[previous].isWhitespace {
                     break
                 }
                 tokenStart = previous
@@ -106,7 +106,7 @@ enum RecentWordsExtractor {
             index = tokenStart
             while index > context.startIndex {
                 let previous = context.index(before: index)
-                if previous.isWhitespace {
+                if context[previous].isWhitespace {
                     index = previous
                 } else {
                     break
