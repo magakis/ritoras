@@ -1104,6 +1104,6 @@ final class DictationViewModel: ObservableObject {
     }
 
     deinit {
-        stopHealthCheckTimer()
+        healthCheckTimer?.invalidate()
     }
 }
