@@ -22,7 +22,11 @@ final class SessionHolder: @unchecked Sendable {
         let config = URLSessionConfiguration.default
         config.waitsForConnectivity = false
         config.timeoutIntervalForRequest = SharedConfig.Defaults.timeoutSeconds
-        config.timeoutIntervalForResource = SharedConfig.Defaults.timeoutSeconds * 2
+        // Resource timeout must accommodate full Whisper inference (sync /transcribe
+        // holds the connection for the whole transcription, which can take a minute+
+        // on real audio). URLRequest.timeoutInterval cannot override this session-level
+        // ceiling, so it must be >= the per-request timeout buildRequest sets (totalDeadline).
+        config.timeoutIntervalForResource = SharedConfig.AsyncTranscription.totalDeadline
         config.httpShouldUsePipelining = false // HTTP/1 pipelining deprecated in Swift 6.1; causes multipart file-upload hangs
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         self.session = URLSession(configuration: config)
@@ -51,7 +55,11 @@ final class SessionHolder: @unchecked Sendable {
         let config = URLSessionConfiguration.default
         config.waitsForConnectivity = false
         config.timeoutIntervalForRequest = SharedConfig.Defaults.timeoutSeconds
-        config.timeoutIntervalForResource = SharedConfig.Defaults.timeoutSeconds * 2
+        // Resource timeout must accommodate full Whisper inference (sync /transcribe
+        // holds the connection for the whole transcription, which can take a minute+
+        // on real audio). URLRequest.timeoutInterval cannot override this session-level
+        // ceiling, so it must be >= the per-request timeout buildRequest sets (totalDeadline).
+        config.timeoutIntervalForResource = SharedConfig.AsyncTranscription.totalDeadline
         config.httpShouldUsePipelining = false // HTTP/1 pipelining deprecated in Swift 6.1; causes multipart file-upload hangs
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         let newSession = URLSession(configuration: config)

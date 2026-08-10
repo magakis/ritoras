@@ -21,6 +21,7 @@ Builds before the first numbered section below had no changelog.
 
 ### Fixed
 
+- Fixed longer dictations failing with "server didn't respond in time": a session-level resource timeout was silently capping every transcription at 40 seconds, overriding the intended 10-minute limit.
 - When the transcription server is reachable but slow to respond, the error message now says the server didn't respond in time, instead of incorrectly claiming the server was unreachable.
 - Starting a new dictation immediately after stopping or cancelling one no longer corrupts the new session — the new recording used to be torn down or left in a broken state.
 - Switching to another text field while a transcription is still being processed no longer inserts the dictated text into the wrong field.
