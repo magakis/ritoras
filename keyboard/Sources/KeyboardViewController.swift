@@ -6,6 +6,20 @@ private enum BackspacePhase {
     case wordRepeat
 }
 
+/// Fully-resolved retroactive candidate captured on main: the ring record plus
+/// its live document offset and per-candidate spell-check state. The background
+/// scan consumes ONLY this snapshot — it never touches the ring buffer or the
+/// document off-main.
+private struct RetroactiveCandidateSnapshot {
+    let typedWord: String
+    let lookupWord: String
+    let offsetFromCursorEnd: Int
+    let isLearned: Bool
+    let isMisspelled: Bool
+    let origin: WordOrigin
+    let commitContextSuffix: String
+}
+
 class KeyboardViewController: UIInputViewController {
 
     // MARK: - State
@@ -62,7 +76,13 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Input Target (keystroke routing)
 
     enum InputTarget { case hostApp, emojiSearch }
-    private var inputTarget: InputTarget = .hostApp
+    private var inputTarget: InputTarget = .hostApp {
+        didSet {
+            // Any input-target switch invalidates a pending deferred autocorrect.
+            keystrokeEpoch &+= 1
+            recentWordBuffer.clear()
+        }
+    }
 
     /// Read-through shims: the prediction stack is process-global and persists
     /// across show/hide cycles (see SharedPredictionStack). Downstream call
@@ -96,6 +116,31 @@ class KeyboardViewController: UIInputViewController {
     private var wordOrigin = WordOriginTracker()
     /// Tracks the most recent autocorrect for potential revert-on-backspace (Phase 4).
     private var lastAutoCorrection: (typed: String, replacement: String)?
+
+    // MARK: - Deferred Autocorrect (background compute)
+
+    /// Monotonic keystroke epoch. Bumped by every document mutation, selection
+    /// change, input-target switch, and teardown. Any background autocorrect
+    /// result whose captured epoch no longer matches is dropped on the main-hop.
+    /// This is the supersession guard for the background→main hop (GCD, not
+    /// async/await — re-entrancy arrives via nested run-loop turns, and the
+    /// epoch check covers it).
+    private var keystrokeEpoch: UInt64 = 0
+
+    /// Serial background queue for the heavy autocorrect compute
+    /// (PredictionEngine.topCorrection + AutocorrectController.evaluate),
+    /// keeping SymSpell/LM scoring off the keystroke hot path.
+    private let keyboardProcessingQueue = DispatchQueue(
+        label: "com.ritoras.keyboard.processing",
+        qos: .userInitiated
+    )
+
+    /// Cancellable handle for the deferred autocorrect compute + main apply hop.
+    private var deferredKeystrokeWorkItem: DispatchWorkItem?
+
+    /// Bounded ring of recently committed words eligible for retroactive
+    /// autocorrect (≤4 entries, well under 1 KB — Jetsam-safe).
+    private var recentWordBuffer = RecentWordBuffer()
 
     // MARK: - Dictation State
 
@@ -1026,6 +1071,14 @@ class KeyboardViewController: UIInputViewController {
         suggestionRefreshWorkItem = nil
         deferredFlushWorkItem?.cancel()
         deferredFlushWorkItem = nil
+        deferredKeystrokeWorkItem?.cancel()
+        deferredKeystrokeWorkItem = nil
+
+        // Invalidate any background autocorrect compute that already started
+        // (an executing DispatchWorkItem cannot be cancelled) so it drops at
+        // the main-hop.
+        keystrokeEpoch &+= 1
+        recentWordBuffer.clear()
 
         // URLSessionDataTask
         currentPollTask?.cancel()
@@ -1465,6 +1518,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             insertTargeted(text)
             if shouldAutoCorrect {
                 applyAutocorrectForTrigger(triggerChar: text)
+                recordRecentWordForTrigger(triggerChar: text)
             }
             if shiftState == .upper {
                 shiftState = .lower
@@ -1517,6 +1571,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         case .space:
             insertTargeted(" ")
             applyAutocorrectForTrigger(triggerChar: " ")
+            recordRecentWordForTrigger(triggerChar: " ")
             recomputeAutoCap()
             scheduleSuggestionRefresh()
             wordOrigin.resetToTyping()
@@ -1527,6 +1582,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             } else {
                 insertTargeted("\n")
                 applyAutocorrectForTrigger(triggerChar: "\n")
+                recordRecentWordForTrigger(triggerChar: "\n")
                 recomputeAutoCap()
                 wordOrigin.resetToTyping()
                 scheduleSuggestionRefresh()
@@ -1709,7 +1765,9 @@ extension KeyboardViewController: KeyboardViewDelegate {
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
 
+        keystrokeEpoch &+= 1  // any text change invalidates a pending deferred autocorrect
         lastAutoCorrection = nil  // host text change invalidates any pending revert
+        recentWordBuffer.clear()  // committed-word records are stale once the doc changes
         // SYNC: system-signaled textDidChange bypasses debounce so the suggestion bar
         // updates immediately — debounce here would feel laggy after external edits.
         keyboardView.refreshSuggestions()
@@ -1727,6 +1785,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     override func selectionWillChange(_ textInput: UITextInput?) {
         super.selectionWillChange(textInput)
+        keystrokeEpoch &+= 1  // any selection change invalidates a pending deferred autocorrect
+        recentWordBuffer.clear()  // cursor moves invalidate committed-word offsets
         backspaceTimer?.invalidate()
         backspaceTimer = nil
         backspacePhase = nil
@@ -1737,7 +1797,9 @@ extension KeyboardViewController: KeyboardViewDelegate {
     override func selectionDidChange(_ textInput: UITextInput?) {
         super.selectionDidChange(textInput)
 
+        keystrokeEpoch &+= 1  // any selection change invalidates a pending deferred autocorrect
         lastAutoCorrection = nil  // cursor move invalidates any pending revert
+        recentWordBuffer.clear()  // committed-word records are stale once the cursor moves
         backspaceNilContextRetries = 0
         recomputeAutoCap()
 
@@ -1748,15 +1810,17 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     // MARK: - Autocorrect-on-space
 
-    /// Evaluates and applies autocorrect synchronously for a trigger character.
+    /// Snapshots the autocorrect context on the main thread and defers the heavy
+    /// compute (PredictionEngine.topCorrection + AutocorrectController.evaluate)
+    /// to a background serial queue so the trigger character lands instantly and
+    /// no keystroke is lost under fast typing.
     ///
     /// The trigger character (space / punct / return) has already been inserted
-    /// by the caller. Spell-check + engine lookup + scoring run inline on the
-    /// main thread in the same run-loop turn as the keystroke, so the host
-    /// coalesces the delete-burst + re-insert into one transaction (no caret
-    /// snap-back). UITextChecker is a UIKit API and must run on the main thread.
-    ///
-    /// The strict context guard is still applied before the correction, so any
+    /// by the caller. UITextChecker is a UIKit API and must run on the main
+    /// thread, so spell-check runs here in the snapshot phase; the engine lookup
+    /// + scoring run off-main. The main apply hop re-validates the result with
+    /// the monotonic keystroke epoch, the content-hash token, the document id,
+    /// and AutocorrectApplicationGuard before mutating the document, so any
     /// state change since the keystroke silently drops the result.
     private func applyAutocorrectForTrigger(triggerChar: String) {
         // --- Synchronous early-return guards (same as today) ---
@@ -1794,7 +1858,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         // Defensive: the suffix must match what we expect.
         guard contextAtDispatch.hasSuffix(typedWord + triggerChar) else { return }
 
-        // --- Main-thread compute (UITextChecker is a UIKit API) ---
+        // --- Main-thread spell-check (UITextChecker is a UIKit API) ---
         let computeStart = Date()
         let isMisspelled: Bool = {
             let checker = UITextChecker()
@@ -1809,43 +1873,290 @@ extension KeyboardViewController: KeyboardViewDelegate {
             )
             return misspelledRange.location != NSNotFound
         }()
-        let uitextcheckerMs = Int(Date().timeIntervalSince(computeStart) * 1000)
+        FileLogger.shared.debug(.keyboard, "autocorrect snapshot",
+            payload: ["uitextcheckerMs": Int(Date().timeIntervalSince(computeStart) * 1000)])
 
-        let top = engine.topCorrection(
-            forCurrentWord: currentWord,
-            lookupWord: typedWord,
-            previousWord: previousWord,
-            previousWord2: previousWord2
+        // Two-layer invalidation captured at dispatch: the monotonic keystroke
+        // epoch and the content-hash context token. Both are re-checked on the
+        // main-hop so stale background results are dropped.
+        let capturedEpoch = keystrokeEpoch
+        let capturedDocId = textDocumentProxy.documentIdentifier
+        let capturedToken = keyboardContextToken(keyboardView)
+
+        // --- Retroactive candidate snapshot (all main-thread work) ---
+        // Resolve the ring's candidates NOW: per-candidate spell-check state
+        // (UITextChecker is UIKit, main-only) and each word's live offset come
+        // from the document on main. The background scan consumes only this
+        // snapshot, so the ring buffer and the document are never touched
+        // off-main. The current trigger's word is handled by the inline path;
+        // it enters the ring via recordRecentWordForTrigger and is scanned on
+        // the NEXT trigger.
+        let retroactiveCandidates = resolveRetroactiveCandidates(
+            candidates: recentWordBuffer.candidates,
+            liveContext: contextAfterInsert
         )
 
-        let fusionActive = engine.fusionIsActive(previousWord: previousWord)
-        let config = AutocorrectController.Config(
-            minWordLength: SharedConfig.Defaults.autocorrectMinWordLength,
-            maxWordLength: SharedConfig.Defaults.autocorrectMaxWordLength,
-            minConfidenceScore: fusionActive
-                ? SharedConfig.Defaults.autocorrectMinConfidenceScoreFused
-                : SharedConfig.Defaults.autocorrectMinConfidenceScore
-        )
-
-        let decision = AutocorrectController.evaluate(
+        scheduleDeferredKeystrokeWork(
             typedWord: typedWord,
-            origin: originAtDispatch,
-            topCorrection: top,
+            currentWord: currentWord,
+            previousWord: previousWord,
+            previousWord2: previousWord2,
             isLearned: isLearned,
             isMisspelled: isMisspelled,
-            config: config
+            originAtDispatch: originAtDispatch,
+            triggerChar: triggerChar,
+            retroactiveCandidates: retroactiveCandidates,
+            engine: engine,
+            capturedEpoch: capturedEpoch,
+            capturedToken: capturedToken,
+            capturedDocId: capturedDocId
         )
-        FileLogger.shared.debug(.keyboard, "autocorrect compute",
-            payload: ["ms": Int(Date().timeIntervalSince(computeStart) * 1000),
-                      "uitextcheckerMs": uitextcheckerMs])
+    }
 
+    /// Appends the just-committed word (the token before `triggerChar`) to the
+    /// retroactive-autocorrect ring. Runs on main right after the inline
+    /// trigger snapshot: the document ends with `typedWord + triggerChar`, so
+    /// the typed word is the extracted current word and the commit context is
+    /// the last ~50 characters of that same context. The origin is whatever
+    /// `wordOrigin` held at commit time; non-`.typing` records are never
+    /// re-scanned by the candidates filter.
+    private func recordRecentWordForTrigger(triggerChar: String) {
+        guard inputTarget == .hostApp else { return }
+        let context = textDocumentProxy.documentContextBeforeInput ?? ""
+        guard context.hasSuffix(triggerChar) else { return }
+        let contextBeforeTrigger = String(context.dropLast())
+        // Stored in canonical form (apostrophes normalized) so it matches the
+        // extractor's lookupWord and the engine's lookup key.
+        let typedWord = CurrentWordExtractor.extract(from: contextBeforeTrigger).lookupWord
+        guard !typedWord.isEmpty else { return }
+        let commitContextSuffix = String(context.suffix(50))
+        recentWordBuffer.append(RecentWordRecord(
+            typedWord: typedWord,
+            origin: wordOrigin.current,
+            evaluatedAndSkipped: false,
+            commitContextSuffix: commitContextSuffix
+        ))
+    }
+
+    /// Resolves the ring's candidates into a snapshot for the background scan:
+    /// each word's live `offsetFromCursorEnd` comes from the document (via
+    /// RecentWordsExtractor on the captured context), and its OWN
+    /// `isLearned`/`isMisspelled` are computed here on main (UITextChecker is a
+    /// UIKit API). Candidates whose committed context no longer appears in the
+    /// live context are dropped — they are simply not scanned this pass and
+    /// remain eligible for a later trigger. Newest first, at most 3 (the
+    /// extractor walks back at most 3 committed words).
+    private func resolveRetroactiveCandidates(
+        candidates: [RecentWordRecord],
+        liveContext: String
+    ) -> [RetroactiveCandidateSnapshot] {
+        guard !candidates.isEmpty else { return [] }
+        let recentWords = RecentWordsExtractor.extract(from: liveContext, maxCount: 3)
+        var resolved: [RetroactiveCandidateSnapshot] = []
+        resolved.reserveCapacity(candidates.count)
+        for candidate in candidates.reversed() {
+            guard let live = recentWords.first(where: {
+                $0.lookupWord == candidate.typedWord || $0.word == candidate.typedWord
+            }) else { continue }
+            // The committed context (~50 chars before the word) must still be
+            // present, proving the word's region has not been edited.
+            guard liveContext.contains(candidate.commitContextSuffix) else { continue }
+            resolved.append(RetroactiveCandidateSnapshot(
+                typedWord: candidate.typedWord,
+                lookupWord: live.lookupWord,
+                offsetFromCursorEnd: live.offsetFromCursorEnd,
+                isLearned: LearnedWordsStore.shared.contains(live.lookupWord),
+                isMisspelled: isWordMisspelled(live.lookupWord),
+                origin: candidate.origin,
+                commitContextSuffix: candidate.commitContextSuffix
+            ))
+        }
+        return resolved
+    }
+
+    /// Main-thread spell-check (UITextChecker is a UIKit API). Mirrors the
+    /// inline snapshot's spell-check block.
+    private func isWordMisspelled(_ word: String) -> Bool {
+        let checker = UITextChecker()
+        let nsString = word as NSString
+        let range = NSRange(location: 0, length: nsString.length)
+        let misspelledRange = checker.rangeOfMisspelledWord(
+            in: word,
+            range: range,
+            startingAt: 0,
+            wrap: false,
+            language: "en-US"
+        )
+        return misspelledRange.location != NSNotFound
+    }
+
+    /// Schedules the deferred autocorrect compute on the background processing
+    /// queue (mirrors scheduleSuggestionRefresh's cancel-previous + asyncAfter
+    /// shape, but dispatches to keyboardProcessingQueue so the heavy engine
+    /// work never runs on the keystroke hot path). The compute hops back to
+    /// main for the guarded apply.
+    private func scheduleDeferredKeystrokeWork(
+        typedWord: String,
+        currentWord: String,
+        previousWord: String?,
+        previousWord2: String?,
+        isLearned: Bool,
+        isMisspelled: Bool,
+        originAtDispatch: WordOrigin,
+        triggerChar: String,
+        retroactiveCandidates: [RetroactiveCandidateSnapshot],
+        engine: PredictionEngine,
+        capturedEpoch: UInt64,
+        capturedToken: UInt64,
+        capturedDocId: UUID,
+        coalescing: TimeInterval = 0.016
+    ) {
+        deferredKeystrokeWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self, weak engine] in
+            guard let self = self, let engine = engine else { return }
+
+            // --- Off-main compute (engine lookup + scoring are pure) ---
+            let computeStart = Date()
+            let top = engine.topCorrection(
+                forCurrentWord: currentWord,
+                lookupWord: typedWord,
+                previousWord: previousWord,
+                previousWord2: previousWord2
+            )
+
+            let fusionActive = engine.fusionIsActive(previousWord: previousWord)
+            let config = AutocorrectController.Config(
+                minWordLength: SharedConfig.Defaults.autocorrectMinWordLength,
+                maxWordLength: SharedConfig.Defaults.autocorrectMaxWordLength,
+                minConfidenceScore: fusionActive
+                    ? SharedConfig.Defaults.autocorrectMinConfidenceScoreFused
+                    : SharedConfig.Defaults.autocorrectMinConfidenceScore
+            )
+
+            let decision = AutocorrectController.evaluate(
+                typedWord: typedWord,
+                origin: originAtDispatch,
+                topCorrection: top,
+                isLearned: isLearned,
+                isMisspelled: isMisspelled,
+                config: config
+            )
+            FileLogger.shared.debug(.keyboard, "autocorrect compute",
+                payload: ["ms": Int(Date().timeIntervalSince(computeStart) * 1000)])
+
+            DispatchQueue.main.async { [weak self] in
+                self?.applyAutocorrectResultIfNeeded(
+                    decision: decision,
+                    typedWord: typedWord,
+                    triggerChar: triggerChar,
+                    capturedEpoch: capturedEpoch,
+                    capturedToken: capturedToken,
+                    capturedDocId: capturedDocId
+                )
+            }
+
+            // --- Retroactive autocorrect scan (additive to inline) ---
+            // Pure compute over the main-thread snapshot ONLY: per-candidate
+            // spell-check state and offsets were resolved at dispatch, so the
+            // ring buffer and the document are never touched off-main. At most
+            // one correction is queued per trigger (the scan breaks on the
+            // first .correct); the remaining candidates stay eligible and retry
+            // on the next trigger.
+            if !retroactiveCandidates.isEmpty {
+                let retroactiveStart = Date()
+                var evaluatedTypedWords: [String] = []
+                var pendingCorrection: (plan: RetroactiveApplyPlan.Plan, typedWord: String)?
+                for entry in retroactiveCandidates {
+                    guard pendingCorrection == nil else { break }
+                    evaluatedTypedWords.append(entry.typedWord)
+
+                    let retroactiveTop = engine.topCorrection(
+                        forCurrentWord: entry.lookupWord,
+                        lookupWord: entry.lookupWord
+                    )
+                    let retroactiveDecision = AutocorrectController.evaluate(
+                        typedWord: entry.lookupWord,
+                        origin: entry.origin,
+                        topCorrection: retroactiveTop,
+                        isLearned: entry.isLearned,
+                        isMisspelled: entry.isMisspelled,
+                        config: config
+                    )
+                    guard case .correct(_, let correction) = retroactiveDecision else { continue }
+
+                    let plan = RetroactiveApplyPlan.plan(
+                        typedWord: entry.lookupWord,
+                        correction: correction,
+                        offsetFromCursorEnd: entry.offsetFromCursorEnd
+                    )
+                    pendingCorrection = (plan, entry.lookupWord)
+                    break
+                }
+
+                if let correction = pendingCorrection {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.applyRetroactiveCorrection(
+                            plan: correction.plan,
+                            typedWord: correction.typedWord,
+                            capturedEpoch: capturedEpoch,
+                            capturedDocId: capturedDocId,
+                            capturedToken: capturedToken
+                        )
+                    }
+                }
+                if !evaluatedTypedWords.isEmpty {
+                    let evaluated = evaluatedTypedWords
+                    DispatchQueue.main.async { [weak self] in
+                        self?.markRecentWordsEvaluated(
+                            evaluated,
+                            capturedEpoch: capturedEpoch,
+                            capturedDocId: capturedDocId,
+                            capturedToken: capturedToken
+                        )
+                    }
+                }
+                FileLogger.shared.debug(.keyboard, "retroactive scan",
+                    payload: ["candidates": retroactiveCandidates.count,
+                              "corrected": pendingCorrection == nil ? 0 : 1,
+                              "ms": Int(Date().timeIntervalSince(retroactiveStart) * 1000)])
+            }
+        }
+        deferredKeystrokeWorkItem = workItem
+        keyboardProcessingQueue.asyncAfter(deadline: .now() + coalescing, execute: workItem)
+    }
+
+    /// Main-thread apply for a deferred autocorrect result. Every guard runs
+    /// BEFORE any shared-state access or document mutation: the keyboard
+    /// liveness gate, the monotonic keystroke epoch (supersession guard — this
+    /// GCD background→main hop is re-entrant via nested run-loop turns), the
+    /// target-bound document id, the content-hash token, and the application
+    /// guard. Once past them the delete-burst + re-insert runs synchronously,
+    /// byte-identical to the pre-FIX B outcome.
+    private func applyAutocorrectResultIfNeeded(
+        decision: AutocorrectController.Decision,
+        typedWord: String,
+        triggerChar: String,
+        capturedEpoch: UInt64,
+        capturedToken: UInt64,
+        capturedDocId: UUID
+    ) {
         // Liveness gate: if the keyboard is no longer in a window,
-        // the textDocumentProxy is dead — reading it in
-        // AutocorrectApplicationGuard.shouldApply (which reads
-        // documentContextBeforeInput) would crash with SIGSEGV.
+        // the textDocumentProxy is dead — reading it in the guards below
+        // would crash with SIGSEGV.
         if self.view.window == nil {
             return
         }
+
+        // Supersession guard (monotonic epoch): any text/selection/target
+        // mutation since dispatch bumped keystrokeEpoch — the result is stale.
+        guard keystrokeEpoch == capturedEpoch else { return }
+
+        // Target-bound guard: the first-responder field must be unchanged.
+        guard textDocumentProxy.documentIdentifier == capturedDocId else { return }
+
+        // Content-hash guard: the live context must still match dispatch.
+        let liveToken = keyboardContextToken(keyboardView)
+        guard shouldApplyLookupResult(capturedToken: capturedToken, liveToken: liveToken) else { return }
 
         // Application guard: all three must hold or the result is stale.
         guard AutocorrectApplicationGuard.shouldApply(
@@ -1878,6 +2189,83 @@ extension KeyboardViewController: KeyboardViewDelegate {
             lastAutoCorrection = (typed: typedWord, replacement: correction)
         case .leaveAsIs:
             lastAutoCorrection = nil
+        }
+    }
+
+    /// Main-thread synchronous apply of a retroactive autocorrect plan: move the
+    /// cursor back to the typed word, delete it, insert the correction, and
+    /// return the cursor to its relative spot — all in ONE synchronous block
+    /// with no suspension between proxy mutations. Guards run before any
+    /// mutation: the keyboard liveness gate, the monotonic keystroke epoch
+    /// (supersession guard), the target-bound document id, and the content-hash
+    /// context token. The context is re-read after the mutations to verify;
+    /// there is no retry on failure. The tail epoch bump drops any retroactive
+    /// or inline hop still queued for this dispatch — the document changed.
+    private func applyRetroactiveCorrection(
+        plan: RetroactiveApplyPlan.Plan,
+        typedWord: String,
+        capturedEpoch: UInt64,
+        capturedDocId: UUID,
+        capturedToken: UInt64
+    ) {
+        if self.view.window == nil { return }
+
+        // Supersession guard (monotonic epoch): if the inline apply or any other
+        // mutation ran first, the epoch moved and this stale plan is dropped.
+        guard keystrokeEpoch == capturedEpoch else { return }
+
+        // Target-bound guard: the first-responder field must be unchanged.
+        guard textDocumentProxy.documentIdentifier == capturedDocId else { return }
+
+        // Content-hash guard: the live context must still match dispatch.
+        let liveToken = keyboardContextToken(keyboardView)
+        guard shouldApplyLookupResult(capturedToken: capturedToken, liveToken: liveToken) else { return }
+
+        textDocumentProxy.adjustTextPosition(byCharacterOffset: plan.backMove)
+        for _ in 0..<plan.deleteCount {
+            textDocumentProxy.deleteBackward()
+        }
+        textDocumentProxy.insertText(plan.insert)
+        textDocumentProxy.adjustTextPosition(byCharacterOffset: plan.forwardMove)
+
+        // Re-read the context to verify the correction landed; no retry.
+        let verifyContext = textDocumentProxy.documentContextBeforeInput ?? ""
+        let verified = verifyContext.contains(plan.insert)
+        if verified {
+            FileLogger.shared.debug(.keyboard, "retroactive autocorrect",
+                payload: ["typed": typedWord,
+                          "insert": plan.insert,
+                          "verified": true])
+        } else {
+            FileLogger.shared.warn(.keyboard, "retroactive autocorrect did not land",
+                payload: ["typed": typedWord,
+                          "insert": plan.insert,
+                          "verified": false])
+        }
+
+        // Defense-in-depth: any hop queued after this one (retroactive or
+        // inline) now fails its epoch guard — the document was mutated.
+        keystrokeEpoch &+= 1
+    }
+
+    /// Main-thread bookkeeping for a retroactive scan batch. Runs the same
+    /// guards as the apply hop so words are marked evaluated ONLY when the
+    /// epoch still matches at main-hop time — a dropped batch (fast typing)
+    /// leaves every scanned word eligible for the next trigger's scan instead
+    /// of permanently suppressing it.
+    private func markRecentWordsEvaluated(
+        _ typedWords: [String],
+        capturedEpoch: UInt64,
+        capturedDocId: UUID,
+        capturedToken: UInt64
+    ) {
+        if self.view.window == nil { return }
+        guard keystrokeEpoch == capturedEpoch else { return }
+        guard textDocumentProxy.documentIdentifier == capturedDocId else { return }
+        let liveToken = keyboardContextToken(keyboardView)
+        guard shouldApplyLookupResult(capturedToken: capturedToken, liveToken: liveToken) else { return }
+        for typedWord in typedWords {
+            recentWordBuffer.markEvaluated(typedWord: typedWord)
         }
     }
 
@@ -1972,6 +2360,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
     }
 
     private func insertTargeted(_ text: String) {
+        keystrokeEpoch &+= 1  // any document mutation invalidates a pending deferred autocorrect
         switch inputTarget {
         case .hostApp:     textDocumentProxy.insertText(text)
         case .emojiSearch: keyboardView.emojiSearchOverlay.searchField.insertText(text)
@@ -1979,6 +2368,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
     }
 
     private func deleteTargetedBackward() {
+        keystrokeEpoch &+= 1  // any document mutation invalidates a pending deferred autocorrect
         switch inputTarget {
         case .hostApp:
             textDocumentProxy.deleteBackward()
