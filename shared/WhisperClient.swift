@@ -493,16 +493,41 @@ enum WhisperClient {
         }
         defer { try? FileManager.default.removeItem(at: bodyFileURL) }
 
-        // 3. Submit transcription.
-        let submitResponse = try await submitTranscription(
-            audioURL: audioURL,
-            serverURL: serverURL,
-            bodyFileURL: bodyFileURL,
-            boundary: boundary,
-            jobId: jobId,
-            timeout: config.timeoutSeconds,
-            correlationId: correlationId
-        )
+        // 3. Submit transcription. A compliant async server returns 202 immediately.
+        // Some servers (e.g. optiplex) accept /transcriptions but block on full
+        // inference instead of returning 202 up front — the per-request submit
+        // timeout (config.timeoutSeconds, 20s) then fires before inference
+        // finishes. On a SUBMIT timeout, fall back to the sync /transcribe path,
+        // which floors its own timeout at AsyncTranscription.totalDeadline (600s)
+        // and is proven to handle blocking servers (manual sync retry succeeds in
+        // ~48s for an 85s clip). The poll-loop deadline timeout (below) is NOT
+        // caught here, so a genuinely-async job that runs out of polling time is
+        // still surfaced as a real failure rather than retried redundantly.
+        let submitResponse: AsyncSubmitResponse
+        do {
+            submitResponse = try await submitTranscription(
+                audioURL: audioURL,
+                serverURL: serverURL,
+                bodyFileURL: bodyFileURL,
+                boundary: boundary,
+                jobId: jobId,
+                timeout: config.timeoutSeconds,
+                correlationId: correlationId
+            )
+        } catch WhisperError.timeout {
+            FileLogger.shared.warn(.network, "async submit timed out; server blocks on /transcriptions instead of returning 202. Falling back to sync /transcribe.", payload: [
+                "serverURL": serverURL,
+                "jobId": jobId.uuidString,
+                "submitTimeoutSeconds": config.timeoutSeconds
+            ])
+            return try await transcribeAgainst(
+                serverURL: serverURL,
+                bodyFileURL: bodyFileURL,
+                boundary: boundary,
+                timeout: config.timeoutSeconds,
+                correlationId: correlationId
+            )
+        }
         FileLogger.shared.debug(.network, "transcribeAsync submitted", payload: [
             "jobId": submitResponse.jobId,
             "statusEndpoint": submitResponse.statusEndpoint
