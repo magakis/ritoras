@@ -23,7 +23,7 @@ final class SessionHolder: @unchecked Sendable {
         config.waitsForConnectivity = false
         config.timeoutIntervalForRequest = SharedConfig.Defaults.timeoutSeconds
         config.timeoutIntervalForResource = SharedConfig.Defaults.timeoutSeconds * 2
-        config.httpShouldUsePipelining = true
+        config.httpShouldUsePipelining = false // HTTP/1 pipelining deprecated in Swift 6.1; causes multipart file-upload hangs
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         self.session = URLSession(configuration: config)
     }
@@ -52,7 +52,7 @@ final class SessionHolder: @unchecked Sendable {
         config.waitsForConnectivity = false
         config.timeoutIntervalForRequest = SharedConfig.Defaults.timeoutSeconds
         config.timeoutIntervalForResource = SharedConfig.Defaults.timeoutSeconds * 2
-        config.httpShouldUsePipelining = true
+        config.httpShouldUsePipelining = false // HTTP/1 pipelining deprecated in Swift 6.1; causes multipart file-upload hangs
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         let newSession = URLSession(configuration: config)
 

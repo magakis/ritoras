@@ -27,9 +27,9 @@ enum WhisperError: Error, LocalizedError {
         case .decodingError(let detail):
             return "Failed to decode server response: \(detail)"
         case .timeout:
-            return "Server unreachable. Check your connection and server address."
+            return "The server didn't respond in time. It may be busy or slow — try again."
         case .serverUnreachable:
-            return "Server unreachable. Check your connection or the server URL in Settings."
+            return "Couldn't reach any transcription server. Check your connection and the server address in Settings."
         case .cancelled:
             return "Transcription was cancelled."
         case .networkError(let error):
@@ -316,7 +316,8 @@ enum WhisperClient {
         let httpT0 = Date()
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await session.upload(for: request, fromFile: bodyFileURL)
+            let bodyData = try Data(contentsOf: bodyFileURL)
+            (data, response) = try await session.upload(for: request, from: bodyData)
         } catch let error as URLError where error.code == .timedOut {
             throw WhisperError.timeout
         } catch {

@@ -17,6 +17,10 @@ final class NetworkChangeMonitor {
     private var started = false
     private let startedLock = NSLock()
 
+    /// Last path signature for change detection: (status, sorted unique interface types).
+    /// Read and written only on the monitor's serial queue — no lock needed.
+    private var lastPathSignature: (NWPath.Status, [NWInterface.InterfaceType])?
+
     private init() {}
 
     /// Starts the monitor. Idempotent — safe to call multiple times (e.g. from
@@ -38,6 +42,15 @@ final class NetworkChangeMonitor {
     }
 
     private func handle(_ path: NWPath) {
+        let interfaceTypes = Set(path.availableInterfaces.map { $0.type })
+            .sorted { $0.rawValue < $1.rawValue }
+        let signature = (path.status, interfaceTypes)
+
+        if let previous = lastPathSignature, previous == signature {
+            return
+        }
+        lastPathSignature = signature
+
         SessionHolder.shared.reset()
         FileLogger.shared.info(.network, "network path changed, session reset", payload: [
             "status": String(describing: path.status),
