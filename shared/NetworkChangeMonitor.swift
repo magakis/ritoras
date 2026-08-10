@@ -19,7 +19,7 @@ final class NetworkChangeMonitor {
 
     /// Last path signature for change detection: (status, sorted unique interface types).
     /// Read and written only on the monitor's serial queue — no lock needed.
-    private var lastPathSignature: (NWPath.Status, [NWInterface.InterfaceType])?
+    private var lastPathSignature: (NWPath.Status, Set<NWInterface.InterfaceType>)?
 
     private init() {}
 
@@ -42,8 +42,7 @@ final class NetworkChangeMonitor {
     }
 
     private func handle(_ path: NWPath) {
-        let interfaceTypes = Set(path.availableInterfaces.map { $0.type })
-            .sorted { $0.rawValue < $1.rawValue }
+        let interfaceTypes: Set<NWInterface.InterfaceType> = Set(path.availableInterfaces.map { $0.type })
         let signature = (path.status, interfaceTypes)
 
         if let previous = lastPathSignature, previous == signature {
