@@ -98,7 +98,7 @@ struct RitorasApp: App {
             .onChange(of: scenePhase) { newPhase in
                 switch newPhase {
                 case .active:
-                    break
+                    dictationViewModel.ensureLocalhostServerHealthy()
                 case .background, .inactive:
                     break
                 @unknown default:

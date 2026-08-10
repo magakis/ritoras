@@ -88,6 +88,14 @@ final class DictationViewModel: ObservableObject {
         didSet {
             updateStateSnapshot()                                    // publish intermediate states first (app-group)
             storeTerminalResultIfNeeded()                            // publish terminal result — BEFORE the post
+            switch phase {
+            case .recording, .transcribing:
+                if localhostServer != nil {
+                    startHealthCheckTimer()
+                }
+            default:
+                stopHealthCheckTimer()
+            }
             DarwinNotifier.post(SharedConfig.Defaults.darwinStateChangedNotificationName)  // LAST — only signal after data is visible
         }
     }
@@ -97,6 +105,19 @@ final class DictationViewModel: ObservableObject {
     // MARK: - Localhost Server (Phase 1)
 
     private var localhostServer: LocalhostServer?
+
+    /// Re-entrancy guard + generation token for ensureLocalhostServerHealthy().
+    /// The boolean is set synchronously before the first await; the token is
+    /// compared after the await so a rapid foreground→background→foreground
+    /// cycle cannot run two concurrent health checks that both restart the server.
+    private var isEnsuringLocalhostHealth = false
+    private var ensureHealthToken = 0
+
+    /// Periodic localhost health check timer. Runs only while a dictation is
+    /// actively recording or transcribing so a "ready but wedged" listener is
+    /// caught even when the app stays foregrounded (no scenePhase transition).
+    private var healthCheckTimer: Timer?
+    private static let healthCheckInterval: TimeInterval = 10.0
 
     /// Locked holder of the latest published snapshot, readable from the
     /// localhost server's background conn_queue without touching @MainActor state.
@@ -160,6 +181,59 @@ final class DictationViewModel: ObservableObject {
             FileLogger.shared.error(.app, "DictationViewModel: failed to start localhost server",
                                     payload: ["error": error.localizedDescription])
         }
+    }
+
+    /// Verifies the localhost server is still responding and restarts it if not.
+    /// Called on app activation (scenePhase .active). Heals an already-started
+    /// server only — never eagerly starts one (that is the ritoras://dictate
+    /// URL path's job). Not async: the SwiftUI scenePhase call site stays
+    /// synchronous; the async work runs in a @MainActor Task guarded against
+    /// re-entrancy.
+    func ensureLocalhostServerHealthy() {
+        guard localhostServer != nil else { return }
+
+        Task { @MainActor [weak self] in
+            guard !(self?.isEnsuringLocalhostHealth ?? true) else { return }
+            self?.isEnsuringLocalhostHealth = true
+            defer { self?.isEnsuringLocalhostHealth = false }
+
+            let token = self?.ensureHealthToken ?? 0
+            let healthy = await LocalhostClient.healthCheck()
+
+            guard let self = self, token == self.ensureHealthToken, self.localhostServer != nil else { return }
+
+            if healthy {
+                FileLogger.shared.debug(.network, "localhost health check ok")
+                return
+            }
+            FileLogger.shared.warn(.network, "localhost server unhealthy on probe, restarting")
+            self.localhostServer?.restart()
+        }
+    }
+
+    /// Starts the periodic localhost health check timer. Runs only while a
+    /// dictation is actively recording or transcribing; stopped on terminal
+    /// phases and in deinit so it never survives a session.
+    private func startHealthCheckTimer() {
+        guard healthCheckTimer == nil else { return }
+        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: Self.healthCheckInterval, repeats: true) { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                // Fast-path: the listener is already dead — restart synchronously
+                // without the GET /health network round-trip.
+                if self.localhostServer?.isHealthy == false || self.localhostServer?.hasListener == false {
+                    FileLogger.shared.warn(.network, "localhost server listener dead, restarting")
+                    self.localhostServer?.restart()
+                    return
+                }
+                self.ensureLocalhostServerHealthy()
+            }
+        }
+    }
+
+    private func stopHealthCheckTimer() {
+        healthCheckTimer?.invalidate()
+        healthCheckTimer = nil
     }
 
     /// Publishes intermediate states (recording, transcribing, cancelled) to app-group snapshot.
@@ -1027,5 +1101,9 @@ final class DictationViewModel: ObservableObject {
         // served to a later poll (the keyboard has already consumed the cancelled
         // snapshot published above, if any).
         lastPayloadHolder.set(nil)
+    }
+
+    deinit {
+        stopHealthCheckTimer()
     }
 }
