@@ -18,11 +18,34 @@ final class LocalhostServer {
     private let onCancel: (() async -> Void)?
     private let onState: (() -> DictationPayload?)?
 
+    // Listener health/restart state. All of these are guarded by `listenerLock`
+    // and must only be touched while holding it.
+    private var _isHealthy = false
+    private var intentionalStop = false
+    private var restartCount = 0
+    private var lastRestartAt: Date = .distantPast
+    private static let restartDebounce: TimeInterval = 2.0
+    private static let maxRestarts = 5
+
     /// The port the listener is actually bound to. Equals `port` when a fixed
     /// port was given; differs when port 0 was passed (OS-assigned).
     /// Returns `nil` before the listener reaches `.ready`.
     var actualPort: UInt16? {
         listener?.port?.rawValue
+    }
+
+    /// Whether the listener last reported `.ready`. `false` while stopped,
+    /// failed, or cancelled. Thread-safe.
+    var isHealthy: Bool {
+        listenerLock.lock(); defer { listenerLock.unlock() }
+        return _isHealthy
+    }
+
+    /// Whether a listener object currently exists (started or failed but not
+    /// yet reaped). Thread-safe.
+    var hasListener: Bool {
+        listenerLock.lock(); defer { listenerLock.unlock() }
+        return _listener != nil
     }
 
     private static let maxRequestSize = 65536
@@ -37,50 +60,135 @@ final class LocalhostServer {
     // MARK: - Lifecycle
 
     func start() throws {
-        guard listener == nil else {
+        listenerLock.lock()
+        defer { listenerLock.unlock() }
+        guard _listener == nil else {
             FileLogger.shared.info(.network, "LocalhostServer: already running",
                                    payload: ["port": port])
             return
         }
+        try startListenerLocked()
+        FileLogger.shared.info(.network, "LocalhostServer: start requested",
+                               payload: ["port": port])
+    }
 
+    /// Creates and starts a fresh NWListener bound to `port`. Caller MUST hold
+    /// `listenerLock`.
+    private func startListenerLocked() throws {
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
         params.requiredInterfaceType = .loopback
 
         let newListener = try NWListener(using: params, on: NWEndpoint.Port(integerLiteral: port))
-        listener = newListener
+        _listener = newListener
 
         newListener.stateUpdateHandler = { [weak self, weak newListener] state in
-            switch state {
-            case .ready:
-                let actual = newListener?.port?.rawValue ?? 0   // local capture — no self.listener read
-                FileLogger.shared.info(.network, "LocalhostServer: ready",
-                                       payload: ["port": actual])
-            case .failed(let error):
-                FileLogger.shared.warn(.network, "LocalhostServer: listener failed",
-                                       payload: ["error": error.localizedDescription])
-            case .cancelled:
-                FileLogger.shared.debug(.network, "LocalhostServer: cancelled")
-            default:
-                break
-            }
+            self?.handleListenerState(state, newListener: newListener)
         }
 
         newListener.newConnectionHandler = { [weak self] connection in
             self?.handleConnection(connection)
         }
 
-        listener?.start(queue: queue)
+        newListener.start(queue: queue)
+    }
 
-        FileLogger.shared.info(.network, "LocalhostServer: start requested",
-                               payload: ["port": port])
+    /// Handles `NWListener` state transitions. Runs on `self.queue`; all state
+    /// mutations are serialized by `listenerLock`.
+    private func handleListenerState(_ state: NWListener.State, newListener: NWListener?) {
+        switch state {
+        case .ready:
+            listenerLock.lock()
+            _isHealthy = true
+            restartCount = 0
+            listenerLock.unlock()
+            let actual = newListener?.port?.rawValue ?? 0   // local capture — no self.listener read
+            FileLogger.shared.info(.network, "LocalhostServer: ready",
+                                   payload: ["port": actual])
+        case .failed(let error):
+            listenerLock.lock()
+            _isHealthy = false
+            if _listener === newListener { _listener = nil }
+            listenerLock.unlock()
+            FileLogger.shared.warn(.network, "LocalhostServer: listener failed",
+                                   payload: ["error": error.localizedDescription])
+            scheduleRestart(reason: "failed")
+        case .cancelled:
+            listenerLock.lock()
+            if intentionalStop {
+                intentionalStop = false
+                listenerLock.unlock()
+                FileLogger.shared.debug(.network, "LocalhostServer: listener cancelled (intentional)")
+                return
+            }
+            _isHealthy = false
+            if _listener === newListener { _listener = nil }
+            listenerLock.unlock()
+            FileLogger.shared.warn(.network, "LocalhostServer: listener cancelled unexpectedly")
+            scheduleRestart(reason: "cancelled")
+        default:
+            break
+        }
     }
 
     func stop() {
-        guard let listener = listener else { return }
+        listenerLock.lock()
+        defer { listenerLock.unlock() }
+        guard let listener = _listener else { return }
+        intentionalStop = true
         listener.cancel()
-        self.listener = nil
+        _listener = nil
+        _isHealthy = false
         FileLogger.shared.info(.network, "LocalhostServer: stopped")
+    }
+
+    /// Manually replaces the current listener with a fresh one. Safe to call
+    /// while running or after failure; resets the auto-restart retry budget.
+    func restart() {
+        listenerLock.lock()
+        defer { listenerLock.unlock() }
+        if _listener != nil {
+            intentionalStop = true
+            _listener?.cancel()
+            _listener = nil
+            _isHealthy = false
+        }
+        do {
+            try startListenerLocked()
+            FileLogger.shared.warn(.network, "LocalhostServer: listener manually restarted")
+            restartCount = 0
+        } catch {
+            FileLogger.shared.error(.network, "LocalhostServer: manual restart failed",
+                                    payload: ["error": error.localizedDescription])
+        }
+    }
+
+    /// Schedules an automatic listener restart after `restartDebounce`, capped
+    /// at `maxRestarts` consecutive failures. The retry budget resets on
+    /// `.ready` and on manual `restart()`.
+    private func scheduleRestart(reason: String) {
+        listenerLock.lock()
+        defer { listenerLock.unlock() }
+        guard restartCount < Self.maxRestarts else {
+            FileLogger.shared.error(.network, "LocalhostServer: gave up restarting listener after \(Self.maxRestarts) attempts")
+            return
+        }
+        let wait = max(0, Self.restartDebounce - Date().timeIntervalSince(lastRestartAt))
+        queue.asyncAfter(deadline: .now() + wait) { [weak self] in
+            guard let self = self else { return }
+            self.listenerLock.lock()
+            defer { self.listenerLock.unlock() }
+            guard self._listener == nil else { return }
+            do {
+                try self.startListenerLocked()
+                self.restartCount += 1
+                self.lastRestartAt = Date()
+                FileLogger.shared.warn(.network, "LocalhostServer: restarting listener (attempt \(self.restartCount), reason: \(reason))")
+            } catch {
+                FileLogger.shared.error(.network, "LocalhostServer: restart failed",
+                                        payload: ["error": error.localizedDescription, "reason": reason])
+            }
+        }
     }
 
     deinit {
