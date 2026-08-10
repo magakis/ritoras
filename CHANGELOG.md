@@ -17,14 +17,18 @@ Builds before the first numbered section below had no changelog.
 
 ### Changed
 
+- The app no longer rebuilds its network session several times in quick succession when the device's network path updates repeatedly without actually changing reachability (common with VPN plus cellular), reducing wasted work during network transitions.
+
 ### Fixed
 
+- When the transcription server is reachable but slow to respond, the error message now says the server didn't respond in time, instead of incorrectly claiming the server was unreachable.
 - Starting a new dictation immediately after stopping or cancelling one no longer corrupts the new session — the new recording used to be torn down or left in a broken state.
 - Switching to another text field while a transcription is still being processed no longer inserts the dictated text into the wrong field.
 - Holding the backspace key while a dictation times out no longer causes unwanted deletions in the next text field you focus.
 - Rapidly double-tapping the stop/cancel control no longer fires duplicate cancel requests.
 - Fixed a rare concurrency issue in the local dictation server that could affect running dictations.
 - The dictation state server inside the app now restarts itself automatically if it stops responding, so the keyboard's recording and transcribing indicators no longer get stuck after the app has been backgrounded or the system disrupted the server. Previously you had to force-close and reopen the app to recover.
+- Fixed a bug where background (async) dictation could hang silently and never upload. The app now sends the recording in-memory (as it did before the streaming change) and no longer forces the deprecated HTTP/1 pipelining mode that could stall multipart uploads.
 
 <!-- To cut a build: rename "## Unreleased" to "## Build <run_number> — <YYYY-MM-DD>",
      then open a fresh "## Unreleased" above it. <run_number> = latest CI run
