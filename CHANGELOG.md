@@ -24,6 +24,7 @@ Builds before the first numbered section below had no changelog.
 - Holding the backspace key while a dictation times out no longer causes unwanted deletions in the next text field you focus.
 - Rapidly double-tapping the stop/cancel control no longer fires duplicate cancel requests.
 - Fixed a rare concurrency issue in the local dictation server that could affect running dictations.
+- The dictation state server inside the app now restarts itself automatically if it stops responding, so the keyboard's recording and transcribing indicators no longer get stuck after the app has been backgrounded or the system disrupted the server. Previously you had to force-close and reopen the app to recover.
 
 <!-- To cut a build: rename "## Unreleased" to "## Build <run_number> — <YYYY-MM-DD>",
      then open a fresh "## Unreleased" above it. <run_number> = latest CI run
