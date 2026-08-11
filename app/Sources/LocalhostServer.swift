@@ -27,6 +27,12 @@ final class LocalhostServer {
     private static let restartDebounce: TimeInterval = 2.0
     private static let maxRestarts = 5
 
+    /// In-flight connections accepted since the listener started. Guarded by
+    /// `listenerLock`. Tracked so `stop()`/`restart()` can cancel them
+    /// deterministically; otherwise cancelling the listener orphans them and
+    /// the keyboard's URLSession continuation may resume twice (SIGTRAP).
+    private var activeConnections: Set<NWConnection> = []
+
     /// The port the listener is actually bound to. Equals `port` when a fixed
     /// port was given; differs when port 0 was passed (OS-assigned).
     /// Returns `nil` before the listener reaches `.ready`.
@@ -136,6 +142,8 @@ final class LocalhostServer {
         defer { listenerLock.unlock() }
         guard let listener = _listener else { return }
         intentionalStop = true
+        for conn in activeConnections { conn.cancel() }
+        activeConnections.removeAll()
         listener.cancel()
         _listener = nil
         _isHealthy = false
@@ -149,6 +157,8 @@ final class LocalhostServer {
         defer { listenerLock.unlock() }
         if _listener != nil {
             intentionalStop = true
+            for conn in activeConnections { conn.cancel() }
+            activeConnections.removeAll()
             _listener?.cancel()
             _listener = nil
             _isHealthy = false
@@ -197,12 +207,24 @@ final class LocalhostServer {
 
     // MARK: - Connection Handling
 
+    private func registerConnection(_ connection: NWConnection) {
+        listenerLock.lock(); defer { listenerLock.unlock() }
+        activeConnections.insert(connection)
+    }
+
+    private func unregisterConnection(_ connection: NWConnection) {
+        listenerLock.lock(); defer { listenerLock.unlock() }
+        activeConnections.remove(connection)
+    }
+
     private func handleConnection(_ connection: NWConnection) {
         let connQueue = DispatchQueue(
             label: "com.ritoras.localhostserver.conn.\(UUID().uuidString.prefix(8))",
             qos: .utility
         )
         connection.start(queue: connQueue)
+
+        registerConnection(connection)
 
         var requestData = Data()
 
@@ -220,6 +242,7 @@ final class LocalhostServer {
                 if let error = error {
                     FileLogger.shared.debug(.network, "LocalhostServer: receive error",
                                            payload: ["error": error.localizedDescription])
+                    self.unregisterConnection(connection)
                     connection.cancel()
                     return
                 }
@@ -243,8 +266,9 @@ final class LocalhostServer {
     }
 
     private func sendResponse(_ data: Data, on connection: NWConnection) {
-        connection.send(content: data, completion: .contentProcessed { _ in
+        connection.send(content: data, completion: .contentProcessed { [weak self] _ in
             connection.cancel()
+            self?.unregisterConnection(connection)
         })
     }
 
