@@ -331,7 +331,7 @@ class KeyboardViewController: UIInputViewController {
 
         // App-group snapshot polling (primary transport).
         appearRefreshTask?.cancel()
-        appearRefreshTask = Task { [weak self] in
+        appearRefreshTask = Task { @MainActor [weak self] in
             await self?.refreshFromSharedState()
         }
         startSnapshotPolling()
@@ -687,7 +687,7 @@ class KeyboardViewController: UIInputViewController {
         darwinStateChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinStateChangedNotificationName) { [weak self] in
             DispatchQueue.main.async { [weak self] in
                 self?.appearRefreshTask?.cancel()
-                self?.appearRefreshTask = Task { [weak self] in
+                self?.appearRefreshTask = Task { @MainActor [weak self] in
                     await self?.refreshFromSharedState()
                 }
             }
@@ -890,7 +890,7 @@ class KeyboardViewController: UIInputViewController {
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         timer.schedule(deadline: .now() + initialDelay, repeating: 0.5)
         timer.setEventHandler { [weak self] in
-            Task { await self?.refreshFromSharedState() }
+            Task { @MainActor [weak self] in await self?.refreshFromSharedState() }
         }
         timer.resume()
         snapshotPollTimer = timer
@@ -1011,7 +1011,7 @@ class KeyboardViewController: UIInputViewController {
             darwinStateChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinStateChangedNotificationName) { [weak self] in
                 DispatchQueue.main.async { [weak self] in
                     self?.appearRefreshTask?.cancel()
-                    self?.appearRefreshTask = Task { [weak self] in
+                    self?.appearRefreshTask = Task { @MainActor [weak self] in
                         await self?.refreshFromSharedState()
                     }
                 }
@@ -1124,7 +1124,7 @@ class KeyboardViewController: UIInputViewController {
         FileLogger.shared.info(.keyboard, "Mic: requesting stop via /stop")
         guard !stopCancelRequestInFlight else { return }
         stopCancelRequestInFlight = true
-        Task { [weak self] in
+        Task { @MainActor [weak self] in
             defer { self?.stopCancelRequestInFlight = false }
             let ok = await LocalhostClient.postStop()
             guard let self = self else { return }
@@ -1146,7 +1146,7 @@ class KeyboardViewController: UIInputViewController {
         FileLogger.shared.info(.keyboard, "Mic: requesting cancel via /cancel")
         guard !stopCancelRequestInFlight else { return }
         stopCancelRequestInFlight = true
-        Task { [weak self] in
+        Task { @MainActor [weak self] in
             defer { self?.stopCancelRequestInFlight = false }
             let ok = await LocalhostClient.postCancel()
             guard let self = self else { return }
