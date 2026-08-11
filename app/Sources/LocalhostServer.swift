@@ -31,7 +31,7 @@ final class LocalhostServer {
     /// `listenerLock`. Tracked so `stop()`/`restart()` can cancel them
     /// deterministically; otherwise cancelling the listener orphans them and
     /// the keyboard's URLSession continuation may resume twice (SIGTRAP).
-    private var activeConnections: Set<NWConnection> = []
+    private var activeConnections: [NWConnection] = []
 
     /// The port the listener is actually bound to. Equals `port` when a fixed
     /// port was given; differs when port 0 was passed (OS-assigned).
@@ -209,12 +209,12 @@ final class LocalhostServer {
 
     private func registerConnection(_ connection: NWConnection) {
         listenerLock.lock(); defer { listenerLock.unlock() }
-        activeConnections.insert(connection)
+        activeConnections.append(connection)
     }
 
     private func unregisterConnection(_ connection: NWConnection) {
         listenerLock.lock(); defer { listenerLock.unlock() }
-        activeConnections.remove(connection)
+        activeConnections.removeAll { $0 === connection }
     }
 
     private func handleConnection(_ connection: NWConnection) {
