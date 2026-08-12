@@ -1181,8 +1181,8 @@ class KeyboardViewController: UIInputViewController {
     /// treat nil as "keyboard transitional" and defer the result — the same
     /// shape as the existing `view.window == nil` deferral.
     private func safeDocumentIdentifier() -> UUID? {
-        guard let nsUuid = (textDocumentProxy as NSObject)
-            .value(forKey: "documentIdentifier") as? NSUUID else {
+        guard let nsObject = textDocumentProxy as? NSObject,
+              let nsUuid = nsObject.value(forKey: "documentIdentifier") as? NSUUID else {
             return nil
         }
         return UUID(uuidString: nsUuid.uuidString)
