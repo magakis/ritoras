@@ -9,6 +9,7 @@ struct DictationView: View {
     @State private var elapsed: TimeInterval = 0
     @State private var timer: Timer?
     @State private var showHistory = false
+    @State private var showSettings = false
 
     var body: some View {
         ZStack {
@@ -37,6 +38,34 @@ struct DictationView: View {
         .sheet(isPresented: $showHistory) {
             HistoryView()
         }
+        .overlay(alignment: .topTrailing) {
+            settingsGearButton
+                .padding(.top, 8)
+                .padding(.trailing, 16)
+        }
+        .sheet(isPresented: $showSettings) {
+            NavigationStack {
+                SettingsView()
+            }
+            // A sheet presents its content in a fresh environment context — it
+            // does not inherit @EnvironmentObject from the presenting view, so
+            // re-inject both objects the sheet content reads: SettingsView (and
+            // its NavigationLink destinations like RecoveryView) need AppSettings
+            // and DictationViewModel, and the ActiveRecordingBadge overlay needs
+            // DictationViewModel.
+            .environmentObject(AppSettings.shared)
+            .environmentObject(viewModel)
+            .overlay(alignment: .topTrailing) {
+                if viewModel.phase == .recording || viewModel.phase == .transcribing {
+                    // Show the badge only while a dictation is actively in flight
+                    // (recording or transcribing). Done/error/cancelled phases have
+                    // no ongoing recording to return to, so the badge is hidden.
+                    ActiveRecordingBadge()
+                        .padding(.top, 60)    // clear the dynamic island / status bar
+                        .padding(.trailing, 16)
+                }
+            }
+        }
         .task {
             await viewModel.start(id: requestId)
         }
@@ -56,6 +85,29 @@ struct DictationView: View {
                 dismiss()
             }
         }
+        .onChange(of: showSettings) { _, isPresented in
+            if isPresented {
+                FileLogger.shared.info(.app, "Settings sheet opened during dictation",
+                                       payload: ["phase": String(describing: viewModel.phase)])
+            } else {
+                FileLogger.shared.info(.app, "Settings sheet closed during dictation",
+                                       payload: ["phase": String(describing: viewModel.phase)])
+            }
+        }
+    }
+
+    // MARK: - Settings
+
+    private var settingsGearButton: some View {
+        Button {
+            showSettings = true
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.title3)
+                .foregroundColor(.primary)
+        }
+        .buttonStyle(.bordered)
+        .accessibilityLabel("Settings")
     }
 
     // MARK: - Recording State

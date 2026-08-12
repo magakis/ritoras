@@ -129,7 +129,10 @@ final class DictationViewModel: ObservableObject {
 
     private var recorder: AudioRecorder?
     private(set) var activeID: UUID?
-    private var recordingStartTime: Date?
+    /// Start of the current recording; @Published so the overlay badge can render
+    /// live elapsed time. Deliberately has NO didSet — unlike `phase`, publishing
+    /// this must not write IPC snapshots.
+    @Published private(set) var recordingStartTime: Date?
 
     private var streamRecorder: StreamingAudioRecorder?
     private var streamClient: WhisperStreamClient?
