@@ -7,6 +7,8 @@ struct RecoveryView: View {
     @State private var retryingJobIds: Set<UUID> = []
     @State private var toastMessage: String?
     @State private var toastIsError = false
+    @State private var resultText: String?
+    @State private var showResult = false
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -66,6 +68,14 @@ struct RecoveryView: View {
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        .sheet(isPresented: $showResult) {
+            if let text = resultText {
+                TranscriptionResultView(text: text) {
+                    showResult = false
+                    resultText = nil
+                }
+            }
+        }
     }
 
     // MARK: - Actions
@@ -80,16 +90,15 @@ struct RecoveryView: View {
         retryingJobIds.insert(jobId)
 
         Task {
-            await dictationViewModel.retry(jobId: jobId)
+            let text = await dictationViewModel.retry(jobId: jobId)
             await MainActor.run {
                 retryingJobIds.remove(jobId)
-                let stillExists = FailedJobStore.shared.list().contains(where: { $0.jobId == jobId })
-                if stillExists {
+                if let text = text {
+                    resultText = text
+                    showResult = true
+                } else {
                     toastMessage = "Retry failed — see updated error below"
                     toastIsError = true
-                } else {
-                    toastMessage = "Transcribed — copied to clipboard"
-                    toastIsError = false
                 }
                 refreshRecords()
                 Task {

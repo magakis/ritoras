@@ -783,7 +783,8 @@ final class DictationViewModel: ObservableObject {
     /// isolated from `activeID` — does NOT fire Darwin notifications,
     /// publishes directly to app-group (no HTTP server), and refuses to run while a
     /// live dictation is in `.recording` or `.transcribing` phase.
-    func retry(jobId: UUID) async {
+    /// Returns the transcribed text on success, `nil` on failure/cancel/skip.
+    func retry(jobId: UUID) async -> String? {
         // HARD GUARD: never retry while a live dictation is in flight.
         // phase may be .recording at startup before any dictation without
         // an active recorder — that's the idle state, not "live". A live
@@ -791,12 +792,12 @@ final class DictationViewModel: ObservableObject {
         // is actively recording.
         switch phase {
         case .transcribing:
-            return  // definitely live
+            return nil  // definitely live
         case .recording:
             // .recording at startup (no recorder) is not live; only block
             // if a recorder is actually active.
             if recorder != nil || streamRecorder != nil {
-                return
+                return nil
             }
         default:
             break
@@ -805,13 +806,17 @@ final class DictationViewModel: ObservableObject {
         do {
             let text = try await transcribeSavedAudio(jobId: jobId)
             handleRetrySuccess(text: text, jobId: jobId)
+            return text
         } catch is RetryAlreadyInFlight {
             // Skip — a concurrent retry for this job is already in flight.
+            return nil
         } catch WhisperError.cancelled {
             FileLogger.shared.debug(.app, "retry cancelled", payload: ["jobId": jobId.uuidString])
             phase = .cancelled
+            return nil
         } catch {
             handleRetryFailure(error: error, jobId: jobId)
+            return nil
         }
     }
 

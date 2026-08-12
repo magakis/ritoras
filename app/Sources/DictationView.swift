@@ -144,24 +144,9 @@ struct DictationView: View {
 
     private func doneContent(text: String) -> some View {
         VStack(spacing: 24) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 72))
-                .foregroundColor(.green)
-
-            Text("Done!")
-                .font(.largeTitle)
-                .fontWeight(.bold)
-
-            ScrollView {
-                Text(text)
-                    .font(.body)
-                    .textSelection(.enabled)
-                    .padding()
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(.secondarySystemBackground))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
+            TranscriptionResultView(text: text) {
+                dismiss()
             }
-            .frame(maxHeight: 250)
 
             HStack(spacing: 8) {
                 Image(systemName: "arrow.left")
@@ -171,24 +156,10 @@ struct DictationView: View {
                     .foregroundColor(.secondary)
             }
 
-            HStack(spacing: 16) {
-                Button {
-                    UIPasteboard.general.string = text
-                } label: {
-                    Label("Copy Text", systemImage: "doc.on.doc")
-                }
-                .buttonStyle(.bordered)
-
-                Button("History") {
-                    showHistory = true
-                }
-                .buttonStyle(.bordered)
+            Button("History") {
+                showHistory = true
             }
-
-            Button("Done") {
-                dismiss()
-            }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.bordered)
         }
     }
 
