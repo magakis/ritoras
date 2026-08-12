@@ -185,6 +185,45 @@ enum WhisperClient {
         )
     }
 
+    /// Single canonical entrypoint for transcribing a recorded audio file.
+    ///
+    /// Resolves a healthy server (using `preferredServer` when it is present in
+    /// `config.servers`, otherwise a parallel probe of `config.servers`), submits
+    /// via async /transcriptions with polling, and falls back to sync POST
+    /// /transcribe against the same resolved server when the server does not
+    /// implement the async endpoint.
+    ///
+    /// Order-independent: when `preferredServer` is nil, all servers are probed
+    /// concurrently and the first healthy responder is used, so an unreachable
+    /// server at index 0 cannot block a reachable server later in the list.
+    static func routeTranscription(
+        audioURL: URL,
+        jobId: UUID,
+        config: SharedConfig,
+        correlationId: UUID? = nil,
+        preferredServer: String? = nil
+    ) async throws -> String {
+        let serverURL: String
+        if let preferredServer, config.servers.contains(preferredServer) {
+            serverURL = preferredServer
+        } else {
+            guard let healthy = await selectFirstHealthyServer(servers: config.servers) else {
+                throw WhisperError.serverUnreachable
+            }
+            serverURL = healthy
+        }
+        do {
+            return try await transcribeAsync(
+                audioURL: audioURL, jobId: jobId, config: config,
+                correlationId: correlationId, preferredServer: serverURL)
+        } catch WhisperError.asyncUnsupported {
+            FileLogger.shared.info(.network, "async unsupported; sync fallback",
+                                   payload: ["server": serverURL])
+            return try await transcribe(
+                audioURL: audioURL, serverURL: serverURL, correlationId: correlationId)
+        }
+    }
+
     /// Pings a server to check if it is reachable.
     /// - Parameters:
     ///   - serverURL: Base URL of the Whisper server.

@@ -604,21 +604,11 @@ final class DictationViewModel: ObservableObject {
                         "server": chosenServer ?? config.servers.first ?? ""
                     ])
 
-                    let text: String
-                    let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
-                    do {
-                        text = try await WhisperClient.transcribeAsync(
-                            audioURL: url, jobId: id, config: config, correlationId: activeID, preferredServer: chosenServer)
-                        FileLogger.shared.debug(.network, "async transcription succeeded",
-                                                payload: ["textLength": text.count])
-                    } catch WhisperError.asyncUnsupported {
-                        FileLogger.shared.info(.network, "async unsupported (404), falling back to sync", payload: [:])
-                        if config.servers.contains(chosenServer) {
-                            text = try await WhisperClient.transcribe(audioURL: url, serverURL: chosenServer, correlationId: activeID)
-                        } else {
-                            text = try await WhisperClient.transcribe(audioURL: url, config: config, correlationId: activeID)
-                        }
-                    }
+                    let text = try await WhisperClient.routeTranscription(
+                        audioURL: url, jobId: id, config: config,
+                        correlationId: activeID, preferredServer: chosenServer)
+                    FileLogger.shared.debug(.network, "async transcription succeeded",
+                                            payload: ["textLength": text.count])
                     guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
 
                     let uploadElapsed = Date().timeIntervalSince(uploadT0) * 1000
@@ -812,50 +802,11 @@ final class DictationViewModel: ObservableObject {
             break
         }
 
-        // Idempotency guard — prevent concurrent retries of the same job.
-        // This stops programmatic retry loops dead regardless of their source.
-        retryLock.lock()
-        if retryingJobIds.contains(jobId) {
-            retryLock.unlock()
-            FileLogger.shared.debug(.app, "retry skipped — already in flight",
-                                    payload: ["jobId": jobId.uuidString])
-            return
-        }
-        retryingJobIds.insert(jobId)
-        retryLock.unlock()
-
-        defer {
-            retryLock.lock()
-            retryingJobIds.remove(jobId)
-            retryLock.unlock()
-        }
-
-        guard let record = FailedJobStore.shared.list().first(where: { $0.jobId == jobId }) else {
-            FileLogger.shared.debug(.app, "retry: no record found",
-                                    payload: ["jobId": jobId.uuidString])
-            return
-        }
-
-        let audioURL = URL(fileURLWithPath: record.audioFilePath)
-        guard FileManager.default.fileExists(atPath: audioURL.path) else {
-            FileLogger.shared.debug(.app, "retry: audio file no longer exists", payload: [
-                "jobId": jobId.uuidString,
-                "path": record.audioFilePath
-            ])
-            return
-        }
-
-        FailedJobStore.shared.incrementRetry(jobId: jobId)
-        FileLogger.shared.debug(.app, "retry: starting transcription",
-                                payload: ["jobId": jobId.uuidString,
-                                          "path": record.audioFilePath,
-                                          "attempt": record.retryCount + 1])
-
-        let config = SharedConfig.load()
         do {
-            let text = try await WhisperClient.transcribe(
-                audioURL: audioURL, config: config, correlationId: jobId)
-            handleRetrySuccess(text: text, jobId: jobId, audioURL: audioURL)
+            let text = try await transcribeSavedAudio(jobId: jobId)
+            handleRetrySuccess(text: text, jobId: jobId)
+        } catch is RetryAlreadyInFlight {
+            // Skip — a concurrent retry for this job is already in flight.
         } catch WhisperError.cancelled {
             FileLogger.shared.debug(.app, "retry cancelled", payload: ["jobId": jobId.uuidString])
             phase = .cancelled
@@ -866,9 +817,10 @@ final class DictationViewModel: ObservableObject {
 
     // MARK: - Retry Helpers
 
-    /// Handles a successful retry: delivers to clipboard, persists in history,
-    /// publishes to app-group snapshot, then cleans up audio file and failed-job record.
-    private func handleRetrySuccess(text: String, jobId: UUID, audioURL: URL) {
+    /// Handles a successful retry: delivers the transcript to the clipboard.
+    /// History persistence and audio/record cleanup happen inside
+    /// `transcribeSavedAudio`.
+    private func handleRetrySuccess(text: String, jobId: UUID) {
         // Deliver to clipboard — write directly since activeID is nil during recovery.
         var payload: [String: Any] = [
             "source": "ritoras",
@@ -882,17 +834,6 @@ final class DictationViewModel: ObservableObject {
                 ["org.ritoras.dictation": jsonData, "public.utf8-plain-text": text]
             ], options: [:])
         }
-
-        // Add to persistent text history.
-        TranscriptionHistory.shared.add(text: text)
-
-        // Clean up — delete audio file first, then remove the record.
-        try? FileManager.default.removeItem(at: audioURL)
-        RecordingStore.shared.delete(jobId: jobId)
-        FailedJobStore.shared.remove(jobId: jobId)
-
-        FileLogger.shared.debug(.app, "retry succeeded, cleaning up",
-                                payload: ["jobId": jobId.uuidString])
     }
 
     /// Handles a failed retry: logs the error and updates the record's
@@ -906,18 +847,23 @@ final class DictationViewModel: ObservableObject {
         FailedJobStore.shared.updateErrorMessage(jobId: jobId, message: errorMessage)
     }
 
-    // MARK: - Retry As Live Dictation
+    /// Thrown by `transcribeSavedAudio` when the same job is already being
+    /// retried. Callers treat it as a no-op, not a failure.
+    private struct RetryAlreadyInFlight: Error {}
 
-    /// Retry a failed dictation from the error screen, going through the same
-    /// phase transitions as a live dictation. The user sees the transcribing UI.
-    func retryAsLiveDictation(jobId: UUID) async {
+    /// Loads saved audio for `jobId`, routes it through the unified transcription
+    /// entrypoint, and on success cleans up the audio file + failed-job record.
+    /// Returns the transcribed text on success; throws on failure. Does NOT touch
+    /// `phase` or `activeID` — callers own delivery.
+    private func transcribeSavedAudio(jobId: UUID) async throws -> String {
         // Idempotency guard — prevent concurrent retries of the same job.
+        // This stops programmatic retry loops dead regardless of their source.
         retryLock.lock()
         if retryingJobIds.contains(jobId) {
             retryLock.unlock()
-            FileLogger.shared.debug(.app, "retryAsLiveDictation skipped — already in flight",
+            FileLogger.shared.debug(.app, "retry skipped — already in flight",
                                     payload: ["jobId": jobId.uuidString])
-            return
+            throw RetryAlreadyInFlight()
         }
         retryingJobIds.insert(jobId)
         retryLock.unlock()
@@ -928,44 +874,78 @@ final class DictationViewModel: ObservableObject {
             retryLock.unlock()
         }
 
-        // Look up the saved audio
-        guard let record = FailedJobStore.shared.list().first(where: { $0.jobId == jobId }),
-              FileManager.default.fileExists(atPath: record.audioFilePath) else {
-            FileLogger.shared.debug(.app, "retryAsLiveDictation: audio not found",
-                                   payload: ["jobId": jobId.uuidString])
-            phase = .error("Saved audio no longer available")
-            return
+        guard let record = FailedJobStore.shared.list().first(where: { $0.jobId == jobId }) else {
+            FileLogger.shared.debug(.app, "retry: no record found",
+                                    payload: ["jobId": jobId.uuidString])
+            throw WhisperError.jobFailed("Saved audio no longer available")
         }
 
         let audioURL = URL(fileURLWithPath: record.audioFilePath)
-        let config = SharedConfig.load()
+        guard FileManager.default.fileExists(atPath: audioURL.path) else {
+            FileLogger.shared.debug(.app, "retry: audio file no longer exists", payload: [
+                "jobId": jobId.uuidString,
+                "path": record.audioFilePath
+            ])
+            throw WhisperError.jobFailed("Saved audio no longer available")
+        }
 
+        FailedJobStore.shared.incrementRetry(jobId: jobId)
+        FileLogger.shared.debug(.app, "retry: starting transcription",
+                                payload: ["jobId": jobId.uuidString,
+                                          "path": record.audioFilePath,
+                                          "attempt": record.retryCount + 1])
+
+        let config = SharedConfig.load()
+        do {
+            let text = try await WhisperClient.routeTranscription(
+                audioURL: audioURL, jobId: jobId, config: config,
+                correlationId: jobId, preferredServer: nil)
+
+            // Add to persistent text history.
+            TranscriptionHistory.shared.add(text: text)
+
+            // Clean up — delete audio file first, then remove the record.
+            try? FileManager.default.removeItem(at: audioURL)
+            RecordingStore.shared.delete(jobId: jobId)
+            FailedJobStore.shared.remove(jobId: jobId)
+
+            FileLogger.shared.debug(.app, "retry succeeded, cleaning up",
+                                    payload: ["jobId": jobId.uuidString])
+            return text
+        } catch WhisperError.cancelled {
+            // Cancelled is not a failure — leave the failed-job record untouched.
+            throw WhisperError.cancelled
+        } catch {
+            let errorMessage = error.localizedDescription
+            FailedJobStore.shared.updateErrorMessage(jobId: jobId, message: errorMessage)
+            throw error
+        }
+    }
+
+    // MARK: - Retry As Live Dictation
+
+    /// Retry a failed dictation from the error screen, going through the same
+    /// phase transitions as a live dictation. The user sees the transcribing UI.
+    func retryAsLiveDictation(jobId: UUID) async {
         // Transition to transcribing — user sees the loading UI
         activeID = jobId
         phase = .transcribing
 
         do {
-            let text = try await WhisperClient.transcribe(
-                audioURL: audioURL, config: config, correlationId: jobId)
+            let text = try await transcribeSavedAudio(jobId: jobId)
 
             // Supersede guard — same pattern as stop()
             guard activeID == jobId else { return }
 
-            // Deliver transcript
-            TranscriptionHistory.shared.add(text: text)
-
-            // Clean up audio file and failed-job record
-            try? FileManager.default.removeItem(at: audioURL)
-            RecordingStore.shared.delete(jobId: jobId)
-            FailedJobStore.shared.remove(jobId: jobId)
-
             phase = .done(text)
             FileLogger.shared.debug(.app, "retryAsLiveDictation succeeded",
                                    payload: ["jobId": jobId.uuidString])
+        } catch is RetryAlreadyInFlight {
+            // Skip — a concurrent retry for this job is already in flight.
+            return
         } catch {
             guard activeID == jobId else { return }
             let message = error.localizedDescription
-            FailedJobStore.shared.updateErrorMessage(jobId: jobId, message: message)
             phase = .error(message)
             FileLogger.shared.info(.app, "retryAsLiveDictation failed",
                                    payload: ["jobId": jobId.uuidString, "error": message])
