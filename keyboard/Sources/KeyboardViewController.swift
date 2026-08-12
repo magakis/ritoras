@@ -614,7 +614,7 @@ class KeyboardViewController: UIInputViewController {
 
         // Capture the document identifier of the current text field so
         // insertDictationResult can defer the result if the field changed.
-        dictationTargetDocId = textDocumentProxy.documentIdentifier
+        dictationTargetDocId = safeDocumentIdentifier()
 
         FileLogger.shared.debug(.keyboard, "dictation start footprint",
             payload: ["id": id.uuidString, "footprint": MemoryMonitor.currentFootprint()])
@@ -1170,6 +1170,24 @@ class KeyboardViewController: UIInputViewController {
         state = .error("Couldn't reach Ritoras app. Stopped locally.")
     }
 
+    /// Reads `textDocumentProxy.documentIdentifier` without trapping.
+    ///
+    /// `documentIdentifier` is declared `UUID` (nonnull) in Swift, but the
+    /// underlying Objective-C `NSUUID *` is nil during keyboard transitions,
+    /// field switches, and rapid controller recycling (a UIKit annotation bug
+    /// shipped since iOS 16). Direct access traps in
+    /// `UUID._unconditionallyBridgeFromObjectiveC` with `brk 1` (SIGTRAP).
+    /// KVC reads the `NSUUID` as an optional and returns nil instead. Callers
+    /// treat nil as "keyboard transitional" and defer the result — the same
+    /// shape as the existing `view.window == nil` deferral.
+    private func safeDocumentIdentifier() -> UUID? {
+        guard let nsUuid = (textDocumentProxy as NSObject)
+            .value(forKey: "documentIdentifier") as? NSUUID else {
+            return nil
+        }
+        return UUID(uuidString: nsUuid.uuidString)
+    }
+
     /// Inserts the transcribed text, clears the pending request, and resets the
     /// keyboard to idle. Centralizes the shared insert+reset flow and guarantees
     /// every other transport is stopped first (prevents double-insert now that the
@@ -1214,11 +1232,26 @@ class KeyboardViewController: UIInputViewController {
             }
         }
 
+        // Safe accessor: documentIdentifier is nonnull in Swift but nil during
+        // keyboard transitions (UIKit bug) — direct access traps. Nil here means
+        // the keyboard is transitional even though view.window != nil. Defer the
+        // result so it flushes when the user taps into a field.
+        guard let currentDocId = safeDocumentIdentifier() else {
+            FileLogger.shared.warn(.keyboard, "documentIdentifier nil — keyboard transitional, deferring",
+                                   payload: ["text_length": text.count])
+            storeDeferredResult(text: text)
+            stopDictationTransports()
+            pendingRequestId = nil
+            dictationTargetDocId = nil
+            state = .waiting
+            return
+        }
+
         // No-field gate: if there is genuinely no focused text field (zero UUID),
         // defer the result so it can be inserted when the user taps into a field.
-        if textDocumentProxy.documentIdentifier == UUID() {
+        if currentDocId == UUID() {
             FileLogger.shared.warn(.keyboard, "Dictation result arrived with no focused field — deferring",
-                                   payload: ["documentIdentifier": textDocumentProxy.documentIdentifier.uuidString])
+                                   payload: ["documentIdentifier": currentDocId.uuidString])
             storeDeferredResult(text: text)
             stopDictationTransports()
             pendingRequestId = nil
@@ -1232,10 +1265,10 @@ class KeyboardViewController: UIInputViewController {
         // the text + target so it flushes when they return to the original field
         // (mirrors scheduleDeferredDictationFlush's mismatch handling).
         if let targetId = dictationTargetDocId, targetId != UUID(),
-           textDocumentProxy.documentIdentifier != targetId {
+           currentDocId != targetId {
             FileLogger.shared.warn(.keyboard, "Dictation target mismatch — deferring",
                                    payload: ["target": targetId.uuidString,
-                                             "current": textDocumentProxy.documentIdentifier.uuidString])
+                                             "current": currentDocId.uuidString])
             storeDeferredResult(text: text, docId: targetId)
             stopDictationTransports()
             pendingRequestId = nil
@@ -1303,14 +1336,21 @@ class KeyboardViewController: UIInputViewController {
         deferredFlushWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self, self.view.window != nil else { return }
+            guard let currentDocId = self.safeDocumentIdentifier() else {
+                self.storeDeferredResult(text: textToInsert, docId: targetDocId)
+                FileLogger.shared.warn(.keyboard, "Deferred flush — documentIdentifier nil, re-deferring",
+                                       payload: ["target": targetDocId?.uuidString ?? "nil",
+                                                 "length": textToInsert.count])
+                return
+            }
             if let targetId = targetDocId, targetId != UUID(),
-               self.textDocumentProxy.documentIdentifier != targetId {
+               currentDocId != targetId {
                 // Original dictation field no longer focused — preserve text + target
                 // so it flushes when the user returns to that field. Do NOT discard.
                 self.storeDeferredResult(text: textToInsert, docId: targetId)
                 FileLogger.shared.warn(.keyboard, "Deferred flush skipped — original field not focused",
                                        payload: ["target": targetId.uuidString,
-                                                 "current": self.textDocumentProxy.documentIdentifier.uuidString])
+                                                 "current": currentDocId.uuidString])
                 return
             }
             self.state = .inserting
@@ -1880,7 +1920,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         // epoch and the content-hash context token. Both are re-checked on the
         // main-hop so stale background results are dropped.
         let capturedEpoch = keystrokeEpoch
-        let capturedDocId = textDocumentProxy.documentIdentifier
+        guard let capturedDocId = safeDocumentIdentifier() else { return }
         let capturedToken = keyboardContextToken(keyboardView)
 
         // --- Retroactive candidate snapshot (all main-thread work) ---
@@ -2152,7 +2192,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         guard keystrokeEpoch == capturedEpoch else { return }
 
         // Target-bound guard: the first-responder field must be unchanged.
-        guard textDocumentProxy.documentIdentifier == capturedDocId else { return }
+        guard safeDocumentIdentifier() == capturedDocId else { return }
 
         // Content-hash guard: the live context must still match dispatch.
         let liveToken = keyboardContextToken(keyboardView)
@@ -2215,7 +2255,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         guard keystrokeEpoch == capturedEpoch else { return }
 
         // Target-bound guard: the first-responder field must be unchanged.
-        guard textDocumentProxy.documentIdentifier == capturedDocId else { return }
+        guard safeDocumentIdentifier() == capturedDocId else { return }
 
         // Content-hash guard: the live context must still match dispatch.
         let liveToken = keyboardContextToken(keyboardView)
@@ -2261,7 +2301,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
     ) {
         if self.view.window == nil { return }
         guard keystrokeEpoch == capturedEpoch else { return }
-        guard textDocumentProxy.documentIdentifier == capturedDocId else { return }
+        guard safeDocumentIdentifier() == capturedDocId else { return }
         let liveToken = keyboardContextToken(keyboardView)
         guard shouldApplyLookupResult(capturedToken: capturedToken, liveToken: liveToken) else { return }
         for typedWord in typedWords {
