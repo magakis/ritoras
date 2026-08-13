@@ -140,21 +140,15 @@ struct SettingsView: View {
             }
             .pickerStyle(.segmented)
 
-            if settings.dictationMode == .batch {
-                Picker("Audio Format", selection: $settings.audioFormat) {
-                    Text("AAC (M4A)").tag(SharedConfig.AudioFormat.aac)
-                    Text("WAV (PCM)").tag(SharedConfig.AudioFormat.wav)
+            if settings.dictationMode == .stream {
+                NavigationLink("Streaming VAD") {
+                    VADSettingsView()
                 }
-                .pickerStyle(.segmented)
-            }
-
-            NavigationLink("Streaming VAD") {
-                VADSettingsView()
             }
         } header: {
             Text("Dictation")
         } footer: {
-            Text("Batch records the whole clip then transcribes (most reliable). Stream transcribes live as you pause — faster feedback, needs a stable connection. Streaming VAD settings only affect Stream mode. Audio Format (Batch only): AAC is smaller and fine for speech; WAV is lossless and larger. Both transcribe identically.")
+            Text("Batch records the whole clip then transcribes (most reliable). Stream transcribes live as you pause — faster feedback, needs a stable connection. Streaming VAD settings only affect Stream mode.")
         }
     }
 

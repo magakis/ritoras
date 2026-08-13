@@ -2,7 +2,7 @@ import Foundation
 
 /// Manages recording audio files in the Application Support directory.
 ///
-/// Files are stored at `{application-support}/Recordings/{jobId}.{ext}` (ext is `m4a` or `wav` per the AudioFormat setting).
+/// Files are stored at `{application-support}/Recordings/{jobId}.m4a` (AAC).
 /// The directory is created lazily on first access. Application Support is
 /// persistent (survives app suspension and process death) and works under
 /// all installation methods (App Store, SideStore, AltStore, Simulator).
@@ -10,8 +10,8 @@ final class RecordingStore {
     static let shared = RecordingStore()
     private init() {}
 
-    /// Extensions a batch recording may be stored under (depends on AudioFormat setting).
-    private static let batchExtensions = ["m4a", "wav"]
+    /// Extensions a batch recording may be stored under (always `.m4a`).
+    private static let batchExtensions = ["m4a"]
 
     /// The recordings directory URL, created lazily. Uses Application Support
     /// (always available on iOS, no entitlement needed, survives process death).
