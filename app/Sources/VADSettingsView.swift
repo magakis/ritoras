@@ -117,13 +117,10 @@ struct VADSettingsView: View {
     private var controlsSection: some View {
         Section {
             silenceDurationRow
-            postRollRow
             speechRmsRow
-            hysteresisRatioRow
-            preRollRow
             minSpeechDurationRow
-            maxChunkDurationRow
-            minSilenceAtMaxSpeechRow
+            minChunkDurationRow
+            maxNoiseRow
         } footer: {
             Text("Changes apply on the next recording.")
         }
@@ -177,86 +174,23 @@ struct VADSettingsView: View {
         }
     }
 
-    private var maxChunkDurationRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
+    private var minChunkDurationRow: some View {
+        Stepper(value: $settings.streamVadMinChunkMs, in: 100...2000, step: 50) {
             HStack {
-                Text("Max Chunk Duration")
+                Text("Min Chunk Duration")
                 Spacer()
-                Text(String(format: "%.1f s", settings.streamMaxChunkSeconds))
+                Text("\(settings.streamVadMinChunkMs) ms")
                     .foregroundColor(.secondary)
             }
-            Text("longer = fewer, larger chunks")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Slider(value: $settings.streamMaxChunkSeconds, in: 5...60, step: 1.0)
         }
     }
 
-    private var postRollRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
+    private var maxNoiseRow: some View {
+        Stepper(value: $settings.streamVadMaxNoiseSec, in: 2...15, step: 1) {
             HStack {
-                Text("Post-roll")
+                Text("Max Noise Duration")
                 Spacer()
-                Text("\(settings.streamVadPostRollMs) ms")
-                    .foregroundColor(.secondary)
-            }
-            Text("Trailing silence retained in each chunk (detection window is the Silence Duration above).")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Slider(
-                value: Binding(
-                    get: { Double(settings.streamVadPostRollMs) },
-                    set: { settings.streamVadPostRollMs = Int($0) }
-                ),
-                in: 0...1000,
-                step: 50
-            )
-        }
-    }
-
-    private var hysteresisRatioRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Hysteresis Ratio")
-                Spacer()
-                Text(String(format: "%.2f", settings.streamVadHysteresisRatio))
-                    .foregroundColor(.secondary)
-            }
-            Text("Exit threshold = speech RMS × ratio. Lower = wider speech-hold band.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Slider(value: $settings.streamVadHysteresisRatio, in: 0.3...0.95, step: 0.05)
-        }
-    }
-
-    private var preRollRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Pre-roll")
-                Spacer()
-                Text("\(settings.streamVadPreRollMs) ms")
-                    .foregroundColor(.secondary)
-            }
-            Text("Audio prepended to each chunk on speech onset (prevents clipped first syllable).")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Slider(
-                value: Binding(
-                    get: { Double(settings.streamVadPreRollMs) },
-                    set: { settings.streamVadPreRollMs = Int($0) }
-                ),
-                in: 0...800,
-                step: 50
-            )
-        }
-    }
-
-    private var minSilenceAtMaxSpeechRow: some View {
-        Stepper(value: $settings.streamVadMinSilenceAtMaxSpeechMs, in: 50...500, step: 50) {
-            HStack {
-                Text("Min Silence at Max Chunk")
-                Spacer()
-                Text("\(settings.streamVadMinSilenceAtMaxSpeechMs) ms")
+                Text("\(settings.streamVadMaxNoiseSec, specifier: "%.0f") s")
                     .foregroundColor(.secondary)
             }
         }
