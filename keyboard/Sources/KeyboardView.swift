@@ -595,7 +595,6 @@ class KeyboardView: UIView {
     private var hasFullAccess = false
     private var currentShiftState: ShiftState = .lower
     private var currentLayoutMode: KeyboardLayoutMode = .letters
-    private var hasShedHeavyState = false
 
     /// The 3s cancel-progress ring on the mic button. Only populated while the
     /// finger is held down; removed on every touch-up and on the long-press fire.
@@ -1296,37 +1295,6 @@ class KeyboardView: UIView {
             payload: ["hadWorkItem": hadWorkItem])
     }
 
-    /// Strips heavy subviews + data so a system-retained view shell holds near-zero.
-    /// Triggered from didMoveToWindow(window == nil). One-shot; a fresh view is built
-    /// each show (setupKeyboardView → KeyboardView(frame: .zero) from viewDidLoad),
-    /// so a shed shell is never re-entered.
-    private func shedHeavyState() {
-        guard !hasShedHeavyState else { return }
-        hasShedHeavyState = true
-
-        let before = MemoryMonitor.currentFootprint()
-
-        cancelSuggestionLookup()                          // round-4 workItem shed (idempotent)
-
-        for sv in subviews { sv.removeFromSuperview() }   // detach UIKit hierarchy
-        _suggestionBar = nil
-        _letterRegionContainer = nil
-        _keyStack = nil
-        _bottomActionRow = nil
-        _emojiPanelView = nil
-        _emojiSearchOverlay = nil
-        _keyPreview = nil
-        suggestionCache = SuggestionDisplayCache()
-        allKeyButtons = []                                // releases KeyButtons (containers already nil'd)
-        hitTestPressedKey = nil
-        micProgressRing = nil
-
-        let after = MemoryMonitor.currentFootprint()
-        FileLogger.shared.info(.keyboard, "view shell shed",
-            payload: ["before": before, "after": after,
-                      "freed": before > after ? before - after : 0])
-    }
-
     func reloadEmojiPanel() {
         emojiPanelView.reloadData()
     }
@@ -1334,10 +1302,21 @@ class KeyboardView: UIView {
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if window == nil {
-            shedHeavyState()
+            // iOS re-attaches the SAME KeyboardView instance on the next show, and
+            // setupView() runs only once (in init). Shredding the UIKit hierarchy
+            // here would leave a permanently empty frame after one app switch, so
+            // the subview tree is intentionally KEPT. The in-flight suggestion
+            // lookup is cancelled defensively in case this detach fires on a path
+            // where viewWillDisappear did not — idempotent, and the work item is
+            // also liveness-gated (self.window == nil) and cancelled from the
+            // controller's viewWillDisappear teardown.
+            cancelSuggestionLookup()
+            FileLogger.shared.info(.keyboard, "KeyboardView detached from window",
+                payload: ["footprint": MemoryMonitor.currentFootprint()])
+        } else {
+            FileLogger.shared.info(.keyboard, "KeyboardView didMoveToWindow",
+                payload: ["hasWindow": true])
         }
-        FileLogger.shared.info(.keyboard, "KeyboardView didMoveToWindow",
-            payload: ["hasWindow": window != nil])
     }
 
     override func willMove(toSuperview newSuperview: UIView?) {
