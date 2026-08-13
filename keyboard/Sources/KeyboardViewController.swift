@@ -1288,6 +1288,9 @@ class KeyboardViewController: UIInputViewController {
         }
         state = .inserting
         textDocumentProxy.insertText(normalizedDictationInsertion(of: text))
+        clearDeferredResult()
+        deferredFlushWorkItem?.cancel()
+        deferredFlushWorkItem = nil
         FileLogger.shared.info(.keyboard, "Inserted dictation",
                                payload: ["length": text.count, "preview": String(text.prefix(30))])
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
