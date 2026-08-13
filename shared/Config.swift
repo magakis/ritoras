@@ -81,12 +81,6 @@ struct SharedConfig {
         /// declaring the stream dead. 3 × 5s ≈ 15s tolerance for transient latency.
         static let streamMaxMissedPongs: Int = 3
 
-        /// Maximum number of chunks held in the in-memory send queue before
-        /// new chunks are dropped (queue overflow). When overflow occurs,
-        /// the WAV file still captures everything; the stream is declared
-        /// terminally failed at stop time so the user can retry via batch.
-        static let streamChunkQueueMaxDepth: Int = 50
-
         /// Backoff intervals (seconds) between chunk send retries.
         /// The last value is the cap for all subsequent retries.
         /// Retry is unbounded while recording is active; terminal failure

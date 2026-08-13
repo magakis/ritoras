@@ -8,19 +8,12 @@ import UIKit
 /// @unchecked Sendable because all access is serialized via internal NSLock.
 final class ChunkSendQueue: @unchecked Sendable {
     private var chunks: [(UInt32, [Float])] = []
-    private var overflowed = false
     private var recordingActive = false
     private let lock = NSLock()
 
-    /// Returns true if enqueued; false if dropped (queue at capacity, sets overflowed).
-    func enqueue(id: UInt32, samples: [Float], maxDepth: Int) -> Bool {
+    func enqueue(id: UInt32, samples: [Float]) {
         lock.lock(); defer { lock.unlock() }
-        if chunks.count >= maxDepth {
-            overflowed = true
-            return false
-        }
         chunks.append((id, samples))
-        return true
     }
 
     func dequeue() -> (UInt32, [Float])? {
@@ -31,7 +24,6 @@ final class ChunkSendQueue: @unchecked Sendable {
 
     var isEmpty: Bool { lock.lock(); defer { lock.unlock() }; return chunks.isEmpty }
     var depth: Int { lock.lock(); defer { lock.unlock() }; return chunks.count }
-    var hasOverflowed: Bool { lock.lock(); defer { lock.unlock() }; return overflowed }
     var isRecordingActive: Bool { lock.lock(); defer { lock.unlock() }; return recordingActive }
 
     func setRecordingActive(_ value: Bool) {
@@ -39,18 +31,16 @@ final class ChunkSendQueue: @unchecked Sendable {
         recordingActive = value
     }
 
-    /// Reset queue contents + overflow flag for a new recording (keeps recordingActive).
+    /// Reset queue contents for a new recording (keeps recordingActive).
     func resetForNewRecording() {
         lock.lock(); defer { lock.unlock() }
         chunks.removeAll()
-        overflowed = false
     }
 
     /// Full reset including recordingActive (used by cancel).
     func clearAll() {
         lock.lock(); defer { lock.unlock() }
         chunks.removeAll()
-        overflowed = false
         recordingActive = false
     }
 }
@@ -487,11 +477,7 @@ final class DictationViewModel: ObservableObject {
                 try await recorder.start(fileURL: wavURL) { [chunkQueue = self.chunkSendQueue] chunkId, samples in
                     FileLogger.shared.debug(.audio, "Stream: chunk produced",
                                             payload: ["chunkId": chunkId, "sampleCount": samples.count])
-                    if !chunkQueue.enqueue(id: chunkId, samples: samples,
-                                           maxDepth: SharedConfig.Defaults.streamChunkQueueMaxDepth) {
-                        FileLogger.shared.debug(.network, "Chunk queue overflow — dropping chunk",
-                                               payload: ["chunkId": chunkId, "queueDepth": chunkQueue.depth])
-                    }
+                    chunkQueue.enqueue(id: chunkId, samples: samples)
                 }
                 FileLogger.shared.info(.audio, "Stream: recorder started")
 
@@ -714,11 +700,9 @@ final class DictationViewModel: ObservableObject {
             chunkSendQueue.setRecordingActive(false)
 
             var queueDrained = false
-            var finalOverflowed = false
             let drainHardCap = Date().addingTimeInterval(SharedConfig.Defaults.streamFinalTimeout)
             while Date() < drainHardCap {
                 if chunkSendQueue.isEmpty { queueDrained = true; break }
-                if chunkSendQueue.hasOverflowed { finalOverflowed = true; break }
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
             }
@@ -728,7 +712,7 @@ final class DictationViewModel: ObservableObject {
 
             let uploadT0 = Date()
 
-            if queueDrained && !finalOverflowed {
+            if queueDrained {
                 do {
                     try await streamClient?.sendEnd()
                     FileLogger.shared.info(.network, "Stream: END sent, awaiting final from receive task")
