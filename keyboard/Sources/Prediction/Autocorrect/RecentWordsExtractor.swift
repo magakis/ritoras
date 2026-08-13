@@ -98,7 +98,7 @@ enum RecentWordsExtractor {
             results.append(RecentWord(
                 word: word,
                 lookupWord: lookupWord,
-                offsetFromCursorEnd: context.distance(from: bodyEnd, to: context.endIndex)
+                offsetFromCursorEnd: context[bodyEnd..<context.endIndex].utf16.count
             ))
 
             // Advance to the previous token: hop over the current token's start
