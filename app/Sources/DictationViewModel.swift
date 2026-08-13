@@ -147,6 +147,13 @@ final class DictationViewModel: ObservableObject {
     private var receiveTask: Task<String, Error>?
     private var transcriptionTask: Task<Void, Never>?
 
+    /// True once the streaming server has returned ≥1 partial transcription for
+    /// the current session — proof it is transcribing THIS recording's audio.
+    /// Reset in start(); read in stop() to reject empty/stale results that did
+    /// not come from this session. Streaming WhisperLive always emits partials
+    /// while decoding, so a session with no partials was never transcribed.
+    private var transcriptionDeliveredThisSession = false
+
     /// Idempotency guard: tracks job IDs currently being retried to prevent
     /// concurrent retries of the same job (defense against retry loops).
     private var retryingJobIds: Set<UUID> = []
@@ -319,6 +326,7 @@ final class DictationViewModel: ObservableObject {
     func start(id: UUID) async {
         activeID = id
         livePartial = ""
+        transcriptionDeliveredThisSession = false
         phase = .recording
 
         // Kick off parallel health probe — runs in background while mic
@@ -467,6 +475,7 @@ final class DictationViewModel: ObservableObject {
                             guard let self else { return }
                             guard self.activeID == sessionID else { return }
                             self.livePartial = partial
+                            self.transcriptionDeliveredThisSession = true
                         }
                     })
                 }
@@ -732,24 +741,44 @@ final class DictationViewModel: ObservableObject {
 
                     guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
 
-                    let uploadElapsed = Date().timeIntervalSince(uploadT0) * 1000
-                    FileLogger.shared.info(.transcription, "upload complete", payload: [
-                        "id": id.uuidString,
-                        "elapsed_ms": uploadElapsed,
-                        "textLength": text.count
-                    ])
+                    // A real transcription requires the server to have transcribed THIS
+                    // session's audio (≥1 partial) AND a non-empty result. Empty text, or text
+                    // that arrived without any partials this session, means the server never
+                    // delivered a transcription for this recording → retryable failure (audio
+                    // preserved via handleStreamTerminalFailure). This also rejects stale text
+                    // from a prior session that must never be re-delivered as this session's.
+                    let transcriptionValid = !text.isEmpty && transcriptionDeliveredThisSession
+                    if !transcriptionValid {
+                        FileLogger.shared.warn(.transcription,
+                            "stream stop: no transcription delivered this session — treating as failure",
+                            payload: ["jobId": id.uuidString,
+                                      "textLen": text.count,
+                                      "partialsReceived": transcriptionDeliveredThisSession])
+                        handleStreamTerminalFailure(
+                            jobId: id,
+                            error: text.isEmpty
+                                ? "Nothing was heard. Try again."
+                                : "Didn't receive a transcription from the server. Try again.")
+                    } else {
+                        let uploadElapsed = Date().timeIntervalSince(uploadT0) * 1000
+                        FileLogger.shared.info(.transcription, "upload complete", payload: [
+                            "id": id.uuidString,
+                            "elapsed_ms": uploadElapsed,
+                            "textLength": text.count
+                        ])
 
-                    FileLogger.shared.info(.transcription, "Stream final received",
-                                           payload: ["preview": String(text.prefix(60)),
-                                                     "length": text.count])
+                        FileLogger.shared.info(.transcription, "Stream final received",
+                                               payload: ["preview": String(text.prefix(60)),
+                                                         "length": text.count])
 
-                    guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
+                        guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
 
-                    TranscriptionHistory.shared.add(text: text)
-                    RecordingStore.shared.deleteStreamWav(for: id)
-                    FileLogger.shared.debug(.audio, "stream wav deleted on success",
-                                            payload: ["jobId": id.uuidString])
-                    phase = .done(text)
+                        TranscriptionHistory.shared.add(text: text)
+                        RecordingStore.shared.deleteStreamWav(for: id)
+                        FileLogger.shared.debug(.audio, "stream wav deleted on success",
+                                                payload: ["jobId": id.uuidString])
+                        phase = .done(text)
+                    }
                 } catch WhisperError.cancelled {
                     guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
                     // User cancelled — do not record as failure.
