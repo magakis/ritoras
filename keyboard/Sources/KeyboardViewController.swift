@@ -154,6 +154,13 @@ class KeyboardViewController: UIInputViewController {
     /// torn down on disappear / context change. See scheduleDeferredDictationFlush.
     private var deferredFlushWorkItem: DispatchWorkItem?
 
+    /// Identity gate for scheduleDeferredDictationFlush: remembers the last
+    /// checked field identity so repeated textDidChange/selectionDidChange on
+    /// the same field skip the UserDefaults read + work-item churn. Reset in
+    /// viewDidAppear so a fresh appear always re-checks.
+    private var deferredFlushLastCheckedDocId: UUID?
+    private var deferredFlushHasChecked = false
+
     // MARK: - Snapshot Polling & Darwin Notifications
 
     private var snapshotPollTimer: DispatchSourceTimer?
@@ -363,6 +370,10 @@ class KeyboardViewController: UIInputViewController {
                 clearDeferredResult()
             }
         }
+
+        // Reset the deferred-flush identity gate: a fresh appear can observe a
+        // new field identity, so the next flush check must run unconditionally.
+        deferredFlushHasChecked = false
 
         // Resume a dictation that was in progress when iOS suspended/terminated
         // the extension. pendingRequestId survives in UserDefaults, so even a
@@ -1303,10 +1314,10 @@ class KeyboardViewController: UIInputViewController {
 
     /// Stores a dictation result in UserDefaults when the keyboard is hidden,
     /// so it can be recovered and auto-pasted on the next viewDidAppear.
-    private func storeDeferredResult(text: String, docId: UUID? = nil) {
+    private func storeDeferredResult(text: String, docId: UUID? = nil, ts: TimeInterval? = nil) {
         let idToStore = docId ?? dictationTargetDocId
         UserDefaults.standard.set(text, forKey: "ritoras_deferred_text")
-        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "ritoras_deferred_ts")
+        UserDefaults.standard.set(ts ?? Date().timeIntervalSince1970, forKey: "ritoras_deferred_ts")
         UserDefaults.standard.set(idToStore?.uuidString ?? "", forKey: "ritoras_deferred_doc_id")
     }
 
@@ -1327,11 +1338,20 @@ class KeyboardViewController: UIInputViewController {
     private func scheduleDeferredDictationFlush(reason: String) {
         guard let deferredText = UserDefaults.standard.string(forKey: "ritoras_deferred_text"),
               !deferredText.isEmpty else { return }
+        let currentDocId = safeDocumentIdentifier()
+        if deferredFlushHasChecked, currentDocId == deferredFlushLastCheckedDocId { return }
+        deferredFlushHasChecked = true
+        deferredFlushLastCheckedDocId = currentDocId
         let deferredTs = UserDefaults.standard.double(forKey: "ritoras_deferred_ts")
         let storedDocIdString = UserDefaults.standard.string(forKey: "ritoras_deferred_doc_id") ?? ""
         let targetDocId = UUID(uuidString: storedDocIdString)
         let age = deferredTs > 0 ? Date().timeIntervalSince1970 - deferredTs : 0
-        guard age < 300 else { clearDeferredResult(); return }
+        if age >= 300 {
+            FileLogger.shared.info(.keyboard, "Deferred dictation result expired on flush check",
+                                   payload: ["age": age])
+            clearDeferredResult()
+            return
+        }
         clearDeferredResult()
         let textToInsert = deferredText
         FileLogger.shared.info(.keyboard, "Scheduling deferred dictation flush",
@@ -1340,7 +1360,7 @@ class KeyboardViewController: UIInputViewController {
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self, self.view.window != nil else { return }
             guard let currentDocId = self.safeDocumentIdentifier() else {
-                self.storeDeferredResult(text: textToInsert, docId: targetDocId)
+                self.storeDeferredResult(text: textToInsert, docId: targetDocId, ts: deferredTs)
                 FileLogger.shared.warn(.keyboard, "Deferred flush — documentIdentifier nil, re-deferring",
                                        payload: ["target": targetDocId?.uuidString ?? "nil",
                                                  "length": textToInsert.count])
@@ -1350,7 +1370,7 @@ class KeyboardViewController: UIInputViewController {
                currentDocId != targetId {
                 // Original dictation field no longer focused — preserve text + target
                 // so it flushes when the user returns to that field. Do NOT discard.
-                self.storeDeferredResult(text: textToInsert, docId: targetId)
+                self.storeDeferredResult(text: textToInsert, docId: targetId, ts: deferredTs)
                 FileLogger.shared.warn(.keyboard, "Deferred flush skipped — original field not focused",
                                        payload: ["target": targetId.uuidString,
                                                  "current": currentDocId.uuidString])
