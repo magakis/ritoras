@@ -400,25 +400,8 @@ class KeyboardViewController: UIInputViewController {
         } else {
             // Check for a deferred result — a dictation completed while the keyboard
             // was hidden and the paste was deferred until the keyboard reappears.
-            if let deferredText = UserDefaults.standard.string(forKey: "ritoras_deferred_text"),
-               !deferredText.isEmpty {
-                let deferredTs = UserDefaults.standard.double(forKey: "ritoras_deferred_ts")
-                let age = deferredTs > 0 ? Date().timeIntervalSince1970 - deferredTs : 0
-                if age < 300 {
-                    FileLogger.shared.info(.keyboard, "Inserting deferred dictation result",
-                                           payload: ["length": deferredText.count, "age": age])
-                    clearDeferredResult()
-                    state = .inserting
-                    textDocumentProxy.insertText(normalizedDictationInsertion(of: deferredText))
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                        self?.state = .idle
-                    }
-                } else {
-                    FileLogger.shared.info(.keyboard, "Deferred dictation result expired",
-                                           payload: ["age": age])
-                    clearDeferredResult()
-                    state = .idle
-                }
+            if UserDefaults.standard.string(forKey: "ritoras_deferred_text")?.isEmpty == false {
+                scheduleDeferredDictationFlush(reason: "viewDidAppear")
             } else {
                 state = .idle
                 FileLogger.shared.info(.keyboard, "viewDidAppear — idle",
@@ -1339,8 +1322,10 @@ class KeyboardViewController: UIInputViewController {
     /// (so a re-entrant textDidChange/selectionDidChange cannot double-flush),
     /// then inserts it on the NEXT run-loop turn so the mutation does not run
     /// inside the host's own change/selection callback (caret snap-back fix).
-    /// Called from textDidChange / selectionDidChange only. viewDidAppear flushes
-    /// synchronously (lifecycle callback, not a change callback).
+    /// Called from textDidChange / selectionDidChange and from viewDidAppear:
+    /// the appear path also defers one run-loop turn because the host's input
+    /// session (caret anchoring included) is still establishing during the
+    /// appearance callback.
     private func scheduleDeferredDictationFlush(reason: String) {
         guard let deferredText = UserDefaults.standard.string(forKey: "ritoras_deferred_text"),
               !deferredText.isEmpty else { return }
