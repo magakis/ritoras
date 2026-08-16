@@ -127,6 +127,12 @@ class KeyboardViewController: UIInputViewController {
     /// epoch check covers it).
     private var keystrokeEpoch: UInt64 = 0
 
+    /// Detects documentIdentifier churn (host input-session flapping, e.g.
+    /// WKWebView+React) so the retroactive-correction apply path can pause
+    /// while the host re-anchors the selection. Main-thread-only; must never
+    /// be read inside a background work item.
+    private var identityMonitor = DocumentIdentityMonitor()
+
     /// Serial background queue for the heavy autocorrect compute
     /// (PredictionEngine.topCorrection + AutocorrectController.evaluate),
     /// keeping SymSpell/LM scoring off the keystroke hot path.
@@ -1825,8 +1831,22 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     // MARK: - Text Changes
 
+    /// One KVC read + in-place ring update per host callback. Main-thread only.
+    private func observeIdentityForFlapDetection() {
+        let wasDefensive = identityMonitor.isDefensive
+        let isDefensive = identityMonitor.observe(safeDocumentIdentifier(),
+                                                  at: Date().timeIntervalSince1970)
+        if !wasDefensive && isDefensive {
+            FileLogger.shared.warn(.keyboard, "identity flap detected — defensive mode")
+        } else if wasDefensive && !isDefensive {
+            FileLogger.shared.info(.keyboard, "identity stable — defensive mode exited")
+            deferredFlushHasChecked = false   // let the next callback re-attempt a flush
+        }
+    }
+
     override func textDidChange(_ textInput: UITextInput?) {
         super.textDidChange(textInput)
+        observeIdentityForFlapDetection()
 
         keystrokeEpoch &+= 1  // any text change invalidates a pending deferred autocorrect
         lastAutoCorrection = nil  // host text change invalidates any pending revert
@@ -1843,11 +1863,13 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     override func textWillChange(_ textInput: UITextInput?) {
         super.textWillChange(textInput)
+        observeIdentityForFlapDetection()
         backspaceNilContextRetries = 0
     }
 
     override func selectionWillChange(_ textInput: UITextInput?) {
         super.selectionWillChange(textInput)
+        observeIdentityForFlapDetection()
         keystrokeEpoch &+= 1  // any selection change invalidates a pending deferred autocorrect
         recentWordBuffer.clear()  // cursor moves invalidate committed-word offsets
         backspaceTimer?.invalidate()
@@ -1859,6 +1881,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     override func selectionDidChange(_ textInput: UITextInput?) {
         super.selectionDidChange(textInput)
+        observeIdentityForFlapDetection()
 
         keystrokeEpoch &+= 1  // any selection change invalidates a pending deferred autocorrect
         lastAutoCorrection = nil  // cursor move invalidates any pending revert
@@ -2259,7 +2282,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
     /// cursor back to the typed word, delete it, insert the correction, and
     /// return the cursor to its relative spot — all in ONE synchronous block
     /// with no suspension between proxy mutations. Guards run before any
-    /// mutation: the keyboard liveness gate, the monotonic keystroke epoch
+    /// mutation: the keyboard liveness gate, the document-identity defensive
+    /// mode (flapping host sessions), the monotonic keystroke epoch
     /// (supersession guard), the target-bound document id, and the content-hash
     /// context token. The context is re-read after the mutations to verify;
     /// there is no retry on failure. The tail epoch bump drops any retroactive
@@ -2272,6 +2296,14 @@ extension KeyboardViewController: KeyboardViewDelegate {
         capturedToken: UInt64
     ) {
         if self.view.window == nil { return }
+
+        // Defensive mode: the host is flapping document identities (input-session
+        // churn, e.g. WKWebView+React), so the cursor-reanchoring retroactive
+        // mutation pattern would fight the re-anchoring host. Pause until stable.
+        guard !identityMonitor.isDefensive else {
+            FileLogger.shared.debug(.keyboard, "retroactive correction suppressed — defensive mode")
+            return
+        }
 
         // Supersession guard (monotonic epoch): if the inline apply or any other
         // mutation ran first, the epoch moved and this stale plan is dropped.
