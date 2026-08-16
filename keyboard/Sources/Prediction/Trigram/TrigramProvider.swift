@@ -28,6 +28,18 @@ final class TrigramProvider: SuggestionProvider {
     /// diagnostic to confirm the end-to-end trigram → unigram path works).
     private static var hasLoggedFirstSuggestion = false
 
+    /// Minimum interval between load attempts after a deferred (memory-gated)
+    /// trigram load. The throttle is a pure timestamp comparison at attempt
+    /// time — no timers or scheduled work. Bounds the retry rate on the
+    /// per-keystroke `suggest()` path while keeping recovery snappy once
+    /// memory frees up.
+    private static let deferredLoadRetryInterval: TimeInterval = 30.0
+
+    /// One-time warn flag for the first deferred (memory-gated) trigram load
+    /// in the process. Reset after a successful load so a future post-shed
+    /// deferral warns once again. Touched only on `loadQueue` (serialized).
+    private static var hasLoggedDeferralWarning = false
+
     // MARK: - State
 
     enum LoadState {
@@ -40,6 +52,9 @@ final class TrigramProvider: SuggestionProvider {
     private var _state: LoadState = .cold
     private var _model: kenlm_model_t?
     private var _sideIndex: SideIndex?
+    /// Uptime (seconds) of the last deferred (memory-gated) load attempt.
+    /// 0 = never deferred. Guarded by `lock`.
+    private var _lastDeferredAttemptAt: TimeInterval = 0
     private var lock = os_unfair_lock()
 
     private let loadQueue = DispatchQueue(label: "com.ritoras.trigram.load", qos: .utility)
@@ -59,6 +74,25 @@ final class TrigramProvider: SuggestionProvider {
         os_unfair_lock_lock(&lock)
         defer { os_unfair_lock_unlock(&lock) }
         return block(_state, _model, _sideIndex)
+    }
+
+    /// Whether a lazy load should start now: state is `.cold` AND the last
+    /// deferred (memory-gated) attempt was ≥ `deferredLoadRetryInterval` ago.
+    /// The throttle is a pure timestamp comparison — no timers, no scheduled work.
+    private func shouldStartLazyLoad() -> Bool {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        guard _state == .cold else { return false }
+        return ProcessInfo.processInfo.systemUptime - _lastDeferredAttemptAt >= Self.deferredLoadRetryInterval
+    }
+
+    /// Resets state to `.cold` and anchors the retry throttle after a deferred
+    /// (memory-gated) load. Runs under the same lock as all state.
+    private func markLoadDeferred() {
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
+        _state = .cold
+        _lastDeferredAttemptAt = ProcessInfo.processInfo.systemUptime
     }
 
     // MARK: - Loading
@@ -93,8 +127,10 @@ final class TrigramProvider: SuggestionProvider {
     /// Lazy-load trigger: called from `suggest(...)` when state is `.cold`.
     /// Logs state transitions.
     func loadAsync() {
-        let currentState = readState { state, _, _ in state }
-        guard currentState == .cold else { return }
+        // Throttled: after a deferred (memory-gated) attempt, stay `.cold` and
+        // skip re-attempting for `deferredLoadRetryInterval` seconds so the
+        // per-keystroke suggest() path does not churn the load (or log) at all.
+        guard shouldStartLazyLoad() else { return }
 
         mutateState { state, _, _ in
             state = .loading
@@ -119,16 +155,23 @@ final class TrigramProvider: SuggestionProvider {
             }
 
             // Guard against Jetsam: skip trigram load if memory is already near the cap.
-            // Uses the trigram-specific threshold (trigramMaxPhysFootprintDuringLoad),
-            // deliberately HIGHER than the dictionary's 40 MB guard so the trigram can
-            // reload after a memory-warning shed (~49 MB) instead of deferring forever.
-            // Trigram model + side index adds ~8-10 MB; loading near the threshold risks an
-            // immediate Jetsam kill. A skipped load degrades gracefully: next suggest() retries
-            // (state stays .cold).
+            // Uses the trigram-specific threshold (trigramMaxPhysFootprintDuringLoad).
+            // The enforced ceiling on the extension is the ~48 MB Jetsam cap; the model
+            // adds ~8-10 MB on top of the pre-load footprint, so the 38 MB gate keeps the
+            // post-load peak at ≤ ~48 MB. A deferred load resets state to `.cold` so the
+            // next suggest() retries — throttled to at most one attempt per 30 s
+            // (deferredLoadRetryInterval) — and falls back to the SymSpell+Apple fusion
+            // without the LM between attempts.
             let currentFootprint = MemoryMonitor.currentFootprint()
             if currentFootprint > SharedConfig.Defaults.trigramMaxPhysFootprintDuringLoad {
-                FileLogger.shared.warn(.prediction,
-                    "trigram load deferred: phys_footprint \(currentFootprint) > \(SharedConfig.Defaults.trigramMaxPhysFootprintDuringLoad)")
+                self.markLoadDeferred()
+                let message = "trigram load deferred: phys_footprint \(currentFootprint) > \(SharedConfig.Defaults.trigramMaxPhysFootprintDuringLoad)"
+                if !Self.hasLoggedDeferralWarning {
+                    Self.hasLoggedDeferralWarning = true
+                    FileLogger.shared.warn(.prediction, message)
+                } else {
+                    FileLogger.shared.debug(.prediction, message)
+                }
                 DispatchQueue.main.async { completion?(false) }
                 return
             }
@@ -166,6 +209,9 @@ final class TrigramProvider: SuggestionProvider {
 
             let isReady = self.isReady
             if isReady {
+                // Reset the one-time deferral warn so a future post-shed
+                // deferral warns once again.
+                Self.hasLoggedDeferralWarning = false
                 let vocabSize = self.readState { _, model, _ in
                     model.map { kenlm_vocab_size($0) } ?? 0
                 }
