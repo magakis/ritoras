@@ -25,6 +25,17 @@ struct SharedConfig {
         static let darwinLearnedWordsChangedNotificationName = "com.ritoras.learnedWordsChanged"
         static let localhostServerPort: UInt16 = 47321
         static let dictationPayloadKey = "dictation.payload"
+        /// How long a terminal `.cancelled` payload stays in the localhost /state
+        /// holder before the delayed clear (see DictationViewModel.cancel()).
+        /// Must exceed the keyboard's catch-up window (seconds) so a suspended
+        /// keyboard can still fetch it on return, yet stay under the keyboard's
+        /// 300s stale-expiry so a stale payload is never served indefinitely.
+        static let terminalStateRetentionSeconds: TimeInterval = 120
+        /// Background-task lifetime keeping the localhost listener serving /state
+        /// after cancel(). Unlike stop(), cancel() has no transcription to finish;
+        /// the grace window lets a suspended keyboard return and fetch the
+        /// terminal `.cancelled` snapshot before the app is suspended.
+        static let cancelGraceSeconds: TimeInterval = 25
         /// UX-guard timeout for the keyboard extension's return-to-idle.
         /// Not a correctness timeout — the localhost fallback chain handles
         /// keyboard return-to-idle. Set to AsyncTranscription.totalDeadline

@@ -1,5 +1,20 @@
 import Foundation
 
+/// Outcome of a localhost `GET /state` probe, distinguishing the cases the
+/// keyboard needs to detect a lost dictation session:
+/// - `.payload(decoded)` — HTTP 200 with a decodable snapshot
+/// - `.noSession` — HTTP 204, the container app affirms no active session
+/// - `.malformed` — HTTP 200 whose body failed to decode: the app is alive and
+///   affirming it has a payload, so this must NOT count as unreachable/miss
+///   evidence
+/// - `.unreachable` — any other status or transport error
+enum LocalhostStateProbe {
+    case payload(DictationPayload)
+    case noSession
+    case malformed
+    case unreachable
+}
+
 enum LocalhostClient {
     // MARK: - Session
 
@@ -58,26 +73,41 @@ enum LocalhostClient {
         }
     }
 
-    /// Fetches the container app's current dictation snapshot via the localhost
+    /// Probes the container app's current dictation snapshot via the localhost
     /// `GET /state` fallback transport — used when the app-group container is
     /// nil (SideStore) and the file/UserDefaults snapshot paths are unavailable.
-    /// Returns the snapshot payload on HTTP 200, `nil` on 204 (idle, no active
-    /// session) or any transport error. Date decoding uses the default strategy,
-    /// symmetric with the server's plain `JSONEncoder` and the existing snapshot
-    /// file path in `SharedConfig`.
-    static func getState() async -> DictationPayload? {
+    /// Distinguishes the outcomes the keyboard needs to detect a lost session:
+    /// HTTP 200 → `.payload(decoded)`, or `.malformed` if the body fails to
+    /// decode (the app is alive but affirming a payload); HTTP 204 →
+    /// `.noSession` (idle, no active session); any other status or thrown
+    /// transport error → `.unreachable`. Date decoding uses the default
+    /// strategy, symmetric with the server's plain `JSONEncoder` and the
+    /// existing snapshot file path in `SharedConfig`.
+    static func probeState() async -> LocalhostStateProbe {
         let url = URL(string: "http://127.0.0.1:\(SharedConfig.Defaults.localhostServerPort)/state")!
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         do {
             let (data, response) = try await activeSession.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else { return nil }
-            guard httpResponse.statusCode == 200 else { return nil }  // 204 = idle, not an error
-            let decoder = JSONDecoder()
-            return try decoder.decode(DictationPayload.self, from: data)
+            guard let httpResponse = response as? HTTPURLResponse else { return .unreachable }
+            switch httpResponse.statusCode {
+            case 200:
+                let decoder = JSONDecoder()
+                do {
+                    return .payload(try decoder.decode(DictationPayload.self, from: data))
+                } catch {
+                    // App is alive but its payload failed to decode — quiet by
+                    // design: not a transport error, and never miss evidence.
+                    return .malformed
+                }
+            case 204:
+                return .noSession
+            default:
+                return .unreachable
+            }
         } catch {
             FileLogger.shared.debug(.network, "GET /state transport error", payload: ["error": error.localizedDescription])
-            return nil
+            return .unreachable
         }
     }
 

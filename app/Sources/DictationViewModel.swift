@@ -1061,6 +1061,21 @@ final class DictationViewModel: ObservableObject {
     func cancel() async {
         FileLogger.shared.info(.transcription, "cancel: stream teardown")
         let id = activeID
+
+        // Keep the localhost /state listener alive for cancelGraceSeconds so a
+        // suspended keyboard can return and fetch the terminal .cancelled
+        // snapshot (Darwin notifications are dropped while it is suspended).
+        var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "DictationCancelGrace") {
+            UIApplication.shared.endBackgroundTask(backgroundTaskID)
+            backgroundTaskID = .invalid
+        }
+        Task {
+            try? await Task.sleep(nanoseconds: UInt64(
+                SharedConfig.Defaults.cancelGraceSeconds * 1_000_000_000))
+            endStopBackgroundTask(&backgroundTaskID)
+        }
+
         chunkConsumerTask?.cancel()
         chunkConsumerTask = nil
         receiveTask?.cancel()
@@ -1098,10 +1113,19 @@ final class DictationViewModel: ObservableObject {
             phase = .cancelled
         }
         activeID = nil
-        // Clear the localhost /state holder so a stale terminal payload is never
-        // served to a later poll (the keyboard has already consumed the cancelled
-        // snapshot published above, if any).
-        lastPayloadHolder.set(nil)
+        // Retain the terminal .cancelled payload in the localhost /state holder
+        // for terminalStateRetentionSeconds so a suspended/reappearing keyboard
+        // can still fetch it; id-matching on the keyboard side makes a stale
+        // payload harmless to a later session.
+        let holder = lastPayloadHolder
+        let clearedId = id
+        Task.detached(priority: .utility) {
+            try? await Task.sleep(nanoseconds: UInt64(
+                SharedConfig.Defaults.terminalStateRetentionSeconds * 1_000_000_000))
+            if holder.get()?.id == clearedId {
+                holder.set(nil)
+            }
+        }
     }
 
     deinit {

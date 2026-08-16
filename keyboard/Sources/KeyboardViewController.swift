@@ -186,6 +186,12 @@ class KeyboardViewController: UIInputViewController {
         /// After this many consecutive misses, start /jobs server polling as
         /// an emergency fallback (container app is not writing snapshots).
         static let serverPollMisses = 6
+        /// After this many consecutive dead/no-session localhost probes while
+        /// the keyboard is in `.recording`, treat the session as lost and reset
+        /// to idle. ~3s of sustained probes at the 0.5s poll cadence, chosen to
+        /// outlast transient listener restarts while the app's 10s health timer
+        /// heals.
+        static let sessionLostMisses = 6
     }
 
     /// Tracks consecutive snapshot misses (app-group read returned nil).
@@ -193,6 +199,10 @@ class KeyboardViewController: UIInputViewController {
     /// `SnapshotThresholds.localhostFallbackMisses` miss(es); /jobs server
     /// polling starts after `SnapshotThresholds.serverPollMisses`.
     private var consecutiveSnapshotMisses: Int = 0
+    /// Tracks consecutive localhost /state probes that returned no session or
+    /// unreachable while the keyboard believed a recording was active. Reset on
+    /// any positive payload, on a fresh dictation, and on keyboard reappear.
+    private var consecutiveSessionEvidenceMiss: Int = 0
     /// Stored Task for refreshFromSharedState, cancelled on teardown and
     /// superseded on each new spawn to prevent interleaved concurrent executions.
     private var appearRefreshTask: Task<Void, Never>?
@@ -343,6 +353,7 @@ class KeyboardViewController: UIInputViewController {
         keyboardView.updateFullAccess(hasFullAccess)
 
         // App-group snapshot polling (primary transport).
+        consecutiveSessionEvidenceMiss = 0
         appearRefreshTask?.cancel()
         appearRefreshTask = Task { @MainActor [weak self] in
             await self?.refreshFromSharedState()
@@ -602,6 +613,7 @@ class KeyboardViewController: UIInputViewController {
         serverPollWorkItem = nil
         lastSeenSnapshotRevision = 0
         consecutiveSnapshotMisses = 0
+        consecutiveSessionEvidenceMiss = 0
 
         let id = UUID()
         pendingRequestId = id
@@ -825,12 +837,23 @@ class KeyboardViewController: UIInputViewController {
         // Darwin-driven refresh. Waiting one more cycle would miss the transient
         // `.recording` phase.
         if consecutiveSnapshotMisses >= SnapshotThresholds.localhostFallbackMisses {
-            if let httpPayload = await LocalhostClient.getState(),
-               httpPayload.id == pendingRequestId,
-               (httpPayload.revision ?? 0) > lastSeenSnapshotRevision {
-                lastSeenSnapshotRevision = httpPayload.revision ?? 0
-                applySnapshotPayload(httpPayload, source: "localhost")
-                return
+            switch await LocalhostClient.probeState() {
+            case .payload(let httpPayload):
+                if httpPayload.id == pendingRequestId,
+                   (httpPayload.revision ?? 0) > lastSeenSnapshotRevision {
+                    lastSeenSnapshotRevision = httpPayload.revision ?? 0
+                    applySnapshotPayload(httpPayload, source: "localhost")
+                    return
+                }
+                // id-mismatched or stale-revision payload: fall through to the
+                // /jobs tier unchanged — do not broaden that behavior.
+            case .malformed:
+                // App is alive but its payload failed to decode — not miss
+                // evidence; fall through to the /jobs tier unchanged.
+                break
+            case .noSession, .unreachable:
+                consecutiveSessionEvidenceMiss += 1
+                if resetIfSessionLost() { return }
             }
         }
 
@@ -867,11 +890,41 @@ class KeyboardViewController: UIInputViewController {
             updateRecordingInProgressUI(phase: payload.status.rawValue)
         }
         consecutiveSnapshotMisses = 0
+        consecutiveSessionEvidenceMiss = 0
         FileLogger.shared.debug(.keyboard, "snapshot hit",
                                 payload: ["src": source,
                                           "status": payload.status.rawValue,
                                           "rev": payload.revision ?? 0,
                                           "id": String(payload.id.uuidString.prefix(8))])
+    }
+
+    /// Conservatively-gated silent reset for a session the keyboard positively
+    /// saw as `.recording` but the container app now affirms is gone (sustained
+    /// dead/no-session probes). The container app declares `UIBackgroundModes:
+    /// audio`, so a live recording keeps it running and the listener answering —
+    /// sustained unreachability means no recording can still be active. All
+    /// conditions must hold:
+    /// - `state == .recording` only — never `.waiting`, which protects the
+    ///   mic-permission / pre-first-snapshot window where 204 is normal, and
+    ///   the transcribing phase (`.waiting` set by `updateRecordingInProgressUI`),
+    ///   where an app death mid-transcription is deliberately NOT covered by
+    ///   this fast reset — it relies on the pre-existing `/jobs` tier plus the
+    ///   900s timeout.
+    /// - `consecutiveSessionEvidenceMiss` at threshold (~3s of dead probes)
+    /// - the pending request started more than 20s ago
+    /// Returns `true` when the reset fired (dictation cancelled), `false` when
+    /// a guard blocked it.
+    @discardableResult
+    private func resetIfSessionLost() -> Bool {
+        guard state == .recording,
+              consecutiveSessionEvidenceMiss >= SnapshotThresholds.sessionLostMisses else { return false }
+        let age = pendingRequestStart > 0 ? Date().timeIntervalSince1970 - pendingRequestStart : 0
+        guard age > 20 else { return false }
+        FileLogger.shared.warn(.keyboard, "session lost — resetting to idle",
+                               payload: ["id": String(pendingRequestId?.uuidString.prefix(8) ?? "nil"),
+                                         "misses": consecutiveSessionEvidenceMiss])
+        cancelDictation()
+        return true
     }
 
     /// Starts a 0.5s repeating timer that calls `refreshFromSharedState`.
