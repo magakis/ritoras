@@ -222,6 +222,11 @@ struct SharedConfig {
         static let hapticsEnabledKey = "hapticsEnabled"
         static let hapticsEnabledDefault = true
 
+        // MARK: - Keyboard Language
+
+        static let keyboardLanguageKey = "keyboardLanguage"
+        static let keyboardLanguageDefault: KeyboardLanguage = .english
+
         // MARK: - Verbose Logging
 
         static let verboseLoggingKey = "verboseLogging"
@@ -367,6 +372,29 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.hapticsEnabledKey) as? Bool)
             ?? Defaults.hapticsEnabledDefault
+    }
+
+    /// Reads the active keyboard language from the App Group.
+    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Returns `.english` when the App Group is unavailable, the key is unset,
+    /// or the stored value is invalid.
+    static func keyboardLanguage() -> KeyboardLanguage {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.keyboardLanguageDefault
+        }
+        guard let raw = defaults.string(forKey: Defaults.keyboardLanguageKey) else {
+            return Defaults.keyboardLanguageDefault
+        }
+        return KeyboardLanguage(rawValue: raw) ?? Defaults.keyboardLanguageDefault
+    }
+
+    /// Writes the active keyboard language to the App Group and posts the
+    /// settings-changed Darwin notification so the keyboard extension applies
+    /// it immediately.
+    static func setKeyboardLanguage(_ language: KeyboardLanguage) {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return }
+        defaults.set(language.rawValue, forKey: Defaults.keyboardLanguageKey)
+        DarwinNotifier.post(Defaults.darwinSettingsChangedNotificationName)
     }
 
     /// Reads the streaming VAD speech RMS threshold from the App Group.

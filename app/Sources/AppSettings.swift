@@ -11,6 +11,7 @@ class AppSettings: ObservableObject {
     @Published var dictationMode: SharedConfig.DictationMode = .batch
     @Published var verboseLogging: Bool = SharedConfig.Defaults.verboseLoggingDefault
     @Published var hapticsEnabled: Bool = SharedConfig.Defaults.hapticsEnabledDefault
+    @Published var keyboardLanguage: KeyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
 
     @Published var streamVadSpeechRms: Float = SharedConfig.Defaults.streamVadSpeechRmsDefault
     @Published var streamVadSilenceMs: Int = SharedConfig.Defaults.streamVadSilenceMsDefault
@@ -32,6 +33,7 @@ class AppSettings: ObservableObject {
         dictationMode = SharedConfig.dictationMode()
         verboseLogging = SharedConfig.verboseLoggingEnabled()
         hapticsEnabled = SharedConfig.hapticsEnabled()
+        keyboardLanguage = SharedConfig.keyboardLanguage()
         streamVadSpeechRms = SharedConfig.streamVadSpeechRms()
         streamVadSilenceMs = SharedConfig.streamVadSilenceMs()
         streamVadMinSpeechMs = SharedConfig.streamVadMinSpeechMs()
@@ -72,6 +74,11 @@ class AppSettings: ObservableObject {
             FileLogger.shared.info(.settings, "saving hapticsEnabled",
                                    payload: ["value": newValue])
             self?.saveHapticsEnabled(newValue)
+        }.store(in: &cancellables)
+        $keyboardLanguage.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving keyboardLanguage",
+                                   payload: ["value": newValue.rawValue])
+            self?.saveKeyboardLanguage(newValue)
         }.store(in: &cancellables)
         $streamVadSpeechRms.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving streamVadSpeechRms",
@@ -115,6 +122,7 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(dictationMode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
         appGroupDefaults?.set(verboseLogging, forKey: SharedConfig.Defaults.verboseLoggingKey)
         appGroupDefaults?.set(hapticsEnabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
+        appGroupDefaults?.set(keyboardLanguage.rawValue, forKey: SharedConfig.Defaults.keyboardLanguageKey)
         appGroupDefaults?.set(streamVadSpeechRms, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
         appGroupDefaults?.set(streamVadSilenceMs, forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
         appGroupDefaults?.set(streamVadMinSpeechMs, forKey: SharedConfig.Defaults.streamVadMinSpeechMsKey)
@@ -160,6 +168,11 @@ class AppSettings: ObservableObject {
         postSettingsChanged()
     }
 
+    private func saveKeyboardLanguage(_ language: KeyboardLanguage) {
+        appGroupDefaults?.set(language.rawValue, forKey: SharedConfig.Defaults.keyboardLanguageKey)
+        postSettingsChanged()
+    }
+
     private func saveStreamVadSpeechRms(_ value: Float) {
         appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
         postSettingsChanged()
@@ -197,6 +210,7 @@ class AppSettings: ObservableObject {
         dictationMode = .batch
         verboseLogging = SharedConfig.Defaults.verboseLoggingDefault
         hapticsEnabled = SharedConfig.Defaults.hapticsEnabledDefault
+        keyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
         resetVadToDefaults()
     }
 

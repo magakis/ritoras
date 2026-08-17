@@ -156,6 +156,11 @@ struct SettingsView: View {
 
     private var keyboardSection: some View {
         Section {
+            Picker("Keyboard language", selection: $settings.keyboardLanguage) {
+                ForEach(KeyboardLanguage.allCases, id: \.self) { language in
+                    Text(language.displayName).tag(language)
+                }
+            }
             Toggle("Auto-Capitalization", isOn: $settings.autoCapitalizationEnabled)
             Toggle("Auto-Correction", isOn: $settings.autocorrectOnSpaceEnabled)
             Toggle("Haptic Feedback", isOn: $settings.hapticsEnabled)
