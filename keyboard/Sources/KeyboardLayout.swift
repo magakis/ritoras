@@ -94,6 +94,54 @@ enum KeyboardLayout {
         ],
     ]
 
+    // MARK: - Greek Letter Rows
+
+    /// Apple-standard Greek QWERTY. Identical row key-counts and widthWeights to
+    /// the English letter rows, so the shared letter-pitch frame math in
+    /// KeyboardRowView needs no language axis. Shifted labels are uppercase Greek;
+    /// `ς` shifts to `Σ` and `;` shifts to `:`.
+    static let greekLetterRows: [[KeyDefinition]] = [
+        // Row 1: ; ς ε ρ τ υ θ ι ο π
+        [
+            KeyDefinition(label: ";", shiftedLabel: ":", action: .insertText(";"), widthWeight: 1),
+            KeyDefinition(label: "ς", shiftedLabel: "Σ", action: .insertText("ς"), widthWeight: 1),
+            KeyDefinition(label: "ε", shiftedLabel: "Ε", action: .insertText("ε"), widthWeight: 1),
+            KeyDefinition(label: "ρ", shiftedLabel: "Ρ", action: .insertText("ρ"), widthWeight: 1),
+            KeyDefinition(label: "τ", shiftedLabel: "Τ", action: .insertText("τ"), widthWeight: 1),
+            KeyDefinition(label: "υ", shiftedLabel: "Υ", action: .insertText("υ"), widthWeight: 1),
+            KeyDefinition(label: "θ", shiftedLabel: "Θ", action: .insertText("θ"), widthWeight: 1),
+            KeyDefinition(label: "ι", shiftedLabel: "Ι", action: .insertText("ι"), widthWeight: 1),
+            KeyDefinition(label: "ο", shiftedLabel: "Ο", action: .insertText("ο"), widthWeight: 1),
+            KeyDefinition(label: "π", shiftedLabel: "Π", action: .insertText("π"), widthWeight: 1),
+        ],
+
+        // Row 2: α σ δ φ γ η ξ κ λ
+        [
+            KeyDefinition(label: "α", shiftedLabel: "Α", action: .insertText("α"), widthWeight: 1),
+            KeyDefinition(label: "σ", shiftedLabel: "Σ", action: .insertText("σ"), widthWeight: 1),
+            KeyDefinition(label: "δ", shiftedLabel: "Δ", action: .insertText("δ"), widthWeight: 1),
+            KeyDefinition(label: "φ", shiftedLabel: "Φ", action: .insertText("φ"), widthWeight: 1),
+            KeyDefinition(label: "γ", shiftedLabel: "Γ", action: .insertText("γ"), widthWeight: 1),
+            KeyDefinition(label: "η", shiftedLabel: "Η", action: .insertText("η"), widthWeight: 1),
+            KeyDefinition(label: "ξ", shiftedLabel: "Ξ", action: .insertText("ξ"), widthWeight: 1),
+            KeyDefinition(label: "κ", shiftedLabel: "Κ", action: .insertText("κ"), widthWeight: 1),
+            KeyDefinition(label: "λ", shiftedLabel: "Λ", action: .insertText("λ"), widthWeight: 1),
+        ],
+
+        // Row 3: shift ζ χ ψ ω β ν μ backspace
+        [
+            KeyDefinition(label: "⇧", shiftedLabel: "⇪", action: .shift, widthWeight: 1.5),
+            KeyDefinition(label: "ζ", shiftedLabel: "Ζ", action: .insertText("ζ"), widthWeight: 1),
+            KeyDefinition(label: "χ", shiftedLabel: "Χ", action: .insertText("χ"), widthWeight: 1),
+            KeyDefinition(label: "ψ", shiftedLabel: "Ψ", action: .insertText("ψ"), widthWeight: 1),
+            KeyDefinition(label: "ω", shiftedLabel: "Ω", action: .insertText("ω"), widthWeight: 1),
+            KeyDefinition(label: "β", shiftedLabel: "Β", action: .insertText("β"), widthWeight: 1),
+            KeyDefinition(label: "ν", shiftedLabel: "Ν", action: .insertText("ν"), widthWeight: 1),
+            KeyDefinition(label: "μ", shiftedLabel: "Μ", action: .insertText("μ"), widthWeight: 1),
+            KeyDefinition(label: "⌫", shiftedLabel: nil, action: .backspace, widthWeight: 1.5),
+        ],
+    ]
+
     // MARK: - Number Rows
 
     static let numberRows: [[KeyDefinition]] = [
@@ -190,10 +238,13 @@ enum KeyboardLayout {
 
     // MARK: - Helpers
 
-    static func rows(for mode: KeyboardLayoutMode) -> [[KeyDefinition]] {
+    static func rows(for mode: KeyboardLayoutMode, language: KeyboardLanguage = .english) -> [[KeyDefinition]] {
         switch mode {
         case .letters:
-            return letterRows
+            switch language {
+            case .english: return letterRows
+            case .greek: return greekLetterRows
+            }
         case .numbers:
             return numberRows
         case .symbols:
