@@ -627,6 +627,9 @@ class KeyboardViewController: UIInputViewController {
     private func presentLanguageMenu() {
         let menu = keyboardView.languageMenu
         guard menu.isHidden else { return }
+        // The accent picker and the language menu are mutually exclusive
+        // surfaces; dismiss the picker defensively before the menu opens.
+        keyboardView.accentPicker.hide()
         menu.show(activeLanguage: keyboardView.currentLanguage)
     }
 
@@ -2662,6 +2665,13 @@ extension KeyboardViewController: KeyboardViewDelegate {
         guard !text.isEmpty else { return text }
         let wantsCaps = shiftState != .lower || effectiveAutoCapActive
         guard wantsCaps else { return text }
+        // Greek letters-layout carry-forward: the `;` key's shifted label is `:`
+        // (GreekLayout row 1). `;` contains no letters, so the generic
+        // uppercase rule below would leave it unshifted — map it explicitly.
+        // English symbols layout has its own `:` key and is untouched.
+        if settingsCache.language == .greek, text == ";" {
+            return ":"
+        }
         if text.rangeOfCharacter(from: .letters) != nil {
             return text.uppercased()
         }

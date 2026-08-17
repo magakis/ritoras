@@ -97,6 +97,11 @@ private class KeyButton: UIButton {
     /// trailing touchUpInside can be suppressed (prevents a cancel + stop).
     var micLongPressDidFire = false
 
+    /// Set true when the accent-picker long-press fires on a Greek vowel key,
+    /// so the trailing touchUpInside can be suppressed (prevents a long-press
+    /// + tap double-fire).
+    var accentLongPressDidFire = false
+
     /// Called whenever isHighlighted transitions. KeyboardView uses this to show/hide
     /// the character preview popup without needing touch-event wiring.
     var onHighlightChange: ((KeyButton, Bool) -> Void)?
@@ -626,6 +631,26 @@ class KeyboardView: UIView {
         return v
     }
 
+    /// Single reusable Greek accent picker overlay — recycled across shows.
+    /// Never per-open allocated. See 48 MB Jetsam constraint. Variant selection
+    /// routes through the normal `.insertText` commit path so the chosen accent
+    /// participates in autocorrect / final-sigma like any other typed letter.
+    private var _accentPicker: AccentPickerView?
+    var accentPicker: AccentPickerView {
+        if let v = _accentPicker { return v }
+        let v = AccentPickerView()
+        v.onSelect = { [weak self] variant in
+            guard let self = self else { return }
+            self.accentPicker.hide()
+            self.delegate?.keyboardView(self, didPerform: .insertText(variant))
+        }
+        v.onDismiss = { [weak self] in
+            self?.accentPicker.hide()
+        }
+        _accentPicker = v
+        return v
+    }
+
     // Key references
     private weak var micKeyButton: KeyButton?
     private weak var emojiKeyButton: KeyButton?
@@ -690,6 +715,9 @@ class KeyboardView: UIView {
 
         addSubview(keyPreview)
         bringSubviewToFront(keyPreview)
+
+        addSubview(accentPicker)
+        bringSubviewToFront(accentPicker)
 
         rebuildKeyRows()
         apply(mode: .letters)
@@ -856,6 +884,14 @@ class KeyboardView: UIView {
                     button.addTarget(self, action: #selector(backspaceTouchUp(_:)), for: .touchUpInside)
                     button.addTarget(self, action: #selector(backspaceTouchUp(_:)), for: .touchUpOutside)
                     button.addTarget(self, action: #selector(backspaceTouchUp(_:)), for: .touchCancel)
+                case .insertText(let s):
+                    // Greek vowel keys get an Apple-style long-press accent picker.
+                    if currentLanguage == .greek, AccentPickerView.variants[s] != nil {
+                        button.addTarget(self, action: #selector(accentTouchDown(_:)), for: .touchDown)
+                        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(accentLongPressed(_:)))
+                        longPress.minimumPressDuration = 0.3
+                        button.addGestureRecognizer(longPress)
+                    }
                 default:
                     break
                 }
@@ -865,7 +901,10 @@ class KeyboardView: UIView {
                     guard let self = self else { return }
                     if highlighted {
                         guard case .insertText = kb.keyDefinition.action,
-                              self.emojiPanelView.isHidden else { return }
+                              self.emojiPanelView.isHidden,
+                              // No plain preview while the accent picker is up —
+                              // the picker already surfaced the key's variants.
+                              self.accentPicker.isHidden else { return }
                         let glyph: String
                         if self.currentShiftState != .lower, let shifted = kb.keyDefinition.shiftedLabel {
                             glyph = shifted
@@ -968,6 +1007,10 @@ class KeyboardView: UIView {
             sender.micLongPressDidFire = false
             return
         }
+        if sender.accentLongPressDidFire {
+            sender.accentLongPressDidFire = false
+            return
+        }
         switch sender.keyDefinition.action {
         case .insertText, .space, .return:
             DispatchQueue.main.async { HapticsManager.shared.tapImpact() }
@@ -984,6 +1027,12 @@ class KeyboardView: UIView {
     /// Resets the long-press flag at the start of each touch on the shift key.
     @objc private func shiftTouchDown(_ sender: KeyButton) {
         sender.shiftLongPressDidFire = false
+    }
+
+    /// Resets the long-press flag at the start of each touch on a Greek vowel key
+    /// (a stale flag from a slide-off/cancelled long-press would swallow the next tap).
+    @objc private func accentTouchDown(_ sender: KeyButton) {
+        sender.accentLongPressDidFire = false
     }
 
     /// Long-pressing the shift key engages Caps Lock (like the native keyboard).
@@ -1019,6 +1068,22 @@ class KeyboardView: UIView {
         button.micLongPressDidFire = true
         HapticsManager.shared.tapCancelWarning()
         delegate?.keyboardViewDidRequestCancelDictation(self)
+    }
+
+    /// Long-pressing a Greek vowel key shows the reusable accent picker anchored
+    /// above the key (Apple-style). Suppresses the trailing tap via the
+    /// KeyButton suppression flag.
+    @objc private func accentLongPressed(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began, let button = gesture.view as? KeyButton else { return }
+        guard currentLanguage == .greek else { return }
+        button.accentLongPressDidFire = true
+        keyPreview.hide()
+        languageMenu.dismiss()   // defensive — the two overlays never overlap
+        let keyFrame = button.convert(button.bounds, to: self)
+        accentPicker.show(for: button.keyDefinition.label,
+                          anchoredAbove: keyFrame,
+                          shifted: currentShiftState != .lower)
+        bringSubviewToFront(accentPicker)
     }
 
     // MARK: - Mic Hold Progress Ring
@@ -1094,6 +1159,13 @@ class KeyboardView: UIView {
         // key-region dead-zone routing so taps on the dimmed backdrop dismiss
         // the menu instead of pressing the keys beneath it.
         if !languageMenu.isHidden {
+            return super.hitTest(point, with: event)
+        }
+
+        // Same for the accent picker: its transparent backdrop covers the whole
+        // keyboard, so any touch outside the strip dismisses instead of firing
+        // the key beneath it.
+        if !accentPicker.isHidden {
             return super.hitTest(point, with: event)
         }
 
@@ -1240,6 +1312,9 @@ class KeyboardView: UIView {
 
         // Dismiss key preview popup when switching to emoji/emojiSearch mode.
         if inSearch || showEmojiPanel { keyPreview.hide() }
+        // The accent picker only belongs to the letters surface; drop it if
+        // the surface changes out from under it.
+        if inSearch || showEmojiPanel { accentPicker.hide() }
 
         suggestionBar.isHidden = !showSuggestBar
         letterRegionContainer.isHidden = !showLetters
@@ -1301,6 +1376,7 @@ class KeyboardView: UIView {
         guard language != currentLanguage else { return }
         currentLanguage = language
         currentLayoutMode = .letters
+        accentPicker.hide()   // defensive — the picker cannot follow a language switch
         rebuildKeyRows()
         suggestionBar.updateLanguage(language)
     }
@@ -1386,8 +1462,11 @@ class KeyboardView: UIView {
             // lookup is cancelled defensively in case this detach fires on a path
             // where viewWillDisappear did not — idempotent, and the work item is
             // also liveness-gated (self.window == nil) and cancelled from the
-            // controller's viewWillDisappear teardown.
+            // controller's viewWillDisappear teardown. The accent picker is hidden
+            // too: the same instance reappears on the next show, and a picker left
+            // visible at detach would come back as a stuck overlay.
             cancelSuggestionLookup()
+            accentPicker.hide()
             FileLogger.shared.info(.keyboard, "KeyboardView detached from window",
                 payload: ["footprint": MemoryMonitor.currentFootprint()])
         } else {
