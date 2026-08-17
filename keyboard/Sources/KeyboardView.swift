@@ -419,9 +419,11 @@ private class KeyboardRowView: UIView {
 private class SuggestionBar: UIView {
     var suggestionTapped: ((Int) -> Void)?
     var suggestionLongPressed: ((Int) -> Void)?
+    var languageTapped: (() -> Void)?
 
     private let stack = UIStackView()
     private var segments: [UIButton] = []
+    private let languageButton = UIButton(type: .system)
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -445,11 +447,32 @@ private class SuggestionBar: UIView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
+        languageButton.translatesAutoresizingMaskIntoConstraints = false
+        languageButton.setTitle(KeyboardLanguage.english.shortLabel, for: .normal)
+        languageButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .medium)
+        languageButton.setTitleColor(UIColor { tc in
+            tc.userInterfaceStyle == .dark
+                ? UIColor.white
+                : UIColor.black
+        }, for: .normal)
+        languageButton.backgroundColor = UIColor { tc in
+            tc.userInterfaceStyle == .dark
+                ? UIColor(white: 0.18, alpha: 1)
+                : UIColor(white: 0.92, alpha: 1)
+        }
+        languageButton.addTarget(self, action: #selector(languageButtonTapped), for: .touchUpInside)
+        addSubview(languageButton)
+
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.trailingAnchor.constraint(equalTo: languageButton.leadingAnchor, constant: -1),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            languageButton.trailingAnchor.constraint(equalTo: trailingAnchor),
+            languageButton.topAnchor.constraint(equalTo: topAnchor),
+            languageButton.bottomAnchor.constraint(equalTo: bottomAnchor),
+            languageButton.widthAnchor.constraint(equalToConstant: 40),
         ])
 
         for i in 0..<3 {
@@ -487,6 +510,14 @@ private class SuggestionBar: UIView {
         suggestionLongPressed?(button.tag)
     }
 
+    @objc private func languageButtonTapped() {
+        languageTapped?()
+    }
+
+    func updateLanguage(_ language: KeyboardLanguage) {
+        languageButton.setTitle(language.shortLabel, for: .normal)
+    }
+
     func update(with suggestions: [String]) {
         for (i, segment) in segments.enumerated() {
             if i < suggestions.count {
@@ -507,6 +538,9 @@ class KeyboardView: UIView {
 
     /// Called when the emoji panel's ABC button is tapped; the controller sets this to route through uiMode.
     var onReturnToLetters: (() -> Void)?
+
+    /// Called when the suggestion bar's language button is tapped; the controller presents the language picker.
+    var languageTapped: (() -> Void)?
 
     // Subviews
     private var _suggestionBar: SuggestionBar?
@@ -581,6 +615,17 @@ class KeyboardView: UIView {
         return v
     }
 
+    /// Single reusable language picker overlay — recycled across shows. Never
+    /// per-open allocated. See 48 MB Jetsam constraint.
+    private var _languageMenu: LanguageMenuView?
+    var languageMenu: LanguageMenuView {
+        if let v = _languageMenu { return v }
+        let v = LanguageMenuView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        _languageMenu = v
+        return v
+    }
+
     // Key references
     private weak var micKeyButton: KeyButton?
     private weak var emojiKeyButton: KeyButton?
@@ -595,6 +640,7 @@ class KeyboardView: UIView {
     private var hasFullAccess = false
     private var currentShiftState: ShiftState = .lower
     private var currentLayoutMode: KeyboardLayoutMode = .letters
+    private(set) var currentLanguage: KeyboardLanguage = .english
 
     /// The 3s cancel-progress ring on the mic button. Only populated while the
     /// finger is held down; removed on every touch-up and on the long-press fire.
@@ -637,6 +683,9 @@ class KeyboardView: UIView {
         addSubview(emojiSearchOverlay)
         bringSubviewToFront(emojiSearchOverlay)
 
+        addSubview(languageMenu)
+        bringSubviewToFront(languageMenu)
+
         setupConstraints()
 
         addSubview(keyPreview)
@@ -666,6 +715,10 @@ class KeyboardView: UIView {
                 return
             }
             self.delegate?.keyboardView(self, didLongPressSuggestion: suggestion)
+        }
+        suggestionBar.languageTapped = { [weak self] in
+            guard let self = self else { return }
+            self.languageTapped?()
         }
         addSubview(suggestionBar)
     }
@@ -738,6 +791,12 @@ class KeyboardView: UIView {
             bottomActionRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             bottomActionRow.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
             bottomActionRow.heightAnchor.constraint(equalToConstant: 48),
+
+            // Language picker overlay — covers the whole keyboard when shown
+            languageMenu.topAnchor.constraint(equalTo: topAnchor),
+            languageMenu.leadingAnchor.constraint(equalTo: leadingAnchor),
+            languageMenu.trailingAnchor.constraint(equalTo: trailingAnchor),
+            languageMenu.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
     }
 
@@ -749,7 +808,7 @@ class KeyboardView: UIView {
         bottomRowView = nil
         shiftKeyButton = nil
 
-        let rows = KeyboardLayout.rows(for: currentLayoutMode)
+        let rows = KeyboardLayout.rows(for: currentLayoutMode, language: currentLanguage)
 
         for (rowIndex, rowDefs) in rows.enumerated() {
             let isLastRow = rowIndex == rows.count - 1
@@ -1031,6 +1090,13 @@ class KeyboardView: UIView {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         guard isUserInteractionEnabled, !isHidden, alpha > 0.01 else { return nil }
 
+        // When the language picker overlay is visible it owns all touches: skip
+        // key-region dead-zone routing so taps on the dimmed backdrop dismiss
+        // the menu instead of pressing the keys beneath it.
+        if !languageMenu.isHidden {
+            return super.hitTest(point, with: event)
+        }
+
         let inKeyRegion = point.y >= letterRegionContainer.frame.minY &&
                           point.y <= bottomActionRow.frame.maxY
 
@@ -1226,6 +1292,17 @@ class KeyboardView: UIView {
 
     private func updateShiftVisual() {
         shiftKeyButton?.updateShiftVisual(currentShiftState)
+    }
+
+    /// Switches the key grid's language and returns to the letters layout
+    /// (Apple behavior: a language switch drops back to the letter surface).
+    /// The controller mirrors this with its own `layoutMode = .letters`.
+    func setLanguage(_ language: KeyboardLanguage) {
+        guard language != currentLanguage else { return }
+        currentLanguage = language
+        currentLayoutMode = .letters
+        rebuildKeyRows()
+        suggestionBar.updateLanguage(language)
     }
 
     func refreshSuggestions() {

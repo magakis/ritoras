@@ -97,6 +97,11 @@ class KeyboardViewController: UIInputViewController {
     /// so this reads 1 from the first build onward — never 2, 3, … per show.
     private static var buildGeneration: Int { SharedPredictionStack.shared.generation }
 
+    /// One-shot flag: set the first time the active spell language is
+    /// unavailable on this device, so the `.debug` diagnostic fires at most
+    /// once per process. Touched only on the main thread (applyLanguageSetting).
+    private static var spellLanguageUnavailableLogged = false
+
     /// Tracks the current server-poll data task so it can be cancelled before
     /// the next poll starts or when transports are stopped.
     private var currentPollTask: URLSessionDataTask?
@@ -330,6 +335,7 @@ class KeyboardViewController: UIInputViewController {
             self.settingsCache.refresh()
             DispatchQueue.main.async {
                 HapticsManager.shared.reloadEnabledFromAppGroup()
+                self.applyLanguageSetting()
             }
         }
         darwinLearnedWordsChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinLearnedWordsChangedNotificationName) { [weak self] in
@@ -426,6 +432,7 @@ class KeyboardViewController: UIInputViewController {
         installOrUpdateHeightConstraint()
         view.setNeedsLayout()
         view.layoutIfNeeded()
+        applyLanguageSetting()
     }
 
     override func viewIsAppearing(_ animated: Bool) {
@@ -433,6 +440,38 @@ class KeyboardViewController: UIInputViewController {
         installOrUpdateHeightConstraint()
         view.setNeedsLayout()
         view.layoutIfNeeded()
+    }
+
+    /// Applies the active keyboard language as the runtime `primaryLanguage`,
+    /// superseding the plist's `PrimaryLanguage` value (which stays "en-US").
+    /// Called on appear (fresh cache) and on the settings-changed Darwin
+    /// notification (after `settingsCache.refresh()`), on the main thread.
+    ///
+    /// Also syncs the key grid to the persisted language. Without this, a
+    /// persisted Greek setting shows an English grid until the menu is used
+    /// (the grid defaults to `.english` at construction). `setLanguage` is a
+    /// no-op when the grid already matches, and only then resets to the
+    /// letters layout — correct for a genuine language change.
+    private func applyLanguageSetting() {
+        let language = settingsCache.language
+        primaryLanguage = language.bcp47Tag
+        keyboardView.setLanguage(language)
+        logSpellLanguageUnavailableIfNeeded()
+        FileLogger.shared.info(.keyboard, "keyboard language set",
+                               payload: ["language": language.rawValue])
+    }
+
+    /// One-time `.debug` log when the active spell language has no lexicon on
+    /// this device (e.g. Greek without the Greek UITextChecker dictionary).
+    /// `rangeOfMisspelledWord` then reports no misspellings, which is acceptable
+    /// degradation: SymSpell still drives suggestions and autocorrect.
+    private func logSpellLanguageUnavailableIfNeeded() {
+        guard settingsCache.language == .greek,
+              !UITextChecker.availableLanguages.contains(KeyboardLanguage.greek.appleSpellTag),
+              !Self.spellLanguageUnavailableLogged else { return }
+        Self.spellLanguageUnavailableLogged = true
+        FileLogger.shared.debug(.keyboard, "UITextChecker unavailable for spell language",
+            payload: ["language": KeyboardLanguage.greek.appleSpellTag])
     }
 
     override func didReceiveMemoryWarning() {
@@ -558,6 +597,26 @@ class KeyboardViewController: UIInputViewController {
         keyboardView.onReturnToLetters = { [weak self] in
             self?.uiMode = .letters
         }
+
+        // Wire the language picker: the suggestion-bar button presents the menu;
+        // selection persists + applies the language; backdrop taps dismiss.
+        keyboardView.languageTapped = { [weak self] in
+            guard let self = self else { return }
+            self.presentLanguageMenu()
+        }
+        keyboardView.languageMenu.onDismiss = { [weak self] in
+            guard let self = self else { return }
+            self.keyboardView.languageMenu.dismiss()
+        }
+    }
+
+    // MARK: - Language Picker
+
+    /// Shows the reusable language picker overlay, marked with the active language.
+    private func presentLanguageMenu() {
+        let menu = keyboardView.languageMenu
+        guard menu.isHidden else { return }
+        menu.show(activeLanguage: keyboardView.currentLanguage)
     }
 
     private func installOrUpdateHeightConstraint() {
