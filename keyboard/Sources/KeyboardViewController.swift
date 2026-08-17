@@ -122,6 +122,13 @@ class KeyboardViewController: UIInputViewController {
     /// Tracks the most recent autocorrect for potential revert-on-backspace (Phase 4).
     private var lastAutoCorrection: (typed: String, replacement: String)?
 
+    /// The word whose trailing σ was auto-converted to ς (Greek final sigma).
+    /// Set when the conversion applies on a commit trigger; the next backspace
+    /// that lands directly after the ς reverts it to σ (Apple system-keyboard
+    /// behavior). Cleared by any other keystroke, navigation, external text
+    /// change, language switch, or teardown.
+    private var lastSigmaConvertedWord: String?
+
     // MARK: - Deferred Autocorrect (background compute)
 
     /// Monotonic keystroke epoch. Bumped by every document mutation, selection
@@ -604,6 +611,10 @@ class KeyboardViewController: UIInputViewController {
             guard let self = self else { return }
             self.presentLanguageMenu()
         }
+        keyboardView.languageMenu.onSelect = { [weak self] language in
+            guard let self = self else { return }
+            self.handleLanguageSelection(language)
+        }
         keyboardView.languageMenu.onDismiss = { [weak self] in
             guard let self = self else { return }
             self.keyboardView.languageMenu.dismiss()
@@ -617,6 +628,36 @@ class KeyboardViewController: UIInputViewController {
         let menu = keyboardView.languageMenu
         guard menu.isHidden else { return }
         menu.show(activeLanguage: keyboardView.currentLanguage)
+    }
+
+    /// Applies a menu selection: persists it, switches the key grid, resets to
+    /// the letters layout, applies the runtime primaryLanguage, and swaps the
+    /// prediction stack (SymSpell + providers) to the selected language.
+    private func handleLanguageSelection(_ language: KeyboardLanguage) {
+        keyboardView.languageMenu.dismiss()
+        lastSigmaConvertedWord = nil  // a language switch closes the sigma revert window
+        // Proceed when the selection differs from the grid OR the prediction
+        // stack. They are tracked independently: at launch the grid may already
+        // show the persisted language (see applyLanguageSetting's grid sync)
+        // while the stack is still English (lazy Greek build) — re-selecting
+        // that language must still swap the prediction stack.
+        guard language != keyboardView.currentLanguage
+            || language != SharedPredictionStack.shared.language else { return }
+        SharedConfig.setKeyboardLanguage(language)
+        keyboardView.setLanguage(language)
+        layoutMode = .letters
+        settingsCache.refresh()
+        applyLanguageSetting()
+        // Swap the prediction stack off the main thread (heavy dictionary build
+        // for Greek; English is a no-op). Suggestions go cold during the swap
+        // and come back when the new stack is ready.
+        SharedPredictionStack.shared.switchLanguageIfNeeded(to: language) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.keyboardView?.refreshSuggestions()
+            }
+        }
+        FileLogger.shared.info(.keyboard, "keyboard language switched",
+                               payload: ["language": language.rawValue])
     }
 
     private func installOrUpdateHeightConstraint() {

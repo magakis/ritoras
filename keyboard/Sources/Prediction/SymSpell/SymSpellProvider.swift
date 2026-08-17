@@ -12,10 +12,12 @@ final class SymSpellProvider: SuggestionProvider {
 
     private let symSpell: SymSpell
     private let trie: Trie
+    private let language: KeyboardLanguage
 
-    init(symSpell: SymSpell, trie: Trie) {
+    init(symSpell: SymSpell, trie: Trie, language: KeyboardLanguage = .english) {
         self.symSpell = symSpell
         self.trie = trie
+        self.language = language
     }
 
     /// Applies the capitalization pattern from `input` to `suggestion`.

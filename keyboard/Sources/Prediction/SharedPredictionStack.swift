@@ -13,6 +13,12 @@ import Foundation
 /// individually sheddable on memory warning; the dictionary + engine +
 /// providers persist.
 ///
+/// Language switching: the stack tracks a `currentLanguage`. English loads
+/// lazily at process launch (load-once per language); Greek builds on the
+/// first explicit menu selection via `switchLanguageIfNeeded(to:)`. A switch
+/// drops the old stack so ARC can reclaim the ~25 MB SymSpell before building
+/// the new language's dictionary.
+///
 /// Thread safety: all state is serialized via an internal `NSLock`; the class
 /// is `@unchecked Sendable` because it is touched from the build queue, the
 /// main queue, and the suggestion lookup queue.
@@ -32,11 +38,13 @@ final class SharedPredictionStack: @unchecked Sendable {
     private var state: LoadState = .cold
     private var engine: PredictionEngine?
     private var trigramProvider: TrigramProvider?
+    private var currentLanguage: KeyboardLanguage = .english
 
-    /// Process-wide build counter. Advanced exactly once per process lifetime
-    /// (cold → loading), so `buildSessionId` and log payloads stay stable
-    /// across show/hide cycles — a second "build start" log means the
-    /// load-once guarantee has regressed.
+    /// Process-wide build counter. Advanced once for the cold → loading build
+    /// and again on each language switch — every `performBuild` gets a unique
+    /// id for `buildSessionId` and log payloads. A second "build start" log
+    /// without a preceding language switch means the load-once guarantee has
+    /// regressed.
     private var buildCount: Int = 0
 
     private let buildQueue = DispatchQueue(
@@ -72,9 +80,16 @@ final class SharedPredictionStack: @unchecked Sendable {
         return state == .loading
     }
 
-    private func mutateState(_ block: (inout LoadState, inout PredictionEngine?, inout TrigramProvider?) -> Void) {
+    /// The language the prediction stack was last built for. `.english` until
+    /// the first explicit language selection triggers a switch.
+    var language: KeyboardLanguage {
         lock.lock(); defer { lock.unlock() }
-        block(&state, &engine, &trigramProvider)
+        return currentLanguage
+    }
+
+    private func mutateState(_ block: (inout LoadState, inout PredictionEngine?, inout TrigramProvider?, inout KeyboardLanguage) -> Void) {
+        lock.lock(); defer { lock.unlock() }
+        block(&state, &engine, &trigramProvider, &currentLanguage)
     }
 
     // MARK: - Load
@@ -97,13 +112,14 @@ final class SharedPredictionStack: @unchecked Sendable {
             state = .loading
             buildCount &+= 1
             let generation = buildCount
+            let language = currentLanguage
             lock.unlock()
             buildQueue.async { [weak self] in
                 guard let self = self else {
                     DispatchQueue.main.async { completion(false) }
                     return
                 }
-                self.performBuild(generation: generation, completion: completion)
+                self.performBuild(generation: generation, language: language, completion: completion)
             }
         case .loading:
             lock.unlock()
@@ -118,7 +134,7 @@ final class SharedPredictionStack: @unchecked Sendable {
     /// Mirrors the former per-instance `KeyboardViewController.buildPredictionEngine`
     /// minus per-instance state. The degraded-engine fallback logs at `.warn` so
     /// the entry survives a Jetsam kill and reaches DebugLogView via a dictation cycle.
-    private func performBuild(generation: Int, completion: @escaping (Bool) -> Void) {
+    private func performBuild(generation: Int, language: KeyboardLanguage, completion: @escaping (Bool) -> Void) {
         let maxED = SharedConfig.Defaults.symspellMaxEditDistance
         let prefixLen = SharedConfig.Defaults.symspellPrefixLength
 
@@ -132,13 +148,14 @@ final class SharedPredictionStack: @unchecked Sendable {
         FileLogger.shared.debug(.prediction, "shared prediction build start",
             payload: [
                 "buildId": generation,
+                "language": language.rawValue,
                 "baselineFootprint": baselineFootprint,
                 "maxFootprint": SharedConfig.Defaults.maxPhysFootprintDuringLoad
             ])
 
         // Stream-load the frequency dictionary into both, with memory monitoring.
         do {
-            guard let url = WordListLoader.bundledURL() else {
+            guard let url = WordListLoader.bundledURL(language: language) else {
                 throw WordListLoader.WordListError.bundledFileNotFound
             }
             let loaded = try WordListLoader.loadStreamed(
@@ -152,6 +169,7 @@ final class SharedPredictionStack: @unchecked Sendable {
             FileLogger.shared.info(.prediction, "shared prediction build result footprint",
                 payload: [
                     "buildId": generation,
+                    "language": language.rawValue,
                     "wordsLoaded": loaded,
                     "postLoadFootprint": postLoadFootprint,
                     "baselineFootprint": baselineFootprint,
@@ -164,22 +182,23 @@ final class SharedPredictionStack: @unchecked Sendable {
             FileLogger.shared.error(.dictionary, "prediction engine failed to load dictionary", payload: ["error": error.localizedDescription])
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.mutateState { state, storedEngine, _ in
+                self.mutateState { state, storedEngine, _, storedLanguage in
                     storedEngine = PredictionEngine()
                     state = .ready
+                    storedLanguage = language
                 }
                 FileLogger.shared.warn(.prediction, "shared prediction ready (degraded empty engine)",
-                    payload: ["buildId": generation])
+                    payload: ["buildId": generation, "language": language.rawValue])
                 completion(true)
             }
             return
         }
 
         // Create the SymSpell provider.
-        let provider = SymSpellProvider(symSpell: symSpell, trie: trie)
+        let provider = SymSpellProvider(symSpell: symSpell, trie: trie, language: language)
 
         // Create the Apple UITextChecker provider.
-        let appleProvider = AppleSpellCheckerProvider()
+        let appleProvider = AppleSpellCheckerProvider(language: language.appleSpellTag)
 
         // Build the engine and register ALL providers before publishing — the
         // engine is published atomically with its provider list so a concurrent
@@ -187,22 +206,35 @@ final class SharedPredictionStack: @unchecked Sendable {
         let engine = PredictionEngine()
         engine.addProvider(provider)
         engine.addProvider(appleProvider)
-        let trigram = TrigramProvider()
-        engine.addProvider(trigram)
+        // English ships with a KenLM trigram provider; Greek ships without one
+        // (Phase 6 deferred) — never register it so its ~8-10 MB model cannot
+        // lazy-load in Greek mode.
+        var trigram: TrigramProvider?
+        if language == .english {
+            let englishTrigram = TrigramProvider()
+            engine.addProvider(englishTrigram)
+            trigram = englishTrigram
+        }
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.mutateState { state, storedEngine, storedTrigram in
+            self.mutateState { state, storedEngine, storedTrigram, storedLanguage in
                 storedEngine = engine
                 storedTrigram = trigram
                 state = .ready
+                storedLanguage = language
             }
 
-            // TrigramProvider registered in .cold state — lazy-loads on first
-            // suggest() call. KenLM model (~8-10 MB) is NOT loaded here, keeping
-            // steady-state ~38-43 MB (well under the 48 MB Jetsam cap).
+            // English: TrigramProvider registered in .cold state — lazy-loads on
+            // first suggest() call. KenLM model (~8-10 MB) is NOT loaded here,
+            // keeping steady-state ~38-43 MB (well under the 48 MB Jetsam cap).
+            // Greek: no trigram provider at all (Phase 6 deferred).
             FileLogger.shared.info(.prediction, "shared prediction ready (trigram deferred)",
-                payload: ["buildId": generation])
+                payload: [
+                    "buildId": generation,
+                    "language": language.rawValue,
+                    "trigram": language == .english ? "deferred" : "none"
+                ])
             completion(true)
         }
     }
@@ -222,5 +254,126 @@ final class SharedPredictionStack: @unchecked Sendable {
         trigram?.unload()
         let after = MemoryMonitor.currentFootprint()
         return before > after ? before - after : 0
+    }
+
+    // MARK: - Language Switch
+
+    /// Swaps the prediction stack to `language`, rebuilding SymSpell + Trie +
+    /// providers from that language's bundled dictionary. No-op when the stack
+    /// is already built for `language`.
+    ///
+    /// Runs on `buildQueue`. Order matters for the 48 MB Jetsam cap:
+    ///   1. `unloadTrigram()` sheds the KenLM model (~8-10 MB) first.
+    ///   2. The old engine/trigram/providers are dropped (state → `.loading`),
+    ///      releasing the ~25 MB SymSpell for ARC.
+    ///   3. `phys_footprint` is polled until the old dictionary is reclaimed
+    ///      (~2 s timeout) so the new build starts from the lower baseline —
+    ///      peak ≈ one full stack ≈ steady state. If ARC does not reclaim in
+    ///      time, `loadStreamed`'s footprint-abort guard is the backstop.
+    ///   4. The new language's stack is built via the shared `performBuild`.
+    ///
+    /// The `.loading` (not `.cold`) intermediate state intentionally mirrors a
+    /// cold start: `engineIfReady()` returns nil so the UI shows no stale
+    /// suggestions, while `isLoading` blocks the refreshSuggestions fallback
+    /// from racing a parallel English `loadIfNeeded` build.
+    ///
+    /// - Parameters:
+    ///   - language: The target language.
+    ///   - completion: Called on the main queue with the new stack's readiness.
+    func switchLanguageIfNeeded(to language: KeyboardLanguage, completion: @escaping (Bool) -> Void = { _ in }) {
+        buildQueue.async { [weak self] in
+            guard let self else {
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            self.performLanguageSwitch(to: language, completion: completion)
+        }
+    }
+
+    /// The serialized switch body, runs on `buildQueue`.
+    private func performLanguageSwitch(to language: KeyboardLanguage, completion: @escaping (Bool) -> Void) {
+        lock.lock()
+        // A build is in flight (lazy English load at launch, or a prior switch).
+        // performBuild always settles to `.ready`, so retry until it does.
+        if state == .loading {
+            lock.unlock()
+            buildQueue.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                guard let self else {
+                    DispatchQueue.main.async { completion(false) }
+                    return
+                }
+                self.performLanguageSwitch(to: language, completion: completion)
+            }
+            return
+        }
+        let alreadyOnLanguage = currentLanguage == language
+        let wasReady = state == .ready
+        lock.unlock()
+
+        guard !alreadyOnLanguage else {
+            DispatchQueue.main.async { completion(wasReady) }
+            return
+        }
+
+        let beforeFootprint = MemoryMonitor.currentFootprint()
+
+        // a. Shed the trigram first — the model must not straddle the swap.
+        let trigramFreed = unloadTrigram()
+
+        // b. Drop the old stack so the old SymSpell/Trie dealloc.
+        lock.lock()
+        engine = nil
+        trigramProvider = nil
+        currentLanguage = language
+        state = .loading
+        lock.unlock()
+        buildCount &+= 1
+        let generation = buildCount
+
+        // The post-drop footprint still includes the not-yet-deallocated old
+        // SymSpell (~25 MB) — it is the baseline the poll below waits against.
+        let afterDropFootprint = MemoryMonitor.currentFootprint()
+
+        // c. Poll phys_footprint until the old dictionary is reclaimed
+        //    (expect ≈25 MB drop). ARC reclamation is async; give it up to
+        //    2 s. On timeout, proceed — loadStreamed's footprint-abort guard
+        //    still protects the 48 MB cap.
+        let reclaimDeadline = Date().addingTimeInterval(2.0)
+        var reclaimed = false
+        while Date() < reclaimDeadline {
+            if MemoryMonitor.currentFootprint() < afterDropFootprint {
+                reclaimed = true
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        let afterReclaimFootprint = MemoryMonitor.currentFootprint()
+        if !reclaimed {
+            FileLogger.shared.warn(.prediction, "old dictionary not reclaimed",
+                payload: [
+                    "language": language.rawValue,
+                    "baselineFootprint": beforeFootprint,
+                    "afterDropFootprint": afterDropFootprint,
+                    "afterReclaimFootprint": afterReclaimFootprint,
+                    "trigramFreed": trigramFreed
+                ])
+        }
+
+        // d. Rebuild for the new language via the shared build path.
+        FileLogger.shared.info(.prediction, "prediction stack switching",
+            payload: ["language": language.rawValue, "buildId": generation, "baselineFootprint": beforeFootprint])
+        performBuild(generation: generation, language: language) { [weak self] ok in
+            guard let self else { return }
+            let afterBuildFootprint = MemoryMonitor.currentFootprint()
+            FileLogger.shared.info(.prediction, "prediction stack switched",
+                payload: [
+                    "language": language.rawValue,
+                    "buildId": generation,
+                    "beforeFootprint": beforeFootprint,
+                    "afterFootprint": afterBuildFootprint,
+                    "reclaimed": reclaimed
+                ])
+            DispatchQueue.main.async { completion(ok) }
+        }
     }
 }

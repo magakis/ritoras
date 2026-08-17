@@ -123,12 +123,6 @@ struct SharedConfig {
         /// Discount applied when the edit is a transposition of adjacent letters (teh→the).
         static let qwertyTranspositionDiscount: Double = 0.7
 
-        // MARK: - UITextChecker Spellcheck
-
-        /// Language tag passed to `UITextChecker` APIs. Matches `PrimaryLanguage`
-        /// in `keyboard/Info.plist`.
-        static let appleSpellCheckerLanguage = "en-US"
-
         // MARK: - Trigram Prediction Tunables
 
         /// Weight for forward-compat interpolation (currently unused — empty-prefix

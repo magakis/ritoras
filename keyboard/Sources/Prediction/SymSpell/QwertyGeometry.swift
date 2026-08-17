@@ -6,6 +6,11 @@ import Foundation
 /// (key-units, not pixels). Used to compute `adjacentKeyCost` so
 /// that nearby-key substitutions (e→r) are scored milder than
 /// far-key substitutions (r→m).
+///
+/// The Greek grid mirrors the Apple Greek QWERTY layout, which shares the
+/// English row geometry exactly (10/9/7 keys, same offsets), so Greek
+/// substitutions are scored with the same key-distance model. Unknown
+/// characters (any char absent from both grids) fall back to a neutral 1.0.
 enum QwertyGeometry {
 
     // MARK: - Key Centers
@@ -31,12 +36,33 @@ enum QwertyGeometry {
         return centers
     }()
 
+    /// Greek key-center positions on the Apple Greek QWERTY layout. Row
+    /// geometry (counts and offsets) matches the English grid, so cross-language
+    /// pairs (e.g. `ε` vs `e`, both at x=2) land at matching coordinates.
+    static let greekKeyCenters: [Character: (x: Double, y: Double)] = {
+        var centers: [Character: (x: Double, y: Double)] = [:]
+        // Row 0: ; ς ε ρ τ υ θ ι ο π  (y=0)
+        for (i, ch) in ";ςερτυθιοπ".enumerated() {
+            centers[ch] = (Double(i), 0)
+        }
+        // Row 1: α σ δ φ γ η ξ κ λ  (y=1, offset 0.25)
+        for (i, ch) in "ασδφγηξκλ".enumerated() {
+            centers[ch] = (Double(i) + 0.25, 1)
+        }
+        // Row 2: ζ χ ψ ω β ν μ  (y=2, offset 0.75)
+        for (i, ch) in "ζχψωβνμ".enumerated() {
+            centers[ch] = (Double(i) + 0.75, 2)
+        }
+        return centers
+    }()
+
     // MARK: - Basic Distance
 
     /// Compute the Euclidean distance between two characters' key centers.
     /// Returns 1.0 for unknown characters (neutral).
     static func distance(_ a: Character, _ b: Character) -> Double {
-        guard let posA = keyCenters[a], let posB = keyCenters[b] else {
+        guard let posA = keyCenters[a] ?? greekKeyCenters[a],
+              let posB = keyCenters[b] ?? greekKeyCenters[b] else {
             return 1.0
         }
         let dx = posA.x - posB.x

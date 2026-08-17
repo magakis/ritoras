@@ -290,4 +290,80 @@ describe('topCorrection', () => {
     assert.strictEqual(result.text, 'both', 'trigram candidate "whatever" excluded');
     assert.notStrictEqual(result.text, 'whatever', 'trigram source not in results');
   });
+
+  // ──────────────────────────────────────────────
+  // Fusion degradation — no ready trigram (Greek ships without a trigram:
+  // Greek KenLM is Phase 6, deferred). Documents the structural guarantee:
+  // with no ready trigram the KenLM re-score and the absolute-floor gate are
+  // skipped, so SymSpell/Apple ranking passes through on raw provider scores.
+  // (The Apple boost step is NOT KenLM-dependent — it still applies, as in
+  // the fused-pool tests. Ambiguous contractions are the one special case:
+  // the Swift guard hard-rejects them without LM context.)
+  // ──────────────────────────────────────────────
+  describe('no ready trigram → SymSpell/Apple ranking unchanged', () => {
+    it('winner is the max raw provider score, unchanged by any KenLM transform', () => {
+      const pool = [
+        { text: 'bith', score: 1.0, source: 'symspell' },   // verbatim (excluded)
+        { text: 'bath', score: 0.5, source: 'symspell' },
+        { text: 'both', score: 0.61, source: 'symspell' },  // top raw provider score
+      ];
+
+      const result = topCorrection({
+        pool,
+        currentWord: 'bith',
+        previousWord: 'for',
+        previousWord2: null,
+        kenlmScorer: null,
+        trigramReady: false,
+        blendWeight: 0.5,
+      });
+
+      assert.ok(result !== null);
+      assert.strictEqual(result.text, 'both');
+      assert.strictEqual(result.score, 0.61, 'score untouched — no KenLM re-score (Apple boost only affects .apple entries)');
+    });
+
+    it('absolute-floor gate does not run without a ready trigram', () => {
+      // The winner would be rejected by the -8.0 floor IF KenLM were ready
+      // (mock scorer gives it -8.5). With no trigram the floor is skipped.
+      const pool = [
+        { text: 'bith', score: 1.0, source: 'symspell' },
+        { text: 'bath', score: 0.65, source: 'symspell' },
+      ];
+
+      const result = topCorrection({
+        pool,
+        currentWord: 'bith',
+        previousWord: 'for',
+        previousWord2: null,
+        kenlmScorer: mockBigramScorer,
+        trigramReady: false,
+        absoluteLogProbFloor: -8.0,
+      });
+
+      assert.ok(result !== null, 'floor gate skipped when trigram is not ready');
+      assert.strictEqual(result.text, 'bath');
+    });
+
+    it('ambiguous-contraction winner is hard-rejected without a ready trigram (mirrors Swift guard)', () => {
+      // Swift: `guard fusionIsActive(...) ... else { return nil }` — a real
+      // dictionary word is never auto-flipped to its contraction form without
+      // LM context. With no trigram the guard fails and topCorrection is nil.
+      const pool = [
+        { text: 'its', score: 1.0, source: 'symspell' },
+        { text: `it${APOSTROPHE_CURLY}s`, score: 0.5, source: 'ambiguousContraction' },
+      ];
+
+      const result = topCorrection({
+        pool,
+        currentWord: 'its',
+        previousWord: 'for',
+        previousWord2: null,
+        kenlmScorer: null,
+        trigramReady: false,
+      });
+
+      assert.strictEqual(result, null, 'ambiguous contraction requires a ready trigram');
+    });
+  });
 });

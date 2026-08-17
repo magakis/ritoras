@@ -14,7 +14,14 @@ final class AppleSpellCheckerProvider: SuggestionProvider {
     private let checker = UITextChecker()
     private let language: String
 
-    init(language: String = SharedConfig.Defaults.appleSpellCheckerLanguage) {
+    /// - Parameter language: BCP-47/Apple spell-check tag (e.g. "en-US", "el").
+    ///   Defaults to the English tag so existing construction sites compile;
+    ///   the prediction stack always passes the active language's
+    ///   `appleSpellTag`. On devices without a lexicon for the tag,
+    ///   `rangeOfMisspelledWord` returns NSNotFound for everything — the
+    ///   provider then contributes nothing, which is acceptable degradation
+    ///   (SymSpell still drives suggestions).
+    init(language: String = KeyboardLanguage.english.appleSpellTag) {
         self.language = language
     }
 

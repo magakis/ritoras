@@ -39,13 +39,45 @@ for (let i = 0; i < row2.length; i++) {
 // Apostrophe — near L
 keyCenters.set("'", { x: 9.25, y: 1 });
 
+/**
+ * Greek key-center positions on the Apple Greek QWERTY layout. Row geometry
+ * (counts and offsets) matches the English grid, so cross-language pairs
+ * (e.g. ε vs e, both at x=2) land at matching coordinates.
+ *
+ * Row 0: ; ς ε ρ τ υ θ ι ο π  (y=0, x=0..9)
+ * Row 1: α σ δ φ γ η ξ κ λ     (y=1, x=0.25..8.25)
+ * Row 2: ζ χ ψ ω β ν μ         (y=2, x=0.75..6.75)
+ *
+ * @type {Map<string, {x: number, y: number}>}
+ */
+export const greekKeyCenters = new Map();
+
+// Row 0: ; ς ε ρ τ υ θ ι ο π (y=0)
+const greekRow0 = ';ςερτυθιοπ';
+for (let i = 0; i < greekRow0.length; i++) {
+  greekKeyCenters.set(greekRow0[i], { x: i, y: 0 });
+}
+
+// Row 1: α σ δ φ γ η ξ κ λ (y=1, offset 0.25)
+const greekRow1 = 'ασδφγηξκλ';
+for (let i = 0; i < greekRow1.length; i++) {
+  greekKeyCenters.set(greekRow1[i], { x: i + 0.25, y: 1 });
+}
+
+// Row 2: ζ χ ψ ω β ν μ (y=2, offset 0.75)
+const greekRow2 = 'ζχψωβνμ';
+for (let i = 0; i < greekRow2.length; i++) {
+  greekKeyCenters.set(greekRow2[i], { x: i + 0.75, y: 2 });
+}
+
 // ---------------------------------------------------------------------------
 // Basic Distance
 // ---------------------------------------------------------------------------
 
 /**
  * Compute the Euclidean distance between two characters' key centers.
- * Returns 1.0 for unknown characters (neutral).
+ * Returns 1.0 for unknown characters (neutral). Consults the English grid
+ * first, then the Greek grid — mirrors the Swift `keyCenters[a] ?? greekKeyCenters[a]`.
  * Mirrors `QwertyGeometry.distance(_:_:)`.
  *
  * @param {string} a
@@ -53,8 +85,8 @@ keyCenters.set("'", { x: 9.25, y: 1 });
  * @returns {number}
  */
 export function distance(a, b) {
-  const posA = keyCenters.get(a);
-  const posB = keyCenters.get(b);
+  const posA = keyCenters.get(a) ?? greekKeyCenters.get(a);
+  const posB = keyCenters.get(b) ?? greekKeyCenters.get(b);
   if (!posA || !posB) return 1.0;
   const dx = posA.x - posB.x;
   const dy = posA.y - posB.y;

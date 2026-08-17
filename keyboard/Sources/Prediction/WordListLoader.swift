@@ -2,8 +2,9 @@ import Foundation
 
 /// Loads the bundled frequency dictionary into SymSpell and Trie.
 ///
-/// The resource file `frequency_dictionary_en_wordfreq_50k.txt` contains
-/// ~50,000 English words (wordfreq Zipf-derived) with their frequency counts, one per line:
+/// The resource files `frequency_dictionary_en_wordfreq_50k.txt` and
+/// `frequency_dictionary_el_wordfreq_50k.txt` contain ~50,000 English / ~46,800
+/// Greek words (wordfreq Zipf-derived) with their frequency counts, one per line:
 ///   `word count`
 enum WordListLoader {
 
@@ -13,13 +14,21 @@ enum WordListLoader {
         let count: Int64
     }
 
-    /// The bundled filename (without extension).
-    private static let resourceName = "frequency_dictionary_en_wordfreq_50k"
+    /// The bundled filename (without extension) for a language.
+    private static func resourceName(for language: KeyboardLanguage) -> String {
+        switch language {
+        case .english: return "frequency_dictionary_en_wordfreq_50k"
+        case .greek: return "frequency_dictionary_el_wordfreq_50k"
+        }
+    }
+
     private static let resourceExtension = "txt"
 
     /// Returns the URL for the bundled frequency dictionary in the keyboard extension's bundle.
-    static func bundledURL() -> URL? {
-        return Bundle.main.url(forResource: resourceName, withExtension: resourceExtension)
+    /// - Parameter language: The language whose dictionary to resolve (defaults to English,
+    ///                       preserving existing call sites).
+    static func bundledURL(language: KeyboardLanguage = .english) -> URL? {
+        return Bundle.main.url(forResource: resourceName(for: language), withExtension: resourceExtension)
     }
 
     /// Loads and parses the frequency dictionary from a URL.
@@ -138,7 +147,7 @@ enum WordListLoader {
         var errorDescription: String? {
             switch self {
             case .bundledFileNotFound:
-                return "frequency_dictionary_en_wordfreq_50k.txt not found in bundle. Ensure it is included in Copy Bundle Resources."
+                return "frequency_dictionary_<lang>_wordfreq_50k.txt not found in bundle. Ensure it is included in Copy Bundle Resources."
             case .fileOpenFailed(let path):
                 return "Could not open file at \(path)"
             }

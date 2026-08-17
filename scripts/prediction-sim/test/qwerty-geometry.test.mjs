@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   keyCenters,
+  greekKeyCenters,
   distance,
   adjacentKeyCost,
   weightedEditDistance,
@@ -54,6 +55,124 @@ describe('QwertyGeometry', () => {
       assert.strictEqual(keyCenters.get('3'), undefined);
       assert.strictEqual(keyCenters.get('!'), undefined);
       assert.strictEqual(keyCenters.get(' '), undefined);
+    });
+  });
+
+  // ──────────────────────────────────────────────
+  // Greek key positions
+  // ──────────────────────────────────────────────
+  describe('Greek key positions', () => {
+    it('Greek Row 0: ; ς ε ρ τ υ θ ι ο π, y=0', () => {
+      const row = ';ςερτυθιοπ';
+      for (let i = 0; i < row.length; i++) {
+        const pos = greekKeyCenters.get(row[i]);
+        assert.ok(pos, `key "${row[i]}" should have a position`);
+        assert.strictEqual(pos.x, i, `x for "${row[i]}" should be ${i}`);
+        assert.strictEqual(pos.y, 0, `y for "${row[i]}" should be 0`);
+      }
+    });
+
+    it('Greek Row 1: α σ δ φ γ η ξ κ λ, y=1, offset 0.25', () => {
+      const row = 'ασδφγηξκλ';
+      for (let i = 0; i < row.length; i++) {
+        const pos = greekKeyCenters.get(row[i]);
+        assert.ok(pos, `key "${row[i]}" should have a position`);
+        assert.strictEqual(pos.x, i + 0.25, `x for "${row[i]}" should be ${i + 0.25}`);
+        assert.strictEqual(pos.y, 1, `y for "${row[i]}" should be 1`);
+      }
+    });
+
+    it('Greek Row 2: ζ χ ψ ω β ν μ, y=2, offset 0.75', () => {
+      const row = 'ζχψωβνμ';
+      for (let i = 0; i < row.length; i++) {
+        const pos = greekKeyCenters.get(row[i]);
+        assert.ok(pos, `key "${row[i]}" should have a position`);
+        assert.strictEqual(pos.x, i + 0.75, `x for "${row[i]}" should be ${i + 0.75}`);
+        assert.strictEqual(pos.y, 2, `y for "${row[i]}" should be 2`);
+      }
+    });
+
+    it('unknown character not in the Greek grid', () => {
+      assert.strictEqual(greekKeyCenters.get('q'), undefined);
+      assert.strictEqual(greekKeyCenters.get('Ω'), undefined);  // uppercase is a different codepoint
+    });
+  });
+
+  // ──────────────────────────────────────────────
+  // Greek distance()/adjacentKeyCost()
+  // ──────────────────────────────────────────────
+  describe('Greek distances', () => {
+    it('ε→ρ is 1.0 (adjacent in Greek row 0)', () => {
+      assert.strictEqual(distance('ε', 'ρ'), 1.0);
+    });
+
+    it('α→σ is 1.0 (adjacent in Greek row 1)', () => {
+      assert.strictEqual(distance('α', 'σ'), 1.0);
+    });
+
+    it('ζ→χ is 1.0 (adjacent in Greek row 2)', () => {
+      assert.strictEqual(distance('ζ', 'χ'), 1.0);
+    });
+
+    it('ε→π is 7.0 (same Greek row, far apart)', () => {
+      // ε at (2,0), π at (9,0)
+      assert.strictEqual(distance('ε', 'π'), 7.0);
+      assert.strictEqual(distance('ε', 'τ'), 2.0);
+    });
+
+    it('same character is 0', () => {
+      assert.strictEqual(distance('ε', 'ε'), 0);
+    });
+
+    it('ε→e cross-language pair shares the same physical key (0.0)', () => {
+      // The Greek ε key occupies the English E key position (x=2 on row 0),
+      // so the pair has zero geometric separation.
+      assert.strictEqual(distance('ε', 'e'), 0.0);
+    });
+
+    it('unknown character still falls back to 1.0', () => {
+      assert.strictEqual(distance('ε', '3'), 1.0);
+      assert.strictEqual(distance('3', 'ε'), 1.0);
+      assert.strictEqual(distance('α', 'Ω'), 1.0);
+    });
+
+    it('adjacentKeyCost: ε→ρ cost is 1/3 (distance 1 / 3)', () => {
+      assert.strictEqual(adjacentKeyCost('ε', 'ρ'), 1 / 3);
+    });
+
+    it('far Greek keys cost 1.0 (capped)', () => {
+      // α at (0.25,1), π at (9,0) → distance ~8.8, /3 ≈ 2.9, capped to 1.0
+      assert.strictEqual(adjacentKeyCost('α', 'π'), 1.0);
+    });
+  });
+
+  // ──────────────────────────────────────────────
+  // Greek weighted edit distance / score
+  // ──────────────────────────────────────────────
+  describe('Greek scoring', () => {
+    it('adjacent Greek substitution costs 1/3; far substitution caps at 1.0', () => {
+      // "ρεπ" → "εππ": ρ→ε adjacent (1/3), ε→π far (capped 1.0), π→π same
+      const wd = weightedEditDistance('ρεπ', 'εππ', 1);
+      assert.ok(Math.abs(wd - (1 / 3 + 1.0)) < 0.001,
+        `weightedEditDistance("ρεπ","εππ",1) = ${wd}, expected ${1 / 3 + 1.0}`);
+      // "πο" → "ππ": ο→π adjacent (1/3) only
+      const adjacentOnly = weightedEditDistance('πο', 'ππ', 1);
+      assert.ok(Math.abs(adjacentOnly - 1 / 3) < 0.001,
+        `weightedEditDistance("πο","ππ",1) = ${adjacentOnly}, expected ${1 / 3}`);
+    });
+
+    it('score() works for Greek candidates (in-range, ordered by distance)', () => {
+      // Typed "κειμενο" (typo), candidate "κειμενο" distance 0 → 1.0
+      assert.strictEqual(score('κειμενο', 'κειμενο', 0, 1.5), 1.0);
+      const adjacent = score('ρεπ', 'εππ', 1, 1.5);
+      assert.ok(adjacent > 0 && adjacent <= 1, 'Greek score must be in (0, 1]');
+    });
+
+    it('unknown-char fallback keeps mixed Greek/Latin scoring neutral', () => {
+      // Latin 'q' is unknown in the Greek grid and not in English row for π...
+      // distance('q','π') → q known (english), π known (greek) → finite.
+      const d = distance('q', 'π');
+      assert.ok(Number.isFinite(d), 'cross-grid distance must be finite');
     });
   });
 
