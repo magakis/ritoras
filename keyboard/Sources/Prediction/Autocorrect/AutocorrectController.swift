@@ -37,6 +37,9 @@ enum AutocorrectController {
     ///   - topCorrection: The highest-scoring suggestion from the prediction engine, or `nil`.
     ///   - isLearned: Whether the user has explicitly learned this word.
     ///   - isMisspelled: Whether the typed word is not in the system dictionary.
+    ///   - language: The active keyboard language (defaults to English, preserving
+    ///               existing call sites). Only the case-preservation step is
+    ///               language-sensitive.
     ///   - config: Tunable thresholds (defaults from `SharedConfig.Defaults`).
     /// - Returns: `.correct(typedWord:correction:)` when conditions are met, otherwise `.leaveAsIs`.
     static func evaluate(
@@ -45,6 +48,7 @@ enum AutocorrectController {
         topCorrection: Suggestion?,
         isLearned: Bool,
         isMisspelled: Bool,
+        language: KeyboardLanguage = .english,
         config: Config = .default
     ) -> Decision {
         // LOCKED origins — never re-correct.
@@ -97,7 +101,7 @@ enum AutocorrectController {
               typedFirst == candidateFirst else { return .leaveAsIs }
 
         // Apply case preservation.
-        let cased = preserveCase(of: typedWord, appliedTo: candidate.text)
+        let cased = preserveCase(of: typedWord, appliedTo: candidate.text, language: language)
         return .correct(typedWord: typedWord, correction: cased)
     }
 
@@ -114,7 +118,10 @@ enum AutocorrectController {
     ///   The keyboard currently ships as English-only (`PrimaryLanguage: "en-US"`); if
     ///   multilingual support is added, audit this method for locale-specific behavior
     ///   (e.g., German ß → SS under uppercase, Turkish İ dotted/dotless).
-    private static func preserveCase(of typed: String, appliedTo correction: String) -> String {
+    ///   The "i'" pronoun rule is English orthography only — Greek has no
+    ///   apostrophe contractions, so the gate below keeps Greek corrections
+    ///   byte-identical to the case-shape transform.
+    private static func preserveCase(of typed: String, appliedTo correction: String, language: KeyboardLanguage = .english) -> String {
         guard !typed.isEmpty else { return correction }
         let result: String
         if typed == typed.uppercased() {
@@ -126,7 +133,8 @@ enum AutocorrectController {
         }
         // English orthography: the standalone pronoun "i" is always capitalized
         // ("I") even after lowercase case-preservation — "id" → "I'd", not "i'd".
-        if result.first == "i",
+        if language == .english,
+           result.first == "i",
            let second = result.dropFirst().first,
            second == "'" || second == "\u{2019}" {
             return "I" + result.dropFirst()

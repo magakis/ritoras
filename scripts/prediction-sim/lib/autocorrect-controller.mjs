@@ -23,6 +23,9 @@ export const ORIGIN_TYPING = 'typing';
  *   correction candidate from the prediction engine, or null.
  * @param {boolean} opts.isLearned - Whether the user has explicitly learned this word.
  * @param {boolean} opts.isMisspelled - Whether the typed word is not in the system dictionary.
+ * @param {string} [opts.language='english'] - Active keyboard language ('english'|'greek').
+ *   Defaults to English, preserving existing call sites. Only the case-preservation
+ *   step is language-sensitive.
  * @param {object} [opts.config] - Tunable thresholds (defaults from SharedConfig.Defaults).
  * @returns {{decision:string, typedWord?:string, correction?:string}}
  */
@@ -32,6 +35,7 @@ export function evaluate({
   topCorrection,
   isLearned,
   isMisspelled,
+  language = 'english',
   config = DEFAULT_CONFIG,
 }) {
   // LOCKED origins — never re-correct.
@@ -85,7 +89,7 @@ export function evaluate({
   }
 
   // Apply case preservation.
-  const cased = preserveCase(typedWord, candidate.text);
+  const cased = preserveCase(typedWord, candidate.text, language);
   return { decision: 'correct', typedWord, correction: cased };
 }
 
@@ -99,8 +103,17 @@ export function evaluate({
  *
  * Mirrors the Swift `String.capitalized` with a simple first-char-uppercase /
  * rest-lowercase rule (English-only keyboard).
+ *
+ * The "i'" pronoun rule is English orthography only — Greek has no apostrophe
+ * contractions, so for 'greek' the correction is left exactly as the
+ * case-shape transform produced (byte-identical Greek output).
+ *
+ * @param {string} typed - The word the user typed (case template).
+ * @param {string} correction - The candidate to case.
+ * @param {string} [language='english'] - Active keyboard language ('english'|'greek').
+ * @returns {string}
  */
-export function preserveCase(typed, correction) {
+export function preserveCase(typed, correction, language = 'english') {
   if (typed.length === 0) return correction;
   let result;
   if (typed === typed.toUpperCase()) {
@@ -112,7 +125,7 @@ export function preserveCase(typed, correction) {
   }
   // English orthography: the standalone pronoun "i" is always capitalized ("I")
   // even after lowercase case-preservation — "id" → "I'd", not "i'd".
-  if (result[0] === 'i' && (result[1] === "'" || result[1] === '\u{2019}')) {
+  if (language === 'english' && result[0] === 'i' && (result[1] === "'" || result[1] === '\u{2019}')) {
     return 'I' + result.slice(1);
   }
   return result;

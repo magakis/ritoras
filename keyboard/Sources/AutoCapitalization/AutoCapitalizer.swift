@@ -59,8 +59,13 @@ enum AutoCapitalizer {
     ///
     /// - Parameter contextBeforeCursor: The full text before the cursor
     ///   (from `textDocumentProxy.documentContextBeforeInput`).
+    /// - Parameter language: The active keyboard language (defaults to English,
+    ///   preserving existing call sites). Greek differs in two ways:
+    ///   `;` (U+003B) is the Greek question mark and therefore sentence-ending
+    ///   terminal punctuation, and the English `AbbreviationSet` is skipped
+    ///   (there is no Greek abbreviation table).
     /// - Returns: `true` to capitalise, `false` to leave as-is.
-    static func shouldCapitalizeNext(contextBeforeCursor: String) -> Bool {
+    static func shouldCapitalizeNext(contextBeforeCursor: String, language: KeyboardLanguage = .english) -> Bool {
         let suffix = String(contextBeforeCursor.suffix(lookbackLimit))
 
         // 1. Start of field.
@@ -89,9 +94,12 @@ enum AutoCapitalizer {
             return true
         }
 
-        // 6. Terminal punctuation that may end a sentence.
-        if lastChar == "." || lastChar == "!" || lastChar == "?" {
-            return isTrueSentenceEnd(lastChar, in: effective)
+        // 6. Terminal punctuation that may end a sentence. Greek treats `;`
+        //    (U+003B) as its question mark, so it is terminal there; English
+        //    keeps it mid-sentence (step 7).
+        if lastChar == "." || lastChar == "!" || lastChar == "?"
+            || (language == .greek && lastChar == ";") {
+            return isTrueSentenceEnd(lastChar, in: effective, language: language)
         }
 
         // 7. Mid-sentence punctuation — never capitalise.
@@ -108,11 +116,12 @@ enum AutoCapitalizer {
     /// Determines whether the terminal punctuation at the end of `text`
     /// represents a true sentence end, or is part of an abbreviation,
     /// initial, or numeric expression.
-    private static func isTrueSentenceEnd(_ char: Character, in text: String) -> Bool {
-        // Exclamation and question marks are always sentence-ending.
-        if char == "!" || char == "?" {
-            return true
-        }
+    private static func isTrueSentenceEnd(_ char: Character, in text: String, language: KeyboardLanguage = .english) -> Bool {
+        // Exclamation and question marks are always sentence-ending. Greek uses
+        // ";" (U+003B) for its question mark, so it is always sentence-ending
+        // there as well.
+        if char == "!" || char == "?" { return true }
+        if language == .greek, char == ";" { return true }
 
         guard char == "." else { return false }
 
@@ -120,8 +129,10 @@ enum AutoCapitalizer {
         // with this period).
         let lastToken = extractLastToken(text)
 
-        // a) Known abbreviation → not a sentence end.
-        if AbbreviationSet.contains(lastToken) {
+        // a) Known abbreviation → not a sentence end. English-only: the
+        //    AbbreviationSet is an English list; Greek has no abbreviation
+        //    table, so the check is skipped.
+        if language == .english, AbbreviationSet.contains(lastToken) {
             return false
         }
 

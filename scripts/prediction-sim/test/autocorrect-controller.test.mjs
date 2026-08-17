@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluate, DEFAULT_CONFIG } from '../lib/autocorrect-controller.mjs';
+import { evaluate, preserveCase, DEFAULT_CONFIG } from '../lib/autocorrect-controller.mjs';
 
 const APOSTROPHE = '\u{2019}';
 
@@ -146,6 +146,49 @@ describe('AutocorrectController.evaluate', () => {
         isMisspelled: true,
       });
       assert.strictEqual(result.decision, 'leaveAsIs');
+    });
+  });
+
+  // ──────────────────────────────────────────────
+  // Language gate (Phase 3: Greek)
+  // ──────────────────────────────────────────────
+  describe('language gate', () => {
+    it('"id" → "I\'d" still applies for English (default language)', () => {
+      const result = evaluate({
+        typedWord: 'id',
+        origin: 'typing',
+        topCorrection: { text: `I${APOSTROPHE}d`, score: 0.9, source: 'ambiguousContraction' },
+        isLearned: false,
+        isMisspelled: false,
+      });
+      assert.strictEqual(result.decision, 'correct');
+      assert.strictEqual(result.correction, `I${APOSTROPHE}d`);
+    });
+
+    it('never applies the capital-I pronoun rule for Greek', () => {
+      // Greek has no apostrophe contractions; the "i'" rule must not fire even
+      // on a token shaped like an English contraction.
+      const result = evaluate({
+        typedWord: 'id',
+        origin: 'typing',
+        topCorrection: { text: `I${APOSTROPHE}d`, score: 0.9, source: 'ambiguousContraction' },
+        isLearned: false,
+        isMisspelled: false,
+        language: 'greek',
+      });
+      assert.strictEqual(result.decision, 'correct');
+      // Pure lowercase case-shape transform, no "I" flip.
+      assert.strictEqual(result.correction, `i${APOSTROPHE}d`);
+    });
+
+    it('Greek case preservation via uppercased keeps tonos (ά → Ά)', () => {
+      assert.strictEqual(preserveCase('Ά', 'ά', 'greek'), 'Ά');
+      assert.strictEqual(preserveCase('ά', 'Ά', 'greek'), 'ά');
+    });
+
+    it('English preserveCase unchanged with explicit language', () => {
+      assert.strictEqual(preserveCase('id', `i${APOSTROPHE}d`, 'english'), `I${APOSTROPHE}d`);
+      assert.strictEqual(preserveCase('Hello', 'world', 'english'), 'World');
     });
   });
 });

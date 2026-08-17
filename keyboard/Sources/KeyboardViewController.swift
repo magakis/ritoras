@@ -2078,6 +2078,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         let contextAtDispatch = contextAfterInsert  // ends with typedWord + triggerChar
         let isLearned = LearnedWordsStore.shared.contains(typedWord)
         let originAtDispatch = wordOrigin.current
+        let languageAtDispatch = settingsCache.language
 
         // Defensive: the suffix must match what we expect.
         guard contextAtDispatch.hasSuffix(typedWord + triggerChar) else { return }
@@ -2093,7 +2094,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 range: range,
                 startingAt: 0,
                 wrap: false,
-                language: "en-US"
+                language: languageAtDispatch.appleSpellTag
             )
             return misspelledRange.location != NSNotFound
         }()
@@ -2128,6 +2129,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             isLearned: isLearned,
             isMisspelled: isMisspelled,
             originAtDispatch: originAtDispatch,
+            languageAtDispatch: languageAtDispatch,
             triggerChar: triggerChar,
             retroactiveCandidates: retroactiveCandidates,
             engine: engine,
@@ -2209,7 +2211,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             range: range,
             startingAt: 0,
             wrap: false,
-            language: "en-US"
+            language: settingsCache.language.appleSpellTag
         )
         return misspelledRange.location != NSNotFound
     }
@@ -2227,6 +2229,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         isLearned: Bool,
         isMisspelled: Bool,
         originAtDispatch: WordOrigin,
+        languageAtDispatch: KeyboardLanguage,
         triggerChar: String,
         retroactiveCandidates: [RetroactiveCandidateSnapshot],
         engine: PredictionEngine,
@@ -2263,6 +2266,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 topCorrection: top,
                 isLearned: isLearned,
                 isMisspelled: isMisspelled,
+                language: languageAtDispatch,
                 config: config
             )
             FileLogger.shared.debug(.keyboard, "autocorrect compute",
@@ -2304,6 +2308,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                         topCorrection: retroactiveTop,
                         isLearned: entry.isLearned,
                         isMisspelled: entry.isMisspelled,
+                        language: languageAtDispatch,
                         config: config
                     )
                     guard case .correct(_, let correction) = retroactiveDecision else { continue }
@@ -2557,7 +2562,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         let context = textDocumentProxy.documentContextBeforeInput ?? ""
         // Dedup: if context is unchanged since the last recompute, the result will be identical — skip.
         if context == lastRecomputedContext { return }
-        let wants = AutoCapitalizer.shouldCapitalizeNext(contextBeforeCursor: context)
+        let wants = AutoCapitalizer.shouldCapitalizeNext(contextBeforeCursor: context, language: settingsCache.language)
         if wants && !lastAtSentenceStart {
             userOverrodeAutoCap = false
         }

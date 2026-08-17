@@ -7,6 +7,11 @@ import Foundation
 /// Without normalization, lookups silently fail across variants. Canonicalizing to
 /// U+2019 means the keyboard's emitted text matches iOS native output, so the host
 /// field's Smart Punctuation pass is a no-op rather than a double-substitution.
+///
+/// No language gate: Greek tokens contain no apostrophe variants (Modern Greek
+/// has no apostrophe contractions), so `canonicalize` passes them through
+/// unchanged — running it unconditionally is both correct and cheaper than a
+/// per-language dispatch.
 enum ApostropheNormalizer {
     /// Canonical apostrophe: U+2019 RIGHT SINGLE QUOTATION MARK.
     static let canonical: Character = "\u{2019}"

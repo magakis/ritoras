@@ -30,7 +30,7 @@ final class SymSpellProvider: SuggestionProvider {
     /// - If `input.allSatisfy(\.isUppercase)` and `input.count > 1` →
     ///   "all caps" → uppercase the entire suggestion.
     /// - Otherwise → "lowercase / mixed" → return suggestion as-is.
-    static func applyCapitalizationTemplate(from input: String, to suggestion: String) -> String {
+    static func applyCapitalizationTemplate(from input: String, to suggestion: String, language: KeyboardLanguage = .english) -> String {
         // Preserve suggestions that are already capitalized (proper nouns / acronyms).
         let suggestionAfterFirst = suggestion.dropFirst()
         if suggestionAfterFirst.contains(where: { $0.isUppercase }) {
@@ -55,8 +55,10 @@ final class SymSpellProvider: SuggestionProvider {
         // English orthography: the standalone pronoun "i" is always capitalized
         // ("I"). Applies only when the result begins with a lowercase "i"
         // immediately followed by an apostrophe (i'd, i'll, i'm) — never
-        // arbitrary leading "i" ("information").
-        if suggestion.first == "i",
+        // arbitrary leading "i" ("information"). English-only: Greek has no
+        // apostrophe contractions.
+        if language == .english,
+           suggestion.first == "i",
            let second = suggestion.dropFirst().first,
            second == "'" || second == "\u{2019}" {
             return "I" + suggestion.dropFirst()
@@ -78,7 +80,12 @@ final class SymSpellProvider: SuggestionProvider {
         let isRealWord = trie.contains(word: word)
             || LearnedWordsStore.shared.contains(word)
 
-        let contractionExpansion = Contractions.expansion(for: word)
+        // Contraction providers are consulted inline (no registration site).
+        // They are English-only tables keyed on ASCII apostrophe-less forms —
+        // Greek has no apostrophe contractions, so the lookups are gated to
+        // the English stack (a Greek token could never collide with a key,
+        // but the gate keeps the language boundary explicit).
+        let contractionExpansion = language == .english ? Contractions.expansion(for: word) : nil
 
         // When a contraction exists, it should be the PRIMARY candidate (leftmost
         // chip, highest score). The verbatim is demoted so it appears as a
@@ -107,7 +114,7 @@ final class SymSpellProvider: SuggestionProvider {
         // lexicon but the user very likely meant "don't". Inserted at position 0
         // so it appears leftmost in the suggestion bar.
         if let contraction = contractionExpansion {
-            let capped = Self.applyCapitalizationTemplate(from: context.currentWord, to: contraction)
+            let capped = Self.applyCapitalizationTemplate(from: context.currentWord, to: contraction, language: language)
             results.insert(
                 Suggestion(
                     text: capped,
@@ -126,8 +133,8 @@ final class SymSpellProvider: SuggestionProvider {
         // of isRealWord, alongside (not instead of) the trie-completion branch —
         // and competes via KenLM fusion. Autocorrect applies it only when the
         // LM-margin gate in PredictionEngine.topCorrection passes.
-        if let ambiguous = AmbiguousContractions.expansion(for: word) {
-            let capped = Self.applyCapitalizationTemplate(from: context.currentWord, to: ambiguous)
+        if let ambiguous = language == .english ? AmbiguousContractions.expansion(for: word) : nil {
+            let capped = Self.applyCapitalizationTemplate(from: context.currentWord, to: ambiguous, language: language)
             results.append(
                 Suggestion(
                     text: capped,
@@ -144,7 +151,7 @@ final class SymSpellProvider: SuggestionProvider {
             // Sort by frequency from SymSpell's canonical dictionary.
             let sorted = completions.sorted { symSpell.count(for: $0.lowercased()) > symSpell.count(for: $1.lowercased()) }
             for completion in sorted.prefix(limit) {
-                let capped = Self.applyCapitalizationTemplate(from: context.currentWord, to: completion)
+                let capped = Self.applyCapitalizationTemplate(from: context.currentWord, to: completion, language: language)
                 if capped.lowercased() != word {
                     results.append(
                         Suggestion(text: capped, score: 0.5, source: .symspell, isUnknownVerbatim: false)
@@ -159,7 +166,7 @@ final class SymSpellProvider: SuggestionProvider {
             )
 
             for (term, _, distance) in corrections.prefix(limit) {
-                let capped = Self.applyCapitalizationTemplate(from: context.currentWord, to: term)
+                let capped = Self.applyCapitalizationTemplate(from: context.currentWord, to: term, language: language)
                 if capped.lowercased() != word {
                     let score: Double
                     if distance == 0 {
