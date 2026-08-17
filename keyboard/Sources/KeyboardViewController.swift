@@ -1233,6 +1233,10 @@ class KeyboardViewController: UIInputViewController {
         keystrokeEpoch &+= 1
         recentWordBuffer.clear()
 
+        // Greek final-sigma revert tracking is session-scoped; a teardown
+        // closes the window.
+        lastSigmaConvertedWord = nil
+
         // URLSessionDataTask
         currentPollTask?.cancel()
         currentPollTask = nil
@@ -1722,6 +1726,13 @@ extension KeyboardViewController: KeyboardViewDelegate {
             let isTriggerPunct = SharedConfig.Defaults.autocorrectTriggerPunctuation.contains(s)
             let shouldAutoCorrect = isTriggerPunct && uiMode != .emoji
             let text = applyShift(to: s)
+            if shouldAutoCorrect {
+                // Final-sigma conversion runs BEFORE the commit trigger lands,
+                // at the same sites autocorrect-on-space evaluates the word.
+                applyFinalSigmaToCommittedWord()
+            } else {
+                lastSigmaConvertedWord = nil  // any other keystroke clears the revert window
+            }
             insertTargeted(text)
             if shouldAutoCorrect {
                 applyAutocorrectForTrigger(triggerChar: text)
@@ -1752,7 +1763,10 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 // User rejected the autocorrect → keep their spelling (mirrors stock iOS behavior).
                 LearnedWordsStore.shared.add(correction.typed)
                 lastAutoCorrection = nil
+                lastSigmaConvertedWord = nil  // the word region was rewritten
                 wordOrigin.resetToTyping()  // user is now back to editing a .typing word
+            } else if revertSigmaIfNeeded() {
+                // The backspace was consumed by the final-sigma revert (ς → σ).
             } else {
                 deleteTargetedBackward()
                 lastAutoCorrection = nil  // any non-immediate-backspace invalidates revert
@@ -1761,6 +1775,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             scheduleSuggestionRefresh()
 
         case .shift:
+            lastSigmaConvertedWord = nil  // any other keystroke clears the revert window
             if effectiveAutoCapActive && shiftState == .lower {
                 userOverrodeAutoCap = true
                 refreshShiftVisual()
@@ -1773,9 +1788,11 @@ extension KeyboardViewController: KeyboardViewDelegate {
             }
 
         case .shiftLock:
+            lastSigmaConvertedWord = nil  // any other keystroke clears the revert window
             shiftState = .locked
 
         case .space:
+            applyFinalSigmaToCommittedWord()
             insertTargeted(" ")
             applyAutocorrectForTrigger(triggerChar: " ")
             recordRecentWordForTrigger(triggerChar: " ")
@@ -1787,6 +1804,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             if inputTarget == .emojiSearch {
                 keyboardView.emojiPanelView.onSearchReturn?()
             } else {
+                applyFinalSigmaToCommittedWord()
                 insertTargeted("\n")
                 applyAutocorrectForTrigger(triggerChar: "\n")
                 recordRecentWordForTrigger(triggerChar: "\n")
@@ -1796,18 +1814,23 @@ extension KeyboardViewController: KeyboardViewDelegate {
             }
 
         case .toggleNumber:
+            lastSigmaConvertedWord = nil  // surface navigation clears the revert window
             layoutMode = .numbers
 
         case .toggleLetters:
+            lastSigmaConvertedWord = nil  // surface navigation clears the revert window
             layoutMode = .letters
 
         case .toggleSymbols:
+            lastSigmaConvertedWord = nil  // surface navigation clears the revert window
             layoutMode = .symbols
 
         case .mic:
+            lastSigmaConvertedWord = nil  // surface navigation clears the revert window
             handleMicButtonTap()
 
         case .emoji:
+            lastSigmaConvertedWord = nil  // surface navigation clears the revert window
             switch uiMode {
             case .letters:      uiMode = .emoji
             case .emoji:        uiMode = .letters
@@ -1818,6 +1841,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             }
 
         case .globe:
+            lastSigmaConvertedWord = nil  // surface navigation clears the revert window
             advanceToNextInputMode()
         }
     }
@@ -1866,6 +1890,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         insertTargeted(insertText + " ")
         wordOrigin.markSuggestionTap()    // Lock persists until the next separator handler clears it
         lastAutoCorrection = nil          // Suggestion tap invalidates any pending revert
+        lastSigmaConvertedWord = nil      // Suggestion tap rewrites the word region
         // Refresh is async; the token guard rejects any result whose captured state no longer matches.
         keyboardView.refreshSuggestions()
 
@@ -1952,7 +1977,12 @@ extension KeyboardViewController: KeyboardViewDelegate {
         backspaceTimer = nil
         backspaceSingleCharCount = 0
         backspacePhase = nil
-        deleteTargetedBackward()
+        // The single-backspace final-sigma revert (ς → σ) consumes this press;
+        // otherwise the normal delete runs. The revert is checked only on the
+        // first press of a fresh sequence, never inside the repeat timer.
+        if !revertSigmaIfNeeded() {
+            deleteTargetedBackward()
+        }
         backspaceSingleCharCount = 1
         scheduleSuggestionRefresh()
         backspacePhase = .charRepeat
@@ -1988,6 +2018,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         keystrokeEpoch &+= 1  // any text change invalidates a pending deferred autocorrect
         lastAutoCorrection = nil  // host text change invalidates any pending revert
+        lastSigmaConvertedWord = nil  // external text change invalidates the sigma revert window
         recentWordBuffer.clear()  // committed-word records are stale once the doc changes
         // SYNC: system-signaled textDidChange bypasses debounce so the suggestion bar
         // updates immediately — debounce here would feel laggy after external edits.
@@ -2023,6 +2054,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         keystrokeEpoch &+= 1  // any selection change invalidates a pending deferred autocorrect
         lastAutoCorrection = nil  // cursor move invalidates any pending revert
+        lastSigmaConvertedWord = nil  // cursor move invalidates the sigma revert window
         recentWordBuffer.clear()  // committed-word records are stale once the cursor moves
         backspaceNilContextRetries = 0
         recomputeAutoCap()
@@ -2525,6 +2557,54 @@ extension KeyboardViewController: KeyboardViewDelegate {
         if context.isEmpty { return trimmedText }
         if context.last?.isWhitespace == true { return trimmedText }
         return trimmedText + " "
+    }
+
+    // MARK: - Greek Final Sigma
+
+    /// Applies the Greek final-sigma rule to the just-completed word: a
+    /// trailing `σ` becomes `ς`. Runs BEFORE the commit trigger (space /
+    /// punctuation / return) is inserted, at the same sites autocorrect-on-space
+    /// evaluates the word. Only in Greek mode and only when the keyboard is the
+    /// input target. Rewrites via backspace-and-retype of the single final
+    /// character — no second rewriting path is invented.
+    private func applyFinalSigmaToCommittedWord() {
+        guard settingsCache.language == .greek, inputTarget == .hostApp else {
+            lastSigmaConvertedWord = nil  // a commit trigger outside Greek closes the window
+            return
+        }
+        let context = textDocumentProxy.documentContextBeforeInput ?? ""
+        let currentWord = CurrentWordExtractor.extract(from: context).currentWord
+        let converted = GreekText.finalSigma(atWordEnd: currentWord)
+        guard converted != currentWord else {
+            lastSigmaConvertedWord = nil  // nothing to convert — the window is closed
+            return
+        }
+        // The word ends in σ: replace the trailing σ with ς before the trigger
+        // lands. The cursor sits after the word, so one backspace removes the σ.
+        deleteTargetedBackward()
+        insertTargeted("ς")
+        lastSigmaConvertedWord = converted
+    }
+
+    /// Backspace revert for the Greek final sigma: when the cursor sits directly
+    /// after an auto-converted ς, replace it with the typed σ instead of deleting
+    /// (Apple system-keyboard behavior), then consume the tracking. The tracking
+    /// is deliberately KEPT when the shape check fails — the first backspace
+    /// after a space/punctuation commit deletes the trigger character, leaving
+    /// the cursor directly after the ς for the next backspace to revert.
+    /// No logging on this hot path (Jetsam; docs/LOGGING.md).
+    private func revertSigmaIfNeeded() -> Bool {
+        guard settingsCache.language == .greek else {
+            lastSigmaConvertedWord = nil
+            return false
+        }
+        guard lastSigmaConvertedWord != nil else { return false }
+        let context = textDocumentProxy.documentContextBeforeInput ?? ""
+        guard GreekText.shouldRevertSigma(before: context) else { return false }
+        deleteTargetedBackward()   // remove the ς
+        insertTargeted("σ")        // put the typed form back
+        lastSigmaConvertedWord = nil
+        return true
     }
 
     // MARK: - Auto-Capitalization Helpers
