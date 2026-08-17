@@ -91,12 +91,14 @@ enum WhisperClient {
     ///   - audioURL:      Local file URL of the recorded audio (.m4a or .wav).
     ///   - config:        Server configuration from `SharedConfig`.
     ///   - correlationId: Optional UUID to correlate this request across processes.
+    ///   - language:      Optional ISO-639-1 language code sent as a form field.
     /// - Returns: The transcribed text string.
     /// - Throws: `WhisperError` if all servers fail.
     static func transcribe(
         audioURL: URL,
         config: SharedConfig,
-        correlationId: UUID? = nil
+        correlationId: UUID? = nil,
+        language: String? = nil
     ) async throws -> String {
         var failedServers: [String] = []
         let t0 = Date()
@@ -107,11 +109,12 @@ enum WhisperClient {
         let bodyFileURL: URL
         do {
             let bodyBuildT0 = Date()
-            bodyFileURL = try await buildBodyFileOffMain(audioURL: audioURL, boundary: boundary)
+            bodyFileURL = try await buildBodyFileOffMain(audioURL: audioURL, boundary: boundary, language: language)
             let bodyBytes = (try? FileManager.default.attributesOfItem(atPath: bodyFileURL.path)[.size] as? Int64).map(Int.init) ?? 0
             FileLogger.shared.debug(.transcription, "multipart body build", payload: [
                 "elapsed_ms": Date().timeIntervalSince(bodyBuildT0) * 1000,
-                "bodyBytes": bodyBytes
+                "bodyBytes": bodyBytes,
+                "language": language ?? "none"
             ])
         } catch {
             throw WhisperError.networkError(error)
@@ -154,22 +157,25 @@ enum WhisperClient {
     ///   - audioURL:      Local file URL of the recorded audio (.m4a or .wav).
     ///   - serverURL:     The target server base URL.
     ///   - correlationId: Optional UUID to correlate this request across processes.
+    ///   - language:      Optional ISO-639-1 language code sent as a form field.
     /// - Returns: The transcribed text string.
     /// - Throws: `WhisperError` if the single server attempt fails.
     static func transcribe(
         audioURL: URL,
         serverURL: String,
-        correlationId: UUID? = nil
+        correlationId: UUID? = nil,
+        language: String? = nil
     ) async throws -> String {
         let boundary = "Boundary-\(UUID().uuidString)"
         let bodyFileURL: URL
         do {
             let bodyBuildT0 = Date()
-            bodyFileURL = try await buildBodyFileOffMain(audioURL: audioURL, boundary: boundary)
+            bodyFileURL = try await buildBodyFileOffMain(audioURL: audioURL, boundary: boundary, language: language)
             let bodyBytes = (try? FileManager.default.attributesOfItem(atPath: bodyFileURL.path)[.size] as? Int64).map(Int.init) ?? 0
             FileLogger.shared.debug(.transcription, "multipart body build", payload: [
                 "elapsed_ms": Date().timeIntervalSince(bodyBuildT0) * 1000,
-                "bodyBytes": bodyBytes
+                "bodyBytes": bodyBytes,
+                "language": language ?? "none"
             ])
         } catch {
             throw WhisperError.networkError(error)
@@ -201,7 +207,8 @@ enum WhisperClient {
         jobId: UUID,
         config: SharedConfig,
         correlationId: UUID? = nil,
-        preferredServer: String? = nil
+        preferredServer: String? = nil,
+        language: String? = nil
     ) async throws -> String {
         let serverURL: String
         if let preferredServer, config.servers.contains(preferredServer) {
@@ -215,12 +222,12 @@ enum WhisperClient {
         do {
             return try await transcribeAsync(
                 audioURL: audioURL, jobId: jobId, config: config,
-                correlationId: correlationId, preferredServer: serverURL)
+                correlationId: correlationId, preferredServer: serverURL, language: language)
         } catch WhisperError.asyncUnsupported {
             FileLogger.shared.info(.network, "async unsupported; sync fallback",
                                    payload: ["server": serverURL])
             return try await transcribe(
-                audioURL: audioURL, serverURL: serverURL, correlationId: correlationId)
+                audioURL: audioURL, serverURL: serverURL, correlationId: correlationId, language: language)
         }
     }
 
@@ -483,6 +490,7 @@ enum WhisperClient {
     ///   - config:          Server configuration from `SharedConfig`.
     ///   - correlationId:   Optional UUID to correlate this request across processes.
     ///   - preferredServer: Optional pre-selected server URL to use without probing.
+    ///   - language:        Optional ISO-639-1 language code sent as a form field.
     /// - Returns: The transcribed text string.
     /// - Throws: `WhisperError.asyncUnsupported` if the server lacks /transcriptions;
     ///           `.jobFailed` on transcription failure; `.timeout` on deadline.
@@ -491,7 +499,8 @@ enum WhisperClient {
         jobId: UUID,
         config: SharedConfig,
         correlationId: UUID? = nil,
-        preferredServer: String? = nil
+        preferredServer: String? = nil,
+        language: String? = nil
     ) async throws -> String {
         FileLogger.shared.debug(.network, "transcribeAsync start", payload: [
             "jobId": jobId.uuidString,
@@ -521,11 +530,12 @@ enum WhisperClient {
         let bodyFileURL: URL
         do {
             let bodyBuildT0 = Date()
-            bodyFileURL = try await buildBodyFileOffMain(audioURL: audioURL, boundary: boundary)
+            bodyFileURL = try await buildBodyFileOffMain(audioURL: audioURL, boundary: boundary, language: language)
             let bodyBytes = (try? FileManager.default.attributesOfItem(atPath: bodyFileURL.path)[.size] as? Int64).map(Int.init) ?? 0
             FileLogger.shared.debug(.transcription, "async multipart body build", payload: [
                 "elapsed_ms": Date().timeIntervalSince(bodyBuildT0) * 1000,
-                "bodyBytes": bodyBytes
+                "bodyBytes": bodyBytes,
+                "language": language ?? "none"
             ])
         } catch {
             throw WhisperError.networkError(error)
@@ -722,7 +732,7 @@ enum WhisperClient {
     // MARK: - Private Helpers
 
     /// Builds the multipart form body as a temp file off the caller thread on a .userInitiated queue.
-    private static func buildBodyFileOffMain(audioURL: URL, boundary: String) async throws -> URL {
+    private static func buildBodyFileOffMain(audioURL: URL, boundary: String, language: String?) async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let tempURL = FileManager.default.temporaryDirectory
@@ -730,7 +740,7 @@ enum WhisperClient {
                 do {
                     let ext = audioURL.pathExtension.lowercased()
                     let (filename, mimeType) = ext == "wav" ? ("audio.wav", "audio/wav") : ("audio.m4a", "audio/mp4")
-                    try writeBodyToFile(audioURL: audioURL, boundary: boundary, mimeType: mimeType, filename: filename, to: tempURL)
+                    try writeBodyToFile(audioURL: audioURL, boundary: boundary, mimeType: mimeType, filename: filename, language: language, to: tempURL)
                     continuation.resume(returning: tempURL)
                 } catch {
                     try? FileManager.default.removeItem(at: tempURL)
@@ -742,7 +752,7 @@ enum WhisperClient {
 
     /// Writes the multipart/form-data body to a temp file, streaming the audio
     /// in 64 KB chunks to avoid loading the entire recording into memory.
-    private static func writeBodyToFile(audioURL: URL, boundary: String, mimeType: String, filename: String, to tempURL: URL) throws {
+    private static func writeBodyToFile(audioURL: URL, boundary: String, mimeType: String, filename: String, language: String?, to tempURL: URL) throws {
         guard let outputStream = OutputStream(url: tempURL, append: false) else {
             throw NSError(domain: "WhisperClient", code: 0, userInfo: [NSLocalizedDescriptionKey: "Failed to create output stream"])
         }
@@ -796,6 +806,14 @@ enum WhisperClient {
                 }
                 written += result
             }
+        }
+
+        // Optional language form field (ISO-639-1) — appended only when provided.
+        if let language {
+            try writeString("\r\n--\(boundary)\r\n")
+            try writeString("Content-Disposition: form-data; name=\"language\"\r\n")
+            try writeString("\r\n")
+            try writeString(language)
         }
 
         // Closing boundary

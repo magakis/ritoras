@@ -604,7 +604,8 @@ final class DictationViewModel: ObservableObject {
 
                     let text = try await WhisperClient.routeTranscription(
                         audioURL: url, jobId: id, config: config,
-                        correlationId: activeID, preferredServer: chosenServer)
+                        correlationId: activeID, preferredServer: chosenServer,
+                        language: SharedConfig.keyboardLanguage().dictationLanguageField)
                     FileLogger.shared.debug(.network, "async transcription succeeded",
                                             payload: ["textLength": text.count])
                     guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
@@ -920,7 +921,8 @@ final class DictationViewModel: ObservableObject {
         do {
             let text = try await WhisperClient.routeTranscription(
                 audioURL: audioURL, jobId: jobId, config: config,
-                correlationId: jobId, preferredServer: nil)
+                correlationId: jobId, preferredServer: nil,
+                language: SharedConfig.keyboardLanguage().dictationLanguageField)
 
             // Add to persistent text history.
             TranscriptionHistory.shared.add(text: text)

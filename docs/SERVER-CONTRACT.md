@@ -66,7 +66,8 @@ empty by default and not used by this server.
 
 ### Multipart body
 
-The body contains a **single** file part. No other form fields are sent.
+The body contains the audio file part, plus an optional `language` form field
+(see the client-side note below).
 
 ```
 --{boundary}\r\n
@@ -87,12 +88,22 @@ Content-Type: audio/mp4\r\n
 **Important:** The field name is `audio`, **not** `file`. The server is not
 OpenAI-compatible — it expects the field named `audio`.
 
+**Optional `language` field (client-side note):** the client sends an optional
+per-request `language` form field (ISO-639-1, `el`) derived from the keyboard's
+active language at dictation time — sent ONLY when the active language is not
+English; English requests omit the field entirely (matching the pre-Greek wire
+format). parakeet-v3 ignores it either way — it can only autodetect language
+and cannot be constrained — while whisper-family engines consume it.
+Code-switching between scripts is not reliable with parakeet-v3.
+
 ### Parameters the server ignores
 
-The following parameters are **not** sent to this server:
+The following parameters are not used by this server:
 
 - `model` — hardcoded to `small.en` on the server side
-- `language` — hardcoded to English on the server side
+- `language` — the client sends an optional `language` field only when the
+  keyboard's active language is not English (see §3); the parakeet-v3 engine
+  ignores it (autodetect only, cannot be constrained)
 - `response_format` — the server always returns JSON
 
 These fields remain in `SharedConfig` for future use if the user switches to
