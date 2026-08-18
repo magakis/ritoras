@@ -2670,12 +2670,9 @@ extension KeyboardViewController: KeyboardViewDelegate {
         guard !text.isEmpty else { return text }
         let wantsCaps = shiftState != .lower || effectiveAutoCapActive
         guard wantsCaps else { return text }
-        // Greek letters-layout carry-forward: the `;` key's shifted label is `:`
-        // (GreekLayout row 1). `;` contains no letters, so the generic
-        // uppercase rule below would leave it unshifted — map it explicitly.
-        // English symbols layout has its own `:` key and is untouched.
-        if settingsCache.language == .greek, text == ";" {
-            return ":"
+        if text == "ς" {
+            // Final sigma has no uppercase form; the picker offers Σ separately.
+            return text
         }
         if text.rangeOfCharacter(from: .letters) != nil {
             return text.uppercased()

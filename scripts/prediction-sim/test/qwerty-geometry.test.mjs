@@ -62,12 +62,12 @@ describe('QwertyGeometry', () => {
   // Greek key positions
   // ──────────────────────────────────────────────
   describe('Greek key positions', () => {
-    it('Greek Row 0: ; ς ε ρ τ υ θ ι ο π, y=0', () => {
-      const row = ';ςερτυθιοπ';
+    it("Greek Row 0: ε ρ τ υ θ ι ο π ', y=0, offset 0.25", () => {
+      const row = "ερτυθιοπ'";
       for (let i = 0; i < row.length; i++) {
         const pos = greekKeyCenters.get(row[i]);
         assert.ok(pos, `key "${row[i]}" should have a position`);
-        assert.strictEqual(pos.x, i, `x for "${row[i]}" should be ${i}`);
+        assert.strictEqual(pos.x, i + 0.25, `x for "${row[i]}" should be ${i + 0.25}`);
         assert.strictEqual(pos.y, 0, `y for "${row[i]}" should be 0`);
       }
     });
@@ -90,6 +90,11 @@ describe('QwertyGeometry', () => {
         assert.strictEqual(pos.x, i + 0.75, `x for "${row[i]}" should be ${i + 0.75}`);
         assert.strictEqual(pos.y, 2, `y for "${row[i]}" should be 2`);
       }
+    });
+
+    it('final sigma shares sigma position', () => {
+      assert.deepStrictEqual(greekKeyCenters.get('ς'), greekKeyCenters.get('σ'));
+      assert.strictEqual(distance('ς', 'σ'), 0);
     });
 
     it('unknown character not in the Greek grid', () => {
@@ -115,7 +120,7 @@ describe('QwertyGeometry', () => {
     });
 
     it('ε→π is 7.0 (same Greek row, far apart)', () => {
-      // ε at (2,0), π at (9,0)
+      // ε at (0.25,0), π at (7.25,0)
       assert.strictEqual(distance('ε', 'π'), 7.0);
       assert.strictEqual(distance('ε', 'τ'), 2.0);
     });
@@ -124,10 +129,9 @@ describe('QwertyGeometry', () => {
       assert.strictEqual(distance('ε', 'ε'), 0);
     });
 
-    it('ε→e cross-language pair shares the same physical key (0.0)', () => {
-      // The Greek ε key occupies the English E key position (x=2 on row 0),
-      // so the pair has zero geometric separation.
-      assert.strictEqual(distance('ε', 'e'), 0.0);
+    it('ε→e reflects the distinct Greek top-row span', () => {
+      // ε is at (0.25, 0), while English e remains at (2, 0).
+      assert.strictEqual(distance('ε', 'e'), 1.75);
     });
 
     it('unknown character still falls back to 1.0', () => {
@@ -141,7 +145,7 @@ describe('QwertyGeometry', () => {
     });
 
     it('far Greek keys cost 1.0 (capped)', () => {
-      // α at (0.25,1), π at (9,0) → distance ~8.8, /3 ≈ 2.9, capped to 1.0
+      // α at (0.25,1), π at (7.25,0) → distance ~7.1, /3 ≈ 2.4, capped to 1.0
       assert.strictEqual(adjacentKeyCost('α', 'π'), 1.0);
     });
   });

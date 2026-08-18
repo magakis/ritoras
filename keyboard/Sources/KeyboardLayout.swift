@@ -96,15 +96,12 @@ enum KeyboardLayout {
 
     // MARK: - Greek Letter Rows
 
-    /// Apple-standard Greek QWERTY. Identical row key-counts and widthWeights to
-    /// the English letter rows, so the shared letter-pitch frame math in
-    /// KeyboardRowView needs no language axis. Shifted labels are uppercase Greek;
-    /// `ς` shifts to `Σ` and `;` shifts to `:`.
+    /// Apple-standard Greek QWERTY. The shared letter-pitch frame math in
+    /// KeyboardRowView handles the nine-key top and middle rows. Shifted labels
+    /// are uppercase Greek.
     static let greekLetterRows: [[KeyDefinition]] = [
-        // Row 1: ; ς ε ρ τ υ θ ι ο π
+        // Row 1: ε ρ τ υ θ ι ο π '
         [
-            KeyDefinition(label: ";", shiftedLabel: ":", action: .insertText(";"), widthWeight: 1),
-            KeyDefinition(label: "ς", shiftedLabel: "Σ", action: .insertText("ς"), widthWeight: 1),
             KeyDefinition(label: "ε", shiftedLabel: "Ε", action: .insertText("ε"), widthWeight: 1),
             KeyDefinition(label: "ρ", shiftedLabel: "Ρ", action: .insertText("ρ"), widthWeight: 1),
             KeyDefinition(label: "τ", shiftedLabel: "Τ", action: .insertText("τ"), widthWeight: 1),
@@ -113,6 +110,7 @@ enum KeyboardLayout {
             KeyDefinition(label: "ι", shiftedLabel: "Ι", action: .insertText("ι"), widthWeight: 1),
             KeyDefinition(label: "ο", shiftedLabel: "Ο", action: .insertText("ο"), widthWeight: 1),
             KeyDefinition(label: "π", shiftedLabel: "Π", action: .insertText("π"), widthWeight: 1),
+            KeyDefinition(label: "'", shiftedLabel: nil, action: .insertText("'"), widthWeight: 1),
         ],
 
         // Row 2: α σ δ φ γ η ξ κ λ

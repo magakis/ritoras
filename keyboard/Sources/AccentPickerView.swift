@@ -13,15 +13,17 @@ final class AccentPickerView: UIView {
 
     // MARK: - Constants
 
-    /// Lowercase variant sets per base vowel. ι and υ carry the dialytika
+    /// Lowercase variant sets per base Greek key. ι and υ carry the dialytika
     /// forms (ϊ/ΐ, ϋ/ΰ) exactly like the system keyboard. Uppercase variants
-    /// are derived by uppercasing when the shift key is active.
+    /// are derived by uppercasing when the shift key is active; final sigma
+    /// remains lowercase so it remains available from the shifted sigma key.
     static let variants: [String: [String]] = [
         "α": ["α", "ά"],
         "ε": ["ε", "έ"],
         "η": ["η", "ή"],
         "ι": ["ι", "ί", "ϊ", "ΐ"],
         "ο": ["ο", "ό"],
+        "σ": ["σ", "ς"],
         "υ": ["υ", "ύ", "ϋ", "ΰ"],
         "ω": ["ω", "ώ"],
     ]
@@ -124,13 +126,15 @@ final class AccentPickerView: UIView {
     // MARK: - Public API
 
     /// Shows the strip above `keyFrame` (in the containing view's coordinate
-    /// space), offering the base vowel plus its accented variants. When
+    /// space), offering the base key plus its variants. When
     /// `shifted` is true the variants are uppercased (Ά Έ Ή Ί Ό Ύ Ώ, Ϊ/Ϋ).
     /// The picker view covers the whole keyboard so taps outside the strip
     /// land on the backdrop and dismiss it.
     func show(for base: String, anchoredAbove keyFrame: CGRect, shifted: Bool) {
         guard let lowercase = Self.variants[base], !lowercase.isEmpty else { return }
-        let variants = shifted ? lowercase.map { $0.uppercased() } : lowercase
+        let variants = shifted
+            ? lowercase.map { $0 == "ς" ? $0 : $0.uppercased() }
+            : lowercase
         let count = variants.count
 
         for (index, button) in variantButtons.enumerated() {

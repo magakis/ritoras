@@ -40,11 +40,10 @@ for (let i = 0; i < row2.length; i++) {
 keyCenters.set("'", { x: 9.25, y: 1 });
 
 /**
- * Greek key-center positions on the Apple Greek QWERTY layout. Row geometry
- * (counts and offsets) matches the English grid, so cross-language pairs
- * (e.g. ε vs e, both at x=2) land at matching coordinates.
+ * Greek key-center positions on the Apple Greek QWERTY layout. The top
+ * nine-key row uses the same span as the English middle row.
  *
- * Row 0: ; ς ε ρ τ υ θ ι ο π  (y=0, x=0..9)
+ * Row 0: ε ρ τ υ θ ι ο π '  (y=0, x=0.25..8.25)
  * Row 1: α σ δ φ γ η ξ κ λ     (y=1, x=0.25..8.25)
  * Row 2: ζ χ ψ ω β ν μ         (y=2, x=0.75..6.75)
  *
@@ -52,10 +51,10 @@ keyCenters.set("'", { x: 9.25, y: 1 });
  */
 export const greekKeyCenters = new Map();
 
-// Row 0: ; ς ε ρ τ υ θ ι ο π (y=0)
-const greekRow0 = ';ςερτυθιοπ';
+// Row 0: ε ρ τ υ θ ι ο π ' (y=0, offset 0.25)
+const greekRow0 = "ερτυθιοπ'";
 for (let i = 0; i < greekRow0.length; i++) {
-  greekKeyCenters.set(greekRow0[i], { x: i, y: 0 });
+  greekKeyCenters.set(greekRow0[i], { x: i + 0.25, y: 0 });
 }
 
 // Row 1: α σ δ φ γ η ξ κ λ (y=1, offset 0.25)
@@ -63,6 +62,7 @@ const greekRow1 = 'ασδφγηξκλ';
 for (let i = 0; i < greekRow1.length; i++) {
   greekKeyCenters.set(greekRow1[i], { x: i + 0.25, y: 1 });
 }
+greekKeyCenters.set('ς', greekKeyCenters.get('σ'));
 
 // Row 2: ζ χ ψ ω β ν μ (y=2, offset 0.75)
 const greekRow2 = 'ζχψωβνμ';
