@@ -463,6 +463,11 @@ class KeyboardViewController: UIInputViewController {
         let language = settingsCache.language
         primaryLanguage = language.bcp47Tag
         keyboardView.setLanguage(language)
+        SharedPredictionStack.shared.switchLanguageIfNeeded(to: language) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.keyboardView?.refreshSuggestions()
+            }
+        }
         logSpellLanguageUnavailableIfNeeded()
         FileLogger.shared.info(.keyboard, "keyboard language set",
                                payload: ["language": language.rawValue])

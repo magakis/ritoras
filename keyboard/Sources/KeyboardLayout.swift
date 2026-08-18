@@ -140,6 +140,15 @@ enum KeyboardLayout {
             KeyDefinition(label: "μ", shiftedLabel: "Μ", action: .insertText("μ"), widthWeight: 1),
             KeyDefinition(label: "⌫", shiftedLabel: nil, action: .backspace, widthWeight: 1.5),
         ],
+
+        // Row 4: 123 emoji mic space return
+        [
+            KeyDefinition(label: "123", shiftedLabel: nil, action: .toggleNumber, widthWeight: 1.5),
+            KeyDefinition(label: "☺", shiftedLabel: nil, action: .emoji, widthWeight: 1.2),
+            KeyDefinition(label: "", shiftedLabel: nil, action: .mic, widthWeight: 1.2),
+            KeyDefinition(label: "space", shiftedLabel: nil, action: .space, widthWeight: 4.6),
+            KeyDefinition(label: "return", shiftedLabel: nil, action: .return, widthWeight: 1.8),
+        ],
     ]
 
     // MARK: - Number Rows
