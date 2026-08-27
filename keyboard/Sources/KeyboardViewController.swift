@@ -80,6 +80,7 @@ class KeyboardViewController: UIInputViewController {
         didSet {
             // Any input-target switch invalidates a pending deferred autocorrect.
             keystrokeEpoch &+= 1
+            keyboardView?.noteSuggestionContextChange()
             recentWordBuffer.clear()
         }
     }
@@ -1949,6 +1950,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     func keyboardContextToken(_ view: KeyboardView) -> UInt64 {
         guard inputTarget == .hostApp else { return 0 }
+        guard view.window != nil else { return 0 }
         let context = textDocumentProxy.documentContextBeforeInput ?? ""
         let suffix = String(context.suffix(50))
         let currentWord = CurrentWordExtractor.extract(from: context).currentWord
@@ -2025,6 +2027,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         observeIdentityForFlapDetection()
 
         keystrokeEpoch &+= 1  // any text change invalidates a pending deferred autocorrect
+        keyboardView.noteSuggestionContextChange()
         lastAutoCorrection = nil  // host text change invalidates any pending revert
         lastSigmaConvertedWord = nil  // external text change invalidates the sigma revert window
         recentWordBuffer.clear()  // committed-word records are stale once the doc changes
@@ -2041,12 +2044,14 @@ extension KeyboardViewController: KeyboardViewDelegate {
     override func textWillChange(_ textInput: UITextInput?) {
         super.textWillChange(textInput)
         observeIdentityForFlapDetection()
+        keyboardView.noteSuggestionContextChange()
         backspaceNilContextRetries = 0
     }
 
     override func selectionWillChange(_ textInput: UITextInput?) {
         super.selectionWillChange(textInput)
         observeIdentityForFlapDetection()
+        keyboardView.noteSuggestionContextChange()
         keystrokeEpoch &+= 1  // any selection change invalidates a pending deferred autocorrect
         recentWordBuffer.clear()  // cursor moves invalidate committed-word offsets
         backspaceTimer?.invalidate()
@@ -2060,6 +2065,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         super.selectionDidChange(textInput)
         observeIdentityForFlapDetection()
 
+        keyboardView.noteSuggestionContextChange()
         keystrokeEpoch &+= 1  // any selection change invalidates a pending deferred autocorrect
         lastAutoCorrection = nil  // cursor move invalidates any pending revert
         lastSigmaConvertedWord = nil  // cursor move invalidates the sigma revert window

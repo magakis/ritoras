@@ -680,6 +680,8 @@ class KeyboardView: UIView {
         qos: .userInitiated
     )
     private var suggestionLookupWorkItem: DispatchWorkItem?
+    /// Monotonic epoch for invalidating stale suggestion lookup results.
+    private var suggestionEpoch: UInt64 = 0
 
     // MARK: - Initialization
 
@@ -1381,6 +1383,10 @@ class KeyboardView: UIView {
         suggestionBar.updateLanguage(language)
     }
 
+    func noteSuggestionContextChange() {
+        suggestionEpoch &+= 1
+    }
+
     func refreshSuggestions() {
         let token = delegate?.keyboardContextToken(self) ?? 0
 
@@ -1389,6 +1395,7 @@ class KeyboardView: UIView {
             // Wrong target or engine not ready — clear synchronously, no hop needed.
             suggestionLookupWorkItem?.cancel()
             suggestionLookupWorkItem = nil
+            suggestionEpoch &+= 1
             suggestionCache.update([], token: token)
             suggestionBar.update(with: [])
             return
@@ -1403,6 +1410,8 @@ class KeyboardView: UIView {
         // Guarantees at most one lookup in flight (48 MB Jetsam: no parallel
         // SymSpell result sets).
         suggestionLookupWorkItem?.cancel()
+        suggestionEpoch &+= 1
+        let capturedEpoch = suggestionEpoch
 
         let workItem = DispatchWorkItem { [weak self, weak engine] in
             guard let self = self, let engine = engine else { return }
@@ -1415,20 +1424,11 @@ class KeyboardView: UIView {
                 previousSuggestions: previousDisplayed
             )
             DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                // Liveness gate: if the keyboard is no longer in a window,
-                // the textDocumentProxy is dead — reading it via keyboardContextToken
-                // (which reads documentContextBeforeInput) would crash with SIGSEGV.
-                if self.window == nil {
-                    return
-                }
-                let liveToken = self.delegate?.keyboardContextToken(self) ?? 0
-                // Stale-result guard: if the user typed more while the lookup was
-                // in flight, the live token will differ from the captured one.
-                // Drop the stale result — it must not overwrite fresh state.
-                if !shouldApplyLookupResult(capturedToken: token, liveToken: liveToken) {
-                    return
-                }
+                // Supersession guard: context changes and lookup cancellation
+                // invalidate any result still queued for the main hop.
+                guard let self,
+                      self.window != nil,
+                      self.suggestionEpoch == capturedEpoch else { return }
                 self.suggestionCache.update(suggestions, token: token)
                 self.suggestionBar.update(with: suggestions)
             }
@@ -1444,6 +1444,7 @@ class KeyboardView: UIView {
         let hadWorkItem = suggestionLookupWorkItem != nil
         suggestionLookupWorkItem?.cancel()
         suggestionLookupWorkItem = nil
+        suggestionEpoch &+= 1
         FileLogger.shared.debug(.keyboard, "suggestion lookup shed",
             payload: ["hadWorkItem": hadWorkItem])
     }
