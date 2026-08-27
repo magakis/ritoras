@@ -10,11 +10,11 @@ import Foundation
 /// so that the input chip and suggestion chips appear consistent.
 final class SymSpellProvider: SuggestionProvider {
 
-    private let symSpell: SymSpell
+    private let symSpell: SymSpellQuerying
     private let trie: Trie
     private let language: KeyboardLanguage
 
-    init(symSpell: SymSpell, trie: Trie, language: KeyboardLanguage = .english) {
+    init(symSpell: SymSpellQuerying, trie: Trie, language: KeyboardLanguage = .english) {
         self.symSpell = symSpell
         self.trie = trie
         self.language = language
@@ -162,6 +162,7 @@ final class SymSpellProvider: SuggestionProvider {
             // Typo correction via SymSpell.
             let corrections = symSpell.lookup(
                 input: word,
+                editDistance: nil,
                 verbosity: .top
             )
 

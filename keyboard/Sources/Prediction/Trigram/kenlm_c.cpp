@@ -2,9 +2,12 @@
 
 // KenLM includes — paths relative to third-party/kenlm/kenlm-source/
 #include "kenlm-source/lm/model.hh"
+#include "kenlm-source/util/mmap.hh"
 #include "kenlm-source/util/string_piece.hh"
 
+#include <cstdio>
 #include <cstring>
+#include <new>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -19,17 +22,34 @@ struct KenlmModel {
     // Use the concrete QuantArrayTrieModel type for our quantized + array-compressed
     // models.  This gives us direct access to the concrete Vocabulary and its Bound().
     lm::ngram::QuantArrayTrieModel* model;
+    int load_method;
 
-    explicit KenlmModel(const char* path) : model(nullptr) {
+    explicit KenlmModel(const char* path) : model(nullptr), load_method(-1) {
         try {
             lm::ngram::Config config;
             // Suppress progress output for keyboard use.
             config.show_progress = false;
             config.messages = nullptr;
+            config.load_method = util::LAZY;
             model = new lm::ngram::QuantArrayTrieModel(path, config);
-        } catch (const std::exception&) {
+            load_method = 0;
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "KenLM lazy load failed: %s\n", error.what());
             delete model;
             model = nullptr;
+
+            try {
+                lm::ngram::Config config;
+                config.show_progress = false;
+                config.messages = nullptr;
+                config.load_method = util::POPULATE_OR_READ;
+                model = new lm::ngram::QuantArrayTrieModel(path, config);
+                load_method = 1;
+            } catch (const std::exception& fallback_error) {
+                std::fprintf(stderr, "KenLM fallback load failed: %s\n", fallback_error.what());
+                delete model;
+                model = nullptr;
+            }
         }
     }
 
@@ -137,6 +157,12 @@ int kenlm_vocab_size(kenlm_model_t model) {
     KenlmModel* wrapper = static_cast<KenlmModel*>(model);
     if (!wrapper->model) return 0;
     return static_cast<int>(wrapper->model->GetVocabulary().Bound());
+}
+
+int kenlm_model_load_method(kenlm_model_t model) {
+    if (!model) return -1;
+    KenlmModel* wrapper = static_cast<KenlmModel*>(model);
+    return wrapper->model ? wrapper->load_method : -1;
 }
 
 const char* kenlm_version(void) {

@@ -25,6 +25,9 @@ double kenlm_score_sentence(kenlm_model_t model, const char* sentence);
 /* Returns the vocabulary size of the loaded model. Returns 0 if model is NULL. */
 int kenlm_vocab_size(kenlm_model_t model);
 
+/* Returns 0 for lazy mmap, 1 for read fallback, or -1 if unknown/NULL. */
+int kenlm_model_load_method(kenlm_model_t model);
+
 /* Returns the KenLM version string (static, do not free). */
 const char* kenlm_version(void);
 

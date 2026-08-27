@@ -102,6 +102,10 @@ struct SharedConfig {
 
         /// Maximum edit distance for SymSpell fuzzy correction.
         static let symspellMaxEditDistance = 2
+        /// Enables the read-only mmap SymSpell index. If loading or validation
+        /// fails, prediction falls back to the in-memory build path. Regenerate
+        /// bundled blobs with `node scripts/prediction-sim/bin/build-symspell-blob.mjs`.
+        static let symspellMappedIndexEnabled = true
         /// Prefix length for SymSpell delete generation.
         static let symspellPrefixLength = 7
         /// Minimum frequency for a dictionary word to be loaded into SymSpell/Trie.
@@ -142,15 +146,17 @@ struct SharedConfig {
 
         // MARK: - Memory Management
 
-        /// Maximum phys_footprint (private dirty memory) allowed during dictionary load.
-        /// Measured via task_vm_info.phys_footprint — same metric iOS Jetsam uses for the
-        /// 48 MB keyboard-extension cap. ~25 MB is SymSpell alone, so 40 MB gives headroom
-        /// while staying 8 MB under Jetsam. If exceeded during loadStreamed, the load is
-        /// aborted and a warning logged; the engine still marks itself ready with whatever
-        /// partial vocabulary was loaded.
+        /// Maximum phys_footprint (private dirty memory) allowed during the legacy
+        /// in-memory fallback / Trie-streaming dictionary load. The mmap-backed
+        /// SymSpell index adds ~0 MB of dirty memory. Measured via task_vm_info
+        /// phys_footprint — the same metric iOS Jetsam uses for the 48 MB cap.
+        /// If exceeded during loadStreamed, the load is aborted and a warning logged;
+        /// the engine still marks itself ready with whatever partial vocabulary was loaded.
         static let maxPhysFootprintDuringLoad: UInt64 = 40 * 1024 * 1024
 
-        /// Load guard for the KenLM trigram model ONLY. The enforced ceiling on the
+        /// Load guard for the KenLM trigram model. Under LAZY mmap loading this is
+        /// nearly always a pass, but it remains as a belt-and-braces guard for the
+        /// read-mode fallback path. The enforced ceiling on the
         /// extension is the ~48 MB Jetsam cap; the model adds ~8–10 MB on top of the
         /// pre-load footprint, so a 38 MB pre-load gate keeps the post-load peak at
         /// ≤ ~48 MB. Steady-state footprint after the dictionary loads is 38–43 MB,

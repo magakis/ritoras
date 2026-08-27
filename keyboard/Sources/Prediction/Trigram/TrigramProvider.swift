@@ -96,11 +96,6 @@ final class TrigramProvider: SuggestionProvider {
     }
 
     // MARK: - Loading
-    //
-    // NOTE: lifecycle logs below are TEMPORARILY elevated to `.warn` (synchronous —
-    // they survive a Jetsam kill and reach DebugLogView) for on-device diagnosis
-    // of the trigram load-deferral loop. Normalize back to `.info` after on-device
-    // confirmation, per docs/LOGGING.md.
 
     /// Public API to explicitly start loading the KenLM model and side index
     /// on a background queue. Idempotent: subsequent calls are no-ops if
@@ -119,7 +114,7 @@ final class TrigramProvider: SuggestionProvider {
         mutateState { state, _, _ in
             state = .loading
         }
-        FileLogger.shared.warn(.prediction, "trigram load started")
+        FileLogger.shared.info(.prediction, "trigram load started")
         performLoad(completion: completion)
     }
 
@@ -135,7 +130,7 @@ final class TrigramProvider: SuggestionProvider {
         mutateState { state, _, _ in
             state = .loading
         }
-        FileLogger.shared.warn(.prediction, "trigram load started")
+        FileLogger.shared.info(.prediction, "trigram load started")
         performLoad()
     }
 
@@ -191,7 +186,21 @@ final class TrigramProvider: SuggestionProvider {
                 return
             }
 
+            let footprintBeforeLoad = MemoryMonitor.currentFootprint()
+            let residentBeforeLoad = MemoryMonitor.currentResidentSize()
             let model = kenlm_load(url.path)
+            let footprintAfterLoad = MemoryMonitor.currentFootprint()
+            let residentAfterLoad = MemoryMonitor.currentResidentSize()
+
+            if let model {
+                FileLogger.shared.info(.prediction, "trigram model loaded", payload: [
+                    "loadMethod": kenlm_model_load_method(model),
+                    "footprintBefore": footprintBeforeLoad,
+                    "footprintAfter": footprintAfterLoad,
+                    "residentBefore": residentBeforeLoad,
+                    "residentAfter": residentAfterLoad
+                ])
+            }
 
             self.mutateState { state, storedModel, storedIndex in
                 if let m = model, let si = sideIndex {

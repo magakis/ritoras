@@ -138,11 +138,8 @@ final class SharedPredictionStack: @unchecked Sendable {
         let maxED = SharedConfig.Defaults.symspellMaxEditDistance
         let prefixLen = SharedConfig.Defaults.symspellPrefixLength
 
-        // Build SymSpell index.
-        let symSpell = SymSpell(maxEditDistance: maxED, prefixLength: prefixLen)
-
         // Build trie for completion.
-        let trie = Trie()
+        var trie = Trie()
 
         let baselineFootprint = MemoryMonitor.currentFootprint()
         FileLogger.shared.debug(.prediction, "shared prediction build start",
@@ -153,18 +150,88 @@ final class SharedPredictionStack: @unchecked Sendable {
                 "maxFootprint": SharedConfig.Defaults.maxPhysFootprintDuringLoad
             ])
 
-        // Stream-load the frequency dictionary into both, with memory monitoring.
+        // Stream-load the frequency dictionary into the selected index and trie,
+        // with memory monitoring.
+        let loadedResult: (query: SymSpellQuerying, wordsLoaded: Int)
         do {
             guard let url = WordListLoader.bundledURL(language: language) else {
+                if SharedConfig.Defaults.symspellMappedIndexEnabled {
+                    FileLogger.shared.warn(.prediction, "mapped SymSpell fallback",
+                        payload: ["buildId": generation, "language": language.rawValue, "reason": "bundled wordlist missing"])
+                }
                 throw WordListLoader.WordListError.bundledFileNotFound
             }
-            let loaded = try WordListLoader.loadStreamed(
-                from: url,
-                into: symSpell,
-                trie: trie,
-                pruneBelow: SharedConfig.Defaults.symspellMinWordFreq,
-                buildSessionId: "b\(generation)"
-            )
+
+            func loadLegacy() throws -> (query: SymSpellQuerying, wordsLoaded: Int) {
+                let symSpell = SymSpell(maxEditDistance: maxED, prefixLength: prefixLen)
+                let loaded = try WordListLoader.loadStreamed(
+                    from: url,
+                    into: symSpell,
+                    trie: trie,
+                    pruneBelow: SharedConfig.Defaults.symspellMinWordFreq,
+                    buildSessionId: "b\(generation)"
+                )
+                return (query: symSpell, wordsLoaded: loaded)
+            }
+
+            if SharedConfig.Defaults.symspellMappedIndexEnabled {
+                let blobName = "symspell_index_\(language.rawValue)_v1"
+                if let blobURL = Bundle.main.url(forResource: blobName, withExtension: "blob") {
+                    let mappedBeforeFootprint = MemoryMonitor.currentFootprint()
+                    let mappedBeforeResident = MemoryMonitor.currentResidentSize()
+                    let mappedResult = MappedSymSpellIndex.load(from: blobURL, language: language)
+                    if let mappedIndex = mappedResult.index {
+                        do {
+                            _ = try WordListLoader.loadStreamed(
+                                from: url,
+                                into: nil,
+                                trie: trie,
+                                pruneBelow: SharedConfig.Defaults.symspellMinWordFreq,
+                                buildSessionId: "b\(generation)"
+                            )
+                            let mappedAfterFootprint = MemoryMonitor.currentFootprint()
+                            let mappedAfterResident = MemoryMonitor.currentResidentSize()
+                            FileLogger.shared.info(.prediction, "mapped SymSpell index loaded", payload: [
+                                "buildId": generation,
+                                "language": language.rawValue,
+                                "wordCount": mappedIndex.wordCount,
+                                "deleteKeyCount": mappedIndex.deleteKeyCount,
+                                "footprintBefore": mappedBeforeFootprint,
+                                "footprintAfter": mappedAfterFootprint,
+                                "residentBefore": mappedBeforeResident,
+                                "residentAfter": mappedAfterResident
+                            ])
+                            loadedResult = (query: mappedIndex, wordsLoaded: mappedIndex.wordCount)
+                        } catch {
+                            FileLogger.shared.warn(.prediction, "mapped SymSpell fallback",
+                                payload: [
+                                    "buildId": generation,
+                                    "language": language.rawValue,
+                                    "reason": "trie load failed",
+                                    "error": error.localizedDescription
+                                ])
+                            trie = Trie()
+                            loadedResult = try loadLegacy()
+                        }
+                    } else {
+                        FileLogger.shared.warn(.prediction, "mapped SymSpell fallback",
+                            payload: [
+                                "buildId": generation,
+                                "language": language.rawValue,
+                                "reason": mappedResult.failureReason ?? "validation failed"
+                            ])
+                        loadedResult = try loadLegacy()
+                    }
+                } else {
+                    FileLogger.shared.warn(.prediction, "mapped SymSpell fallback",
+                        payload: ["buildId": generation, "language": language.rawValue, "reason": "blob resource missing"])
+                    loadedResult = try loadLegacy()
+                }
+            } else {
+                loadedResult = try loadLegacy()
+            }
+
+            let loaded = loadedResult.wordsLoaded
             let postLoadFootprint = MemoryMonitor.currentFootprint()
             FileLogger.shared.info(.prediction, "shared prediction build result footprint",
                 payload: [
@@ -195,7 +262,7 @@ final class SharedPredictionStack: @unchecked Sendable {
         }
 
         // Create the SymSpell provider.
-        let provider = SymSpellProvider(symSpell: symSpell, trie: trie, language: language)
+        let provider = SymSpellProvider(symSpell: loadedResult.query, trie: trie, language: language)
 
         // Create the Apple UITextChecker provider.
         let appleProvider = AppleSpellCheckerProvider(language: language.appleSpellTag)

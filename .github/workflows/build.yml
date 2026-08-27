@@ -16,6 +16,20 @@ jobs:
       - name: Run pure-logic tests (Node)
         run: node --test 'scripts/prediction-sim/test/**/*.{js,cjs,mjs}'
 
+      - name: Verify prediction resource formats
+        run: |
+          node scripts/prediction-sim/bin/build-symspell-blob.mjs --check
+          node -e '
+            const fs = require("node:fs");
+            const path = "keyboard/Sources/Prediction/Resources/trigram_en_v1.klm";
+            const expected = Buffer.from("mmap lm http://kheafield.com/code format version 5\n", "ascii");
+            const actual = fs.readFileSync(path);
+            if (!actual.subarray(0, expected.length).equals(expected)) {
+              console.error(`${path} is not a KenLM v5 mmap model`);
+              process.exit(1);
+            }
+          '
+
       - name: Install XcodeGen
         run: brew install xcodegen
 

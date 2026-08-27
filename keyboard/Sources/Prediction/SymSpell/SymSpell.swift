@@ -24,13 +24,22 @@
 
 import Foundation
 
+protocol SymSpellQuerying: AnyObject {
+    func lookup(
+        input: String,
+        editDistance: Int?,
+        verbosity: SymSpell.Verbosity
+    ) -> [(term: String, count: Int64, distance: Int)]
+    func count(for word: String) -> Int64
+}
+
 /// SymSpell: Symmetric Delete spelling correction algorithm.
 ///
 /// Generates all possible deletes (removing 1 or 2 characters) from each
 /// dictionary word's prefix and indexes them. At lookup time, deletes of the
 /// input are generated the same way and matched against the index — the edit
 /// distance is then verified via Levenshtein to filter false positives.
-final class SymSpell {
+final class SymSpell: SymSpellQuerying {
 
     // MARK: - Verbosity
 
@@ -191,11 +200,13 @@ final class SymSpell {
     ) -> [(term: String, count: Int64, distance: Int)] {
         let maxED = editDistance ?? maxEditDistance
         let inputLower = input.lowercased()
-        var suggestionSet: [String: (count: Int64, distance: Int)] = [:]
+        var suggestionSet: [String: (count: Int64, distance: Int, insertionOrder: Int)] = [:]
+        var insertionOrder = 0
 
         // Phase 1: exact match (edit distance 0) via word index.
         if let idx = wordToIndex[inputLower] {
-            suggestionSet[inputLower] = (Int64(counts[Int(idx)]), 0)
+            suggestionSet[inputLower] = (Int64(counts[Int(idx)]), 0, insertionOrder)
+            insertionOrder += 1
         }
 
         // Phase 2: edit-space search. Generate deletes of the input prefix and
@@ -220,9 +231,10 @@ final class SymSpell {
                 if suggestionSet.keys.contains(key) { continue }
 
                 // Verify actual edit distance.
-                let dist = levenshteinDistance(inputLower, key)
+                let dist = Self.levenshteinDistance(inputLower, key)
                 if dist <= maxED {
-                    suggestionSet[key] = (Int64(counts[Int(idx)]), dist)
+                    suggestionSet[key] = (Int64(counts[Int(idx)]), dist, insertionOrder)
+                    insertionOrder += 1
                 }
             }
         }
@@ -233,12 +245,13 @@ final class SymSpell {
         // If suggestionSet is empty, no correction exists within maxEditDistance.
         // (https://github.com/wolfgarbe/SymSpell)
 
-        // Sort: edit distance ascending, then frequency descending.
+        // Sort: edit distance ascending, then frequency descending, then insertion order.
         let sorted = suggestionSet
-            .map { (term: $0.key, count: $0.value.count, distance: $0.value.distance) }
+            .map { (term: $0.key, count: $0.value.count, distance: $0.value.distance, insertionOrder: $0.value.insertionOrder) }
             .sorted { a, b in
                 if a.distance != b.distance { return a.distance < b.distance }
-                return a.count > b.count
+                if a.count != b.count { return a.count > b.count }
+                return a.insertionOrder < b.insertionOrder
             }
 
         switch verbosity {
@@ -295,7 +308,7 @@ final class SymSpell {
     // MARK: - Levenshtein Distance
 
     /// Computes the Levenshtein edit distance between two strings.
-    func levenshteinDistance(_ a: String, _ b: String) -> Int {
+    static func levenshteinDistance(_ a: String, _ b: String) -> Int {
         let aChars = Array(a)
         let bChars = Array(b)
         let m = aChars.count

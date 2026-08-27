@@ -136,6 +136,9 @@ touches UIKit/AVFoundation/device behavior, verify on device manually.
 The keyboard extension is killed without warning if it exceeds ~48 MB resident memory. This is a hard OS limit, not a guideline.
 
 - `SymSpell` index alone uses ~25 MB.
+- Prediction data is mmap-backed; clean, file-backed pages are excluded from `phys_footprint`.
+- Regenerate `keyboard/Sources/Prediction/Resources/symspell_index_*_v1.blob` with `node scripts/prediction-sim/bin/build-symspell-blob.mjs` whenever wordlists or `symspellMaxEditDistance`/`symspellPrefixLength`/`symspellMinWordFreq` change.
+- The in-memory build remains the automatic fallback (kill-switch: `SharedConfig.Defaults.symspellMappedIndexEnabled`); KenLM loads lazily via mmap with a read-mode fallback.
 - Any change to `keyboard/` or `shared/` that touches memory must be reasoned about against this 48 MB cap before a keyboard change is considered done. There is no automated test enforcing the memory cap (the Node harness covers pure logic only, not runtime memory — see *Test policy*); verify on device with the `ritoras-ios-debugging` skill.
 - Prefer streaming / in-place approaches over holding full data structures.
 - Release builds strip debug dylibs in `build.yml` specifically to fit this budget — do not disable that step.

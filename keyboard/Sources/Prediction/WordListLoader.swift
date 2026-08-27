@@ -57,14 +57,15 @@ enum WordListLoader {
         return entries
     }
 
-    /// Stream-loads the frequency dictionary line-by-line into SymSpell and Trie,
-    /// periodically checking phys_footprint (private dirty memory). If memory
-    /// exceeds `maxPhysFootprintBytes`, the load is aborted with a warning and the
-    /// partial vocabulary is kept.
+    /// Stream-loads the frequency dictionary line-by-line into an optional
+    /// SymSpell index and a Trie, periodically checking phys_footprint (private
+    /// dirty memory). If memory exceeds `maxPhysFootprintBytes`, the load is
+    /// aborted with a warning and the partial vocabulary is kept.
     ///
     /// - Parameters:
     ///   - url: URL to the .txt file.
-    ///   - symSpell: The SymSpell instance to populate.
+    ///   - symSpell: The optional SymSpell instance to populate. Pass nil when
+    ///               the index is supplied by a mapped blob.
     ///   - trie: The Trie instance to populate.
     ///   - maxPhysFootprintBytes: phys_footprint threshold in bytes. Defaults to the shared config value.
     ///   - pruneBelow: Optional minimum frequency threshold for pruning.
@@ -72,7 +73,7 @@ enum WordListLoader {
     @discardableResult
     static func loadStreamed(
         from url: URL,
-        into symSpell: SymSpell,
+        into symSpell: SymSpell?,
         trie: Trie,
         maxPhysFootprintBytes: UInt64 = SharedConfig.Defaults.maxPhysFootprintDuringLoad,
         pruneBelow: Int64? = nil,
@@ -112,7 +113,9 @@ enum WordListLoader {
                     if let minFreq = pruneBelow, count < minFreq { return false }
 
                     let canonicalWord = ApostropheNormalizer.canonicalize(word)
-                    symSpell.createDictionaryEntry(key: canonicalWord, count: count)
+                    if let symSpell = symSpell {
+                        symSpell.createDictionaryEntry(key: canonicalWord, count: count)
+                    }
                     trie.insert(word: canonicalWord)
                     return true
                 }
@@ -126,14 +129,18 @@ enum WordListLoader {
                     let physFootprint = MemoryMonitor.currentFootprint()
                     if physFootprint > maxPhysFootprintBytes {
                         FileLogger.shared.error(.dictionary, "memory threshold exceeded during word list load", payload: ["physFootprint": physFootprint, "maxPhysFootprint": maxPhysFootprintBytes, "wordsLoaded": wordCount, "buildSessionId": buildSessionId ?? "none"])
-                        symSpell.finalize() // release the pending deletes map even on the abort path
+                        if let symSpell = symSpell {
+                            symSpell.finalize() // release the pending deletes map even on the abort path
+                        }
                         return wordCount
                     }
                 }
             }
         }
 
-        symSpell.finalize()
+        if let symSpell = symSpell {
+            symSpell.finalize()
+        }
 
         return wordCount
     }
