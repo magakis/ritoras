@@ -157,7 +157,7 @@ final class MappedSymSpellIndex: SymSpellQuerying, @unchecked Sendable {
     let deleteValueCount: Int
     let stringPoolBytes: Int
 
-    init?(url: URL, language: KeyboardLanguage) {
+    convenience init?(url: URL, language: KeyboardLanguage) {
         guard let mappedFile = ReadOnlyMappedFile(url: url) else { return nil }
         do {
             try self.init(mappedFile: mappedFile, language: language)

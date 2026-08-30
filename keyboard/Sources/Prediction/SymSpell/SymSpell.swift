@@ -256,9 +256,9 @@ final class SymSpell: SymSpellQuerying {
 
         switch verbosity {
         case .top:
-            return Array(sorted.prefix(1))
+            return Array(sorted.prefix(1).map { (term: $0.term, count: $0.count, distance: $0.distance) })
         case .all, .closest:
-            return sorted
+            return sorted.map { (term: $0.term, count: $0.count, distance: $0.distance) }
         }
     }
 
