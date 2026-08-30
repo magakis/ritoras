@@ -12,6 +12,7 @@
 #include <vector>
 #include <sstream>
 #include <cstdint>
+#include <chrono>
 
 // ---------------------------------------------------------------------------
 // Internal: wrapper struct to hold the model instance and catch exceptions
@@ -25,6 +26,7 @@ struct KenlmModel {
     int load_method;
 
     explicit KenlmModel(const char* path) : model(nullptr), load_method(-1) {
+        const auto lazyStart = std::chrono::steady_clock::now();
         try {
             lm::ngram::Config config;
             // Suppress progress output for keyboard use.
@@ -34,10 +36,15 @@ struct KenlmModel {
             model = new lm::ngram::QuantArrayTrieModel(path, config);
             load_method = 0;
         } catch (const std::exception& error) {
-            std::fprintf(stderr, "KenLM lazy load failed: %s\n", error.what());
+            const auto lazyElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - lazyStart
+            ).count();
+            std::fprintf(stderr, "KenLM lazy load failed after %lld ms: %s; triggering read fallback\n",
+                         static_cast<long long>(lazyElapsed), error.what());
             delete model;
             model = nullptr;
 
+            const auto fallbackStart = std::chrono::steady_clock::now();
             try {
                 lm::ngram::Config config;
                 config.show_progress = false;
@@ -46,7 +53,11 @@ struct KenlmModel {
                 model = new lm::ngram::QuantArrayTrieModel(path, config);
                 load_method = 1;
             } catch (const std::exception& fallback_error) {
-                std::fprintf(stderr, "KenLM fallback load failed: %s\n", fallback_error.what());
+                const auto fallbackElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - fallbackStart
+                ).count();
+                std::fprintf(stderr, "KenLM fallback load failed after %lld ms: %s\n",
+                             static_cast<long long>(fallbackElapsed), fallback_error.what());
                 delete model;
                 model = nullptr;
             }

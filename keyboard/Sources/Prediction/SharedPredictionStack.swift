@@ -135,6 +135,8 @@ final class SharedPredictionStack: @unchecked Sendable {
     /// minus per-instance state. The degraded-engine fallback logs at `.warn` so
     /// the entry survives a Jetsam kill and reaches DebugLogView via a dictation cycle.
     private func performBuild(generation: Int, language: KeyboardLanguage, completion: @escaping (Bool) -> Void) {
+        let diagnosticsEnabled = SharedConfig.Defaults.predictionDebugLoggingEnabled
+        let buildStart = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         let maxED = SharedConfig.Defaults.symspellMaxEditDistance
         let prefixLen = SharedConfig.Defaults.symspellPrefixLength
 
@@ -142,13 +144,19 @@ final class SharedPredictionStack: @unchecked Sendable {
         var trie = Trie()
 
         let baselineFootprint = MemoryMonitor.currentFootprint()
-        FileLogger.shared.debug(.prediction, "shared prediction build start",
-            payload: [
-                "buildId": generation,
-                "language": language.rawValue,
-                "baselineFootprint": baselineFootprint,
-                "maxFootprint": SharedConfig.Defaults.maxPhysFootprintDuringLoad
-            ])
+        let baselineResident = diagnosticsEnabled ? MemoryMonitor.currentResidentSize() : 0
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "shared prediction build start",
+                payload: [
+                    "buildId": generation,
+                    "language": language.rawValue,
+                    "mappedEnabled": SharedConfig.Defaults.symspellMappedIndexEnabled,
+                    "baselineFootprint": baselineFootprint,
+                    "baselineResident": baselineResident,
+                    "elapsedMs": (DispatchTime.now().uptimeNanoseconds - buildStart) / 1_000_000,
+                    "maxFootprint": SharedConfig.Defaults.maxPhysFootprintDuringLoad
+                ])
+        }
 
         // Stream-load the frequency dictionary into the selected index and trie,
         // with memory monitoring.
@@ -157,13 +165,14 @@ final class SharedPredictionStack: @unchecked Sendable {
             guard let url = WordListLoader.bundledURL(language: language) else {
                 if SharedConfig.Defaults.symspellMappedIndexEnabled {
                     FileLogger.shared.warn(.prediction, "mapped SymSpell fallback",
-                        payload: ["buildId": generation, "language": language.rawValue, "reason": "bundled wordlist missing"])
+                        payload: ["buildId": generation, "language": language.rawValue, "reason": "bundled wordlist missing", "path": "legacy-fallback"])
                 }
                 throw WordListLoader.WordListError.bundledFileNotFound
             }
 
             func loadLegacy() throws -> (query: SymSpellQuerying, wordsLoaded: Int) {
                 let symSpell = SymSpell(maxEditDistance: maxED, prefixLength: prefixLen)
+                let streamStart = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
                 let loaded = try WordListLoader.loadStreamed(
                     from: url,
                     into: symSpell,
@@ -171,24 +180,77 @@ final class SharedPredictionStack: @unchecked Sendable {
                     pruneBelow: SharedConfig.Defaults.symspellMinWordFreq,
                     buildSessionId: "b\(generation)"
                 )
+                if diagnosticsEnabled {
+                    let elapsedMs = (DispatchTime.now().uptimeNanoseconds - streamStart) / 1_000_000
+                    FileLogger.shared.debug(.prediction, "shared prediction trie stream complete", payload: [
+                        "buildId": generation,
+                        "language": language.rawValue,
+                        "path": "legacy",
+                        "entriesLoaded": loaded,
+                        "elapsedMs": elapsedMs,
+                        "footprint": MemoryMonitor.currentFootprint(),
+                        "resident": MemoryMonitor.currentResidentSize()
+                    ])
+                }
                 return (query: symSpell, wordsLoaded: loaded)
             }
 
             if SharedConfig.Defaults.symspellMappedIndexEnabled {
                 let blobName = "symspell_index_\(language.rawValue)_v1"
-                if let blobURL = Bundle.main.url(forResource: blobName, withExtension: "blob") {
+                let blobResolveStart = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
+                let blobURL = Bundle.main.url(forResource: blobName, withExtension: "blob")
+                if diagnosticsEnabled {
+                    let elapsedMs = (DispatchTime.now().uptimeNanoseconds - blobResolveStart) / 1_000_000
+                    FileLogger.shared.debug(.prediction, "mapped SymSpell blob resolve", payload: [
+                        "buildId": generation,
+                        "language": language.rawValue,
+                        "resource": blobName,
+                        "resolved": blobURL != nil,
+                        "pathSuffix": blobURL.map { String($0.path.suffix(96)) } ?? "nil",
+                        "elapsedMs": elapsedMs,
+                        "footprint": MemoryMonitor.currentFootprint(),
+                        "resident": MemoryMonitor.currentResidentSize()
+                    ])
+                }
+                if let blobURL = blobURL {
                     let mappedBeforeFootprint = MemoryMonitor.currentFootprint()
                     let mappedBeforeResident = MemoryMonitor.currentResidentSize()
+                    let mappedStart = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
                     let mappedResult = MappedSymSpellIndex.load(from: blobURL, language: language)
+                    if diagnosticsEnabled {
+                        let elapsedMs = (DispatchTime.now().uptimeNanoseconds - mappedStart) / 1_000_000
+                        FileLogger.shared.debug(.prediction, "mapped SymSpell open and validate complete", payload: [
+                            "buildId": generation,
+                            "language": language.rawValue,
+                            "resolved": mappedResult.index != nil,
+                            "failureReason": mappedResult.failureReason ?? "none",
+                            "elapsedMs": elapsedMs,
+                            "footprint": MemoryMonitor.currentFootprint(),
+                            "resident": MemoryMonitor.currentResidentSize()
+                        ])
+                    }
                     if let mappedIndex = mappedResult.index {
                         do {
-                            _ = try WordListLoader.loadStreamed(
+                            let trieStreamStart = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
+                            let trieEntriesLoaded = try WordListLoader.loadStreamed(
                                 from: url,
                                 into: nil,
                                 trie: trie,
                                 pruneBelow: SharedConfig.Defaults.symspellMinWordFreq,
                                 buildSessionId: "b\(generation)"
                             )
+                            if diagnosticsEnabled {
+                                let elapsedMs = (DispatchTime.now().uptimeNanoseconds - trieStreamStart) / 1_000_000
+                                FileLogger.shared.debug(.prediction, "shared prediction trie stream complete", payload: [
+                                    "buildId": generation,
+                                    "language": language.rawValue,
+                                    "path": "mapped",
+                                    "entriesLoaded": trieEntriesLoaded,
+                                    "elapsedMs": elapsedMs,
+                                    "footprint": MemoryMonitor.currentFootprint(),
+                                    "resident": MemoryMonitor.currentResidentSize()
+                                ])
+                            }
                             let mappedAfterFootprint = MemoryMonitor.currentFootprint()
                             let mappedAfterResident = MemoryMonitor.currentResidentSize()
                             FileLogger.shared.info(.prediction, "mapped SymSpell index loaded", payload: [
@@ -208,6 +270,7 @@ final class SharedPredictionStack: @unchecked Sendable {
                                     "buildId": generation,
                                     "language": language.rawValue,
                                     "reason": "trie load failed",
+                                    "path": "legacy-fallback",
                                     "error": error.localizedDescription
                                 ])
                             trie = Trie()
@@ -216,15 +279,16 @@ final class SharedPredictionStack: @unchecked Sendable {
                     } else {
                         FileLogger.shared.warn(.prediction, "mapped SymSpell fallback",
                             payload: [
-                                "buildId": generation,
-                                "language": language.rawValue,
-                                "reason": mappedResult.failureReason ?? "validation failed"
-                            ])
+                                     "buildId": generation,
+                                     "language": language.rawValue,
+                                     "reason": mappedResult.failureReason ?? "validation failed",
+                                     "path": "legacy-fallback"
+                                 ])
                         loadedResult = try loadLegacy()
                     }
                 } else {
                     FileLogger.shared.warn(.prediction, "mapped SymSpell fallback",
-                        payload: ["buildId": generation, "language": language.rawValue, "reason": "blob resource missing"])
+                        payload: ["buildId": generation, "language": language.rawValue, "reason": "blob resource missing", "path": "legacy-fallback"])
                     loadedResult = try loadLegacy()
                 }
             } else {
@@ -242,6 +306,17 @@ final class SharedPredictionStack: @unchecked Sendable {
                     "baselineFootprint": baselineFootprint,
                     "delta": postLoadFootprint > baselineFootprint ? postLoadFootprint - baselineFootprint : 0
                 ])
+            if diagnosticsEnabled {
+                let elapsedMs = (DispatchTime.now().uptimeNanoseconds - buildStart) / 1_000_000
+                FileLogger.shared.debug(.prediction, "shared prediction dictionary stage complete", payload: [
+                    "buildId": generation,
+                    "language": language.rawValue,
+                    "entriesLoaded": loaded,
+                    "elapsedMs": elapsedMs,
+                    "footprint": postLoadFootprint,
+                    "resident": MemoryMonitor.currentResidentSize()
+                ])
+            }
             if loaded < 49000 {
                 FileLogger.shared.info(.dictionary, "prediction engine loaded partial dictionary", payload: ["wordsLoaded": loaded])
             }
@@ -256,12 +331,34 @@ final class SharedPredictionStack: @unchecked Sendable {
                 }
                 FileLogger.shared.warn(.prediction, "shared prediction ready (degraded empty engine)",
                     payload: ["buildId": generation, "language": language.rawValue])
+                if diagnosticsEnabled {
+                    let footprint = MemoryMonitor.currentFootprint()
+                    FileLogger.shared.debug(.prediction, "shared prediction engine publish", payload: [
+                        "buildId": generation,
+                        "language": language.rawValue,
+                        "degraded": true,
+                        "elapsedMs": (DispatchTime.now().uptimeNanoseconds - buildStart) / 1_000_000,
+                        "footprint": footprint,
+                        "resident": MemoryMonitor.currentResidentSize()
+                    ])
+                    FileLogger.shared.debug(.prediction, "shared prediction build end", payload: [
+                        "buildId": generation,
+                        "language": language.rawValue,
+                        "degraded": true,
+                        "totalMs": (DispatchTime.now().uptimeNanoseconds - buildStart) / 1_000_000,
+                        "footprintStart": baselineFootprint,
+                        "footprintEnd": footprint,
+                        "footprintDelta": footprint > baselineFootprint ? footprint - baselineFootprint : 0,
+                        "residentEnd": MemoryMonitor.currentResidentSize()
+                    ])
+                }
                 completion(true)
             }
             return
         }
 
         // Create the SymSpell provider.
+        let providerStart = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         let provider = SymSpellProvider(symSpell: loadedResult.query, trie: trie, language: language)
 
         // Create the Apple UITextChecker provider.
@@ -282,6 +379,16 @@ final class SharedPredictionStack: @unchecked Sendable {
             engine.addProvider(englishTrigram)
             trigram = englishTrigram
         }
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "shared prediction providers constructed", payload: [
+                "buildId": generation,
+                "language": language.rawValue,
+                "trigramRegistered": trigram != nil,
+                "elapsedMs": (DispatchTime.now().uptimeNanoseconds - providerStart) / 1_000_000,
+                "footprint": MemoryMonitor.currentFootprint(),
+                "resident": MemoryMonitor.currentResidentSize()
+            ])
+        }
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -290,6 +397,28 @@ final class SharedPredictionStack: @unchecked Sendable {
                 storedTrigram = trigram
                 state = .ready
                 storedLanguage = language
+            }
+
+            if diagnosticsEnabled {
+                let footprint = MemoryMonitor.currentFootprint()
+                FileLogger.shared.debug(.prediction, "shared prediction engine publish", payload: [
+                    "buildId": generation,
+                    "language": language.rawValue,
+                    "degraded": false,
+                    "elapsedMs": (DispatchTime.now().uptimeNanoseconds - buildStart) / 1_000_000,
+                    "footprint": footprint,
+                    "resident": MemoryMonitor.currentResidentSize()
+                ])
+                FileLogger.shared.debug(.prediction, "shared prediction build end", payload: [
+                    "buildId": generation,
+                    "language": language.rawValue,
+                    "degraded": false,
+                    "totalMs": (DispatchTime.now().uptimeNanoseconds - buildStart) / 1_000_000,
+                    "footprintStart": baselineFootprint,
+                    "footprintEnd": footprint,
+                    "footprintDelta": footprint > baselineFootprint ? footprint - baselineFootprint : 0,
+                    "residentEnd": MemoryMonitor.currentResidentSize()
+                ])
             }
 
             // English: TrigramProvider registered in .cold state — lazy-loads on

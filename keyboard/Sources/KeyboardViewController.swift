@@ -1950,7 +1950,12 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     func keyboardContextToken(_ view: KeyboardView) -> UInt64 {
         guard inputTarget == .hostApp else { return 0 }
-        guard view.window != nil else { return 0 }
+        guard view.window != nil else {
+            if SharedConfig.Defaults.predictionDebugLoggingEnabled {
+                FileLogger.shared.debug(.keyboard, "keyboard context token rejected: window nil")
+            }
+            return 0
+        }
         let context = textDocumentProxy.documentContextBeforeInput ?? ""
         let suffix = String(context.suffix(50))
         let currentWord = CurrentWordExtractor.extract(from: context).currentWord

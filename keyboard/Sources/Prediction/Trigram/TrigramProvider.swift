@@ -159,6 +159,14 @@ final class TrigramProvider: SuggestionProvider {
             // without the LM between attempts.
             let currentFootprint = MemoryMonitor.currentFootprint()
             if currentFootprint > SharedConfig.Defaults.trigramMaxPhysFootprintDuringLoad {
+                if SharedConfig.Defaults.predictionDebugLoggingEnabled {
+                    FileLogger.shared.debug(.prediction, "trigram load memory gate", payload: [
+                        "footprint": currentFootprint,
+                        "resident": MemoryMonitor.currentResidentSize(),
+                        "limit": SharedConfig.Defaults.trigramMaxPhysFootprintDuringLoad,
+                        "result": "deferred"
+                    ])
+                }
                 self.markLoadDeferred()
                 let message = "trigram load deferred: phys_footprint \(currentFootprint) > \(SharedConfig.Defaults.trigramMaxPhysFootprintDuringLoad)"
                 if !Self.hasLoggedDeferralWarning {
@@ -172,7 +180,17 @@ final class TrigramProvider: SuggestionProvider {
             }
 
             // Load side index (quick — ~320 KB JSON).
+            let sideIndexStart = SharedConfig.Defaults.predictionDebugLoggingEnabled
+                ? DispatchTime.now().uptimeNanoseconds : 0
             let sideIndex = SideIndex()
+            if SharedConfig.Defaults.predictionDebugLoggingEnabled {
+                FileLogger.shared.debug(.prediction, "trigram side index load complete", payload: [
+                    "loaded": sideIndex != nil,
+                    "elapsedMs": (DispatchTime.now().uptimeNanoseconds - sideIndexStart) / 1_000_000,
+                    "footprint": MemoryMonitor.currentFootprint(),
+                    "resident": MemoryMonitor.currentResidentSize()
+                ])
+            }
 
             // Load KenLM model.
             guard let url = Bundle.main.url(forResource: Self.modelName,
@@ -188,13 +206,34 @@ final class TrigramProvider: SuggestionProvider {
 
             let footprintBeforeLoad = MemoryMonitor.currentFootprint()
             let residentBeforeLoad = MemoryMonitor.currentResidentSize()
+            let kenlmLoadStart = DispatchTime.now().uptimeNanoseconds
             let model = kenlm_load(url.path)
+            let kenlmLoadElapsedMs = (DispatchTime.now().uptimeNanoseconds - kenlmLoadStart) / 1_000_000
             let footprintAfterLoad = MemoryMonitor.currentFootprint()
             let residentAfterLoad = MemoryMonitor.currentResidentSize()
+            let loadMethod = model.map { kenlm_model_load_method($0) } ?? -1
+
+            if SharedConfig.Defaults.predictionDebugLoggingEnabled {
+                FileLogger.shared.debug(.prediction, "trigram KenLM LAZY load attempt", payload: [
+                    "elapsedMs": kenlmLoadElapsedMs,
+                    "loaded": model != nil,
+                    "loadMethod": loadMethod,
+                    "footprintBefore": footprintBeforeLoad,
+                    "footprintAfter": footprintAfterLoad,
+                    "residentBefore": residentBeforeLoad,
+                    "residentAfter": residentAfterLoad
+                ])
+            }
+            if loadMethod == 1 {
+                FileLogger.shared.warn(.prediction, "trigram KenLM LAZY load fell back to read", payload: [
+                    "loadMethod": loadMethod,
+                    "elapsedMs": kenlmLoadElapsedMs
+                ])
+            }
 
             if let model {
                 FileLogger.shared.info(.prediction, "trigram model loaded", payload: [
-                    "loadMethod": kenlm_model_load_method(model),
+                    "loadMethod": loadMethod,
                     "footprintBefore": footprintBeforeLoad,
                     "footprintAfter": footprintAfterLoad,
                     "residentBefore": residentBeforeLoad,
@@ -241,6 +280,15 @@ final class TrigramProvider: SuggestionProvider {
     /// Transitions state back to `.cold` so the next `suggest()` triggers a fresh lazy load.
     /// Safe to call from any thread. Frees ~8-10 MB of private dirty memory.
     func unload() {
+        let diagnosticsEnabled = SharedConfig.Defaults.predictionDebugLoggingEnabled
+        let footprintBefore = diagnosticsEnabled ? MemoryMonitor.currentFootprint() : 0
+        let residentBefore = diagnosticsEnabled ? MemoryMonitor.currentResidentSize() : 0
+        let hadModel: Bool
+        if diagnosticsEnabled {
+            hadModel = readState { _, model, _ in model != nil }
+        } else {
+            hadModel = false
+        }
         mutateState { state, model, index in
             if let m = model {
                 kenlm_free(m)
@@ -248,6 +296,19 @@ final class TrigramProvider: SuggestionProvider {
             model = nil
             index = nil
             state = .cold
+        }
+        if diagnosticsEnabled {
+            let footprintAfter = MemoryMonitor.currentFootprint()
+            let residentAfter = MemoryMonitor.currentResidentSize()
+            FileLogger.shared.debug(.prediction, "trigram unload complete", payload: [
+                "hadModel": hadModel,
+                "footprintBefore": footprintBefore,
+                "footprintAfter": footprintAfter,
+                "footprintFreed": footprintBefore > footprintAfter ? footprintBefore - footprintAfter : 0,
+                "residentBefore": residentBefore,
+                "residentAfter": residentAfter,
+                "residentFreed": residentBefore > residentAfter ? residentBefore - residentAfter : 0
+            ])
         }
         FileLogger.shared.warn(.prediction, "trigram unloaded (memory pressure)")
     }

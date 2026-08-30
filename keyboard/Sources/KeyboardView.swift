@@ -1426,9 +1426,22 @@ class KeyboardView: UIView {
             DispatchQueue.main.async { [weak self] in
                 // Supersession guard: context changes and lookup cancellation
                 // invalidate any result still queued for the main hop.
-                guard let self,
-                      self.window != nil,
-                      self.suggestionEpoch == capturedEpoch else { return }
+                guard let self else { return }
+                guard self.window != nil else {
+                    if SharedConfig.Defaults.predictionDebugLoggingEnabled {
+                        FileLogger.shared.debug(.keyboard, "suggestion result rejected: window nil")
+                    }
+                    return
+                }
+                guard self.suggestionEpoch == capturedEpoch else {
+                    if SharedConfig.Defaults.predictionDebugLoggingEnabled {
+                        FileLogger.shared.debug(.keyboard, "suggestion result rejected: epoch mismatch", payload: [
+                            "capturedEpoch": capturedEpoch,
+                            "currentEpoch": self.suggestionEpoch
+                        ])
+                    }
+                    return
+                }
                 self.suggestionCache.update(suggestions, token: token)
                 self.suggestionBar.update(with: suggestions)
             }
@@ -1444,9 +1457,14 @@ class KeyboardView: UIView {
         let hadWorkItem = suggestionLookupWorkItem != nil
         suggestionLookupWorkItem?.cancel()
         suggestionLookupWorkItem = nil
+        let oldEpoch = suggestionEpoch
         suggestionEpoch &+= 1
-        FileLogger.shared.debug(.keyboard, "suggestion lookup shed",
-            payload: ["hadWorkItem": hadWorkItem])
+        if SharedConfig.Defaults.predictionDebugLoggingEnabled {
+            FileLogger.shared.debug(.keyboard, "suggestion lookup shed",
+                payload: ["hadWorkItem": hadWorkItem,
+                          "oldEpoch": oldEpoch,
+                          "newEpoch": suggestionEpoch])
+        }
     }
 
     func reloadEmojiPanel() {

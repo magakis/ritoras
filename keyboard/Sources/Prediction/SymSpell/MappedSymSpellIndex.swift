@@ -13,29 +13,88 @@ final class ReadOnlyMappedFile {
     }
 
     init?(url: URL) {
+        let diagnosticsEnabled = SharedConfig.Defaults.predictionDebugLoggingEnabled
         let descriptor = Darwin.open(url.path, O_RDONLY)
-        guard descriptor >= 0 else { return nil }
+        guard descriptor >= 0 else {
+            if diagnosticsEnabled {
+                FileLogger.shared.debug(.prediction, "mapped SymSpell file open failed", payload: [
+                    "pathSuffix": String(url.path.suffix(96)),
+                    "errno": Int(errno)
+                ])
+            }
+            return nil
+        }
         defer { Darwin.close(descriptor) }
 
         var fileInfo = stat()
-        guard Darwin.fstat(descriptor, &fileInfo) == 0 else { return nil }
-        guard fileInfo.st_size > 0, fileInfo.st_size <= off_t(Int.max) else { return nil }
+        let statResult = Darwin.fstat(descriptor, &fileInfo)
+        guard statResult == 0 else {
+            if diagnosticsEnabled {
+                FileLogger.shared.debug(.prediction, "mapped SymSpell file stat failed", payload: [
+                    "pathSuffix": String(url.path.suffix(96)),
+                    "result": Int(statResult),
+                    "errno": Int(errno)
+                ])
+            }
+            return nil
+        }
+        guard fileInfo.st_size > 0, fileInfo.st_size <= off_t(Int.max) else {
+            if diagnosticsEnabled {
+                FileLogger.shared.debug(.prediction, "mapped SymSpell file size invalid", payload: [
+                    "pathSuffix": String(url.path.suffix(96)),
+                    "byteSize": Int64(fileInfo.st_size)
+                ])
+            }
+            return nil
+        }
 
         let size = Int(fileInfo.st_size)
         guard let address = mmap(nil, size, PROT_READ, MAP_PRIVATE, descriptor, 0) else {
+            if diagnosticsEnabled {
+                FileLogger.shared.debug(.prediction, "mapped SymSpell mmap failed", payload: [
+                    "pathSuffix": String(url.path.suffix(96)),
+                    "byteSize": size,
+                    "errno": Int(errno)
+                ])
+            }
             return nil
         }
-        guard Int(bitPattern: address) != -1 else { return nil }
+        guard Int(bitPattern: address) != -1 else {
+            if diagnosticsEnabled {
+                FileLogger.shared.debug(.prediction, "mapped SymSpell mmap returned MAP_FAILED", payload: [
+                    "pathSuffix": String(url.path.suffix(96)),
+                    "byteSize": size
+                ])
+            }
+            return nil
+        }
 
         mappedAddress = address
         baseAddress = UnsafeRawPointer(address)
         fileSize = size
 
-        _ = posix_madvise(address, size, POSIX_MADV_WILLNEED)
+        let madviseResult = posix_madvise(address, size, POSIX_MADV_WILLNEED)
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell mmap succeeded", payload: [
+                "pathSuffix": String(url.path.suffix(96)),
+                "byteSize": size,
+                "madviseResult": Int(madviseResult)
+            ])
+        }
     }
 
     deinit {
-        _ = munmap(mappedAddress, fileSize)
+        let munmapResult = munmap(mappedAddress, fileSize)
+        if SharedConfig.Defaults.predictionDebugLoggingEnabled {
+            let footprint = MemoryMonitor.currentFootprint()
+            let resident = MemoryMonitor.currentResidentSize()
+            FileLogger.shared.debug(.prediction, "mapped SymSpell munmap", payload: [
+                "byteSize": fileSize,
+                "munmapResult": Int(munmapResult),
+                "footprintAfter": footprint,
+                "residentAfter": resident
+            ])
+        }
     }
 }
 
@@ -88,6 +147,8 @@ final class MappedSymSpellIndex: SymSpellQuerying, @unchecked Sendable {
     private let deleteOffsets: UnsafeBufferPointer<Int32>
     private let deleteValues: UnsafeBufferPointer<Int32>
     private let stringPool: UnsafeRawBufferPointer
+    private let lookupDiagnosticsLock = NSLock()
+    private var lookupDiagnosticsCount = 0
 
     let maxEditDistance: Int
     let prefixLength: Int
@@ -106,54 +167,174 @@ final class MappedSymSpellIndex: SymSpellQuerying, @unchecked Sendable {
     }
 
     static func load(from url: URL, language: KeyboardLanguage) -> LoadResult {
+        let diagnosticsEnabled = SharedConfig.Defaults.predictionDebugLoggingEnabled
+        let validationStart = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
+        if diagnosticsEnabled {
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let byteSize = (attributes?[.size] as? NSNumber)?.int64Value ?? -1
+            FileLogger.shared.debug(.prediction, "mapped SymSpell file resolved", payload: [
+                "pathSuffix": String(url.path.suffix(96)),
+                "byteSize": byteSize,
+                "language": language.rawValue
+            ])
+        }
+
         guard let mappedFile = ReadOnlyMappedFile(url: url) else {
+            if diagnosticsEnabled {
+                let elapsedMs = (DispatchTime.now().uptimeNanoseconds - validationStart) / 1_000_000
+                FileLogger.shared.debug(.prediction, "mapped SymSpell mmap result", payload: [
+                    "result": "failed",
+                    "pathSuffix": String(url.path.suffix(96)),
+                    "elapsedMs": elapsedMs
+                ])
+                FileLogger.shared.debug(.prediction, "mapped SymSpell validation finished", payload: [
+                    "result": "failed",
+                    "reason": "open or mmap failed",
+                    "elapsedMs": elapsedMs
+                ])
+            }
             return LoadResult(index: nil, failureReason: "open or mmap failed")
+        }
+
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell mmap result", payload: [
+                "result": "success",
+                "byteSize": mappedFile.fileSize
+            ])
         }
 
         do {
             let index = try MappedSymSpellIndex(mappedFile: mappedFile, language: language)
+            if diagnosticsEnabled {
+                let elapsedMs = (DispatchTime.now().uptimeNanoseconds - validationStart) / 1_000_000
+                FileLogger.shared.debug(.prediction, "mapped SymSpell validation finished", payload: [
+                    "result": "success",
+                    "elapsedMs": elapsedMs,
+                    "wordCount": index.wordCount,
+                    "deleteKeyCount": index.deleteKeyCount,
+                    "deleteValueCount": index.deleteValueCount,
+                    "stringPoolBytes": index.stringPoolBytes
+                ])
+            }
             return LoadResult(index: index, failureReason: nil)
         } catch let error as ValidationError {
+            if diagnosticsEnabled {
+                let elapsedMs = (DispatchTime.now().uptimeNanoseconds - validationStart) / 1_000_000
+                FileLogger.shared.debug(.prediction, "mapped SymSpell validation finished", payload: [
+                    "result": "failed",
+                    "reason": error.reason,
+                    "elapsedMs": elapsedMs
+                ])
+            }
             return LoadResult(index: nil, failureReason: error.reason)
         } catch {
+            if diagnosticsEnabled {
+                let elapsedMs = (DispatchTime.now().uptimeNanoseconds - validationStart) / 1_000_000
+                FileLogger.shared.debug(.prediction, "mapped SymSpell validation finished", payload: [
+                    "result": "failed",
+                    "reason": error.localizedDescription,
+                    "elapsedMs": elapsedMs
+                ])
+            }
             return LoadResult(index: nil, failureReason: error.localizedDescription)
         }
     }
 
     private init(mappedFile: ReadOnlyMappedFile, language: KeyboardLanguage) throws {
+        let diagnosticsEnabled = SharedConfig.Defaults.predictionDebugLoggingEnabled
         let region = mappedFile.rawRegion
-        guard region.count >= Self.headerBytes else {
+        let headerValid = region.count >= Self.headerBytes
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell header validation", payload: [
+                "actualBytes": region.count,
+                "requiredBytes": Self.headerBytes,
+                "valid": headerValid
+            ])
+        }
+        guard headerValid else {
             throw ValidationError(reason: "truncated header")
         }
         guard let regionBaseAddress = region.baseAddress else {
+            if diagnosticsEnabled {
+                FileLogger.shared.debug(.prediction, "mapped SymSpell region validation", payload: [
+                    "baseAddress": "nil",
+                    "valid": false
+                ])
+            }
             throw ValidationError(reason: "empty mapped region")
         }
 
-        guard region[0] == 82, region[1] == 83, region[2] == 83, region[3] == 49 else {
+        let magicValid = region[0] == 82 && region[1] == 83 && region[2] == 83 && region[3] == 49
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell magic validation", payload: [
+                "expected": "RSS1",
+                "actual0": region[0],
+                "actual1": region[1],
+                "actual2": region[2],
+                "actual3": region[3],
+                "valid": magicValid
+            ])
+        }
+        guard magicValid else {
             throw ValidationError(reason: "invalid magic")
         }
 
         let version = Self.readUInt16LE(region, at: 4)
-        guard version == Self.formatVersion else {
+        let versionValid = version == Self.formatVersion
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell version validation", payload: [
+                "actual": version,
+                "expected": Self.formatVersion,
+                "valid": versionValid
+            ])
+        }
+        guard versionValid else {
             throw ValidationError(reason: "unsupported format version")
         }
 
         let expectedLanguageBytes = Array(language.rawValue.utf8)
-        guard expectedLanguageBytes.count == 2,
-              region[8] == expectedLanguageBytes[0],
-              region[9] == expectedLanguageBytes[1],
-              region[10] == 0,
-              region[11] == 0 else {
+        let languageValid = expectedLanguageBytes.count == 2
+            && region[8] == expectedLanguageBytes[0]
+            && region[9] == expectedLanguageBytes[1]
+            && region[10] == 0
+            && region[11] == 0
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell language validation", payload: [
+                "expected": language.rawValue,
+                "actual0": region[8],
+                "actual1": region[9],
+                "actual2": region[10],
+                "actual3": region[11],
+                "valid": languageValid
+            ])
+        }
+        guard languageValid else {
             throw ValidationError(reason: "language mismatch")
         }
 
         let maxEditDistance = Int(region[6])
-        guard maxEditDistance == SharedConfig.Defaults.symspellMaxEditDistance else {
+        let maxEditDistanceValid = maxEditDistance == SharedConfig.Defaults.symspellMaxEditDistance
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell edit distance validation", payload: [
+                "expected": SharedConfig.Defaults.symspellMaxEditDistance,
+                "actual": maxEditDistance,
+                "valid": maxEditDistanceValid
+            ])
+        }
+        guard maxEditDistanceValid else {
             throw ValidationError(reason: "unexpected max edit distance")
         }
 
         let prefixLength = Int(region[7])
-        guard prefixLength == SharedConfig.Defaults.symspellPrefixLength else {
+        let prefixLengthValid = prefixLength == SharedConfig.Defaults.symspellPrefixLength
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell prefix validation", payload: [
+                "expected": SharedConfig.Defaults.symspellPrefixLength,
+                "actual": prefixLength,
+                "valid": prefixLengthValid
+            ])
+        }
+        guard prefixLengthValid else {
             throw ValidationError(reason: "unexpected prefix length")
         }
 
@@ -161,20 +342,50 @@ final class MappedSymSpellIndex: SymSpellQuerying, @unchecked Sendable {
         let deleteKeyCount = Self.readUInt32LE(region, at: 0x10)
         let deleteValueCount = Self.readUInt32LE(region, at: 0x14)
         let stringPoolBytes = Self.readUInt32LE(region, at: 0x18)
-        guard wordCount > 0,
-              deleteKeyCount > 0,
-              deleteValueCount > 0,
-              stringPoolBytes > 0 else {
+        let dimensionsValid = wordCount > 0
+            && deleteKeyCount > 0
+            && deleteValueCount > 0
+            && stringPoolBytes > 0
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell dimension validation", payload: [
+                "wordCount": Int(wordCount),
+                "deleteKeyCount": Int(deleteKeyCount),
+                "deleteValueCount": Int(deleteValueCount),
+                "stringPoolBytes": Int(stringPoolBytes),
+                "valid": dimensionsValid
+            ])
+        }
+        guard dimensionsValid else {
             throw ValidationError(reason: "invalid dimensions")
         }
 
-        let layout = try Self.makeLayout(
-            wordCount: wordCount,
-            deleteKeyCount: deleteKeyCount,
-            deleteValueCount: deleteValueCount,
-            stringPoolBytes: stringPoolBytes,
-            fileSize: mappedFile.fileSize
-        )
+        let layout: Layout
+        do {
+            layout = try Self.makeLayout(
+                wordCount: wordCount,
+                deleteKeyCount: deleteKeyCount,
+                deleteValueCount: deleteValueCount,
+                stringPoolBytes: stringPoolBytes,
+                fileSize: mappedFile.fileSize
+            )
+        } catch let error as ValidationError {
+            if diagnosticsEnabled {
+                FileLogger.shared.debug(.prediction, "mapped SymSpell section validation", payload: [
+                    "computedSectionEnd": -1,
+                    "actualSectionEnd": mappedFile.fileSize - 8,
+                    "valid": false,
+                    "reason": error.reason
+                ])
+            }
+            throw error
+        }
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell section validation", payload: [
+                "computedSectionEnd": layout.blobFnv1a64,
+                "actualSectionEnd": mappedFile.fileSize - 8,
+                "valid": layout.blobFnv1a64 == mappedFile.fileSize - 8
+            ])
+        }
 
         let wordCountInt = Int(wordCount)
         let deleteKeyCountInt = Int(deleteKeyCount)
@@ -228,46 +439,121 @@ final class MappedSymSpellIndex: SymSpellQuerying, @unchecked Sendable {
             count: stringPoolBytesInt
         )
 
-        try Self.validateStructure(
-            wordOffsets: wordOffsets,
-            sortedWordIdx: sortedWordIdx,
-            counts: counts,
-            deleteKeyOffsets: deleteKeyOffsets,
-            deleteOffsets: deleteOffsets,
-            deleteValues: deleteValues,
-            stringPool: stringPool,
-            wordCount: wordCountInt,
-            deleteKeyCount: deleteKeyCountInt,
-            deleteValueCount: deleteValueCountInt,
-            stringPoolBytes: stringPoolBytesInt
-        )
+        do {
+            try Self.validateStructure(
+                wordOffsets: wordOffsets,
+                sortedWordIdx: sortedWordIdx,
+                counts: counts,
+                deleteKeyOffsets: deleteKeyOffsets,
+                deleteOffsets: deleteOffsets,
+                deleteValues: deleteValues,
+                stringPool: stringPool,
+                wordCount: wordCountInt,
+                deleteKeyCount: deleteKeyCountInt,
+                deleteValueCount: deleteValueCountInt,
+                stringPoolBytes: stringPoolBytesInt
+            )
+        } catch let error as ValidationError {
+            if diagnosticsEnabled {
+                FileLogger.shared.debug(.prediction, "mapped SymSpell structure validation", payload: [
+                    "wordCount": wordCountInt,
+                    "deleteKeyCount": deleteKeyCountInt,
+                    "deleteValueCount": deleteValueCountInt,
+                    "stringPoolBytes": stringPoolBytesInt,
+                    "valid": false,
+                    "reason": error.reason
+                ])
+            }
+            throw error
+        }
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell structure validation", payload: [
+                "wordCount": wordCountInt,
+                "deleteKeyCount": deleteKeyCountInt,
+                "deleteValueCount": deleteValueCountInt,
+                "stringPoolBytes": stringPoolBytesInt,
+                "valid": true
+            ])
+        }
 
         for index in 0x24..<Self.headerBytes {
             guard region[index] == 0 else {
+                if diagnosticsEnabled {
+                    FileLogger.shared.debug(.prediction, "mapped SymSpell reserved header validation", payload: [
+                        "offset": index,
+                        "actual": region[index],
+                        "expected": 0,
+                        "valid": false
+                    ])
+                }
                 throw ValidationError(reason: "non-zero reserved header bytes")
             }
         }
         for index in (layout.stringPool + stringPoolBytesInt)..<layout.blobFnv1a64 {
             guard region[index] == 0 else {
+                if diagnosticsEnabled {
+                    FileLogger.shared.debug(.prediction, "mapped SymSpell alignment padding validation", payload: [
+                        "offset": index,
+                        "actual": region[index],
+                        "expected": 0,
+                        "valid": false
+                    ])
+                }
                 throw ValidationError(reason: "non-zero alignment padding")
             }
+        }
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell reserved bytes validation", payload: [
+                "headerReservedBytes": Self.headerBytes - 0x24,
+                "alignmentPaddingBytes": layout.blobFnv1a64 - (layout.stringPool + stringPoolBytesInt),
+                "valid": true
+            ])
         }
 
         let storedWordlistHash = Self.readUInt64LE(region, at: 0x1c)
         let wordlistURL = WordListLoader.bundledURL(language: language)
         guard let wordlistURL else {
+            if diagnosticsEnabled {
+                FileLogger.shared.debug(.prediction, "mapped SymSpell wordlist resolution", payload: [
+                    "result": "missing",
+                    "language": language.rawValue,
+                    "valid": false
+                ])
+            }
             throw ValidationError(reason: "bundled wordlist missing")
+        }
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell wordlist resolution", payload: [
+                "result": "resolved",
+                "pathSuffix": String(wordlistURL.path.suffix(96)),
+                "valid": true
+            ])
         }
         let wordlistData: Data
         do {
             wordlistData = try Data(contentsOf: wordlistURL)
         } catch {
+            if diagnosticsEnabled {
+                FileLogger.shared.debug(.prediction, "mapped SymSpell wordlist read", payload: [
+                    "result": "failed",
+                    "pathSuffix": String(wordlistURL.path.suffix(96)),
+                    "valid": false
+                ])
+            }
             throw ValidationError(reason: "bundled wordlist unreadable")
         }
         let wordlistHash = wordlistData.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) -> UInt64 in
             Self.fnv1a64(bytes)
         }
-        guard storedWordlistHash == wordlistHash else {
+        let wordlistHashValid = storedWordlistHash == wordlistHash
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell wordlist FNV", payload: [
+                "expected": String(storedWordlistHash),
+                "computed": String(wordlistHash),
+                "valid": wordlistHashValid
+            ])
+        }
+        guard wordlistHashValid else {
             throw ValidationError(reason: "source wordlist checksum mismatch")
         }
 
@@ -275,7 +561,15 @@ final class MappedSymSpellIndex: SymSpellQuerying, @unchecked Sendable {
         let blobHash = Self.fnv1a64(
             UnsafeRawBufferPointer(start: regionBaseAddress, count: layout.blobFnv1a64)
         )
-        guard storedBlobHash == blobHash else {
+        let blobHashValid = storedBlobHash == blobHash
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell blob FNV", payload: [
+                "expected": String(storedBlobHash),
+                "computed": String(blobHash),
+                "valid": blobHashValid
+            ])
+        }
+        guard blobHashValid else {
             throw ValidationError(reason: "blob checksum mismatch")
         }
 
@@ -309,6 +603,18 @@ final class MappedSymSpellIndex: SymSpellQuerying, @unchecked Sendable {
         editDistance: Int? = nil,
         verbosity: SymSpell.Verbosity = .top
     ) -> [(term: String, count: Int64, distance: Int)] {
+        let diagnosticsEnabled = SharedConfig.Defaults.predictionDebugLoggingEnabled
+        let lookupStart = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
+        var shouldLogLookup = false
+        if diagnosticsEnabled {
+            lookupDiagnosticsLock.lock()
+            if lookupDiagnosticsCount < 3 {
+                lookupDiagnosticsCount += 1
+                shouldLogLookup = true
+            }
+            lookupDiagnosticsLock.unlock()
+        }
+
         let maxED = editDistance ?? maxEditDistance
         let inputLower = input.lowercased()
         var candidates: [Candidate] = []
@@ -378,12 +684,23 @@ final class MappedSymSpellIndex: SymSpellQuerying, @unchecked Sendable {
             results.append((term: term, count: candidate.count, distance: candidate.distance))
         }
 
+        let output: [(term: String, count: Int64, distance: Int)]
         switch verbosity {
         case .top:
-            return Array(results.prefix(1))
+            output = Array(results.prefix(1))
         case .all, .closest:
-            return results
+            output = results
         }
+
+        if shouldLogLookup {
+            let elapsedMicros = (DispatchTime.now().uptimeNanoseconds - lookupStart) / 1_000
+            FileLogger.shared.debug(.prediction, "mapped SymSpell lookup", payload: [
+                "inputLength": input.count,
+                "resultCount": output.count,
+                "elapsedMicros": elapsedMicros
+            ])
+        }
+        return output
     }
 
     private func findWordIndex(_ query: UnsafeRawBufferPointer) -> Int? {
@@ -549,7 +866,22 @@ final class MappedSymSpellIndex: SymSpellQuerying, @unchecked Sendable {
         let sectionEndUInt64 = (nextStringPool + 7) & ~UInt64(7)
         guard sectionEndUInt64 <= UInt64(Int.max),
               sectionEndUInt64 == UInt64(fileSize - 8) else {
+            if SharedConfig.Defaults.predictionDebugLoggingEnabled {
+                FileLogger.shared.debug(.prediction, "mapped SymSpell section end mismatch", payload: [
+                    "computedSectionEnd": sectionEndUInt64,
+                    "actualSectionEnd": fileSize - 8,
+                    "valid": false
+                ])
+            }
             throw ValidationError(reason: "section layout does not match file size")
+        }
+
+        if SharedConfig.Defaults.predictionDebugLoggingEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell section end", payload: [
+                "computedSectionEnd": sectionEndUInt64,
+                "actualSectionEnd": fileSize - 8,
+                "valid": true
+            ])
         }
 
         let offsets = [
@@ -562,7 +894,16 @@ final class MappedSymSpellIndex: SymSpellQuerying, @unchecked Sendable {
             stringPool,
             sectionEndUInt64
         ]
-        guard offsets.allSatisfy({ $0 % 4 == 0 }), sectionEndUInt64 % 8 == 0 else {
+        let offsetsAligned = offsets.allSatisfy({ $0 % 4 == 0 })
+        let sectionAligned = sectionEndUInt64 % 8 == 0
+        if SharedConfig.Defaults.predictionDebugLoggingEnabled {
+            FileLogger.shared.debug(.prediction, "mapped SymSpell section alignment", payload: [
+                "offsetsAligned": offsetsAligned,
+                "sectionAligned": sectionAligned,
+                "valid": offsetsAligned && sectionAligned
+            ])
+        }
+        guard offsetsAligned, sectionAligned else {
             throw ValidationError(reason: "section alignment mismatch")
         }
 

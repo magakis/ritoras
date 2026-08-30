@@ -79,7 +79,24 @@ enum WordListLoader {
         pruneBelow: Int64? = nil,
         buildSessionId: String? = nil
     ) throws -> Int {
+        let diagnosticsEnabled = SharedConfig.Defaults.predictionDebugLoggingEnabled
+        let streamStart = diagnosticsEnabled ? DispatchTime.now().uptimeNanoseconds : 0
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.dictionary, "word list stream start", payload: [
+                "pathSuffix": String(url.path.suffix(96)),
+                "symSpellEnabled": symSpell != nil,
+                "pruneBelow": pruneBelow ?? 0,
+                "maxFootprint": maxPhysFootprintBytes,
+                "buildSessionId": buildSessionId ?? "none"
+            ])
+        }
         guard let fileHandle = FileHandle(forReadingAtPath: url.path) else {
+            if diagnosticsEnabled {
+                FileLogger.shared.debug(.dictionary, "word list stream open failed", payload: [
+                    "pathSuffix": String(url.path.suffix(96)),
+                    "buildSessionId": buildSessionId ?? "none"
+                ])
+            }
             throw WordListError.fileOpenFailed(url.path)
         }
         defer { fileHandle.closeFile() }
@@ -124,10 +141,29 @@ enum WordListLoader {
 
                 wordCount += 1
 
+                if wordCount % 10_000 == 0, diagnosticsEnabled {
+                    FileLogger.shared.debug(.dictionary, "word list stream progress", payload: [
+                        "entriesLoaded": wordCount,
+                        "trieInsertTotal": wordCount,
+                        "symSpellEnabled": symSpell != nil,
+                        "buildSessionId": buildSessionId ?? "none"
+                    ])
+                }
+
                 // Periodic memory check every 5000 words.
                 if wordCount % 5000 == 0 {
                     let physFootprint = MemoryMonitor.currentFootprint()
                     if physFootprint > maxPhysFootprintBytes {
+                        if diagnosticsEnabled {
+                            FileLogger.shared.debug(.dictionary, "word list memory guard triggered", payload: [
+                                "physFootprint": physFootprint,
+                                "maxPhysFootprint": maxPhysFootprintBytes,
+                                "entriesLoaded": wordCount,
+                                "trieInsertTotal": wordCount,
+                                "elapsedMs": (DispatchTime.now().uptimeNanoseconds - streamStart) / 1_000_000,
+                                "buildSessionId": buildSessionId ?? "none"
+                            ])
+                        }
                         FileLogger.shared.error(.dictionary, "memory threshold exceeded during word list load", payload: ["physFootprint": physFootprint, "maxPhysFootprint": maxPhysFootprintBytes, "wordsLoaded": wordCount, "buildSessionId": buildSessionId ?? "none"])
                         if let symSpell = symSpell {
                             symSpell.finalize() // release the pending deletes map even on the abort path
@@ -142,6 +178,17 @@ enum WordListLoader {
             symSpell.finalize()
         }
 
+        if diagnosticsEnabled {
+            FileLogger.shared.debug(.dictionary, "word list stream complete", payload: [
+                "entriesLoaded": wordCount,
+                "trieInsertTotal": wordCount,
+                "symSpellFinalized": symSpell != nil,
+                "elapsedMs": (DispatchTime.now().uptimeNanoseconds - streamStart) / 1_000_000,
+                "buildSessionId": buildSessionId ?? "none",
+                "footprint": MemoryMonitor.currentFootprint(),
+                "resident": MemoryMonitor.currentResidentSize()
+            ])
+        }
         return wordCount
     }
 
