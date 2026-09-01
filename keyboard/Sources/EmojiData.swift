@@ -278,7 +278,8 @@ private extension Character {
 
 enum EmojiRecents {
     private static let storageKey = "ritoras_emoji_recents"
-    private static let maxRecents = 12
+    /// Rolling window: dedupe, insert at the front, then evict the oldest entries past 24.
+    private static let maxRecents = 24
 
     private static var didPurgeOnLoad = false
 
