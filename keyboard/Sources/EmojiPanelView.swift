@@ -228,6 +228,8 @@ final class EmojiPanelView: UIView {
     /// Point size for the emoji-toggle key's SF Symbol on the letter keyboard.
     /// Slightly larger than modeKeyPointSize so the smiley reads as a primary affordance.
     static let emojiToggleIconPointSize: CGFloat = 20
+    /// Hold duration before removing a recent emoji. Cross-referenced from EmojiSearchOverlay.
+    static let recentsRemovalHoldSeconds: TimeInterval = 2.0
     /// Ordered category ids matching the toolbar icon button order.
     private static let categoryOrder: [String] = [
         "people", "nature", "foods", "activity",
@@ -599,7 +601,7 @@ final class EmojiPanelView: UIView {
             }
 
             emojiLongPressWorkItem = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: workItem)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.recentsRemovalHoldSeconds, execute: workItem)
 
         case .ended, .cancelled, .failed:
             guard !emojiLongPressRemoving else { return }

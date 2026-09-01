@@ -96,6 +96,9 @@ final class EmojiSearchOverlay: UIView {
     // MARK: - State
 
     private var allEmojis: [String] = []
+    private var emojiLongPressWorkItem: DispatchWorkItem?
+    private var emojiLongPressIndexPath: IndexPath?
+    private var emojiLongPressRemoving = false
     private var currentQuery: String = ""
     private var searchDebounceWorkItem: DispatchWorkItem?
     private let selectionFeedback = UISelectionFeedbackGenerator()
@@ -176,6 +179,13 @@ final class EmojiSearchOverlay: UIView {
         collectionView.showsVerticalScrollIndicator = false
         collectionView.delaysContentTouches = false
         addSubview(collectionView)
+
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(emojiCellLongPressed(_:)))
+        longPress.minimumPressDuration = 0.5
+        longPress.allowableMovement = 10
+        longPress.cancelsTouchesInView = false
+        longPress.delaysTouchesBegan = false
+        collectionView.addGestureRecognizer(longPress)
 
         // Internal vertical constraints — .defaultHigh so external height=0 wins cleanly
         let cvTop = collectionView.topAnchor.constraint(equalTo: searchContainer.bottomAnchor)
@@ -263,6 +273,92 @@ final class EmojiSearchOverlay: UIView {
         }
         collectionView.reloadData()
         collectionView.setContentOffset(.zero, animated: false)
+    }
+}
+
+// MARK: - Emoji Cell Long-Press (Recents Removal)
+
+extension EmojiSearchOverlay {
+    @objc private func emojiCellLongPressed(_ gesture: UILongPressGestureRecognizer) {
+        // Recents-only: no-op while showing search results
+        guard currentQuery.isEmpty else { return }
+
+        let location = gesture.location(in: collectionView)
+
+        switch gesture.state {
+        case .began:
+            // Don't trigger during active scrolling (deceleration from a flick)
+            guard !collectionView.isDecelerating else { return }
+            guard let indexPath = collectionView.indexPathForItem(at: location),
+                  let cell = collectionView.cellForItem(at: indexPath),
+                  indexPath.item < allEmojis.count else { return }
+
+            let emoji = allEmojis[indexPath.item]
+            emojiLongPressIndexPath = indexPath
+
+            // Haptic: start-of-hold acknowledgment
+            HapticsManager.shared.tapImpact()
+
+            // Visual: dim the cell to indicate hold in progress
+            cell.alpha = 0.6
+
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                guard self.currentQuery.isEmpty,
+                      self.emojiLongPressIndexPath == indexPath,
+                      indexPath.item < self.allEmojis.count,
+                      self.allEmojis[indexPath.item] == emoji,
+                      let cell = self.collectionView.cellForItem(at: indexPath) else { return }
+
+                // Mark removal in progress so .ended/.cancelled don't restore the cell
+                self.emojiLongPressRemoving = true
+
+                // Completion haptic
+                self.selectionFeedback.selectionChanged()
+
+                // Shrink and fade animation
+                UIView.animate(withDuration: 0.25, animations: {
+                    cell.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
+                    cell.alpha = 0
+                }, completion: { _ in
+                    EmojiRecents.remove(emoji)
+                    self.allEmojis.remove(at: indexPath.item)
+
+                    self.collectionView.performBatchUpdates({
+                        self.collectionView.deleteItems(at: [indexPath])
+                    })
+
+                    if self.allEmojis.isEmpty {
+                        self.emptyStateLabel.isHidden = false
+                        self.bringSubviewToFront(self.emptyStateLabel)
+                    }
+
+                    self.emojiLongPressIndexPath = nil
+                    self.emojiLongPressRemoving = false
+                })
+            }
+
+            emojiLongPressWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + EmojiPanelView.recentsRemovalHoldSeconds, execute: workItem)
+
+        case .ended, .cancelled, .failed:
+            guard !emojiLongPressRemoving else { return }
+
+            emojiLongPressWorkItem?.cancel()
+            emojiLongPressWorkItem = nil
+
+            if let indexPath = emojiLongPressIndexPath,
+               let cell = collectionView.cellForItem(at: indexPath) {
+                UIView.animate(withDuration: 0.2) {
+                    cell.transform = .identity
+                    cell.alpha = 1.0
+                }
+            }
+            emojiLongPressIndexPath = nil
+
+        default:
+            break
+        }
     }
 }
 
