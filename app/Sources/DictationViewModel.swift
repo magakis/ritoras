@@ -331,6 +331,16 @@ final class DictationViewModel: ObservableObject {
         }
 
         let mode = SharedConfig.dictationMode()
+        // Fire-and-forget model warm-up: batch mode only connects to the server
+        // AFTER recording stops, so pre-load the engine now — the ~5 s load
+        // overlaps with the user's speech. Stream mode already loads at WS connect.
+        if mode != .stream {
+            let selectionTask = serverSelectionTask
+            Task.detached(priority: .utility) {
+                guard let selected = await selectionTask?.value, !selected.isEmpty else { return }
+                await WhisperClient.warmup(serverURL: selected)
+            }
+        }
         activeModeLabel = mode == .stream ? "STREAM" : "BATCH"
         FileLogger.shared.info(.transcription, "dictation start", payload: [
             "id": id.uuidString,

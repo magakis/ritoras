@@ -272,6 +272,27 @@ enum WhisperClient {
         return false
     }
 
+    /// Fires a fire-and-forget POST /warmup so the server pre-loads its model
+    /// while the user is still dictating. Never throws; failures are logged
+    /// at debug level and tolerated — warm-up is strictly best-effort.
+    static func warmup(serverURL: String, timeout: TimeInterval = 5) async {
+        let base = serverURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !base.isEmpty, let url = URL(string: "\(base)/warmup") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = timeout
+        let session = SessionHolder.shared.get()
+        do {
+            let (_, response) = try await session.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            FileLogger.shared.debug(.network, "warmup", payload: ["status": status])
+        } catch {
+            FileLogger.shared.debug(.network, "warmup failed (tolerated)", payload: [
+                "error": error.localizedDescription
+            ])
+        }
+    }
+
     /// Probes all servers in parallel and returns the first healthy one.
     /// Returns as soon as any server responds, cancelling remaining probes.
     /// - Parameters:

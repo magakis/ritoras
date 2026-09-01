@@ -753,3 +753,37 @@ The following table summarises the state of all documented server endpoints:
 - **`GET /dictation_result/latest`** has been removed from the client. The
   server may retain the endpoint for backward compatibility, but no active
   Ritoras client relies on it.
+
+## 17. Warm-up (POST /warmup)
+
+```
+POST {BASE_URL}/warmup
+```
+
+The request has an empty body and no authentication. Responses are:
+
+Cold model (HTTP 202):
+```json
+{"status":"warming","mode":"on-demand-trim","ttl":180}
+```
+Resident model (HTTP 200):
+```json
+{"status":"warm","mode":"on-demand-trim","ttl":180}
+```
+Always-loaded model (HTTP 200):
+```json
+{"status":"warm","mode":"always"}
+```
+Disabled with `model_idle_ttl=0` (HTTP 200):
+```json
+{"status":"skipped","mode":"on-demand","detail":"..."}
+```
+Every response includes a `"mode"` field.
+The client sends this at batch-mode record-button press, fire-and-forget, with
+a 5-second timeout. Stream mode skips it because WebSocket connection already
+warms the server. Failures, including 404 while unsupported, are swallowed.
+
+Test with:
+```bash
+curl -X POST http://your-server:5000/warmup
+```
