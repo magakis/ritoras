@@ -93,7 +93,7 @@ private class KeyButton: UIButton {
     /// (prevents a duplicate backspace when Phase 4 handles it on touch-down).
     var backspaceSuppressTap = false
 
-    /// Set true when the 3s cancel long-press fires on the mic button, so the
+    /// Set true when the 2s cancel long-press fires on the mic button, so the
     /// trailing touchUpInside can be suppressed (prevents a cancel + stop).
     var micLongPressDidFire = false
 
@@ -539,6 +539,10 @@ private class SuggestionBar: UIView {
 // MARK: - KeyboardView
 
 class KeyboardView: UIView {
+    /// Hold-to-cancel duration on the mic/recording key. Drives both the long-press
+    /// gesture and the progress-ring animation — keep them in sync via this single constant.
+    static let micCancelHoldSeconds: TimeInterval = 2.0
+
     weak var delegate: KeyboardViewDelegate?
 
     /// Called when the emoji panel's ABC button is tapped; the controller sets this to route through uiMode.
@@ -667,7 +671,7 @@ class KeyboardView: UIView {
     private var currentLayoutMode: KeyboardLayoutMode = .letters
     private(set) var currentLanguage: KeyboardLanguage = .english
 
-    /// The 3s cancel-progress ring on the mic button. Only populated while the
+    /// The 2s cancel-progress ring on the mic button. Only populated while the
     /// finger is held down; removed on every touch-up and on the long-press fire.
     private var micProgressRing: CAShapeLayer?
 
@@ -856,13 +860,13 @@ class KeyboardView: UIView {
                 case .mic:
                     micKeyButton = button
                     // Single-tap → stop (fires through keyTapped → handleMicButtonTap);
-                    // 3s long-press → cancel. Touch-down/up drive the progress ring.
+                    // 2s long-press → cancel. Touch-down/up drive the progress ring.
                     button.addTarget(self, action: #selector(micTouchDown(_:)), for: .touchDown)
                     button.addTarget(self, action: #selector(micTouchUp(_:)),
                                      for: [.touchUpInside, .touchUpOutside, .touchCancel, .touchDragExit])
                     let lp = UILongPressGestureRecognizer(target: self, action: #selector(micLongPressed(_:)))
-                    lp.minimumPressDuration = 3.0
-                    lp.allowableMovement = 40   // default 10 is too tight for a 3s hold — finger drift would silently fail
+                    lp.minimumPressDuration = Self.micCancelHoldSeconds
+                    lp.allowableMovement = 40   // default 10 is too tight for a 2s hold — finger drift would silently fail
                     button.addGestureRecognizer(lp)
                 case .emoji:
                     emojiKeyButton = button
@@ -1045,7 +1049,7 @@ class KeyboardView: UIView {
         delegate?.keyboardView(self, didPerform: .shiftLock)
     }
 
-    /// Touch-down on the mic button. If dictation is active, starts the 3s
+    /// Touch-down on the mic button. If dictation is active, starts the 2s
     /// progress ring (a plain start-dictation tap in .idle shows no ring).
     @objc private func micTouchDown(_ sender: KeyButton) {
         sender.micLongPressDidFire = false
@@ -1061,7 +1065,7 @@ class KeyboardView: UIView {
         cancelMicHoldProgress(on: sender)
     }
 
-    /// 3s long-press on the mic button cancels dictation.
+    /// 2s long-press on the mic button cancels dictation.
     @objc private func micLongPressed(_ gesture: UILongPressGestureRecognizer) {
         guard gesture.state == .began, let button = gesture.view as? KeyButton else { return }
         let micState = delegate?.keyboardViewMicState(self)
@@ -1090,7 +1094,7 @@ class KeyboardView: UIView {
 
     // MARK: - Mic Hold Progress Ring
 
-    /// Starts a 3s circular progress ring on the mic button. White stroke is
+    /// Starts a 2s circular progress ring on the mic button. White stroke is
     /// high-contrast on BOTH the red recording background (.systemRed) and the
     /// light/dark gray waiting background.
     private func startMicHoldProgress(on button: KeyButton) {
@@ -1114,7 +1118,7 @@ class KeyboardView: UIView {
         let animation = CABasicAnimation(keyPath: "strokeEnd")
         animation.fromValue = 0
         animation.toValue = 1
-        animation.duration = 3.0
+        animation.duration = Self.micCancelHoldSeconds
         animation.fillMode = .forwards
         animation.isRemovedOnCompletion = false
         ring.add(animation, forKey: "micHoldProgress")
