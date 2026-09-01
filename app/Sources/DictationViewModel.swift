@@ -592,18 +592,12 @@ final class DictationViewModel: ObservableObject {
                 do {
                     let audioBytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? UInt64 ?? 0
 
-                    // Fail-fast: await the health probe started in start(). The probe completes
-                    // during recording, so this is ~0s on the happy path. If no server is
-                    // reachable, abort BEFORE uploading so the user sees a clear error in ~3s
-                    // instead of hanging in .transcribing.
-                    let probedServer = await serverSelectionTask?.value
+                    // Fast path: await the health probe started in start(). The probe completes
+                    // during recording, so this is ~0s on the happy path. If no server was
+                    // found, pass nil below so routeTranscription performs a fresh probe and
+                    // fast connection failures are retried instead of aborting before upload.
+                    let chosenServer = await serverSelectionTask?.value
                     serverSelectionTask = nil
-                    guard let chosenServer = probedServer else {
-                        FileLogger.shared.warn(.network, "transcription abort: no reachable server",
-                                               payload: ["id": id.uuidString,
-                                                         "serverCount": config.servers.count])
-                        throw WhisperError.serverUnreachable
-                    }
 
                     FileLogger.shared.info(.transcription, "upload start", payload: [
                         "id": id.uuidString,
@@ -612,9 +606,9 @@ final class DictationViewModel: ObservableObject {
                         "server": chosenServer ?? config.servers.first ?? ""
                     ])
 
-                    let text = try await WhisperClient.routeTranscription(
+                    let text = try await transcribeWithAutoRetry(
                         audioURL: url, jobId: id, config: config,
-                        correlationId: activeID, preferredServer: chosenServer,
+                        correlationId: activeID, initialServer: chosenServer,
                         language: SharedConfig.keyboardLanguage().dictationLanguageField)
                     FileLogger.shared.debug(.network, "async transcription succeeded",
                                             payload: ["textLength": text.count])
@@ -883,6 +877,64 @@ final class DictationViewModel: ObservableObject {
     /// retried. Callers treat it as a no-op, not a failure.
     private struct RetryAlreadyInFlight: Error {}
 
+    private func transcribeWithAutoRetry(
+        audioURL: URL,
+        jobId: UUID,
+        config: SharedConfig,
+        correlationId: UUID?,
+        initialServer: String?,
+        language: String?
+    ) async throws -> String {
+        let maxAttempts = max(1, SharedConfig.Defaults.transcriptionAutoRetryMaxAttempts)
+        var attempt = 0
+
+        while true {
+            let attemptStart = Date()
+            do {
+                return try await WhisperClient.routeTranscription(
+                    audioURL: audioURL, jobId: jobId, config: config,
+                    correlationId: correlationId,
+                    preferredServer: attempt == 0 ? initialServer : nil,
+                    language: language)
+            } catch WhisperError.cancelled {
+                throw WhisperError.cancelled
+            } catch {
+                let attemptNumber = attempt + 1
+                let attemptElapsed = Date().timeIntervalSince(attemptStart)
+                let isRetryable = (error as? WhisperError)?.isRetryableConnectionFailure ?? false
+                let attemptsRemain = attemptNumber < maxAttempts
+
+                guard !Task.isCancelled else {
+                    throw error
+                }
+                guard isRetryable else {
+                    throw error
+                }
+                if !attemptsRemain {
+                    FileLogger.shared.warn(.transcription, "transcription retries exhausted", payload: [
+                        "jobId": jobId.uuidString,
+                        "attempts": attemptNumber,
+                        "error": error.localizedDescription
+                    ])
+                    throw error
+                }
+
+                guard attemptElapsed < SharedConfig.Defaults.transcriptionFastFailWindowSeconds else {
+                    throw error
+                }
+
+                FileLogger.shared.debug(.transcription, "transcription attempt failed, retrying", payload: [
+                    "jobId": jobId.uuidString,
+                    "attempt": attemptNumber,
+                    "error": error.localizedDescription
+                ])
+                try await Task.sleep(nanoseconds: UInt64(
+                    SharedConfig.Defaults.transcriptionAutoRetryDelaySeconds * 1_000_000_000))
+                attempt += 1
+            }
+        }
+    }
+
     /// Loads saved audio for `jobId`, routes it through the unified transcription
     /// entrypoint, and on success cleans up the audio file + failed-job record.
     /// Returns the transcribed text on success; throws on failure. Does NOT touch
@@ -929,9 +981,9 @@ final class DictationViewModel: ObservableObject {
 
         let config = SharedConfig.load()
         do {
-            let text = try await WhisperClient.routeTranscription(
+            let text = try await transcribeWithAutoRetry(
                 audioURL: audioURL, jobId: jobId, config: config,
-                correlationId: jobId, preferredServer: nil,
+                correlationId: jobId, initialServer: nil,
                 language: SharedConfig.keyboardLanguage().dictationLanguageField)
 
             // Add to persistent text history.

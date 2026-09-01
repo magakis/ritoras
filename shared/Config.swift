@@ -247,6 +247,12 @@ struct SharedConfig {
         /// Per-server health-probe timeout. 5s balances false-negative risk on slow
         /// LANs/Tailscale against the user's failure-tolerance for offline servers.
         static let serverProbeTimeoutSeconds: TimeInterval = 3.0
+        /// Maximum number of fast connection-failure attempts for one transcription.
+        static let transcriptionAutoRetryMaxAttempts: Int = 3
+        /// Delay between fast connection-failure transcription attempts.
+        static let transcriptionAutoRetryDelaySeconds: TimeInterval = 1.0
+        /// Maximum elapsed time for an attempt to qualify for an automatic retry.
+        static let transcriptionFastFailWindowSeconds: TimeInterval = 5.0
     }
 
     // MARK: - Async Transcription

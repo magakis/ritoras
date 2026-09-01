@@ -46,6 +46,31 @@ enum WhisperError: Error, LocalizedError {
     }
 }
 
+extension WhisperError {
+    /// Whether this error represents a transient connection failure that can be retried quickly.
+    var isRetryableConnectionFailure: Bool {
+        switch self {
+        case .serverUnreachable, .allServersFailed:
+            return true
+        case .networkError(let error):
+            guard let urlError = error as? URLError else { return false }
+            switch urlError.code {
+            case .cannotConnectToHost,
+                 .cannotFindHost,
+                 .dnsLookupFailed,
+                 .networkConnectionLost,
+                 .notConnectedToInternet,
+                 .timedOut:
+                return true
+            default:
+                return false
+            }
+        default:
+            return false
+        }
+    }
+}
+
 // MARK: - Response Model
 
 struct WhisperResponse: Decodable {
