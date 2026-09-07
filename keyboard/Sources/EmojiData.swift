@@ -302,9 +302,23 @@ enum EmojiRecents {
         return character.isEmojiCharacter
     }
 
+    /// Maps stored pre-fix recents (trailing VS16 stripped by the old dataset
+    /// generator) to their fully-qualified catalog forms, then dedupes.
+    /// Keys are the unqualified spellings of catalog entries that require
+    /// U+FE0F for emoji presentation.
+    private static func normalizeQualification(_ recents: [String]) -> [String] {
+        var qualified: [String: String] = [:]
+        for entry in EmojiData.searchable where entry.char.hasSuffix("\u{FE0F}") {
+            qualified[String(entry.char.dropLast())] = entry.char
+        }
+        var seen = Set<String>()
+        return recents.map { qualified[$0] ?? $0 }.filter { seen.insert($0).inserted }
+    }
+
+    /// Removes invalid recents and migrates pre-fix bare forms to qualified catalog spellings.
     private static func purge(_ recents: [String]) -> [String] {
-        let cleaned = recents.filter { isSingleEmoji($0) }
-        if cleaned.count != recents.count {
+        let cleaned = normalizeQualification(recents).filter { isSingleEmoji($0) }
+        if cleaned != recents {
             UserDefaults.standard.set(cleaned, forKey: storageKey)
         }
         return cleaned
