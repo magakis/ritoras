@@ -5,6 +5,8 @@
 // One-time transform script: installs @emoji-mart/data in a temp directory,
 // walks the emoji dataset, and emits a bundled JSON resource for the
 // Ritoras keyboard extension.
+// Characters are emitted fully qualified, retaining trailing U+FE0F where
+// the dataset carries it so strict renderers show emoji presentation.
 //
 // Usage: node scripts/build_emoji_json.mjs
 
@@ -30,11 +32,6 @@ const CATEGORY_NAMES = {
   symbols: 'Symbols',
   flags: 'Flags',
 };
-
-function stripTrailingVS16(str) {
-  // Strip trailing variation selector U+FE0F (e.g., ☺️ → ☺)
-  return str.endsWith('\uFE0F') ? str.slice(0, -1) : str;
-}
 
 async function main() {
   // Install @emoji-mart/data in a temp directory
@@ -80,7 +77,7 @@ async function main() {
         }
 
         // Base char is always the first skin entry
-        const char = stripTrailingVS16(skins[0].native);
+        const char = skins[0].native;
 
         // Lowercase the name (emoji-mart uses title case)
         const name = (emoji.name || emojiId).toLowerCase();
@@ -111,11 +108,16 @@ async function main() {
 
     // Count total emojis
     const totalEmojis = outputCategories.reduce((sum, c) => sum + c.emojis.length, 0);
+    const qualifiedWithVS16 = outputCategories.reduce(
+      (sum, c) => sum + c.emojis.filter((emoji) => emoji.char.endsWith('\uFE0F')).length,
+      0,
+    );
 
     // Sanity checks
     console.log(`Total emojis: ${totalEmojis}`);
     console.log(`Categories: ${outputCategories.length} (${outputCategories.map((c) => c.id).join(', ')})`);
     console.log(`Skin-tone capable: ${output.skinToneCapable.length}`);
+    console.log(`Qualified with trailing VS16: ${qualifiedWithVS16}`);
     console.log(`Output size: ~${JSON.stringify(output).length} bytes`);
 
     // Check for duplicates within each category

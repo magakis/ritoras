@@ -251,7 +251,7 @@
           "hasSkins": false
         },
         {
-          "char": "☺",
+          "char": "☺️",
           "name": "smiling face",
           "keywords": [
             "relaxed",
@@ -530,7 +530,7 @@
           "hasSkins": false
         },
         {
-          "char": "😶‍🌫",
+          "char": "😶‍🌫️",
           "name": "face in clouds",
           "keywords": [
             "shower",
@@ -909,7 +909,7 @@
           "hasSkins": false
         },
         {
-          "char": "☹",
+          "char": "☹️",
           "name": "frowning face",
           "keywords": [
             "white",
@@ -1230,7 +1230,7 @@
           "hasSkins": false
         },
         {
-          "char": "☠",
+          "char": "☠️",
           "name": "skull and crossbones",
           "keywords": [
             "poison",
@@ -1352,7 +1352,7 @@
           "hasSkins": true
         },
         {
-          "char": "🖐",
+          "char": "🖐️",
           "name": "hand with fingers splayed",
           "keywords": [
             "raised",
@@ -1478,7 +1478,7 @@
           "hasSkins": true
         },
         {
-          "char": "✌",
+          "char": "✌️",
           "name": "victory hand",
           "keywords": [
             "v",
@@ -1610,7 +1610,7 @@
           "hasSkins": true
         },
         {
-          "char": "☝",
+          "char": "☝️",
           "name": "index pointing up",
           "keywords": [
             "point",
@@ -1787,7 +1787,7 @@
           "hasSkins": true
         },
         {
-          "char": "✍",
+          "char": "✍️",
           "name": "writing hand",
           "keywords": [
             "lower",
@@ -1952,7 +1952,7 @@
           "hasSkins": false
         },
         {
-          "char": "👁",
+          "char": "👁️",
           "name": "eye",
           "keywords": [
             "face",
@@ -2078,7 +2078,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧔‍♂",
+          "char": "🧔‍♂️",
           "name": "man: beard",
           "keywords": [
             "man",
@@ -2089,7 +2089,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧔‍♀",
+          "char": "🧔‍♀️",
           "name": "woman: beard",
           "keywords": [
             "woman",
@@ -2230,7 +2230,7 @@
           "hasSkins": true
         },
         {
-          "char": "👱‍♀",
+          "char": "👱‍♀️",
           "name": "woman: blond hair",
           "keywords": [
             "haired-woman",
@@ -2243,7 +2243,7 @@
           "hasSkins": true
         },
         {
-          "char": "👱‍♂",
+          "char": "👱‍♂️",
           "name": "man: blond hair",
           "keywords": [
             "haired-man",
@@ -2305,7 +2305,7 @@
           "hasSkins": true
         },
         {
-          "char": "🙍‍♂",
+          "char": "🙍‍♂️",
           "name": "man frowning",
           "keywords": [
             "male",
@@ -2318,7 +2318,7 @@
           "hasSkins": true
         },
         {
-          "char": "🙍‍♀",
+          "char": "🙍‍♀️",
           "name": "woman frowning",
           "keywords": [
             "female",
@@ -2341,7 +2341,7 @@
           "hasSkins": true
         },
         {
-          "char": "🙎‍♂",
+          "char": "🙎‍♂️",
           "name": "man pouting",
           "keywords": [
             "male",
@@ -2350,7 +2350,7 @@
           "hasSkins": true
         },
         {
-          "char": "🙎‍♀",
+          "char": "🙎‍♀️",
           "name": "woman pouting",
           "keywords": [
             "female",
@@ -2368,7 +2368,7 @@
           "hasSkins": true
         },
         {
-          "char": "🙅‍♂",
+          "char": "🙅‍♂️",
           "name": "man gesturing no",
           "keywords": [
             "gesturing-no",
@@ -2379,7 +2379,7 @@
           "hasSkins": true
         },
         {
-          "char": "🙅‍♀",
+          "char": "🙅‍♀️",
           "name": "woman gesturing no",
           "keywords": [
             "gesturing-no",
@@ -2399,7 +2399,7 @@
           "hasSkins": true
         },
         {
-          "char": "🙆‍♂",
+          "char": "🙆‍♂️",
           "name": "man gesturing ok",
           "keywords": [
             "gesturing-ok",
@@ -2412,7 +2412,7 @@
           "hasSkins": true
         },
         {
-          "char": "🙆‍♀",
+          "char": "🙆‍♀️",
           "name": "woman gesturing ok",
           "keywords": [
             "gesturing-ok",
@@ -2434,7 +2434,7 @@
           "hasSkins": true
         },
         {
-          "char": "💁‍♂",
+          "char": "💁‍♂️",
           "name": "man tipping hand",
           "keywords": [
             "tipping-hand",
@@ -2446,7 +2446,7 @@
           "hasSkins": true
         },
         {
-          "char": "💁‍♀",
+          "char": "💁‍♀️",
           "name": "woman tipping hand",
           "keywords": [
             "tipping-hand",
@@ -2466,7 +2466,7 @@
           "hasSkins": true
         },
         {
-          "char": "🙋‍♂",
+          "char": "🙋‍♂️",
           "name": "man raising hand",
           "keywords": [
             "raising-hand",
@@ -2476,7 +2476,7 @@
           "hasSkins": true
         },
         {
-          "char": "🙋‍♀",
+          "char": "🙋‍♀️",
           "name": "woman raising hand",
           "keywords": [
             "raising-hand",
@@ -2494,7 +2494,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧏‍♂",
+          "char": "🧏‍♂️",
           "name": "deaf man",
           "keywords": [
             "accessibility"
@@ -2502,7 +2502,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧏‍♀",
+          "char": "🧏‍♀️",
           "name": "deaf woman",
           "keywords": [
             "accessibility"
@@ -2519,7 +2519,7 @@
           "hasSkins": true
         },
         {
-          "char": "🙇‍♂",
+          "char": "🙇‍♂️",
           "name": "man bowing",
           "keywords": [
             "male",
@@ -2528,7 +2528,7 @@
           "hasSkins": true
         },
         {
-          "char": "🙇‍♀",
+          "char": "🙇‍♀️",
           "name": "woman bowing",
           "keywords": [
             "female",
@@ -2547,7 +2547,7 @@
           "hasSkins": true
         },
         {
-          "char": "🤦‍♂",
+          "char": "🤦‍♂️",
           "name": "man facepalming",
           "keywords": [
             "male",
@@ -2557,7 +2557,7 @@
           "hasSkins": true
         },
         {
-          "char": "🤦‍♀",
+          "char": "🤦‍♀️",
           "name": "woman facepalming",
           "keywords": [
             "female",
@@ -2577,7 +2577,7 @@
           "hasSkins": true
         },
         {
-          "char": "🤷‍♂",
+          "char": "🤷‍♂️",
           "name": "man shrugging",
           "keywords": [
             "male",
@@ -2589,7 +2589,7 @@
           "hasSkins": true
         },
         {
-          "char": "🤷‍♀",
+          "char": "🤷‍♀️",
           "name": "woman shrugging",
           "keywords": [
             "female",
@@ -2601,7 +2601,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧑‍⚕",
+          "char": "🧑‍⚕️",
           "name": "health worker",
           "keywords": [
             "hospital"
@@ -2609,7 +2609,7 @@
           "hasSkins": true
         },
         {
-          "char": "👨‍⚕",
+          "char": "👨‍⚕️",
           "name": "man health worker",
           "keywords": [
             "male",
@@ -2622,7 +2622,7 @@
           "hasSkins": true
         },
         {
-          "char": "👩‍⚕",
+          "char": "👩‍⚕️",
           "name": "woman health worker",
           "keywords": [
             "female",
@@ -2693,7 +2693,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧑‍⚖",
+          "char": "🧑‍⚖️",
           "name": "judge",
           "keywords": [
             "law"
@@ -2701,7 +2701,7 @@
           "hasSkins": true
         },
         {
-          "char": "👨‍⚖",
+          "char": "👨‍⚖️",
           "name": "man judge",
           "keywords": [
             "male",
@@ -2712,7 +2712,7 @@
           "hasSkins": true
         },
         {
-          "char": "👩‍⚖",
+          "char": "👩‍⚖️",
           "name": "woman judge",
           "keywords": [
             "female",
@@ -3014,7 +3014,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧑‍✈",
+          "char": "🧑‍✈️",
           "name": "pilot",
           "keywords": [
             "fly",
@@ -3024,7 +3024,7 @@
           "hasSkins": true
         },
         {
-          "char": "👨‍✈",
+          "char": "👨‍✈️",
           "name": "man pilot",
           "keywords": [
             "male",
@@ -3035,7 +3035,7 @@
           "hasSkins": true
         },
         {
-          "char": "👩‍✈",
+          "char": "👩‍✈️",
           "name": "woman pilot",
           "keywords": [
             "female",
@@ -3112,7 +3112,7 @@
           "hasSkins": true
         },
         {
-          "char": "👮‍♂",
+          "char": "👮‍♂️",
           "name": "man police officer",
           "keywords": [
             "male",
@@ -3126,7 +3126,7 @@
           "hasSkins": true
         },
         {
-          "char": "👮‍♀",
+          "char": "👮‍♀️",
           "name": "woman police officer",
           "keywords": [
             "female",
@@ -3140,7 +3140,7 @@
           "hasSkins": true
         },
         {
-          "char": "🕵",
+          "char": "🕵️",
           "name": "detective",
           "keywords": [
             "sleuth",
@@ -3151,7 +3151,7 @@
           "hasSkins": true
         },
         {
-          "char": "🕵️‍♂",
+          "char": "🕵️‍♂️",
           "name": "man detective",
           "keywords": [
             "male",
@@ -3160,7 +3160,7 @@
           "hasSkins": true
         },
         {
-          "char": "🕵️‍♀",
+          "char": "🕵️‍♀️",
           "name": "woman detective",
           "keywords": [
             "female",
@@ -3179,7 +3179,7 @@
           "hasSkins": true
         },
         {
-          "char": "💂‍♂",
+          "char": "💂‍♂️",
           "name": "man guard",
           "keywords": [
             "male",
@@ -3192,7 +3192,7 @@
           "hasSkins": true
         },
         {
-          "char": "💂‍♀",
+          "char": "💂‍♀️",
           "name": "woman guard",
           "keywords": [
             "female",
@@ -3223,7 +3223,7 @@
           "hasSkins": true
         },
         {
-          "char": "👷‍♂",
+          "char": "👷‍♂️",
           "name": "man construction worker",
           "keywords": [
             "male",
@@ -3237,7 +3237,7 @@
           "hasSkins": true
         },
         {
-          "char": "👷‍♀",
+          "char": "👷‍♀️",
           "name": "woman construction worker",
           "keywords": [
             "female",
@@ -3296,7 +3296,7 @@
           "hasSkins": true
         },
         {
-          "char": "👳‍♂",
+          "char": "👳‍♂️",
           "name": "man wearing turban",
           "keywords": [
             "wearing-turban",
@@ -3308,7 +3308,7 @@
           "hasSkins": true
         },
         {
-          "char": "👳‍♀",
+          "char": "👳‍♀️",
           "name": "woman wearing turban",
           "keywords": [
             "wearing-turban",
@@ -3355,7 +3355,7 @@
           "hasSkins": true
         },
         {
-          "char": "🤵‍♂",
+          "char": "🤵‍♂️",
           "name": "man in tuxedo",
           "keywords": [
             "formal",
@@ -3364,7 +3364,7 @@
           "hasSkins": true
         },
         {
-          "char": "🤵‍♀",
+          "char": "🤵‍♀️",
           "name": "woman in tuxedo",
           "keywords": [
             "formal",
@@ -3384,7 +3384,7 @@
           "hasSkins": true
         },
         {
-          "char": "👰‍♂",
+          "char": "👰‍♂️",
           "name": "man with veil",
           "keywords": [
             "wedding",
@@ -3393,7 +3393,7 @@
           "hasSkins": true
         },
         {
-          "char": "👰‍♀",
+          "char": "👰‍♀️",
           "name": "woman with veil",
           "keywords": [
             "wedding",
@@ -3518,7 +3518,7 @@
           "hasSkins": true
         },
         {
-          "char": "🦸‍♂",
+          "char": "🦸‍♂️",
           "name": "man superhero",
           "keywords": [
             "male",
@@ -3529,7 +3529,7 @@
           "hasSkins": true
         },
         {
-          "char": "🦸‍♀",
+          "char": "🦸‍♀️",
           "name": "woman superhero",
           "keywords": [
             "female",
@@ -3548,7 +3548,7 @@
           "hasSkins": true
         },
         {
-          "char": "🦹‍♂",
+          "char": "🦹‍♂️",
           "name": "man supervillain",
           "keywords": [
             "male",
@@ -3561,7 +3561,7 @@
           "hasSkins": true
         },
         {
-          "char": "🦹‍♀",
+          "char": "🦹‍♀️",
           "name": "woman supervillain",
           "keywords": [
             "female",
@@ -3582,7 +3582,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧙‍♂",
+          "char": "🧙‍♂️",
           "name": "man mage",
           "keywords": [
             "male",
@@ -3591,7 +3591,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧙‍♀",
+          "char": "🧙‍♀️",
           "name": "woman mage",
           "keywords": [
             "female",
@@ -3609,7 +3609,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧚‍♂",
+          "char": "🧚‍♂️",
           "name": "man fairy",
           "keywords": [
             "male"
@@ -3617,7 +3617,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧚‍♀",
+          "char": "🧚‍♀️",
           "name": "woman fairy",
           "keywords": [
             "female"
@@ -3634,7 +3634,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧛‍♂",
+          "char": "🧛‍♂️",
           "name": "man vampire",
           "keywords": [
             "male",
@@ -3643,7 +3643,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧛‍♀",
+          "char": "🧛‍♀️",
           "name": "woman vampire",
           "keywords": [
             "female"
@@ -3659,7 +3659,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧜‍♂",
+          "char": "🧜‍♂️",
           "name": "merman",
           "keywords": [
             "man",
@@ -3669,7 +3669,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧜‍♀",
+          "char": "🧜‍♀️",
           "name": "mermaid",
           "keywords": [
             "woman",
@@ -3688,7 +3688,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧝‍♂",
+          "char": "🧝‍♂️",
           "name": "man elf",
           "keywords": [
             "male"
@@ -3696,7 +3696,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧝‍♀",
+          "char": "🧝‍♀️",
           "name": "woman elf",
           "keywords": [
             "female"
@@ -3713,7 +3713,7 @@
           "hasSkins": false
         },
         {
-          "char": "🧞‍♂",
+          "char": "🧞‍♂️",
           "name": "man genie",
           "keywords": [
             "male"
@@ -3721,7 +3721,7 @@
           "hasSkins": false
         },
         {
-          "char": "🧞‍♀",
+          "char": "🧞‍♀️",
           "name": "woman genie",
           "keywords": [
             "female"
@@ -3737,7 +3737,7 @@
           "hasSkins": false
         },
         {
-          "char": "🧟‍♂",
+          "char": "🧟‍♂️",
           "name": "man zombie",
           "keywords": [
             "male",
@@ -3749,7 +3749,7 @@
           "hasSkins": false
         },
         {
-          "char": "🧟‍♀",
+          "char": "🧟‍♀️",
           "name": "woman zombie",
           "keywords": [
             "female",
@@ -3779,7 +3779,7 @@
           "hasSkins": true
         },
         {
-          "char": "💆‍♂",
+          "char": "💆‍♂️",
           "name": "man getting massage",
           "keywords": [
             "getting-massage",
@@ -3790,7 +3790,7 @@
           "hasSkins": true
         },
         {
-          "char": "💆‍♀",
+          "char": "💆‍♀️",
           "name": "woman getting massage",
           "keywords": [
             "getting-massage",
@@ -3811,7 +3811,7 @@
           "hasSkins": true
         },
         {
-          "char": "💇‍♂",
+          "char": "💇‍♂️",
           "name": "man getting haircut",
           "keywords": [
             "getting-haircut",
@@ -3821,7 +3821,7 @@
           "hasSkins": true
         },
         {
-          "char": "💇‍♀",
+          "char": "💇‍♀️",
           "name": "woman getting haircut",
           "keywords": [
             "getting-haircut",
@@ -3841,7 +3841,7 @@
           "hasSkins": true
         },
         {
-          "char": "🚶‍♂",
+          "char": "🚶‍♂️",
           "name": "man walking",
           "keywords": [
             "human",
@@ -3851,7 +3851,7 @@
           "hasSkins": true
         },
         {
-          "char": "🚶‍♀",
+          "char": "🚶‍♀️",
           "name": "woman walking",
           "keywords": [
             "human",
@@ -3870,7 +3870,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧍‍♂",
+          "char": "🧍‍♂️",
           "name": "man standing",
           "keywords": [
             "still"
@@ -3878,7 +3878,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧍‍♀",
+          "char": "🧍‍♀️",
           "name": "woman standing",
           "keywords": [
             "still"
@@ -3895,7 +3895,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧎‍♂",
+          "char": "🧎‍♂️",
           "name": "man kneeling",
           "keywords": [
             "pray",
@@ -3904,7 +3904,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧎‍♀",
+          "char": "🧎‍♀️",
           "name": "woman kneeling",
           "keywords": [
             "respectful",
@@ -4004,7 +4004,7 @@
           "hasSkins": true
         },
         {
-          "char": "🏃‍♂",
+          "char": "🏃‍♂️",
           "name": "man running",
           "keywords": [
             "walking",
@@ -4014,7 +4014,7 @@
           "hasSkins": true
         },
         {
-          "char": "🏃‍♀",
+          "char": "🏃‍♀️",
           "name": "woman running",
           "keywords": [
             "walking",
@@ -4048,7 +4048,7 @@
           "hasSkins": true
         },
         {
-          "char": "🕴",
+          "char": "🕴️",
           "name": "person in suit levitating",
           "keywords": [
             "man",
@@ -4071,7 +4071,7 @@
           "hasSkins": false
         },
         {
-          "char": "👯‍♂",
+          "char": "👯‍♂️",
           "name": "men with bunny ears",
           "keywords": [
             "with-bunny-ears-partying",
@@ -4082,7 +4082,7 @@
           "hasSkins": false
         },
         {
-          "char": "👯‍♀",
+          "char": "👯‍♀️",
           "name": "women with bunny ears",
           "keywords": [
             "with-bunny-ears-partying",
@@ -4102,7 +4102,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧖‍♂",
+          "char": "🧖‍♂️",
           "name": "man in steamy room",
           "keywords": [
             "male",
@@ -4113,7 +4113,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧖‍♀",
+          "char": "🧖‍♀️",
           "name": "woman in steamy room",
           "keywords": [
             "female",
@@ -4132,7 +4132,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧗‍♂",
+          "char": "🧗‍♂️",
           "name": "man climbing",
           "keywords": [
             "sports",
@@ -4143,7 +4143,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧗‍♀",
+          "char": "🧗‍♀️",
           "name": "woman climbing",
           "keywords": [
             "sports",
@@ -4177,7 +4177,7 @@
           "hasSkins": true
         },
         {
-          "char": "⛷",
+          "char": "⛷️",
           "name": "skier",
           "keywords": [
             "sports",
@@ -4196,7 +4196,7 @@
           "hasSkins": true
         },
         {
-          "char": "🏌",
+          "char": "🏌️",
           "name": "person golfing",
           "keywords": [
             "golfer",
@@ -4206,7 +4206,7 @@
           "hasSkins": true
         },
         {
-          "char": "🏌️‍♂",
+          "char": "🏌️‍♂️",
           "name": "man golfing",
           "keywords": [
             "sport"
@@ -4214,7 +4214,7 @@
           "hasSkins": true
         },
         {
-          "char": "🏌️‍♀",
+          "char": "🏌️‍♀️",
           "name": "woman golfing",
           "keywords": [
             "sports",
@@ -4235,7 +4235,7 @@
           "hasSkins": true
         },
         {
-          "char": "🏄‍♂",
+          "char": "🏄‍♂️",
           "name": "man surfing",
           "keywords": [
             "sports",
@@ -4247,7 +4247,7 @@
           "hasSkins": true
         },
         {
-          "char": "🏄‍♀",
+          "char": "🏄‍♀️",
           "name": "woman surfing",
           "keywords": [
             "sports",
@@ -4272,7 +4272,7 @@
           "hasSkins": true
         },
         {
-          "char": "🚣‍♂",
+          "char": "🚣‍♂️",
           "name": "man rowing boat",
           "keywords": [
             "rowing-boat",
@@ -4284,7 +4284,7 @@
           "hasSkins": true
         },
         {
-          "char": "🚣‍♀",
+          "char": "🚣‍♀️",
           "name": "woman rowing boat",
           "keywords": [
             "rowing-boat",
@@ -4308,7 +4308,7 @@
           "hasSkins": true
         },
         {
-          "char": "🏊‍♂",
+          "char": "🏊‍♂️",
           "name": "man swimming",
           "keywords": [
             "sports",
@@ -4321,7 +4321,7 @@
           "hasSkins": true
         },
         {
-          "char": "🏊‍♀",
+          "char": "🏊‍♀️",
           "name": "woman swimming",
           "keywords": [
             "sports",
@@ -4335,7 +4335,7 @@
           "hasSkins": true
         },
         {
-          "char": "⛹",
+          "char": "⛹️",
           "name": "person bouncing ball",
           "keywords": [
             "with",
@@ -4345,7 +4345,7 @@
           "hasSkins": true
         },
         {
-          "char": "⛹️‍♂",
+          "char": "⛹️‍♂️",
           "name": "man bouncing ball",
           "keywords": [
             "bouncing-ball",
@@ -4354,7 +4354,7 @@
           "hasSkins": true
         },
         {
-          "char": "⛹️‍♀",
+          "char": "⛹️‍♀️",
           "name": "woman bouncing ball",
           "keywords": [
             "bouncing-ball",
@@ -4365,7 +4365,7 @@
           "hasSkins": true
         },
         {
-          "char": "🏋",
+          "char": "🏋️",
           "name": "person lifting weights",
           "keywords": [
             "weight",
@@ -4377,7 +4377,7 @@
           "hasSkins": true
         },
         {
-          "char": "🏋️‍♂",
+          "char": "🏋️‍♂️",
           "name": "man lifting weights",
           "keywords": [
             "lifting-weights",
@@ -4386,7 +4386,7 @@
           "hasSkins": true
         },
         {
-          "char": "🏋️‍♀",
+          "char": "🏋️‍♀️",
           "name": "woman lifting weights",
           "keywords": [
             "lifting-weights",
@@ -4409,7 +4409,7 @@
           "hasSkins": true
         },
         {
-          "char": "🚴‍♂",
+          "char": "🚴‍♂️",
           "name": "man biking",
           "keywords": [
             "sports",
@@ -4420,7 +4420,7 @@
           "hasSkins": true
         },
         {
-          "char": "🚴‍♀",
+          "char": "🚴‍♀️",
           "name": "woman biking",
           "keywords": [
             "sports",
@@ -4443,7 +4443,7 @@
           "hasSkins": true
         },
         {
-          "char": "🚵‍♂",
+          "char": "🚵‍♂️",
           "name": "man mountain biking",
           "keywords": [
             "mountain-biking",
@@ -4456,7 +4456,7 @@
           "hasSkins": true
         },
         {
-          "char": "🚵‍♀",
+          "char": "🚵‍♀️",
           "name": "woman mountain biking",
           "keywords": [
             "mountain-biking",
@@ -4481,7 +4481,7 @@
           "hasSkins": true
         },
         {
-          "char": "🤸‍♂",
+          "char": "🤸‍♂️",
           "name": "man cartwheeling",
           "keywords": [
             "gymnastics"
@@ -4489,7 +4489,7 @@
           "hasSkins": true
         },
         {
-          "char": "🤸‍♀",
+          "char": "🤸‍♀️",
           "name": "woman cartwheeling",
           "keywords": [
             "gymnastics"
@@ -4507,7 +4507,7 @@
           "hasSkins": false
         },
         {
-          "char": "🤼‍♂",
+          "char": "🤼‍♂️",
           "name": "men wrestling",
           "keywords": [
             "man",
@@ -4517,7 +4517,7 @@
           "hasSkins": false
         },
         {
-          "char": "🤼‍♀",
+          "char": "🤼‍♀️",
           "name": "women wrestling",
           "keywords": [
             "woman",
@@ -4537,7 +4537,7 @@
           "hasSkins": true
         },
         {
-          "char": "🤽‍♂",
+          "char": "🤽‍♂️",
           "name": "man playing water polo",
           "keywords": [
             "playing-water-polo",
@@ -4547,7 +4547,7 @@
           "hasSkins": true
         },
         {
-          "char": "🤽‍♀",
+          "char": "🤽‍♀️",
           "name": "woman playing water polo",
           "keywords": [
             "playing-water-polo",
@@ -4567,7 +4567,7 @@
           "hasSkins": true
         },
         {
-          "char": "🤾‍♂",
+          "char": "🤾‍♂️",
           "name": "man playing handball",
           "keywords": [
             "playing-handball",
@@ -4576,7 +4576,7 @@
           "hasSkins": true
         },
         {
-          "char": "🤾‍♀",
+          "char": "🤾‍♀️",
           "name": "woman playing handball",
           "keywords": [
             "playing-handball",
@@ -4595,7 +4595,7 @@
           "hasSkins": true
         },
         {
-          "char": "🤹‍♂",
+          "char": "🤹‍♂️",
           "name": "man juggling",
           "keywords": [
             "juggle",
@@ -4606,7 +4606,7 @@
           "hasSkins": true
         },
         {
-          "char": "🤹‍♀",
+          "char": "🤹‍♀️",
           "name": "woman juggling",
           "keywords": [
             "juggle",
@@ -4625,7 +4625,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧘‍♂",
+          "char": "🧘‍♂️",
           "name": "man in lotus position",
           "keywords": [
             "male",
@@ -4638,7 +4638,7 @@
           "hasSkins": true
         },
         {
-          "char": "🧘‍♀",
+          "char": "🧘‍♀️",
           "name": "woman in lotus position",
           "keywords": [
             "female",
@@ -5239,7 +5239,7 @@
           "hasSkins": false
         },
         {
-          "char": "🗣",
+          "char": "🗣️",
           "name": "speaking head",
           "keywords": [
             "in",
@@ -5553,7 +5553,7 @@
           "hasSkins": false
         },
         {
-          "char": "❣",
+          "char": "❣️",
           "name": "heart exclamation",
           "keywords": [
             "heavy",
@@ -5595,7 +5595,7 @@
           "hasSkins": false
         },
         {
-          "char": "❤",
+          "char": "❤️",
           "name": "red heart",
           "keywords": [
             "love",
@@ -5798,7 +5798,7 @@
           "hasSkins": false
         },
         {
-          "char": "🕳",
+          "char": "🕳️",
           "name": "hole",
           "keywords": [
             "embarrassing"
@@ -5818,7 +5818,7 @@
           "hasSkins": false
         },
         {
-          "char": "👁️‍🗨",
+          "char": "👁️‍🗨️",
           "name": "eye in speech bubble",
           "keywords": [
             "in-speech-bubble",
@@ -5827,7 +5827,7 @@
           "hasSkins": false
         },
         {
-          "char": "🗨",
+          "char": "🗨️",
           "name": "left speech bubble",
           "keywords": [
             "words",
@@ -5838,7 +5838,7 @@
           "hasSkins": false
         },
         {
-          "char": "🗯",
+          "char": "🗯️",
           "name": "right anger bubble",
           "keywords": [
             "caption",
@@ -6435,7 +6435,7 @@
           "hasSkins": false
         },
         {
-          "char": "🐿",
+          "char": "🐿️",
           "name": "chipmunk",
           "keywords": [
             "animal",
@@ -6486,7 +6486,7 @@
           "hasSkins": false
         },
         {
-          "char": "🐻‍❄",
+          "char": "🐻‍❄️",
           "name": "polar bear",
           "keywords": [
             "animal",
@@ -6662,7 +6662,7 @@
           "hasSkins": false
         },
         {
-          "char": "🕊",
+          "char": "🕊️",
           "name": "dove",
           "keywords": [
             "of",
@@ -7133,7 +7133,7 @@
           "hasSkins": false
         },
         {
-          "char": "🕷",
+          "char": "🕷️",
           "name": "spider",
           "keywords": [
             "animal",
@@ -7142,7 +7142,7 @@
           "hasSkins": false
         },
         {
-          "char": "🕸",
+          "char": "🕸️",
           "name": "spider web",
           "keywords": [
             "animal",
@@ -7241,7 +7241,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏵",
+          "char": "🏵️",
           "name": "rosette",
           "keywords": [
             "flower",
@@ -7410,7 +7410,7 @@
           "hasSkins": false
         },
         {
-          "char": "☘",
+          "char": "☘️",
           "name": "shamrock",
           "keywords": [
             "vegetable",
@@ -7741,7 +7741,7 @@
           "hasSkins": false
         },
         {
-          "char": "🌶",
+          "char": "🌶️",
           "name": "hot pepper",
           "keywords": [
             "food",
@@ -8864,7 +8864,7 @@
           "hasSkins": false
         },
         {
-          "char": "🍽",
+          "char": "🍽️",
           "name": "fork and knife with plate",
           "keywords": [
             "food",
@@ -9147,7 +9147,7 @@
           "hasSkins": false
         },
         {
-          "char": "🎗",
+          "char": "🎗️",
           "name": "reminder ribbon",
           "keywords": [
             "sports",
@@ -9158,7 +9158,7 @@
           "hasSkins": false
         },
         {
-          "char": "🎟",
+          "char": "🎟️",
           "name": "admission tickets",
           "keywords": [
             "sports",
@@ -9178,7 +9178,7 @@
           "hasSkins": false
         },
         {
-          "char": "🎖",
+          "char": "🎖️",
           "name": "military medal",
           "keywords": [
             "award",
@@ -9439,7 +9439,7 @@
           "hasSkins": false
         },
         {
-          "char": "⛸",
+          "char": "⛸️",
           "name": "ice skate",
           "keywords": [
             "sports"
@@ -9600,7 +9600,7 @@
           "hasSkins": false
         },
         {
-          "char": "🕹",
+          "char": "🕹️",
           "name": "joystick",
           "keywords": [
             "game",
@@ -9681,7 +9681,7 @@
           "hasSkins": false
         },
         {
-          "char": "♠",
+          "char": "♠️",
           "name": "spade suit",
           "keywords": [
             "spades",
@@ -9693,7 +9693,7 @@
           "hasSkins": false
         },
         {
-          "char": "♥",
+          "char": "♥️",
           "name": "heart suit",
           "keywords": [
             "hearts",
@@ -9705,7 +9705,7 @@
           "hasSkins": false
         },
         {
-          "char": "♦",
+          "char": "♦️",
           "name": "diamond suit",
           "keywords": [
             "diamonds",
@@ -9717,7 +9717,7 @@
           "hasSkins": false
         },
         {
-          "char": "♣",
+          "char": "♣️",
           "name": "club suit",
           "keywords": [
             "clubs",
@@ -9729,7 +9729,7 @@
           "hasSkins": false
         },
         {
-          "char": "♟",
+          "char": "♟️",
           "name": "chess pawn",
           "keywords": [
             "expendable"
@@ -9781,7 +9781,7 @@
           "hasSkins": false
         },
         {
-          "char": "🖼",
+          "char": "🖼️",
           "name": "framed picture",
           "keywords": [
             "frame",
@@ -9896,7 +9896,7 @@
           "hasSkins": false
         },
         {
-          "char": "🗺",
+          "char": "🗺️",
           "name": "world map",
           "keywords": [
             "location",
@@ -9926,7 +9926,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏔",
+          "char": "🏔️",
           "name": "snow-capped mountain",
           "keywords": [
             "snow",
@@ -9940,7 +9940,7 @@
           "hasSkins": false
         },
         {
-          "char": "⛰",
+          "char": "⛰️",
           "name": "mountain",
           "keywords": [
             "photo",
@@ -9971,7 +9971,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏕",
+          "char": "🏕️",
           "name": "camping",
           "keywords": [
             "photo",
@@ -9981,7 +9981,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏖",
+          "char": "🏖️",
           "name": "beach with umbrella",
           "keywords": [
             "weather",
@@ -9993,7 +9993,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏜",
+          "char": "🏜️",
           "name": "desert",
           "keywords": [
             "photo",
@@ -10003,7 +10003,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏝",
+          "char": "🏝️",
           "name": "desert island",
           "keywords": [
             "photo",
@@ -10013,7 +10013,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏞",
+          "char": "🏞️",
           "name": "national park",
           "keywords": [
             "photo",
@@ -10023,7 +10023,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏟",
+          "char": "🏟️",
           "name": "stadium",
           "keywords": [
             "photo",
@@ -10035,7 +10035,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏛",
+          "char": "🏛️",
           "name": "classical building",
           "keywords": [
             "art",
@@ -10045,7 +10045,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏗",
+          "char": "🏗️",
           "name": "building construction",
           "keywords": [
             "wip",
@@ -10090,7 +10090,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏘",
+          "char": "🏘️",
           "name": "houses",
           "keywords": [
             "house",
@@ -10100,7 +10100,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏚",
+          "char": "🏚️",
           "name": "derelict house",
           "keywords": [
             "building",
@@ -10337,7 +10337,7 @@
           "hasSkins": false
         },
         {
-          "char": "⛩",
+          "char": "⛩️",
           "name": "shinto shrine",
           "keywords": [
             "temple",
@@ -10397,7 +10397,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏙",
+          "char": "🏙️",
           "name": "cityscape",
           "keywords": [
             "photo",
@@ -10464,7 +10464,7 @@
           "hasSkins": false
         },
         {
-          "char": "♨",
+          "char": "♨️",
           "name": "hot springs",
           "keywords": [
             "hotsprings",
@@ -10842,7 +10842,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏎",
+          "char": "🏎️",
           "name": "racing car",
           "keywords": [
             "sports",
@@ -10854,7 +10854,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏍",
+          "char": "🏍️",
           "name": "motorcycle",
           "keywords": [
             "racing",
@@ -10948,7 +10948,7 @@
           "hasSkins": false
         },
         {
-          "char": "🛣",
+          "char": "🛣️",
           "name": "motorway",
           "keywords": [
             "road",
@@ -10959,7 +10959,7 @@
           "hasSkins": false
         },
         {
-          "char": "🛤",
+          "char": "🛤️",
           "name": "railway track",
           "keywords": [
             "train",
@@ -10968,7 +10968,7 @@
           "hasSkins": false
         },
         {
-          "char": "🛢",
+          "char": "🛢️",
           "name": "oil drum",
           "keywords": [
             "barrell"
@@ -11105,7 +11105,7 @@
           "hasSkins": false
         },
         {
-          "char": "🛳",
+          "char": "🛳️",
           "name": "passenger ship",
           "keywords": [
             "yacht",
@@ -11115,7 +11115,7 @@
           "hasSkins": false
         },
         {
-          "char": "⛴",
+          "char": "⛴️",
           "name": "ferry",
           "keywords": [
             "boat",
@@ -11125,7 +11125,7 @@
           "hasSkins": false
         },
         {
-          "char": "🛥",
+          "char": "🛥️",
           "name": "motor boat",
           "keywords": [
             "ship"
@@ -11143,7 +11143,7 @@
           "hasSkins": false
         },
         {
-          "char": "✈",
+          "char": "✈️",
           "name": "airplane",
           "keywords": [
             "vehicle",
@@ -11154,7 +11154,7 @@
           "hasSkins": false
         },
         {
-          "char": "🛩",
+          "char": "🛩️",
           "name": "small airplane",
           "keywords": [
             "flight",
@@ -11247,7 +11247,7 @@
           "hasSkins": false
         },
         {
-          "char": "🛰",
+          "char": "🛰️",
           "name": "satellite",
           "keywords": [
             "communication",
@@ -11284,7 +11284,7 @@
           "hasSkins": false
         },
         {
-          "char": "🛎",
+          "char": "🛎️",
           "name": "bellhop bell",
           "keywords": [
             "service"
@@ -11346,7 +11346,7 @@
           "hasSkins": false
         },
         {
-          "char": "⏱",
+          "char": "⏱️",
           "name": "stopwatch",
           "keywords": [
             "time",
@@ -11355,7 +11355,7 @@
           "hasSkins": false
         },
         {
-          "char": "⏲",
+          "char": "⏲️",
           "name": "timer clock",
           "keywords": [
             "alarm"
@@ -11363,7 +11363,7 @@
           "hasSkins": false
         },
         {
-          "char": "🕰",
+          "char": "🕰️",
           "name": "mantelpiece clock",
           "keywords": [
             "time"
@@ -11993,7 +11993,7 @@
           "hasSkins": false
         },
         {
-          "char": "🌡",
+          "char": "🌡️",
           "name": "thermometer",
           "keywords": [
             "weather",
@@ -12004,7 +12004,7 @@
           "hasSkins": false
         },
         {
-          "char": "☀",
+          "char": "☀️",
           "name": "sun",
           "keywords": [
             "sunny",
@@ -12093,7 +12093,7 @@
           "hasSkins": false
         },
         {
-          "char": "☁",
+          "char": "☁️",
           "name": "cloud",
           "keywords": [
             "weather",
@@ -12117,7 +12117,7 @@
           "hasSkins": false
         },
         {
-          "char": "⛈",
+          "char": "⛈️",
           "name": "cloud with lightning and rain",
           "keywords": [
             "thunder",
@@ -12126,7 +12126,7 @@
           "hasSkins": false
         },
         {
-          "char": "🌤",
+          "char": "🌤️",
           "name": "sun behind small cloud",
           "keywords": [
             "mostly",
@@ -12136,7 +12136,7 @@
           "hasSkins": false
         },
         {
-          "char": "🌥",
+          "char": "🌥️",
           "name": "sun behind large cloud",
           "keywords": [
             "barely",
@@ -12146,7 +12146,7 @@
           "hasSkins": false
         },
         {
-          "char": "🌦",
+          "char": "🌦️",
           "name": "sun behind rain cloud",
           "keywords": [
             "partly",
@@ -12156,7 +12156,7 @@
           "hasSkins": false
         },
         {
-          "char": "🌧",
+          "char": "🌧️",
           "name": "cloud with rain",
           "keywords": [
             "weather"
@@ -12164,7 +12164,7 @@
           "hasSkins": false
         },
         {
-          "char": "🌨",
+          "char": "🌨️",
           "name": "cloud with snow",
           "keywords": [
             "weather"
@@ -12172,7 +12172,7 @@
           "hasSkins": false
         },
         {
-          "char": "🌩",
+          "char": "🌩️",
           "name": "cloud with lightning",
           "keywords": [
             "weather",
@@ -12181,7 +12181,7 @@
           "hasSkins": false
         },
         {
-          "char": "🌪",
+          "char": "🌪️",
           "name": "tornado",
           "keywords": [
             "cloud",
@@ -12192,7 +12192,7 @@
           "hasSkins": false
         },
         {
-          "char": "🌫",
+          "char": "🌫️",
           "name": "fog",
           "keywords": [
             "weather"
@@ -12200,7 +12200,7 @@
           "hasSkins": false
         },
         {
-          "char": "🌬",
+          "char": "🌬️",
           "name": "wind face",
           "keywords": [
             "blowing",
@@ -12252,7 +12252,7 @@
           "hasSkins": false
         },
         {
-          "char": "☂",
+          "char": "☂️",
           "name": "umbrella",
           "keywords": [
             "weather",
@@ -12271,7 +12271,7 @@
           "hasSkins": false
         },
         {
-          "char": "⛱",
+          "char": "⛱️",
           "name": "umbrella on ground",
           "keywords": [
             "weather",
@@ -12293,7 +12293,7 @@
           "hasSkins": false
         },
         {
-          "char": "❄",
+          "char": "❄️",
           "name": "snowflake",
           "keywords": [
             "winter",
@@ -12306,7 +12306,7 @@
           "hasSkins": false
         },
         {
-          "char": "☃",
+          "char": "☃️",
           "name": "snowman",
           "keywords": [
             "winter",
@@ -12334,7 +12334,7 @@
           "hasSkins": false
         },
         {
-          "char": "☄",
+          "char": "☄️",
           "name": "comet",
           "keywords": [
             "space"
@@ -12395,7 +12395,7 @@
           "hasSkins": false
         },
         {
-          "char": "🕶",
+          "char": "🕶️",
           "name": "sunglasses",
           "keywords": [
             "dark",
@@ -12634,7 +12634,7 @@
           "hasSkins": false
         },
         {
-          "char": "🛍",
+          "char": "🛍️",
           "name": "shopping bags",
           "keywords": [
             "mall",
@@ -12837,7 +12837,7 @@
           "hasSkins": false
         },
         {
-          "char": "⛑",
+          "char": "⛑️",
           "name": "rescue worker’s helmet",
           "keywords": [
             "with",
@@ -13026,7 +13026,7 @@
           "hasSkins": false
         },
         {
-          "char": "🎙",
+          "char": "🎙️",
           "name": "studio microphone",
           "keywords": [
             "sing",
@@ -13037,7 +13037,7 @@
           "hasSkins": false
         },
         {
-          "char": "🎚",
+          "char": "🎚️",
           "name": "level slider",
           "keywords": [
             "scale"
@@ -13045,7 +13045,7 @@
           "hasSkins": false
         },
         {
-          "char": "🎛",
+          "char": "🎛️",
           "name": "control knobs",
           "keywords": [
             "dial"
@@ -13218,7 +13218,7 @@
           "hasSkins": false
         },
         {
-          "char": "☎",
+          "char": "☎️",
           "name": "telephone",
           "keywords": [
             "phone",
@@ -13298,7 +13298,7 @@
           "hasSkins": false
         },
         {
-          "char": "🖥",
+          "char": "🖥️",
           "name": "desktop computer",
           "keywords": [
             "technology",
@@ -13308,7 +13308,7 @@
           "hasSkins": false
         },
         {
-          "char": "🖨",
+          "char": "🖨️",
           "name": "printer",
           "keywords": [
             "paper",
@@ -13317,7 +13317,7 @@
           "hasSkins": false
         },
         {
-          "char": "⌨",
+          "char": "⌨️",
           "name": "keyboard",
           "keywords": [
             "technology",
@@ -13329,7 +13329,7 @@
           "hasSkins": false
         },
         {
-          "char": "🖱",
+          "char": "🖱️",
           "name": "computer mouse",
           "keywords": [
             "three",
@@ -13339,7 +13339,7 @@
           "hasSkins": false
         },
         {
-          "char": "🖲",
+          "char": "🖲️",
           "name": "trackball",
           "keywords": [
             "technology",
@@ -13412,7 +13412,7 @@
           "hasSkins": false
         },
         {
-          "char": "🎞",
+          "char": "🎞️",
           "name": "film frames",
           "keywords": [
             "movie"
@@ -13420,7 +13420,7 @@
           "hasSkins": false
         },
         {
-          "char": "📽",
+          "char": "📽️",
           "name": "film projector",
           "keywords": [
             "video",
@@ -13517,7 +13517,7 @@
           "hasSkins": false
         },
         {
-          "char": "🕯",
+          "char": "🕯️",
           "name": "candle",
           "keywords": [
             "fire",
@@ -13710,7 +13710,7 @@
           "hasSkins": false
         },
         {
-          "char": "🗞",
+          "char": "🗞️",
           "name": "rolled-up newspaper",
           "keywords": [
             "rolled",
@@ -13742,7 +13742,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏷",
+          "char": "🏷️",
           "name": "label",
           "keywords": [
             "sale",
@@ -13866,7 +13866,7 @@
           "hasSkins": false
         },
         {
-          "char": "✉",
+          "char": "✉️",
           "name": "envelope",
           "keywords": [
             "email",
@@ -13989,7 +13989,7 @@
           "hasSkins": false
         },
         {
-          "char": "🗳",
+          "char": "🗳️",
           "name": "ballot box with ballot",
           "keywords": [
             "election",
@@ -13998,7 +13998,7 @@
           "hasSkins": false
         },
         {
-          "char": "✏",
+          "char": "✏️",
           "name": "pencil",
           "keywords": [
             "pencil2",
@@ -14012,7 +14012,7 @@
           "hasSkins": false
         },
         {
-          "char": "✒",
+          "char": "✒️",
           "name": "black nib",
           "keywords": [
             "pen",
@@ -14023,7 +14023,7 @@
           "hasSkins": false
         },
         {
-          "char": "🖋",
+          "char": "🖋️",
           "name": "fountain pen",
           "keywords": [
             "lower",
@@ -14035,7 +14035,7 @@
           "hasSkins": false
         },
         {
-          "char": "🖊",
+          "char": "🖊️",
           "name": "pen",
           "keywords": [
             "lower",
@@ -14048,7 +14048,7 @@
           "hasSkins": false
         },
         {
-          "char": "🖌",
+          "char": "🖌️",
           "name": "paintbrush",
           "keywords": [
             "lower",
@@ -14060,7 +14060,7 @@
           "hasSkins": false
         },
         {
-          "char": "🖍",
+          "char": "🖍️",
           "name": "crayon",
           "keywords": [
             "lower",
@@ -14123,7 +14123,7 @@
           "hasSkins": false
         },
         {
-          "char": "🗂",
+          "char": "🗂️",
           "name": "card index dividers",
           "keywords": [
             "organizing",
@@ -14154,7 +14154,7 @@
           "hasSkins": false
         },
         {
-          "char": "🗒",
+          "char": "🗒️",
           "name": "spiral notepad",
           "keywords": [
             "note",
@@ -14165,7 +14165,7 @@
           "hasSkins": false
         },
         {
-          "char": "🗓",
+          "char": "🗓️",
           "name": "spiral calendar",
           "keywords": [
             "pad",
@@ -14274,7 +14274,7 @@
           "hasSkins": false
         },
         {
-          "char": "🖇",
+          "char": "🖇️",
           "name": "linked paperclips",
           "keywords": [
             "documents",
@@ -14309,7 +14309,7 @@
           "hasSkins": false
         },
         {
-          "char": "✂",
+          "char": "✂️",
           "name": "scissors",
           "keywords": [
             "stationery",
@@ -14318,7 +14318,7 @@
           "hasSkins": false
         },
         {
-          "char": "🗃",
+          "char": "🗃️",
           "name": "card file box",
           "keywords": [
             "business",
@@ -14327,7 +14327,7 @@
           "hasSkins": false
         },
         {
-          "char": "🗄",
+          "char": "🗄️",
           "name": "file cabinet",
           "keywords": [
             "filing",
@@ -14336,7 +14336,7 @@
           "hasSkins": false
         },
         {
-          "char": "🗑",
+          "char": "🗑️",
           "name": "wastebasket",
           "keywords": [
             "bin",
@@ -14401,7 +14401,7 @@
           "hasSkins": false
         },
         {
-          "char": "🗝",
+          "char": "🗝️",
           "name": "old key",
           "keywords": [
             "lock",
@@ -14431,7 +14431,7 @@
           "hasSkins": false
         },
         {
-          "char": "⛏",
+          "char": "⛏️",
           "name": "pick",
           "keywords": [
             "tools",
@@ -14440,7 +14440,7 @@
           "hasSkins": false
         },
         {
-          "char": "⚒",
+          "char": "⚒️",
           "name": "hammer and pick",
           "keywords": [
             "tools",
@@ -14450,7 +14450,7 @@
           "hasSkins": false
         },
         {
-          "char": "🛠",
+          "char": "🛠️",
           "name": "hammer and wrench",
           "keywords": [
             "tools",
@@ -14460,7 +14460,7 @@
           "hasSkins": false
         },
         {
-          "char": "🗡",
+          "char": "🗡️",
           "name": "dagger",
           "keywords": [
             "knife",
@@ -14469,7 +14469,7 @@
           "hasSkins": false
         },
         {
-          "char": "⚔",
+          "char": "⚔️",
           "name": "crossed swords",
           "keywords": [
             "weapon"
@@ -14504,7 +14504,7 @@
           "hasSkins": false
         },
         {
-          "char": "🛡",
+          "char": "🛡️",
           "name": "shield",
           "keywords": [
             "protection",
@@ -14552,7 +14552,7 @@
           "hasSkins": false
         },
         {
-          "char": "⚙",
+          "char": "⚙️",
           "name": "gear",
           "keywords": [
             "cog"
@@ -14560,7 +14560,7 @@
           "hasSkins": false
         },
         {
-          "char": "🗜",
+          "char": "🗜️",
           "name": "clamp",
           "keywords": [
             "compression",
@@ -14569,7 +14569,7 @@
           "hasSkins": false
         },
         {
-          "char": "⚖",
+          "char": "⚖️",
           "name": "balance scale",
           "keywords": [
             "scales",
@@ -14598,7 +14598,7 @@
           "hasSkins": false
         },
         {
-          "char": "⛓",
+          "char": "⛓️",
           "name": "chains",
           "keywords": [
             "lock",
@@ -14644,7 +14644,7 @@
           "hasSkins": false
         },
         {
-          "char": "⚗",
+          "char": "⚗️",
           "name": "alembic",
           "keywords": [
             "distilling",
@@ -14830,7 +14830,7 @@
           "hasSkins": false
         },
         {
-          "char": "🛏",
+          "char": "🛏️",
           "name": "bed",
           "keywords": [
             "sleep",
@@ -14839,7 +14839,7 @@
           "hasSkins": false
         },
         {
-          "char": "🛋",
+          "char": "🛋️",
           "name": "couch and lamp",
           "keywords": [
             "read",
@@ -15032,7 +15032,7 @@
           "hasSkins": false
         },
         {
-          "char": "⚰",
+          "char": "⚰️",
           "name": "coffin",
           "keywords": [
             "vampire",
@@ -15059,7 +15059,7 @@
           "hasSkins": false
         },
         {
-          "char": "⚱",
+          "char": "⚱️",
           "name": "funeral urn",
           "keywords": [
             "dead",
@@ -15286,7 +15286,7 @@
           "hasSkins": false
         },
         {
-          "char": "⚠",
+          "char": "⚠️",
           "name": "warning",
           "keywords": [
             "exclamation",
@@ -15427,7 +15427,7 @@
           "hasSkins": false
         },
         {
-          "char": "☢",
+          "char": "☢️",
           "name": "radioactive",
           "keywords": [
             "sign",
@@ -15437,7 +15437,7 @@
           "hasSkins": false
         },
         {
-          "char": "☣",
+          "char": "☣️",
           "name": "biohazard",
           "keywords": [
             "sign",
@@ -15446,7 +15446,7 @@
           "hasSkins": false
         },
         {
-          "char": "⬆",
+          "char": "⬆️",
           "name": "up arrow",
           "keywords": [
             "blue",
@@ -15458,7 +15458,7 @@
           "hasSkins": false
         },
         {
-          "char": "↗",
+          "char": "↗️",
           "name": "up-right arrow",
           "keywords": [
             "upper",
@@ -15474,7 +15474,7 @@
           "hasSkins": false
         },
         {
-          "char": "➡",
+          "char": "➡️",
           "name": "right arrow",
           "keywords": [
             "blue",
@@ -15484,7 +15484,7 @@
           "hasSkins": false
         },
         {
-          "char": "↘",
+          "char": "↘️",
           "name": "south east arrow",
           "keywords": [
             "lower",
@@ -15499,7 +15499,7 @@
           "hasSkins": false
         },
         {
-          "char": "⬇",
+          "char": "⬇️",
           "name": "down arrow",
           "keywords": [
             "blue",
@@ -15510,7 +15510,7 @@
           "hasSkins": false
         },
         {
-          "char": "↙",
+          "char": "↙️",
           "name": "down-left arrow",
           "keywords": [
             "lower",
@@ -15525,7 +15525,7 @@
           "hasSkins": false
         },
         {
-          "char": "⬅",
+          "char": "⬅️",
           "name": "left arrow",
           "keywords": [
             "blue",
@@ -15536,7 +15536,7 @@
           "hasSkins": false
         },
         {
-          "char": "↖",
+          "char": "↖️",
           "name": "up-left arrow",
           "keywords": [
             "upper",
@@ -15552,7 +15552,7 @@
           "hasSkins": false
         },
         {
-          "char": "↕",
+          "char": "↕️",
           "name": "up down arrow",
           "keywords": [
             "blue",
@@ -15564,7 +15564,7 @@
           "hasSkins": false
         },
         {
-          "char": "↔",
+          "char": "↔️",
           "name": "left right arrow",
           "keywords": [
             "shape",
@@ -15575,7 +15575,7 @@
           "hasSkins": false
         },
         {
-          "char": "↩",
+          "char": "↩️",
           "name": "right arrow curving left",
           "keywords": [
             "leftwards",
@@ -15591,7 +15591,7 @@
           "hasSkins": false
         },
         {
-          "char": "↪",
+          "char": "↪️",
           "name": "left arrow curving right",
           "keywords": [
             "hook",
@@ -15604,7 +15604,7 @@
           "hasSkins": false
         },
         {
-          "char": "⤴",
+          "char": "⤴️",
           "name": "right arrow curving up",
           "keywords": [
             "heading",
@@ -15616,7 +15616,7 @@
           "hasSkins": false
         },
         {
-          "char": "⤵",
+          "char": "⤵️",
           "name": "right arrow curving down",
           "keywords": [
             "heading",
@@ -15705,7 +15705,7 @@
           "hasSkins": false
         },
         {
-          "char": "⚛",
+          "char": "⚛️",
           "name": "atom symbol",
           "keywords": [
             "science",
@@ -15715,7 +15715,7 @@
           "hasSkins": false
         },
         {
-          "char": "🕉",
+          "char": "🕉️",
           "name": "om",
           "keywords": [
             "symbol",
@@ -15727,7 +15727,7 @@
           "hasSkins": false
         },
         {
-          "char": "✡",
+          "char": "✡️",
           "name": "star of david",
           "keywords": [
             "judaism"
@@ -15735,7 +15735,7 @@
           "hasSkins": false
         },
         {
-          "char": "☸",
+          "char": "☸️",
           "name": "wheel of dharma",
           "keywords": [
             "hinduism",
@@ -15746,7 +15746,7 @@
           "hasSkins": false
         },
         {
-          "char": "☯",
+          "char": "☯️",
           "name": "yin yang",
           "keywords": [
             "balance"
@@ -15754,7 +15754,7 @@
           "hasSkins": false
         },
         {
-          "char": "✝",
+          "char": "✝️",
           "name": "latin cross",
           "keywords": [
             "christianity"
@@ -15762,7 +15762,7 @@
           "hasSkins": false
         },
         {
-          "char": "☦",
+          "char": "☦️",
           "name": "orthodox cross",
           "keywords": [
             "suppedaneum",
@@ -15771,7 +15771,7 @@
           "hasSkins": false
         },
         {
-          "char": "☪",
+          "char": "☪️",
           "name": "star and crescent",
           "keywords": [
             "islam"
@@ -15779,7 +15779,7 @@
           "hasSkins": false
         },
         {
-          "char": "☮",
+          "char": "☮️",
           "name": "peace symbol",
           "keywords": [
             "hippie"
@@ -16014,7 +16014,7 @@
           "hasSkins": false
         },
         {
-          "char": "▶",
+          "char": "▶️",
           "name": "play button",
           "keywords": [
             "arrow",
@@ -16041,7 +16041,7 @@
           "hasSkins": false
         },
         {
-          "char": "⏭",
+          "char": "⏭️",
           "name": "next track button",
           "keywords": [
             "black",
@@ -16059,7 +16059,7 @@
           "hasSkins": false
         },
         {
-          "char": "⏯",
+          "char": "⏯️",
           "name": "play or pause button",
           "keywords": [
             "black",
@@ -16076,7 +16076,7 @@
           "hasSkins": false
         },
         {
-          "char": "◀",
+          "char": "◀️",
           "name": "reverse button",
           "keywords": [
             "arrow",
@@ -16100,7 +16100,7 @@
           "hasSkins": false
         },
         {
-          "char": "⏮",
+          "char": "⏮️",
           "name": "last track button",
           "keywords": [
             "black",
@@ -16173,7 +16173,7 @@
           "hasSkins": false
         },
         {
-          "char": "⏸",
+          "char": "⏸️",
           "name": "pause button",
           "keywords": [
             "double",
@@ -16185,7 +16185,7 @@
           "hasSkins": false
         },
         {
-          "char": "⏹",
+          "char": "⏹️",
           "name": "stop button",
           "keywords": [
             "black",
@@ -16196,7 +16196,7 @@
           "hasSkins": false
         },
         {
-          "char": "⏺",
+          "char": "⏺️",
           "name": "record button",
           "keywords": [
             "black",
@@ -16208,7 +16208,7 @@
           "hasSkins": false
         },
         {
-          "char": "⏏",
+          "char": "⏏️",
           "name": "eject button",
           "keywords": [
             "blue",
@@ -16306,7 +16306,7 @@
           "hasSkins": false
         },
         {
-          "char": "♀",
+          "char": "♀️",
           "name": "female sign",
           "keywords": [
             "woman",
@@ -16317,7 +16317,7 @@
           "hasSkins": false
         },
         {
-          "char": "♂",
+          "char": "♂️",
           "name": "male sign",
           "keywords": [
             "man",
@@ -16327,7 +16327,7 @@
           "hasSkins": false
         },
         {
-          "char": "⚧",
+          "char": "⚧️",
           "name": "transgender symbol",
           "keywords": [
             "lgbtq"
@@ -16335,7 +16335,7 @@
           "hasSkins": false
         },
         {
-          "char": "✖",
+          "char": "✖️",
           "name": "multiply",
           "keywords": [
             "heavy",
@@ -16395,7 +16395,7 @@
           "hasSkins": false
         },
         {
-          "char": "♾",
+          "char": "♾️",
           "name": "infinity",
           "keywords": [
             "forever"
@@ -16403,7 +16403,7 @@
           "hasSkins": false
         },
         {
-          "char": "‼",
+          "char": "‼️",
           "name": "double exclamation mark",
           "keywords": [
             "bangbang",
@@ -16412,7 +16412,7 @@
           "hasSkins": false
         },
         {
-          "char": "⁉",
+          "char": "⁉️",
           "name": "exclamation question mark",
           "keywords": [
             "interrobang",
@@ -16470,7 +16470,7 @@
           "hasSkins": false
         },
         {
-          "char": "〰",
+          "char": "〰️",
           "name": "wavy dash",
           "keywords": [
             "draw",
@@ -16506,7 +16506,7 @@
           "hasSkins": false
         },
         {
-          "char": "⚕",
+          "char": "⚕️",
           "name": "medical symbol",
           "keywords": [
             "staff",
@@ -16518,7 +16518,7 @@
           "hasSkins": false
         },
         {
-          "char": "♻",
+          "char": "♻️",
           "name": "recycling symbol",
           "keywords": [
             "recycle",
@@ -16530,7 +16530,7 @@
           "hasSkins": false
         },
         {
-          "char": "⚜",
+          "char": "⚜️",
           "name": "fleur-de-lis",
           "keywords": [
             "fleur",
@@ -16594,7 +16594,7 @@
           "hasSkins": false
         },
         {
-          "char": "☑",
+          "char": "☑️",
           "name": "check box with check",
           "keywords": [
             "ballot",
@@ -16611,7 +16611,7 @@
           "hasSkins": false
         },
         {
-          "char": "✔",
+          "char": "✔️",
           "name": "check mark",
           "keywords": [
             "heavy",
@@ -16671,7 +16671,7 @@
           "hasSkins": false
         },
         {
-          "char": "〽",
+          "char": "〽️",
           "name": "part alternation mark",
           "keywords": [
             "graph",
@@ -16684,7 +16684,7 @@
           "hasSkins": false
         },
         {
-          "char": "✳",
+          "char": "✳️",
           "name": "eight spoked asterisk",
           "keywords": [
             "star",
@@ -16695,7 +16695,7 @@
           "hasSkins": false
         },
         {
-          "char": "✴",
+          "char": "✴️",
           "name": "eight-pointed star",
           "keywords": [
             "eight",
@@ -16709,7 +16709,7 @@
           "hasSkins": false
         },
         {
-          "char": "❇",
+          "char": "❇️",
           "name": "sparkle",
           "keywords": [
             "stars",
@@ -16722,7 +16722,7 @@
           "hasSkins": false
         },
         {
-          "char": "©",
+          "char": "©️",
           "name": "copyright",
           "keywords": [
             "ip",
@@ -16734,7 +16734,7 @@
           "hasSkins": false
         },
         {
-          "char": "®",
+          "char": "®️",
           "name": "registered",
           "keywords": [
             "alphabet",
@@ -16743,7 +16743,7 @@
           "hasSkins": false
         },
         {
-          "char": "™",
+          "char": "™️",
           "name": "trade mark",
           "keywords": [
             "tm",
@@ -16968,7 +16968,7 @@
           "hasSkins": false
         },
         {
-          "char": "🅰",
+          "char": "🅰️",
           "name": "a button (blood type)",
           "keywords": [
             "red",
@@ -16990,7 +16990,7 @@
           "hasSkins": false
         },
         {
-          "char": "🅱",
+          "char": "🅱️",
           "name": "b button (blood type)",
           "keywords": [
             "red",
@@ -17032,7 +17032,7 @@
           "hasSkins": false
         },
         {
-          "char": "ℹ",
+          "char": "ℹ️",
           "name": "information",
           "keywords": [
             "source",
@@ -17054,7 +17054,7 @@
           "hasSkins": false
         },
         {
-          "char": "Ⓜ",
+          "char": "Ⓜ️",
           "name": "circled m",
           "keywords": [
             "alphabet",
@@ -17088,7 +17088,7 @@
           "hasSkins": false
         },
         {
-          "char": "🅾",
+          "char": "🅾️",
           "name": "o button (blood type)",
           "keywords": [
             "o2",
@@ -17112,7 +17112,7 @@
           "hasSkins": false
         },
         {
-          "char": "🅿",
+          "char": "🅿️",
           "name": "p button",
           "keywords": [
             "parking",
@@ -17173,7 +17173,7 @@
           "hasSkins": false
         },
         {
-          "char": "🈂",
+          "char": "🈂️",
           "name": "squared katakana sa",
           "keywords": [
             "japanese",
@@ -17186,7 +17186,7 @@
           "hasSkins": false
         },
         {
-          "char": "🈷",
+          "char": "🈷️",
           "name": "japanese “monthly amount” button",
           "keywords": [
             "u6708",
@@ -17357,7 +17357,7 @@
           "hasSkins": false
         },
         {
-          "char": "㊗",
+          "char": "㊗️",
           "name": "circled ideograph congratulation",
           "keywords": [
             "congratulations",
@@ -17371,7 +17371,7 @@
           "hasSkins": false
         },
         {
-          "char": "㊙",
+          "char": "㊙️",
           "name": "circled ideograph secret",
           "keywords": [
             "japanese",
@@ -17580,7 +17580,7 @@
           "hasSkins": false
         },
         {
-          "char": "◼",
+          "char": "◼️",
           "name": "black medium square",
           "keywords": [
             "shape",
@@ -17590,7 +17590,7 @@
           "hasSkins": false
         },
         {
-          "char": "◻",
+          "char": "◻️",
           "name": "white medium square",
           "keywords": [
             "shape",
@@ -17621,7 +17621,7 @@
           "hasSkins": false
         },
         {
-          "char": "▪",
+          "char": "▪️",
           "name": "black small square",
           "keywords": [
             "shape",
@@ -17630,7 +17630,7 @@
           "hasSkins": false
         },
         {
-          "char": "▫",
+          "char": "▫️",
           "name": "white small square",
           "keywords": [
             "shape",
@@ -20667,7 +20667,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏴‍☠",
+          "char": "🏴‍☠️",
           "name": "pirate flag",
           "keywords": [
             "skull",
@@ -20706,7 +20706,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏳️‍⚧",
+          "char": "🏳️‍⚧️",
           "name": "transgender flag",
           "keywords": [
             "lgbtq"
@@ -20747,7 +20747,7 @@
           "hasSkins": false
         },
         {
-          "char": "🏳",
+          "char": "🏳️",
           "name": "white flag",
           "keywords": [
             "waving",
@@ -20765,32 +20765,32 @@
     }
   ],
   "skinToneCapable": [
-    "☝",
-    "⛹",
-    "⛹️‍♀",
-    "⛹️‍♂",
+    "☝️",
+    "⛹️",
+    "⛹️‍♀️",
+    "⛹️‍♂️",
     "✊",
     "✋",
-    "✌",
-    "✍",
+    "✌️",
+    "✍️",
     "🎅",
     "🏂",
     "🏃",
-    "🏃‍♀",
-    "🏃‍♂",
+    "🏃‍♀️",
+    "🏃‍♂️",
     "🏄",
-    "🏄‍♀",
-    "🏄‍♂",
+    "🏄‍♀️",
+    "🏄‍♂️",
     "🏇",
     "🏊",
-    "🏊‍♀",
-    "🏊‍♂",
-    "🏋",
-    "🏋️‍♀",
-    "🏋️‍♂",
-    "🏌",
-    "🏌️‍♀",
-    "🏌️‍♂",
+    "🏊‍♀️",
+    "🏊‍♂️",
+    "🏋️",
+    "🏋️‍♀️",
+    "🏋️‍♂️",
+    "🏌️",
+    "🏌️‍♀️",
+    "🏌️‍♂️",
     "👂",
     "👃",
     "👆",
@@ -20807,9 +20807,9 @@
     "👦",
     "👧",
     "👨",
-    "👨‍⚕",
-    "👨‍⚖",
-    "👨‍✈",
+    "👨‍⚕️",
+    "👨‍⚖️",
+    "👨‍✈️",
     "👨‍❤️‍👨",
     "👨‍❤️‍💋‍👨",
     "👨‍🌾",
@@ -20834,9 +20834,9 @@
     "👨‍🦼",
     "👨‍🦽",
     "👩",
-    "👩‍⚕",
-    "👩‍⚖",
-    "👩‍✈",
+    "👩‍⚕️",
+    "👩‍⚖️",
+    "👩‍✈️",
     "👩‍❤️‍👨",
     "👩‍❤️‍👩",
     "👩‍❤️‍💋‍👨",
@@ -20866,83 +20866,83 @@
     "👬",
     "👭",
     "👮",
-    "👮‍♀",
-    "👮‍♂",
+    "👮‍♀️",
+    "👮‍♂️",
     "👰",
-    "👰‍♀",
-    "👰‍♂",
+    "👰‍♀️",
+    "👰‍♂️",
     "👱",
-    "👱‍♀",
-    "👱‍♂",
+    "👱‍♀️",
+    "👱‍♂️",
     "👲",
     "👳",
-    "👳‍♀",
-    "👳‍♂",
+    "👳‍♀️",
+    "👳‍♂️",
     "👴",
     "👵",
     "👶",
     "👷",
-    "👷‍♀",
-    "👷‍♂",
+    "👷‍♀️",
+    "👷‍♂️",
     "👸",
     "👼",
     "💁",
-    "💁‍♀",
-    "💁‍♂",
+    "💁‍♀️",
+    "💁‍♂️",
     "💂",
-    "💂‍♀",
-    "💂‍♂",
+    "💂‍♀️",
+    "💂‍♂️",
     "💃",
     "💅",
     "💆",
-    "💆‍♀",
-    "💆‍♂",
+    "💆‍♀️",
+    "💆‍♂️",
     "💇",
-    "💇‍♀",
-    "💇‍♂",
+    "💇‍♀️",
+    "💇‍♂️",
     "💏",
     "💑",
     "💪",
-    "🕴",
-    "🕵",
-    "🕵️‍♀",
-    "🕵️‍♂",
+    "🕴️",
+    "🕵️",
+    "🕵️‍♀️",
+    "🕵️‍♂️",
     "🕺",
-    "🖐",
+    "🖐️",
     "🖕",
     "🖖",
     "🙅",
-    "🙅‍♀",
-    "🙅‍♂",
+    "🙅‍♀️",
+    "🙅‍♂️",
     "🙆",
-    "🙆‍♀",
-    "🙆‍♂",
+    "🙆‍♀️",
+    "🙆‍♂️",
     "🙇",
-    "🙇‍♀",
-    "🙇‍♂",
+    "🙇‍♀️",
+    "🙇‍♂️",
     "🙋",
-    "🙋‍♀",
-    "🙋‍♂",
+    "🙋‍♀️",
+    "🙋‍♂️",
     "🙌",
     "🙍",
-    "🙍‍♀",
-    "🙍‍♂",
+    "🙍‍♀️",
+    "🙍‍♂️",
     "🙎",
-    "🙎‍♀",
-    "🙎‍♂",
+    "🙎‍♀️",
+    "🙎‍♂️",
     "🙏",
     "🚣",
-    "🚣‍♀",
-    "🚣‍♂",
+    "🚣‍♀️",
+    "🚣‍♂️",
     "🚴",
-    "🚴‍♀",
-    "🚴‍♂",
+    "🚴‍♀️",
+    "🚴‍♂️",
     "🚵",
-    "🚵‍♀",
-    "🚵‍♂",
+    "🚵‍♀️",
+    "🚵‍♂️",
     "🚶",
-    "🚶‍♀",
-    "🚶‍♂",
+    "🚶‍♀️",
+    "🚶‍♂️",
     "🛀",
     "🛌",
     "🤌",
@@ -20956,55 +20956,55 @@
     "🤞",
     "🤟",
     "🤦",
-    "🤦‍♀",
-    "🤦‍♂",
+    "🤦‍♀️",
+    "🤦‍♂️",
     "🤰",
     "🤱",
     "🤲",
     "🤳",
     "🤴",
     "🤵",
-    "🤵‍♀",
-    "🤵‍♂",
+    "🤵‍♀️",
+    "🤵‍♂️",
     "🤶",
     "🤷",
-    "🤷‍♀",
-    "🤷‍♂",
+    "🤷‍♀️",
+    "🤷‍♂️",
     "🤸",
-    "🤸‍♀",
-    "🤸‍♂",
+    "🤸‍♀️",
+    "🤸‍♂️",
     "🤹",
-    "🤹‍♀",
-    "🤹‍♂",
+    "🤹‍♀️",
+    "🤹‍♂️",
     "🤽",
-    "🤽‍♀",
-    "🤽‍♂",
+    "🤽‍♀️",
+    "🤽‍♂️",
     "🤾",
-    "🤾‍♀",
-    "🤾‍♂",
+    "🤾‍♀️",
+    "🤾‍♂️",
     "🥷",
     "🦵",
     "🦶",
     "🦸",
-    "🦸‍♀",
-    "🦸‍♂",
+    "🦸‍♀️",
+    "🦸‍♂️",
     "🦹",
-    "🦹‍♀",
-    "🦹‍♂",
+    "🦹‍♀️",
+    "🦹‍♂️",
     "🦻",
     "🧍",
-    "🧍‍♀",
-    "🧍‍♂",
+    "🧍‍♀️",
+    "🧍‍♂️",
     "🧎",
-    "🧎‍♀",
-    "🧎‍♂",
+    "🧎‍♀️",
+    "🧎‍♂️",
     "🧏",
-    "🧏‍♀",
-    "🧏‍♂",
+    "🧏‍♀️",
+    "🧏‍♂️",
     "🧑",
-    "🧑‍⚕",
-    "🧑‍⚖",
-    "🧑‍✈",
+    "🧑‍⚕️",
+    "🧑‍⚖️",
+    "🧑‍✈️",
     "🧑‍🌾",
     "🧑‍🍳",
     "🧑‍🍼",
@@ -21031,33 +21031,33 @@
     "🧒",
     "🧓",
     "🧔",
-    "🧔‍♀",
-    "🧔‍♂",
+    "🧔‍♀️",
+    "🧔‍♂️",
     "🧕",
     "🧖",
-    "🧖‍♀",
-    "🧖‍♂",
+    "🧖‍♀️",
+    "🧖‍♂️",
     "🧗",
-    "🧗‍♀",
-    "🧗‍♂",
+    "🧗‍♀️",
+    "🧗‍♂️",
     "🧘",
-    "🧘‍♀",
-    "🧘‍♂",
+    "🧘‍♀️",
+    "🧘‍♂️",
     "🧙",
-    "🧙‍♀",
-    "🧙‍♂",
+    "🧙‍♀️",
+    "🧙‍♂️",
     "🧚",
-    "🧚‍♀",
-    "🧚‍♂",
+    "🧚‍♀️",
+    "🧚‍♂️",
     "🧛",
-    "🧛‍♀",
-    "🧛‍♂",
+    "🧛‍♀️",
+    "🧛‍♂️",
     "🧜",
-    "🧜‍♀",
-    "🧜‍♂",
+    "🧜‍♀️",
+    "🧜‍♂️",
     "🧝",
-    "🧝‍♀",
-    "🧝‍♂",
+    "🧝‍♀️",
+    "🧝‍♂️",
     "🫃",
     "🫄",
     "🫅",
