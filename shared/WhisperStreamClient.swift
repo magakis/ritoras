@@ -81,7 +81,7 @@ actor WhisperStreamClient {
         task = newTask
         newTask.resume()
 
-        FileLogger.shared.info(.network, "Connecting to WebSocket",
+        FileLogger.shared.debug(.network, "Connecting to WebSocket",
                                payload: ["url": url.absoluteString])
 
         try await withThrowingTaskGroup(of: Void.self) { group in
@@ -118,7 +118,7 @@ actor WhisperStreamClient {
                 try await Task.sleep(
                     nanoseconds: UInt64(SharedConfig.Defaults.streamWsConnectTimeout * 1_000_000_000)
                 )
-                FileLogger.shared.info(.network, "Connection timed out",
+                FileLogger.shared.debug(.network, "Connection timed out",
                                        payload: ["url": self.url.absoluteString,
                                                  "timeout": SharedConfig.Defaults.streamWsConnectTimeout])
                 throw WhisperError.timeout
@@ -140,7 +140,7 @@ actor WhisperStreamClient {
                 catch { await self.forceClose(); break }
             }
         }
-        FileLogger.shared.info(.network, "Keepalive loop started",
+        FileLogger.shared.debug(.network, "Keepalive loop started",
                                payload: ["interval": SharedConfig.Defaults.streamKeepaliveIntervalSeconds])
     }
 

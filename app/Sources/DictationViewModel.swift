@@ -494,7 +494,9 @@ final class DictationViewModel: ObservableObject {
         }
 
         var retryDelay: TimeInterval = 1.0
+        var round = 0
         while true {
+            round += 1
             var attemptedCount = 0
             for server in orderedServers {
                 guard !Task.isCancelled else { return }
@@ -527,13 +529,15 @@ final class DictationViewModel: ObservableObject {
                                                       "outcome": "failed",
                                                       "latencyMs": elapsed,
                                                       "error": error.localizedDescription,
-                                                      "attempt": attemptedCount])
+                                                      "attempt": attemptedCount,
+                                                      "round": round])
                     await candidate.disconnect()
                 }
             }
 
             FileLogger.shared.debug(.network, "Stream: connect round failed",
-                                    payload: ["attemptedCount": attemptedCount,
+                                    payload: ["round": round,
+                                              "attemptedCount": attemptedCount,
                                               "nextBackoffSeconds": retryDelay])
             try? await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
             if Task.isCancelled { return }
@@ -546,9 +550,11 @@ final class DictationViewModel: ObservableObject {
         sessionID: UUID,
         recorder: StreamingAudioRecorder
     ) async {
+        // Accept .transcribing for a late connection during stop()'s connect-grace
+        // window; identity checks and a nil client still protect this session.
         guard activeID == sessionID,
               streamRecorder === recorder,
-              phase == .recording,
+              (phase == .recording || phase == .transcribing),
               streamClient == nil else {
             await client.disconnect()
             return
