@@ -755,6 +755,7 @@ final class DictationViewModel: ObservableObject {
 
             guard let id = activeID else { return }
             let sessionRecorder = streamRecorder
+            let queueDepthAtStop = chunkSendQueue.depth
 
             let recordedDurationMs = recordingStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? 0
             FileLogger.shared.info(.transcription, "dictation stop (user requested)", payload: [
@@ -851,7 +852,11 @@ final class DictationViewModel: ObservableObject {
                             "stream stop: no transcription delivered this session — treating as failure",
                             payload: ["jobId": id.uuidString,
                                       "textLen": text.count,
-                                      "partialsReceived": transcriptionDeliveredThisSession])
+                                      "partialsReceived": transcriptionDeliveredThisSession,
+                                      "queueDepthAtStop": queueDepthAtStop,
+                                      "queueDrained": queueDrained,
+                                      "firstChunkSentMs": streamOffsetMs(from: firstChunkSentAt),
+                                      "firstPartialMs": streamOffsetMs(from: firstPartialReceivedAt)])
                         handleStreamTerminalFailure(
                             jobId: id,
                             error: "Nothing was heard. Try again.")
@@ -905,6 +910,17 @@ final class DictationViewModel: ObservableObject {
             guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
             streamClient = nil
             streamRecorder = nil
+
+            FileLogger.shared.info(.network, "Stream: stop summary", payload: [
+                "id": id.uuidString,
+                "recordedDurationMs": recordedDurationMs,
+                "chunksSent": chunksSentThisSession,
+                "connectOutcome": canStream ? "connected" : "failed",
+                "queueDepthAtStop": queueDepthAtStop,
+                "queueDrained": queueDrained,
+                "firstChunkSentMs": streamOffsetMs(from: firstChunkSentAt),
+                "firstPartialMs": streamOffsetMs(from: firstPartialReceivedAt)
+            ])
         }
     }
 
@@ -1149,6 +1165,11 @@ final class DictationViewModel: ObservableObject {
 
     // MARK: - Stream Chunk Queue Helpers
 
+    private func streamOffsetMs(from timestamp: Date?) -> Any {
+        guard let timestamp, let start = recordingStartTime else { return NSNull() }
+        return timestamp.timeIntervalSince(start) * 1000
+    }
+
     /// Background task that dequeues and sends chunks with unbounded retry
     /// while recording is active. Runs until the queue is empty AND recording
     /// has stopped (natural completion), or until cancelled.
@@ -1173,6 +1194,17 @@ final class DictationViewModel: ObservableObject {
                 do {
                     try await client.sendChunk(id: chunkId, samples: samples)
                     sent = true
+                    chunksSentThisSession += 1
+                    if firstChunkSentAt == nil {
+                        let sentAt = Date()
+                        firstChunkSentAt = sentAt
+                        let deltaMs = recordingStartTime.map {
+                            sentAt.timeIntervalSince($0) * 1000
+                        } ?? 0
+                        FileLogger.shared.info(.network, "Stream: first chunk sent",
+                                               payload: ["deltaMs": deltaMs,
+                                                         "chunkId": chunkId])
+                    }
                     if attempt > 0 {
                         FileLogger.shared.info(.network, "Chunk sent after retries",
                                                 payload: ["chunkId": chunkId, "attempts": attempt])
