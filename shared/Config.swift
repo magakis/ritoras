@@ -79,6 +79,8 @@ struct SharedConfig {
         static let streamVadMaxNoiseSecDefault: Double = 6.0
         /// WebSocket connection timeout.
         static let streamWsConnectTimeout: TimeInterval = 8.0
+        /// Maximum buffered stream audio duration before new chunks are dropped.
+        static let streamChunkBufferMaxSeconds: TimeInterval = 30.0
         /// How long to wait for a final transcription after the last audio chunk.
         static let streamFinalTimeout: TimeInterval = 30.0
         /// Application-level PING interval; must stay under nginx idle (~60s). Resets the server 600s recv timer and keeps NAT/nginx alive.

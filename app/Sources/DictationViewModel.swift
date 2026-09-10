@@ -8,22 +8,41 @@ import UIKit
 /// @unchecked Sendable because all access is serialized via internal NSLock.
 final class ChunkSendQueue: @unchecked Sendable {
     private var chunks: [(UInt32, [Float])] = []
+    private let maxBufferedSamples = Int(SharedConfig.Defaults.streamChunkBufferMaxSeconds * 16_000)
+    private var bufferedSamples = 0
+    private var droppedChunkCount = 0
+    private var _hasOverflowed = false
     private var recordingActive = false
     private let lock = NSLock()
 
     func enqueue(id: UInt32, samples: [Float]) {
         lock.lock(); defer { lock.unlock() }
+        if bufferedSamples + samples.count > maxBufferedSamples {
+            droppedChunkCount += 1
+            if !_hasOverflowed {
+                _hasOverflowed = true
+                FileLogger.shared.warn(.network, "Stream: chunk buffer overflow",
+                                        payload: ["droppedChunks": droppedChunkCount,
+                                                  "bufferedSamples": bufferedSamples,
+                                                  "maxBufferedSamples": maxBufferedSamples])
+            }
+            return
+        }
         chunks.append((id, samples))
+        bufferedSamples += samples.count
     }
 
     func dequeue() -> (UInt32, [Float])? {
         lock.lock(); defer { lock.unlock() }
         guard !chunks.isEmpty else { return nil }
-        return chunks.removeFirst()
+        let chunk = chunks.removeFirst()
+        bufferedSamples -= chunk.1.count
+        return chunk
     }
 
     var isEmpty: Bool { lock.lock(); defer { lock.unlock() }; return chunks.isEmpty }
     var depth: Int { lock.lock(); defer { lock.unlock() }; return chunks.count }
+    var hasOverflowed: Bool { lock.lock(); defer { lock.unlock() }; return _hasOverflowed }
     var isRecordingActive: Bool { lock.lock(); defer { lock.unlock() }; return recordingActive }
 
     func setRecordingActive(_ value: Bool) {
@@ -35,12 +54,18 @@ final class ChunkSendQueue: @unchecked Sendable {
     func resetForNewRecording() {
         lock.lock(); defer { lock.unlock() }
         chunks.removeAll()
+        bufferedSamples = 0
+        droppedChunkCount = 0
+        _hasOverflowed = false
     }
 
     /// Full reset including recordingActive (used by cancel).
     func clearAll() {
         lock.lock(); defer { lock.unlock() }
         chunks.removeAll()
+        bufferedSamples = 0
+        droppedChunkCount = 0
+        _hasOverflowed = false
         recordingActive = false
     }
 }
