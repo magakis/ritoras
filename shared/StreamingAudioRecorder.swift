@@ -603,11 +603,8 @@ actor StreamingAudioRecorder {
             case .inputRanDry:
                 statusChars.append("R")
                 break drainLoop
-            case .noDataNow:
-                statusChars.append("N")
-                break drainLoop
             case .endOfStream:
-                statusChars.append("E")
+                statusChars.append("S")
                 FileLogger.shared.debug(.audio, "converter returned unexpected endOfStream")
                 break drainLoop
             case .error:
