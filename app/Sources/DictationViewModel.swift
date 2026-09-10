@@ -124,6 +124,9 @@ final class DictationViewModel: ObservableObject {
     /// live elapsed time. Deliberately has NO didSet — unlike `phase`, publishing
     /// this must not write IPC snapshots.
     @Published private(set) var recordingStartTime: Date?
+    private var firstChunkSentAt: Date?
+    private var firstPartialReceivedAt: Date?
+    private var chunksSentThisSession = 0
 
     private var streamRecorder: StreamingAudioRecorder?
     private var streamClient: WhisperStreamClient?
@@ -134,6 +137,7 @@ final class DictationViewModel: ObservableObject {
     // MARK: - Stream Chunk Queue
 
     private let chunkSendQueue = ChunkSendQueue()
+    private var streamConnectTask: Task<Void, Never>?
     private var chunkConsumerTask: Task<Void, Never>?
     private var receiveTask: Task<String, Error>?
     private var transcriptionTask: Task<Void, Never>?
@@ -320,6 +324,9 @@ final class DictationViewModel: ObservableObject {
         activeID = id
         livePartial = ""
         transcriptionDeliveredThisSession = false
+        firstChunkSentAt = nil
+        firstPartialReceivedAt = nil
+        chunksSentThisSession = 0
         phase = .connecting
         FileLogger.shared.info(.transcription, "dictation connecting", payload: [
             "id": id.uuidString
@@ -399,6 +406,8 @@ final class DictationViewModel: ObservableObject {
         case .stream:
             FileLogger.shared.info(.transcription, "start mode: stream")
 
+            streamConnectTask?.cancel()
+            streamConnectTask = nil
             chunkConsumerTask?.cancel()
             chunkConsumerTask = nil
             receiveTask?.cancel()
@@ -428,106 +437,14 @@ final class DictationViewModel: ObservableObject {
                 recordingStartTime = Date()
                 phase = .recording
 
-                // Await probe result and try the selected server first.
-                // If unavailable or the probe-selected connection fails, iterate
-                // the remaining servers with the existing failover behaviour.
-                var client: WhisperStreamClient?
-                var lastError: Error?
-                let probeResult = await serverSelectionTask?.value
-
-                // Pre-trim once for efficient comparison and iteration.
-                let trimmedServers = config.servers.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }.filter { !$0.isEmpty }
-                var remainingServers = trimmedServers
-
-                if let selected = probeResult {
-                    let base = selected.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                    if !base.isEmpty, config.servers.contains(selected) {
-                        if let candidate = WhisperStreamClient(baseURL: base) {
-                            do {
-                                try await candidate.connect()
-                                client = candidate
-                                FileLogger.shared.info(.network, "Stream: connected to probe-selected server",
-                                                       payload: ["base": base])
-                            } catch {
-                                FileLogger.shared.info(.network, "Stream: probe-selected server failed",
-                                                       payload: ["base": base, "error": error.localizedDescription])
-                                lastError = error
-                                await candidate.disconnect()
-                            }
-                        } else {
-                            lastError = WhisperError.networkError(URLError(.badURL))
-                            FileLogger.shared.warn(.network, "Stream: invalid probe-selected server URL",
-                                                   payload: ["base": base])
-                        }
-                        remainingServers = trimmedServers.filter { $0 != base }
-                    }
+                streamConnectTask = Task { [weak self] in
+                    await self?.runStreamConnectLoop(
+                        sessionID: id,
+                        recorder: recorder,
+                        servers: config.servers)
                 }
-
-                if client == nil {
-                    for server in remainingServers {
-                        guard !server.isEmpty else { continue }
-                        guard let candidate = WhisperStreamClient(baseURL: server) else {
-                            FileLogger.shared.warn(.network, "Stream: invalid server URL",
-                                                   payload: ["base": server])
-                            lastError = WhisperError.networkError(URLError(.badURL))
-                            continue
-                        }
-                        do {
-                            try await candidate.connect()
-                            client = candidate
-                            FileLogger.shared.info(.network, "Stream: connected to server",
-                                                   payload: ["base": server])
-                            break
-                        } catch {
-                            FileLogger.shared.info(.network, "Stream: server failed",
-                                                   payload: ["base": server, "error": error.localizedDescription])
-                            lastError = error
-                            await candidate.disconnect()
-                            continue
-                        }
-                    }
-                }
-
-                if let client = client {
-                    if activeID != id || streamRecorder !== recorder {
-                        await client.disconnect()
-                        return
-                    }
-
-                    FileLogger.shared.info(.network, "Stream: WebSocket connected")
-                    streamClient = client
-
-                    let receiveClient = client
-                    let sessionID = id
-                    receiveTask?.cancel()
-                    receiveTask = Task { [weak self] in
-                        guard let self = self else { throw WhisperError.networkError(URLError(.cancelled)) }
-                        return try await receiveClient.receiveMessages(onPartial: { [weak self] partial in
-                            FileLogger.shared.debug(.transcription, "livePartial updated",
-                                                    payload: ["preview": String(partial.prefix(60)), "length": partial.count])
-                            Task { @MainActor [weak self] in
-                                guard let self else { return }
-                                guard self.activeID == sessionID else { return }
-                                self.livePartial = partial
-                                self.transcriptionDeliveredThisSession = true
-                            }
-                        })
-                    }
-
-                    chunkConsumerTask?.cancel()
-                    let consumerClient = client
-                    chunkConsumerTask = Task { [weak self] in
-                        guard let self = self else { return }
-                        await self.runChunkConsumer(client: consumerClient)
-                    }
-                } else {
-                    streamClient = nil
-                    FileLogger.shared.warn(.network,
-                                           "Stream: all servers failed — continuing local-only, WAV preserved for retry",
-                                           payload: ["error": lastError?.localizedDescription ?? "unknown error"])
-                }
-
                 UIApplication.shared.isIdleTimerDisabled = true
+                return
             } catch {
                 FileLogger.shared.error(.transcription, "Stream start error",
                                         payload: ["error": error.localizedDescription])
@@ -549,6 +466,138 @@ final class DictationViewModel: ObservableObject {
                 phase = .error(message)
             }
         }
+    }
+
+    private func runStreamConnectLoop(
+        sessionID: UUID,
+        recorder: StreamingAudioRecorder,
+        servers: [String]
+    ) async {
+        let probeResult = await serverSelectionTask?.value
+        let trimmedServers = servers
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+            .filter { !$0.isEmpty }
+
+        let orderedServers: [String]
+        if let selected = probeResult {
+            let base = selected.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            if !base.isEmpty, servers.contains(selected) {
+                orderedServers = [base] + trimmedServers.filter { $0 != base }
+            } else {
+                orderedServers = trimmedServers
+            }
+        } else {
+            orderedServers = trimmedServers
+        }
+
+        guard !orderedServers.isEmpty else {
+            FileLogger.shared.warn(.network, "Stream: no configured servers")
+            return
+        }
+
+        var retryDelay: TimeInterval = 1.0
+        while true {
+            var attemptedCount = 0
+            for server in orderedServers {
+                guard !Task.isCancelled else { return }
+                guard activeID == sessionID, streamRecorder === recorder, phase == .recording else { return }
+
+                let attemptStart = Date()
+                attemptedCount += 1
+                guard let candidate = WhisperStreamClient(baseURL: server) else {
+                    let elapsed = Date().timeIntervalSince(attemptStart) * 1000
+                    FileLogger.shared.debug(.network, "Stream: invalid server URL",
+                                            payload: ["server": server,
+                                                      "outcome": "failed",
+                                                      "latencyMs": elapsed])
+                    continue
+                }
+
+                do {
+                    try await candidate.connect()
+                    let elapsed = Date().timeIntervalSince(attemptStart) * 1000
+                    FileLogger.shared.debug(.network, "Stream: server connect succeeded",
+                                            payload: ["server": server,
+                                                      "outcome": "connected",
+                                                      "latencyMs": elapsed])
+                    await beginStreamingSession(client: candidate, sessionID: sessionID, recorder: recorder)
+                    return
+                } catch {
+                    let elapsed = Date().timeIntervalSince(attemptStart) * 1000
+                    FileLogger.shared.debug(.network, "Stream: server connect failed",
+                                            payload: ["server": server,
+                                                      "outcome": "failed",
+                                                      "latencyMs": elapsed,
+                                                      "error": error.localizedDescription,
+                                                      "attempt": attemptedCount])
+                    await candidate.disconnect()
+                }
+            }
+
+            FileLogger.shared.debug(.network, "Stream: connect round failed",
+                                    payload: ["attemptedCount": attemptedCount,
+                                              "nextBackoffSeconds": retryDelay])
+            try? await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
+            if Task.isCancelled { return }
+            retryDelay = min(retryDelay * 2.0, 8.0)
+        }
+    }
+
+    private func beginStreamingSession(
+        client: WhisperStreamClient,
+        sessionID: UUID,
+        recorder: StreamingAudioRecorder
+    ) async {
+        guard activeID == sessionID,
+              streamRecorder === recorder,
+              phase == .recording,
+              streamClient == nil else {
+            await client.disconnect()
+            return
+        }
+
+        streamClient = client
+
+        let receiveClient = client
+        receiveTask?.cancel()
+        receiveTask = Task { [weak self] in
+            guard let self = self else { throw WhisperError.networkError(URLError(.cancelled)) }
+            return try await receiveClient.receiveMessages(onPartial: { [weak self] partial in
+                FileLogger.shared.debug(.transcription, "livePartial updated",
+                                        payload: ["preview": String(partial.prefix(60)), "length": partial.count])
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    guard self.activeID == sessionID else { return }
+                    if self.firstPartialReceivedAt == nil {
+                        let receivedAt = Date()
+                        self.firstPartialReceivedAt = receivedAt
+                        let deltaMs = self.recordingStartTime.map {
+                            receivedAt.timeIntervalSince($0) * 1000
+                        } ?? 0
+                        FileLogger.shared.info(.transcription,
+                                               "Stream: first partial received",
+                                               payload: ["deltaMs": deltaMs,
+                                                         "textLength": partial.count])
+                    }
+                    self.livePartial = partial
+                    self.transcriptionDeliveredThisSession = true
+                }
+            })
+        }
+
+        chunkConsumerTask?.cancel()
+        let consumerClient = client
+        chunkConsumerTask = Task { [weak self] in
+            guard let self = self else { return }
+            await self.runChunkConsumer(client: consumerClient)
+        }
+
+        let sinceRecordingStartSec = recordingStartTime.map {
+            Date().timeIntervalSince($0)
+        } ?? 0
+        FileLogger.shared.info(.network, "Stream: WebSocket connected",
+                               payload: ["backlogChunks": chunkSendQueue.depth,
+                                         "sinceRecordingStartSec": sinceRecordingStartSec])
     }
 
     func stop() async {
@@ -717,6 +766,8 @@ final class DictationViewModel: ObservableObject {
 
             phase = .transcribing
             UIApplication.shared.isIdleTimerDisabled = false
+            streamConnectTask?.cancel()
+            streamConnectTask = nil
 
             var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
             backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "WhisperTranscription") {
@@ -730,24 +781,56 @@ final class DictationViewModel: ObservableObject {
             guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
             chunkSendQueue.setRecordingActive(false)
 
-            let canStream = streamClient != nil
-            let overflowed = chunkSendQueue.hasOverflowed
-            var queueDrained = false
-            if canStream && !overflowed {
-                let drainHardCap = Date().addingTimeInterval(SharedConfig.Defaults.streamFinalTimeout)
-                while Date() < drainHardCap {
-                    if chunkSendQueue.isEmpty { queueDrained = true; break }
+            if streamClient == nil {
+                let connectGraceDeadline = Date().addingTimeInterval(2.0)
+                while streamClient == nil && Date() < connectGraceDeadline {
                     try? await Task.sleep(nanoseconds: 200_000_000)
                     guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
                 }
+                guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
             }
 
+            let canStream = streamClient != nil
+            var queueDrained = false
+            if canStream, let consumerTask = chunkConsumerTask {
+                guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
+
+                let (drainEvents, drainContinuation) = AsyncStream<Bool>.makeStream()
+                let drainWaitTask = Task {
+                    await consumerTask.value
+                    drainContinuation.yield(true)
+                    drainContinuation.finish()
+                }
+                let drainTimeoutTask = Task {
+                    try? await Task.sleep(nanoseconds: UInt64(
+                        SharedConfig.Defaults.streamFinalTimeout * 1_000_000_000))
+                    guard !Task.isCancelled else { return }
+                    drainContinuation.yield(false)
+                    drainContinuation.finish()
+                }
+
+                guard activeID == id else {
+                    drainWaitTask.cancel()
+                    drainTimeoutTask.cancel()
+                    endStopBackgroundTask(&backgroundTaskID)
+                    return
+                }
+                queueDrained = await drainEvents.first ?? false
+                drainWaitTask.cancel()
+                drainTimeoutTask.cancel()
+                guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
+                FileLogger.shared.info(.network, "Stream: backlog flushed",
+                                       payload: ["depth": queueDepthAtStop,
+                                                 "drained": queueDrained])
+            }
+
+            guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
             chunkConsumerTask?.cancel()
             chunkConsumerTask = nil
 
             let uploadT0 = Date()
 
-            if queueDrained && canStream && !overflowed {
+            if queueDrained && canStream {
                 do {
                     try await streamClient?.sendEnd()
                     FileLogger.shared.info(.network, "Stream: END sent, awaiting final from receive task")
@@ -1180,6 +1263,8 @@ final class DictationViewModel: ObservableObject {
         receiveTask = nil
         transcriptionTask?.cancel()
         transcriptionTask = nil
+        streamConnectTask?.cancel()
+        streamConnectTask = nil
         chunkSendQueue.clearAll()
         await sessionRecorder?.stop()
         guard activeID == id else { return }
