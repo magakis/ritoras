@@ -84,6 +84,8 @@ struct ActiveRecordingBadge: View {
 
     private var phaseSymbolName: String {
         switch viewModel.phase {
+        case .connecting:
+            return "waveform"
         case .recording:
             return "waveform"
         case .transcribing:

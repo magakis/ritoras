@@ -92,6 +92,7 @@ private final class LastPayloadHolder: @unchecked Sendable {
 @MainActor
 final class DictationViewModel: ObservableObject {
     enum DictationPhase: Equatable {
+        case connecting
         case recording
         case transcribing
         case done(String)
@@ -104,7 +105,7 @@ final class DictationViewModel: ObservableObject {
             updateStateSnapshot()                                    // publish intermediate states first (app-group)
             storeTerminalResultIfNeeded()                            // publish terminal result — BEFORE the post
             switch phase {
-            case .recording, .transcribing:
+            case .connecting, .recording, .transcribing:
                 if localhostServer != nil {
                     startHealthCheckTimer()
                 }
@@ -129,8 +130,8 @@ final class DictationViewModel: ObservableObject {
     private var ensureHealthToken = 0
 
     /// Periodic localhost health check timer. Runs only while a dictation is
-    /// actively recording or transcribing so a "ready but wedged" listener is
-    /// caught even when the app stays foregrounded (no scenePhase transition).
+    /// connecting, recording, or transcribing so a "ready but wedged" listener
+    /// is caught even when the app stays foregrounded (no scenePhase transition).
     private var healthCheckTimer: Timer?
     private static let healthCheckInterval: TimeInterval = 10.0
 
@@ -261,10 +262,12 @@ final class DictationViewModel: ObservableObject {
         healthCheckTimer = nil
     }
 
-    /// Publishes intermediate states (recording, transcribing, cancelled) to app-group snapshot.
+    /// Publishes intermediate states (connecting, recording, transcribing, cancelled) to app-group snapshot.
     private func updateStateSnapshot() {
         let payloadStatus: DictationPayload.Status?
         switch phase {
+        case .connecting:
+            payloadStatus = .recording
         case .recording:
             payloadStatus = .recording
         case .transcribing:
@@ -342,7 +345,10 @@ final class DictationViewModel: ObservableObject {
         activeID = id
         livePartial = ""
         transcriptionDeliveredThisSession = false
-        phase = .recording
+        phase = .connecting
+        FileLogger.shared.info(.transcription, "dictation connecting", payload: [
+            "id": id.uuidString
+        ])
 
         // Kick off parallel health probe — runs in background while mic
         // permission is checked and recording starts.
@@ -407,6 +413,7 @@ final class DictationViewModel: ObservableObject {
                 let newRecorder = AudioRecorder()
                 _ = try await newRecorder.startRecording(jobId: id)
                 recorder = newRecorder
+                phase = .recording
                 recordingStartTime = Date()
                 UIApplication.shared.isIdleTimerDisabled = true
             } catch {

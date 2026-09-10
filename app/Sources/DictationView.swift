@@ -19,6 +19,8 @@ struct DictationView: View {
                 Spacer()
 
                 switch viewModel.phase {
+                case .connecting:
+                    connectingContent
                 case .recording:
                     recordingContent
                 case .transcribing:
@@ -56,10 +58,11 @@ struct DictationView: View {
             .environmentObject(AppSettings.shared)
             .environmentObject(viewModel)
             .overlay(alignment: .topTrailing) {
-                if viewModel.phase == .recording || viewModel.phase == .transcribing {
+                if viewModel.phase == .connecting || viewModel.phase == .recording || viewModel.phase == .transcribing {
                     // Show the badge only while a dictation is actively in flight
-                    // (recording or transcribing). Done/error/cancelled phases have
-                    // no ongoing recording to return to, so the badge is hidden.
+                    // (connecting, recording or transcribing). Done/error/cancelled
+                    // phases have no ongoing recording to return to, so the badge
+                    // is hidden.
                     ActiveRecordingBadge()
                         .padding(.top, 60)    // clear the dynamic island / status bar
                         .padding(.trailing, 16)
@@ -72,7 +75,7 @@ struct DictationView: View {
         .onDisappear {
             timer?.invalidate()
             switch viewModel.phase {
-            case .recording where viewModel.activeID != nil:
+            case .recording, .connecting where viewModel.activeID != nil:
                 Task { await viewModel.cancel() }
             default:
                 // During transcribing the background task keeps the app alive
@@ -111,6 +114,35 @@ struct DictationView: View {
     }
 
     // MARK: - Recording State
+
+    private var connectingContent: some View {
+        VStack(spacing: 24) {
+            Text(viewModel.activeModeLabel)
+                .font(.caption2)
+                .fontWeight(.semibold)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .background(.tertiary, in: Capsule())
+
+            Image(systemName: "waveform")
+                .font(.system(size: 48))
+                .foregroundColor(Color(.systemRed))
+
+            Text("Starting…")
+                .font(.title2)
+                .fontWeight(.medium)
+
+            Button("Cancel") {
+                Task {
+                    await viewModel.cancel()
+                    dismiss()
+                }
+            }
+            .font(.subheadline)
+            .foregroundColor(.secondary)
+            .padding(.top, 8)
+        }
+    }
 
     private var recordingContent: some View {
         VStack(spacing: 24) {
