@@ -65,9 +65,9 @@ struct SharedConfig {
         /// RMS threshold for VAD speech detection. Higher = less sensitive.
         static let streamVadSpeechRmsKey = "streamVadSpeechRms"
         static let streamVadSpeechRmsDefault: Float = 0.025
-        /// Silence duration (ms) before a chunk is finalized (~3 s).
+        /// Silence duration (ms) before a chunk is finalized (~2 s).
         static let streamVadSilenceMsKey = "streamVadSilenceMs"
-        static let streamVadSilenceMsDefault: Int = 3000
+        static let streamVadSilenceMsDefault: Int = 2000
         /// Minimum speech duration (ms) to accept a chunk.
         static let streamVadMinSpeechMsKey = "streamVadMinSpeechMs"
         static let streamVadMinSpeechMsDefault: Int = 300
@@ -419,7 +419,7 @@ struct SharedConfig {
 
     /// Reads the streaming VAD silence threshold (ms) from the App Group.
     /// Used by the keyboard extension, which cannot link `AppSettings`.
-    /// Returns the default (`2500`) when the App Group is unavailable or the key is unset.
+    /// Returns the default when the App Group is unavailable or the key is unset.
     static func streamVadSilenceMs() -> Int {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
             return Defaults.streamVadSilenceMsDefault
