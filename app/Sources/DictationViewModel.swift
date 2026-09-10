@@ -142,11 +142,9 @@ final class DictationViewModel: ObservableObject {
     private var receiveTask: Task<String, Error>?
     private var transcriptionTask: Task<Void, Never>?
 
-    /// True once the streaming server has returned ≥1 partial transcription for
-    /// the current session — proof it is transcribing THIS recording's audio.
-    /// Reset in start(); read in stop() to reject empty/stale results that did
-    /// not come from this session. Streaming WhisperLive always emits partials
-    /// while decoding, so a session with no partials was never transcribed.
+    /// Diagnostic only: true once the streaming server has returned ≥1 partial
+    /// transcription for the current session. Reset in start() and retained for
+    /// failure diagnostics; it does not gate acceptance of a non-empty final.
     private var transcriptionDeliveredThisSession = false
 
     /// Idempotency guard: tracks job IDs currently being retried to prevent
@@ -843,13 +841,11 @@ final class DictationViewModel: ObservableObject {
 
                     guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
 
-                    // A real transcription requires the server to have transcribed THIS
-                    // session's audio (≥1 partial) AND a non-empty result. Empty text, or text
-                    // that arrived without any partials this session, means the server never
-                    // delivered a transcription for this recording → retryable failure (audio
-                    // preserved via handleStreamTerminalFailure). This also rejects stale text
-                    // from a prior session that must never be re-delivered as this session's.
-                    let transcriptionValid = !text.isEmpty && transcriptionDeliveredThisSession
+                    // A non-empty final from this session's receive task is valid by
+                    // construction: receiveTask is session-scoped and activeID guards
+                    // protect the session identity. Empty text remains a retryable
+                    // failure (audio preserved via handleStreamTerminalFailure).
+                    let transcriptionValid = !text.isEmpty
                     if !transcriptionValid {
                         FileLogger.shared.warn(.transcription,
                             "stream stop: no transcription delivered this session — treating as failure",
@@ -858,9 +854,7 @@ final class DictationViewModel: ObservableObject {
                                       "partialsReceived": transcriptionDeliveredThisSession])
                         handleStreamTerminalFailure(
                             jobId: id,
-                            error: text.isEmpty
-                                ? "Nothing was heard. Try again."
-                                : "Didn't receive a transcription from the server. Try again.")
+                            error: "Nothing was heard. Try again.")
                     } else {
                         let uploadElapsed = Date().timeIntervalSince(uploadT0) * 1000
                         FileLogger.shared.info(.transcription, "upload complete", payload: [
