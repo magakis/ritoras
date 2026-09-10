@@ -241,6 +241,16 @@ private final class StoppedFlag: @unchecked Sendable {
     var isStopped: Bool { stopped }
 }
 
+// MARK: - Converter Accounting (access via vadQueue serialization)
+
+/// Per-session converter accounting. Access is vadQueue-only, so no lock is needed.
+private final class ConverterAccounting: @unchecked Sendable {
+    var inputFramesTotal = 0
+    var outputFramesTotal = 0
+    var expectedOutputTotal = 0.0
+    var debugLoggedBuffers = 0
+}
+
 // MARK: - Streaming Audio Recorder
 
 /// Captures microphone audio via `AVAudioEngine`, runs an energy-based VAD
@@ -274,6 +284,9 @@ actor StreamingAudioRecorder {
 
     /// Lockless stopped flag; set on vadQueue in stop(), read on vadQueue in processTapBuffer.
     private let stoppedFlag = StoppedFlag()
+
+    /// Per-session converter accounting; accessed only from `vadQueue` (serial).
+    private let accounting = ConverterAccounting()
 
     /// Tracks whether a tap is installed, enabling idempotent teardown.
     private var tapInstalled = false
@@ -385,6 +398,7 @@ actor StreamingAudioRecorder {
         let converterHolder = self.converterHolder
         let diskWriter = self.diskWriter
         let stoppedFlag = self.stoppedFlag
+        let accounting = self.accounting
 
         // 6. Install tap with NATIVE format (REMOVES the format-mismatch crash)
         let tapBlock: AVAudioNodeTapBlock = { buffer, _ in
@@ -428,7 +442,8 @@ actor StreamingAudioRecorder {
                     vad: vad,
                     handler: handler,
                     diskWriter: diskWriter,
-                    stoppedFlag: stoppedFlag
+                    stoppedFlag: stoppedFlag,
+                    accounting: accounting
                 )
             }
         }
@@ -478,7 +493,8 @@ actor StreamingAudioRecorder {
         vad: VADContext,
         handler: ChunkHandler,
         diskWriter: DiskWriterHolder,
-        stoppedFlag: StoppedFlag
+        stoppedFlag: StoppedFlag,
+        accounting: ConverterAccounting
     ) {
         // Discard any emission from a late tap callback that runs after stop() set the flag.
         guard !stoppedFlag.isStopped else { return }
@@ -494,7 +510,13 @@ actor StreamingAudioRecorder {
                 "Failed to build AVAudioConverter from delivered format \(deliveredFormat)")
             return
         }
-        if let old = oldFormat, old != deliveredFormat {
+        if oldFormat == nil {
+            FileLogger.shared.info(.audio, "converter session formats",
+                                   payload: ["nativeHz": Int(deliveredSampleRate),
+                                             "nativeCh": deliveredChannelCount,
+                                             "targetHz": 16000,
+                                             "targetCh": 1])
+        } else if let old = oldFormat, old != deliveredFormat {
             FileLogger.shared.info(.audio,
                 "Format change detected — rebuilt converter",
                 payload: ["old": "\(old)", "new": "\(deliveredFormat)"])
@@ -520,7 +542,7 @@ actor StreamingAudioRecorder {
 
         // Allocate output buffer in target format (16 kHz mono float32)
         let outputCapacity = AVAudioFrameCount(
-            ceil(Double(frameLength) * 16000.0 / deliveredSampleRate) + 64
+            ceil(Double(frameLength) * 16000.0 / deliveredSampleRate) + 128
         )
         guard let outputBuffer = AVAudioPCMBuffer(
             pcmFormat: targetFormat,
@@ -544,50 +566,89 @@ actor StreamingAudioRecorder {
             inStatus.pointee = .haveData
             return inputBuffer
         }
-        let status = converter.convert(to: outputBuffer, error: &convError, withInputFrom: inputBlock)
-        switch status {
-        case .haveData:
-            break
-        case .error:
-            let detail = convError.map { $0.localizedDescription } ?? "unknown error"
-            FileLogger.shared.error(.audio, "Converter error: \(detail)")
-            return
-        @unknown default:
-            // .endOfStream or any future status — drop this buffer
-            return
+
+        var drained = [Float]()
+        drained.reserveCapacity(Int(outputCapacity))
+        var iterations = 0
+        var statusChars = ""
+        let maxDrainIterations = 16
+
+        drainLoop: while true {
+            guard iterations < maxDrainIterations else {
+                FileLogger.shared.warn(.audio, "converter drain hit iteration cap")
+                break drainLoop
+            }
+
+            iterations += 1
+            convError = nil
+            let status = converter.convert(to: outputBuffer, error: &convError, withInputFrom: inputBlock)
+            let n = Int(outputBuffer.frameLength)
+            if n > 0 {
+                // Write every converted buffer to disk (incl. silence) so the full
+                // session is available for batch transcription if the stream fails.
+                diskWriter.write(from: outputBuffer)
+
+                // Copy before the next convert call overwrites the output buffer.
+                let outputPtr = UnsafeBufferPointer(
+                    start: outputBuffer.floatChannelData![0],
+                    count: n
+                )
+                drained.append(contentsOf: outputPtr)
+            }
+
+            switch status {
+            case .haveData:
+                statusChars.append("H")
+                continue drainLoop
+            case .inputRanDry:
+                statusChars.append("R")
+                break drainLoop
+            case .noDataNow:
+                statusChars.append("N")
+                break drainLoop
+            case .endOfStream:
+                statusChars.append("E")
+                FileLogger.shared.debug(.audio, "converter returned unexpected endOfStream")
+                break drainLoop
+            case .error:
+                statusChars.append("E")
+                let detail = convError.map { $0.localizedDescription } ?? "unknown error"
+                FileLogger.shared.error(.audio, "Converter error: \(detail)")
+                break drainLoop
+            @unknown default:
+                statusChars.append("X")
+                FileLogger.shared.debug(.audio, "converter returned unknown status")
+                break drainLoop
+            }
         }
 
-        let convertedLength = Int(outputBuffer.frameLength)
-        guard convertedLength > 0 else { return }
+        guard !drained.isEmpty else { return }
 
-        // Write every converted buffer to disk (incl. silence) so the full
-        // session is available for batch transcription if the stream fails.
-        diskWriter.write(from: outputBuffer)
+        let expectedOutput = Double(frameLength) * 16000.0 / deliveredSampleRate
+        accounting.inputFramesTotal += frameLength
+        accounting.outputFramesTotal += drained.count
+        accounting.expectedOutputTotal += expectedOutput
 
-        // Extract converted float samples (always mono at 16 kHz)
-        let outputPtr = UnsafeBufferPointer(
-            start: outputBuffer.floatChannelData![0],
-            count: convertedLength
-        )
-        let convertedSamples = Array(outputPtr)
+        if accounting.debugLoggedBuffers < 10 {
+            accounting.debugLoggedBuffers += 1
+            let inputChannelSamples = Array(samples.prefix(frameLength))
+            FileLogger.shared.debug(.audio, "converter buffer accounting",
+                                    payload: ["inFrames": frameLength,
+                                              "outFrames": drained.count,
+                                              "expected": Int(expectedOutput.rounded()),
+                                              "iterations": iterations,
+                                              "statuses": statusChars,
+                                              "inRms": Self.dcCorrectedRMS(inputChannelSamples),
+                                              "outRms": Self.dcCorrectedRMS(drained)])
+        }
 
         // RMS computation (off audio thread) — DC-corrected (mean-subtracted),
         // matching the reference client: rms = sqrt(mean((s - mean(s))^2)).
-        var mean: Float = 0
-        for s in convertedSamples {
-            mean += s
-        }
-        mean /= Float(convertedSamples.count)
-        var sumSquares: Float = 0
-        for s in convertedSamples {
-            let centered = s - mean
-            sumSquares += centered * centered
-        }
-        let rms = sqrt(sumSquares / Float(convertedSamples.count))
+        let rms = Self.dcCorrectedRMS(drained)
 
         // VAD processing (locks internally via os_unfair_lock)
         // frameLength = post-conversion (16 kHz) — VAD tunables are in 16 kHz samples
-        let emission = vad.process(frame: convertedSamples, frameLength: convertedLength, rms: rms)
+        let emission = vad.process(frame: drained, frameLength: drained.count, rms: rms)
 
         // Emit chunk if ready (handler runs synchronously on vadQueue)
         if let emission = emission {
@@ -596,6 +657,23 @@ actor StreamingAudioRecorder {
                                               "sampleCount": emission.samples.count])
             handler(emission.chunkId, emission.samples)
         }
+    }
+
+    private static func dcCorrectedRMS(_ samples: [Float]) -> Float {
+        guard !samples.isEmpty else { return 0 }
+
+        var mean: Float = 0
+        for sample in samples {
+            mean += sample
+        }
+        mean /= Float(samples.count)
+
+        var sumSquares: Float = 0
+        for sample in samples {
+            let centered = sample - mean
+            sumSquares += centered * centered
+        }
+        return sqrt(sumSquares / Float(samples.count))
     }
 
     // MARK: - Teardown
@@ -630,11 +708,26 @@ actor StreamingAudioRecorder {
         let vad = self.vad
         let diskWriter = self.diskWriter
         let stoppedFlag = self.stoppedFlag
+        let accounting = self.accounting
         let emission: VADEmission? = await withCheckedContinuation { continuation in
             vadQueue.async {
                 stoppedFlag.set(true)
                 let result = vad.flush()
                 diskWriter.close()
+                let ratio = accounting.outputFramesTotal > 0
+                    ? Double(accounting.inputFramesTotal) / Double(accounting.outputFramesTotal)
+                    : 0.0
+                let driftFrames = Int(Double(accounting.outputFramesTotal) - accounting.expectedOutputTotal)
+                FileLogger.shared.info(.audio, "converter session accounting",
+                                       payload: ["inFrames": accounting.inputFramesTotal,
+                                                 "outFrames": accounting.outputFramesTotal,
+                                                 "ratio": ratio,
+                                                 "driftFrames": driftFrames,
+                                                 "driftMs": Double(driftFrames) / 16.0])
+                accounting.inputFramesTotal = 0
+                accounting.outputFramesTotal = 0
+                accounting.expectedOutputTotal = 0.0
+                accounting.debugLoggedBuffers = 0
                 continuation.resume(returning: result)
             }
         }
