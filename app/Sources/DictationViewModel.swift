@@ -424,6 +424,15 @@ final class DictationViewModel: ObservableObject {
         case .stream:
             FileLogger.shared.info(.transcription, "start mode: stream")
 
+            chunkConsumerTask?.cancel()
+            chunkConsumerTask = nil
+            receiveTask?.cancel()
+            receiveTask = nil
+            if let oldClient = streamClient {
+                await oldClient.disconnect()
+            }
+            streamClient = nil
+
             livePartial = ""
             chunkSendQueue.resetForNewRecording()
             chunkSendQueue.setRecordingActive(true)
@@ -505,6 +514,11 @@ final class DictationViewModel: ObservableObject {
                 }
 
                 if let client = client {
+                    if activeID != id || streamRecorder !== recorder {
+                        await client.disconnect()
+                        return
+                    }
+
                     FileLogger.shared.info(.network, "Stream: WebSocket connected")
                     streamClient = client
 
@@ -718,6 +732,7 @@ final class DictationViewModel: ObservableObject {
             FileLogger.shared.info(.transcription, "stop mode: stream")
 
             guard let id = activeID else { return }
+            let sessionRecorder = streamRecorder
 
             let recordedDurationMs = recordingStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? 0
             FileLogger.shared.info(.transcription, "dictation stop (user requested)", payload: [
@@ -735,7 +750,7 @@ final class DictationViewModel: ObservableObject {
             }
 
             // Signal recording done and drain queue
-            await streamRecorder?.stop()
+            await sessionRecorder?.stop()
 
             guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
             chunkSendQueue.setRecordingActive(false)
@@ -1168,6 +1183,7 @@ final class DictationViewModel: ObservableObject {
     func cancel() async {
         FileLogger.shared.info(.transcription, "cancel: stream teardown")
         let id = activeID
+        let sessionRecorder = streamRecorder
 
         // Keep the localhost /state listener alive for cancelGraceSeconds so a
         // suspended keyboard can return and fetch the terminal .cancelled
@@ -1190,7 +1206,7 @@ final class DictationViewModel: ObservableObject {
         transcriptionTask?.cancel()
         transcriptionTask = nil
         chunkSendQueue.clearAll()
-        await streamRecorder?.stop()
+        await sessionRecorder?.stop()
         guard activeID == id else { return }
         await streamClient?.disconnect()
         guard activeID == id else { return }
