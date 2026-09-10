@@ -820,7 +820,7 @@ final class DictationViewModel: ObservableObject {
                     endStopBackgroundTask(&backgroundTaskID)
                     return
                 }
-                queueDrained = await drainEvents.first ?? false
+                queueDrained = await drainEvents.first(where: { _ in true }) ?? false
                 drainWaitTask.cancel()
                 drainTimeoutTask.cancel()
                 guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
