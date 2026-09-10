@@ -425,10 +425,25 @@ final class DictationViewModel: ObservableObject {
             FileLogger.shared.info(.transcription, "start mode: stream")
 
             livePartial = ""
+            chunkSendQueue.resetForNewRecording()
+            chunkSendQueue.setRecordingActive(true)
 
             let config = SharedConfig.load()
 
             do {
+                let recorder = StreamingAudioRecorder()
+                streamRecorder = recorder
+
+                let wavURL = RecordingStore.shared.streamWavURL(for: id)
+                try await recorder.start(fileURL: wavURL) { [chunkQueue = self.chunkSendQueue] chunkId, samples in
+                    FileLogger.shared.debug(.audio, "Stream: chunk produced",
+                                            payload: ["chunkId": chunkId, "sampleCount": samples.count])
+                    chunkQueue.enqueue(id: chunkId, samples: samples)
+                }
+                FileLogger.shared.info(.audio, "Stream: recorder started")
+                recordingStartTime = Date()
+                phase = .recording
+
                 // Await probe result and try the selected server first.
                 // If unavailable or the probe-selected connection fails, iterate
                 // the remaining servers with the existing failover behaviour.
@@ -489,56 +504,45 @@ final class DictationViewModel: ObservableObject {
                     }
                 }
 
-                guard let client = client else {
-                    throw lastError ?? WhisperError.allServersFailed(config.servers)
+                if let client = client {
+                    FileLogger.shared.info(.network, "Stream: WebSocket connected")
+                    streamClient = client
+
+                    let receiveClient = client
+                    let sessionID = id
+                    receiveTask?.cancel()
+                    receiveTask = Task { [weak self] in
+                        guard let self = self else { throw WhisperError.networkError(URLError(.cancelled)) }
+                        return try await receiveClient.receiveMessages(onPartial: { [weak self] partial in
+                            FileLogger.shared.debug(.transcription, "livePartial updated",
+                                                    payload: ["preview": String(partial.prefix(60)), "length": partial.count])
+                            Task { @MainActor [weak self] in
+                                guard let self else { return }
+                                guard self.activeID == sessionID else { return }
+                                self.livePartial = partial
+                                self.transcriptionDeliveredThisSession = true
+                            }
+                        })
+                    }
+
+                    chunkConsumerTask?.cancel()
+                    let consumerClient = client
+                    chunkConsumerTask = Task { [weak self] in
+                        guard let self = self else { return }
+                        await self.runChunkConsumer(client: consumerClient)
+                    }
+                } else {
+                    streamClient = nil
+                    FileLogger.shared.warn(.network,
+                                           "Stream: all servers failed — continuing local-only, WAV preserved for retry",
+                                           payload: ["error": lastError?.localizedDescription ?? "unknown error"])
                 }
-                FileLogger.shared.info(.network, "Stream: WebSocket connected")
-                streamClient = client
-
-                let receiveClient = client
-                let sessionID = id
-                receiveTask?.cancel()
-                receiveTask = Task { [weak self] in
-                    guard let self = self else { throw WhisperError.networkError(URLError(.cancelled)) }
-                    return try await receiveClient.receiveMessages(onPartial: { [weak self] partial in
-                        FileLogger.shared.debug(.transcription, "livePartial updated",
-                                                payload: ["preview": String(partial.prefix(60)), "length": partial.count])
-                        Task { @MainActor [weak self] in
-                            guard let self else { return }
-                            guard self.activeID == sessionID else { return }
-                            self.livePartial = partial
-                            self.transcriptionDeliveredThisSession = true
-                        }
-                    })
-                }
-
-                let recorder = StreamingAudioRecorder()
-                streamRecorder = recorder
-
-                let wavURL = RecordingStore.shared.streamWavURL(for: id)
-                try await recorder.start(fileURL: wavURL) { [chunkQueue = self.chunkSendQueue] chunkId, samples in
-                    FileLogger.shared.debug(.audio, "Stream: chunk produced",
-                                            payload: ["chunkId": chunkId, "sampleCount": samples.count])
-                    chunkQueue.enqueue(id: chunkId, samples: samples)
-                }
-                FileLogger.shared.info(.audio, "Stream: recorder started")
-
-                // Reset queue state and launch consumer
-                chunkSendQueue.resetForNewRecording()
-                chunkSendQueue.setRecordingActive(true)
-                chunkConsumerTask?.cancel()
-                let consumerClient = client
-                chunkConsumerTask = Task { [weak self] in
-                    guard let self = self else { return }
-                    await self.runChunkConsumer(client: consumerClient)
-                }
-
-                recordingStartTime = Date()
 
                 UIApplication.shared.isIdleTimerDisabled = true
             } catch {
                 FileLogger.shared.error(.transcription, "Stream start error",
                                         payload: ["error": error.localizedDescription])
+                chunkSendQueue.clearAll()
                 await streamClient?.disconnect()
                 receiveTask?.cancel()
                 receiveTask = nil
@@ -736,12 +740,16 @@ final class DictationViewModel: ObservableObject {
             guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
             chunkSendQueue.setRecordingActive(false)
 
+            let canStream = streamClient != nil
+            let overflowed = chunkSendQueue.hasOverflowed
             var queueDrained = false
-            let drainHardCap = Date().addingTimeInterval(SharedConfig.Defaults.streamFinalTimeout)
-            while Date() < drainHardCap {
-                if chunkSendQueue.isEmpty { queueDrained = true; break }
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
+            if canStream && !overflowed {
+                let drainHardCap = Date().addingTimeInterval(SharedConfig.Defaults.streamFinalTimeout)
+                while Date() < drainHardCap {
+                    if chunkSendQueue.isEmpty { queueDrained = true; break }
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
+                }
             }
 
             chunkConsumerTask?.cancel()
@@ -749,7 +757,7 @@ final class DictationViewModel: ObservableObject {
 
             let uploadT0 = Date()
 
-            if queueDrained {
+            if queueDrained && canStream && !overflowed {
                 do {
                     try await streamClient?.sendEnd()
                     FileLogger.shared.info(.network, "Stream: END sent, awaiting final from receive task")
@@ -812,7 +820,10 @@ final class DictationViewModel: ObservableObject {
                     handleStreamTerminalFailure(jobId: id, error: error.localizedDescription)
                 }
             } else {
-                handleStreamTerminalFailure(jobId: id, error: "stream send failed — recording preserved for retry")
+                let message = canStream
+                    ? "stream send failed — recording preserved for retry"
+                    : "Server unreachable — recording preserved for retry"
+                handleStreamTerminalFailure(jobId: id, error: message)
             }
 
             if backgroundTaskID != .invalid {
@@ -839,16 +850,16 @@ final class DictationViewModel: ObservableObject {
     /// Returns the transcribed text on success, `nil` on failure/cancel/skip.
     func retry(jobId: UUID) async -> String? {
         // HARD GUARD: never retry while a live dictation is in flight.
-        // phase may be .recording at startup before any dictation without
-        // an active recorder — that's the idle state, not "live". A live
-        // dictation only exists when an AudioRecorder or StreamingAudioRecorder
-        // is actively recording.
+        // phase may be .recording at startup or .connecting before any dictation
+        // recorder exists — those states are not live from this guard's
+        // perspective. A live dictation only exists when an AudioRecorder or
+        // StreamingAudioRecorder is actively recording.
         switch phase {
         case .transcribing:
             return nil  // definitely live
-        case .recording:
-            // .recording at startup (no recorder) is not live; only block
-            // if a recorder is actually active.
+        case .recording, .connecting:
+            // A startup phase without a recorder is not live; only block if a
+            // recorder is actually active.
             if recorder != nil || streamRecorder != nil {
                 return nil
             }
