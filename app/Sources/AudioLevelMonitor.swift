@@ -95,7 +95,7 @@ private final class LevelState: @unchecked Sendable {
 /// minimal — it reads the buffer, copies samples, and dispatches all heavy
 /// work (conversion, RMS, smoothing, peak-hold) to a dedicated serial queue.
 actor AudioLevelMonitor {
-    public typealias LevelCallback = @Sendable (Float, Float) -> Void
+    public typealias LevelCallback = @Sendable (Float, Float, Double) -> Void
 
     // MARK: - Private Properties
 
@@ -118,7 +118,7 @@ actor AudioLevelMonitor {
     /// Begins capturing mic audio and publishing raw + peak RMS levels.
     ///
     /// - Parameter onLevel: Called on the serial processing queue for each
-    ///   audio frame with `(rawRMS, peakRMS)`.
+    ///   audio frame with `(rawRMS, peakRMS, frameDuration)`.
     /// - Throws: ``AudioLevelMonitorError`` if mic permission is unavailable,
     ///   session configuration fails, or the engine cannot start.
     func start(onLevel: @escaping LevelCallback) async throws {
@@ -265,18 +265,14 @@ actor AudioLevelMonitor {
                 )
 
                 // RMS computation (mirrors lines 554-559)
-                var sumSquares: Float = 0
-                for i in 0..<convertedLength {
-                    let s = outputPtr[i]
-                    sumSquares += s * s
-                }
-                let rms = sqrt(sumSquares / Float(convertedLength))
+                let rms = AudioMath.dcCorrectedRMS(outputPtr)
+                let frameDuration = Double(convertedLength) / 16000.0
 
                 // Peak hold: chase raw RMS up, decay 2% per frame
                 levelState.peak = max(levelState.peak, rms)
                 levelState.peak *= 0.98
 
-                handler(rms, levelState.peak)
+                handler(rms, levelState.peak, frameDuration)
             }
         }
 

@@ -146,12 +146,21 @@ struct DictationView: View {
 
     private var recordingContent: some View {
         VStack(spacing: 24) {
-            Text(viewModel.activeModeLabel)
-                .font(.caption2)
-                .fontWeight(.semibold)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 2)
-                .background(.tertiary, in: Capsule())
+            HStack(spacing: 8) {
+                Text(viewModel.activeModeLabel)
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(.tertiary, in: Capsule())
+
+                if viewModel.vadCalibrating {
+                    Text("Measuring ambient noise — you can start talking")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.leading)
+                }
+            }
 
             Image(systemName: "waveform")
                 .font(.system(size: 48))

@@ -29,6 +29,24 @@ struct VADSettingsView: View {
                 }
             }
         }
+        .onChange(of: settings.streamVadMode) { _, _ in
+            tester.rebuildGate()
+        }
+        .onChange(of: settings.streamVadCalibrationMs) { _, _ in
+            tester.rebuildGate()
+        }
+        .onChange(of: settings.streamVadCalibratedOffsetDb) { _, _ in
+            tester.rebuildGate()
+        }
+        .onChange(of: settings.streamVadAdaptiveDeltaDb) { _, _ in
+            tester.rebuildGate()
+        }
+        .onChange(of: settings.streamVadAdaptiveHysteresisEnabled) { _, _ in
+            tester.rebuildGate()
+        }
+        .onChange(of: settings.audioMeasurementModeEnabled) { _, _ in
+            tester.rebuildGate()
+        }
     }
 
     // MARK: - Tester Section
@@ -53,7 +71,7 @@ struct VADSettingsView: View {
                 meterRow
             }
         } footer: {
-            Text("Speak normally, then set the threshold above the noise floor and below your speech.")
+            Text("Use the live meter to check microphone levels and tune the selected VAD mode.")
         }
     }
 
@@ -78,18 +96,41 @@ struct VADSettingsView: View {
                         .fill(Color(.systemGray5))
 
                     RoundedRectangle(cornerRadius: 4)
-                        .fill(tester.currentRms < settings.streamVadSpeechRms ? Color.green : Color.red)
+                        .fill(tester.isSpeech ? Color.green : Color.red)
                         .frame(width: CGFloat(min(tester.currentRms / meterFullScale, 1.0)) * width)
 
-                    Rectangle()
-                        .fill(Color.orange)
-                        .frame(width: 2)
-                        .offset(x: CGFloat(settings.streamVadSpeechRms / meterFullScale) * width)
+                    if let floorDb = tester.floorDb {
+                        Rectangle()
+                            .fill(Color.gray)
+                            .frame(width: 1)
+                            .offset(x: CGFloat(min(
+                                AudioMath.rmsFromDb(Float(floorDb)) / meterFullScale,
+                                1.0
+                            )) * width)
+                    }
+
+                    if !tester.calibrating {
+                        Rectangle()
+                            .fill(Color.orange)
+                            .frame(width: 2)
+                            .offset(x: CGFloat(min(
+                                AudioMath.rmsFromDb(Float(tester.thresholdDb)) / meterFullScale,
+                                1.0
+                            )) * width)
+                    }
 
                     Rectangle()
                         .fill(Color.blue)
                         .frame(width: 2)
                         .offset(x: CGFloat(min(tester.peakRms / meterFullScale, 1.0)) * width)
+
+                    if tester.calibrating {
+                        Text("Measuring… (\(Int(tester.calibrationElapsedMs.rounded())) / \(settings.streamVadCalibrationMs) ms)")
+                            .font(.caption2)
+                            .foregroundColor(.primary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 4))
+                    }
                 }
             }
             .frame(height: 20)
@@ -99,10 +140,16 @@ struct VADSettingsView: View {
                 Spacer()
                 Text("peak \(String(format: "%.4f", tester.peakRms))")
                 Spacer()
-                Text("threshold \(String(format: "%.4f", settings.streamVadSpeechRms))")
+                Text(String(format: "threshold %.1f dB", tester.thresholdDb))
             }
             .font(.caption)
             .foregroundColor(.secondary)
+
+            if tester.usedFallback {
+                Text("adaptive fallback")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            }
 
             if tester.isMonitoring && tester.currentRms < 0.001 {
                 Text("Speak into the microphone to see levels.")
@@ -114,15 +161,75 @@ struct VADSettingsView: View {
 
     // MARK: - Controls Section
 
+    @ViewBuilder
     private var controlsSection: some View {
+        modeSection
+
         Section {
             silenceDurationRow
-            speechRmsRow
+            switch settings.streamVadMode {
+            case .staticMode:
+                speechRmsRow
+            case .calibrated:
+                calibrationMsRow
+                calibratedOffsetRow
+            case .adaptive:
+                adaptiveDeltaRow
+                Toggle("Hysteresis", isOn: $settings.streamVadAdaptiveHysteresisEnabled)
+            }
             minSpeechDurationRow
             minChunkDurationRow
             maxNoiseRow
         } footer: {
-            Text("Changes apply on the next recording.")
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Silence duration is how long a pause closes a chunk — 3000 ms ≈ 3 s.")
+                Text("Changes apply live to this tester and on the next recording.")
+            }
+        }
+
+        signalPathSection
+    }
+
+    private var modeSection: some View {
+        Section {
+            Picker("Detection", selection: $settings.streamVadMode) {
+                ForEach(VADMode.allCases, id: \.self) { mode in
+                    switch mode {
+                    case .staticMode:
+                        Text("Static").tag(mode)
+                    case .calibrated:
+                        Text("Calibrated").tag(mode)
+                    case .adaptive:
+                        Text("Adaptive").tag(mode)
+                    }
+                }
+            }
+            .pickerStyle(.segmented)
+        } header: {
+            Text("Mode")
+        } footer: {
+            modeHelpText
+        }
+    }
+
+    private var modeHelpText: some View {
+        switch settings.streamVadMode {
+        case .staticMode:
+            Text("One fixed level bar. Retune it when your environment changes.")
+        case .calibrated:
+            Text("Start talking whenever you like — the measurement ignores speech and needs no quiet period. It reads the quiet quarter of the first moments of each dictation. Raise Δ if chunks fire on noise; if you talk through the whole window it switches to adaptive tracking automatically.")
+        case .adaptive:
+            Text("Tracks the noise floor continuously from the first half-second. Δ is how far above the floor speech must be — lower it for whispering (try 6–8). Best hands-off choice across environments. Hysteresis closes chunks more decisively.")
+        }
+    }
+
+    private var signalPathSection: some View {
+        Section {
+            Toggle("Measurement Mode", isOn: $settings.audioMeasurementModeEnabled)
+        } header: {
+            Text("Signal Path")
+        } footer: {
+            Text("Applies globally to ALL recording (dictation, batch, and this tester); strips iOS's hidden mic processing (AGC) for stable levels; changes the absolute level scale so the Static threshold may need retuning; pairs best with Calibrated/Adaptive.")
         }
     }
 
@@ -160,6 +267,49 @@ struct VADSettingsView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
             Slider(value: $settings.streamVadSpeechRms, in: 0.005...0.10, step: 0.001)
+        }
+    }
+
+    private var calibrationMsRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Calibration Window")
+                Spacer()
+                Text("\(settings.streamVadCalibrationMs) ms")
+                    .foregroundColor(.secondary)
+            }
+            Slider(
+                value: Binding(
+                    get: { Double(settings.streamVadCalibrationMs) },
+                    set: { settings.streamVadCalibrationMs = Int($0) }
+                ),
+                in: 500...3000,
+                step: 100
+            )
+        }
+    }
+
+    private var calibratedOffsetRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Sensitivity Δ")
+                Spacer()
+                Text("\(settings.streamVadCalibratedOffsetDb, specifier: "%.0f") dB")
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: $settings.streamVadCalibratedOffsetDb, in: 3...20, step: 1)
+        }
+    }
+
+    private var adaptiveDeltaRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Sensitivity Δ")
+                Spacer()
+                Text("\(settings.streamVadAdaptiveDeltaDb, specifier: "%.0f") dB")
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: $settings.streamVadAdaptiveDeltaDb, in: 3...24, step: 1)
         }
     }
 
