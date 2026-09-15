@@ -55,7 +55,6 @@ private final class VADContext: @unchecked Sendable {
     var chunkId: UInt32 = 0
     var onCalibrationChange: ((Bool) -> Void)?
     private var wasCalibrating: Bool
-    private var didLogCalibrationStart = false
     private var didLogFallback = false
 
     init(gateConfig: VADGateConfig, silenceThresholdSamples: Int, minSpeechSamples: Int, minChunkSamples: Int, maxNoiseSamples: Int) {
@@ -107,6 +106,13 @@ private final class VADContext: @unchecked Sendable {
         }
         wasCalibrating = out.calibrating
 
+        if out.retroactiveSpeechMs > 0 {
+            speechSamples += Int(out.retroactiveSpeechMs * 16.0)
+        }
+        if let trailingSilenceMs = out.trailingSilenceMs {
+            silenceSamples = Int(trailingSilenceMs * 16.0)
+        }
+
         if out.isSpeech {
             // Speech frame — resets the consecutive-silence counter.
             silenceSamples = 0
@@ -114,12 +120,6 @@ private final class VADContext: @unchecked Sendable {
         } else {
             // Silence frame — accumulates the consecutive-silence counter.
             silenceSamples += frameLength
-        }
-        if out.retroactiveSpeechMs > 0 {
-            speechSamples += Int(out.retroactiveSpeechMs * 16.0)
-        }
-        if let trailingSilenceMs = out.trailingSilenceMs {
-            silenceSamples = Int(trailingSilenceMs * 16.0)
         }
 
         // Pause emit: consecutive silence AND min total length AND min speech —
@@ -540,8 +540,7 @@ actor StreamingAudioRecorder {
             startedPayload["hysteresis"] = vadGateConfig.adaptiveHysteresisEnabled
         }
         FileLogger.shared.info(.audio, "Started", payload: startedPayload)
-        if vadGateConfig.mode == .calibrated, !didLogCalibrationStart {
-            didLogCalibrationStart = true
+        if vadGateConfig.mode == .calibrated {
             FileLogger.shared.debug(.audio, "VAD: calibration start")
         }
     }
