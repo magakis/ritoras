@@ -1348,6 +1348,11 @@ class KeyboardViewController: UIInputViewController {
     /// KVC reads the `NSUUID` as an optional and returns nil instead. Callers
     /// treat nil as "keyboard transitional" and defer the result — the same
     /// shape as the existing `view.window == nil` deferral.
+    /// A zero UUID means "no focused field": the proxy exists but has no
+    /// backing document. This differs from nil, which means the identity is
+    /// not yet readable during a transitional keyboard state.
+    private static let noFieldDocumentId = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
     private func safeDocumentIdentifier() -> UUID? {
         guard let nsObject = textDocumentProxy as? NSObject,
               let nsUuid = nsObject.value(forKey: "documentIdentifier") as? NSUUID else {
@@ -1418,14 +1423,15 @@ class KeyboardViewController: UIInputViewController {
 
         // No-field gate: if there is genuinely no focused text field (zero UUID),
         // defer the result so it can be inserted when the user taps into a field.
-        if currentDocId == UUID() {
-            FileLogger.shared.warn(.keyboard, "Dictation result arrived with no focused field — deferring",
+        if currentDocId == Self.noFieldDocumentId {
+            FileLogger.shared.warn(.keyboard, "Dictation result arrived with no focused field (zero UUID) — deferring",
                                    payload: ["documentIdentifier": currentDocId.uuidString])
             storeDeferredResult(text: text)
             stopDictationTransports()
             pendingRequestId = nil
             dictationTargetDocId = nil
             state = .waiting
+            startDeferredFlushRetryTimer()
             return
         }
 
@@ -1433,7 +1439,7 @@ class KeyboardViewController: UIInputViewController {
         // transcription was in flight, do NOT insert into the wrong field. Preserve
         // the text + target so it flushes when they return to the original field
         // (mirrors scheduleDeferredDictationFlush's mismatch handling).
-        if let targetId = dictationTargetDocId, targetId != UUID(),
+        if let targetId = dictationTargetDocId, targetId != Self.noFieldDocumentId,
            currentDocId != targetId {
             FileLogger.shared.warn(.keyboard, "Dictation target mismatch — deferring",
                                    payload: ["target": targetId.uuidString,
@@ -1567,7 +1573,7 @@ class KeyboardViewController: UIInputViewController {
                                                  "length": textToInsert.count])
                 return
             }
-            if let targetId = targetDocId, targetId != UUID(),
+            if let targetId = targetDocId, targetId != Self.noFieldDocumentId,
                currentDocId != targetId {
                 // Original dictation field no longer focused — preserve text + target
                 // so it flushes when the user returns to that field. Do NOT discard.
