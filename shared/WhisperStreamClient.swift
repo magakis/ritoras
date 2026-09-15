@@ -35,9 +35,9 @@ actor WhisperStreamClient {
     private var keepaliveTask: Task<Void, Never>?
 
     /// Last evidence the server is alive (PONG or partial received). Updated by the
-    /// receive loop; read by the liveness monitor. A busy server
-    /// still answers PING→PONG immediately (server.py stream receive loop), so this
-    /// stays fresh even while the worker transcribes a long final.
+    /// receive loop; read by the liveness monitor. A PONG or partial response is
+    /// treated as evidence that the connection is alive, so this stays fresh while
+    /// the server processes a long final.
     private var lastActivityDate: Date = .distantPast
 
     // MARK: - Initialization

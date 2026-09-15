@@ -515,6 +515,10 @@ final class DictationViewModel: ObservableObject {
 
                 do {
                     try await candidate.connect()
+                    guard !Task.isCancelled else {
+                        await candidate.disconnect()
+                        return
+                    }
                     let elapsed = Date().timeIntervalSince(attemptStart) * 1000
                     FileLogger.shared.debug(.network, "Stream: server connect succeeded",
                                             payload: ["server": server,
@@ -550,8 +554,9 @@ final class DictationViewModel: ObservableObject {
         sessionID: UUID,
         recorder: StreamingAudioRecorder
     ) async {
-        // Accept .transcribing for a late connection during stop()'s connect-grace
-        // window; identity checks and a nil client still protect this session.
+        // Accept .transcribing for an in-flight connection while stop() waits
+        // through the configured connect-grace window; identity checks and a nil
+        // client still protect this session.
         guard activeID == sessionID,
               streamRecorder === recorder,
               (phase == .recording || phase == .transcribing),
@@ -771,8 +776,6 @@ final class DictationViewModel: ObservableObject {
 
             phase = .transcribing
             UIApplication.shared.isIdleTimerDisabled = false
-            streamConnectTask?.cancel()
-            streamConnectTask = nil
 
             var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
             backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "WhisperTranscription") {
@@ -787,12 +790,25 @@ final class DictationViewModel: ObservableObject {
             chunkSendQueue.setRecordingActive(false)
 
             if streamClient == nil {
-                let connectGraceDeadline = Date().addingTimeInterval(2.0)
+                let connectGraceStart = Date()
+                let connectGraceTimeout = SharedConfig.Defaults.streamWsConnectTimeout
+                let connectGraceDeadline = connectGraceStart.addingTimeInterval(connectGraceTimeout)
+                FileLogger.shared.debug(.network, "Stream: waiting for connect during stop",
+                                        payload: ["timeoutSec": connectGraceTimeout])
                 while streamClient == nil && Date() < connectGraceDeadline {
                     try? await Task.sleep(nanoseconds: 200_000_000)
                     guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
                 }
                 guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
+
+                let attachedDuringGrace = streamClient != nil
+                if !attachedDuringGrace {
+                    streamConnectTask?.cancel()
+                }
+                streamConnectTask = nil
+                FileLogger.shared.debug(.network, "Stream: connect grace finished",
+                                        payload: ["attached": attachedDuringGrace,
+                                                  "elapsedMs": Date().timeIntervalSince(connectGraceStart) * 1000])
             }
 
             let canStream = streamClient != nil
@@ -900,7 +916,7 @@ final class DictationViewModel: ObservableObject {
             } else {
                 let message = canStream
                     ? "stream send failed — recording preserved for retry"
-                    : "Server unreachable — recording preserved for retry"
+                    : "Could not connect to the server in time — recording preserved for retry"
                 handleStreamTerminalFailure(jobId: id, error: message)
             }
 
