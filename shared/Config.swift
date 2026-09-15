@@ -60,11 +60,26 @@ struct SharedConfig {
         static let dictationModeKey = "dictationMode"
         static let dictationModeDefault: DictationMode = .batch
 
+        // MARK: - Audio Measurement
+
+        static let audioMeasurementModeEnabledKey = "audioMeasurementModeEnabled"
+        static let audioMeasurementModeEnabledDefault = false
+
         // MARK: - Streaming / VAD Tunables
 
         /// RMS threshold for VAD speech detection. Higher = less sensitive.
         static let streamVadSpeechRmsKey = "streamVadSpeechRms"
         static let streamVadSpeechRmsDefault: Float = 0.025
+        static let streamVadModeKey = "streamVadMode"
+        static let streamVadModeDefault = "static"
+        static let streamVadCalibrationMsKey = "streamVadCalibrationMs"
+        static let streamVadCalibrationMsDefault: Int = 1500
+        static let streamVadCalibratedOffsetDbKey = "streamVadCalibratedOffsetDb"
+        static let streamVadCalibratedOffsetDbDefault: Double = 10.0
+        static let streamVadAdaptiveDeltaDbKey = "streamVadAdaptiveDeltaDb"
+        static let streamVadAdaptiveDeltaDbDefault: Double = 10.0
+        static let streamVadAdaptiveHysteresisEnabledKey = "streamVadAdaptiveHysteresisEnabled"
+        static let streamVadAdaptiveHysteresisEnabledDefault = true
         /// Silence duration (ms) before a chunk is finalized (~2 s).
         static let streamVadSilenceMsKey = "streamVadSilenceMs"
         static let streamVadSilenceMsDefault: Int = 2000
@@ -415,6 +430,66 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.streamVadSpeechRmsKey) as? Float)
             ?? Defaults.streamVadSpeechRmsDefault
+    }
+
+    /// Reads the streaming VAD mode from the App Group.
+    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Returns `.staticMode` when the App Group is unavailable, the key is unset,
+    /// or the stored value is invalid.
+    static func streamVadMode() -> VADMode {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return VADMode(rawValue: Defaults.streamVadModeDefault) ?? .staticMode
+        }
+        guard let raw = defaults.string(forKey: Defaults.streamVadModeKey) else {
+            return VADMode(rawValue: Defaults.streamVadModeDefault) ?? .staticMode
+        }
+        return VADMode(rawValue: raw)
+            ?? (VADMode(rawValue: Defaults.streamVadModeDefault) ?? .staticMode)
+    }
+
+    /// Reads the streaming VAD calibration window (ms) from the App Group.
+    static func streamVadCalibrationMs() -> Int {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadCalibrationMsDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadCalibrationMsKey) as? Int)
+            ?? Defaults.streamVadCalibrationMsDefault
+    }
+
+    /// Reads the calibrated VAD threshold offset (dB) from the App Group.
+    static func streamVadCalibratedOffsetDb() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadCalibratedOffsetDbDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadCalibratedOffsetDbKey) as? Double)
+            ?? Defaults.streamVadCalibratedOffsetDbDefault
+    }
+
+    /// Reads the adaptive VAD threshold delta (dB) from the App Group.
+    static func streamVadAdaptiveDeltaDb() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadAdaptiveDeltaDbDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadAdaptiveDeltaDbKey) as? Double)
+            ?? Defaults.streamVadAdaptiveDeltaDbDefault
+    }
+
+    /// Reads the adaptive VAD hysteresis flag from the App Group.
+    static func streamVadAdaptiveHysteresisEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadAdaptiveHysteresisEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadAdaptiveHysteresisEnabledKey) as? Bool)
+            ?? Defaults.streamVadAdaptiveHysteresisEnabledDefault
+    }
+
+    /// Reads the audio measurement mode flag from the App Group.
+    static func audioMeasurementModeEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.audioMeasurementModeEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.audioMeasurementModeEnabledKey) as? Bool)
+            ?? Defaults.audioMeasurementModeEnabledDefault
     }
 
     /// Reads the streaming VAD silence threshold (ms) from the App Group.
