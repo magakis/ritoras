@@ -1480,6 +1480,7 @@ class KeyboardViewController: UIInputViewController {
     /// Stores a dictation result in UserDefaults when the keyboard is hidden,
     /// so it can be recovered and auto-pasted on the next viewDidAppear.
     private func storeDeferredResult(text: String, docId: UUID? = nil, ts: TimeInterval? = nil) {
+        deferredFlushGate.reset()
         let idToStore = docId ?? dictationTargetDocId
         UserDefaults.standard.set(text, forKey: "ritoras_deferred_text")
         UserDefaults.standard.set(ts ?? Date().timeIntervalSince1970, forKey: "ritoras_deferred_ts")
@@ -1492,7 +1493,6 @@ class KeyboardViewController: UIInputViewController {
         UserDefaults.standard.removeObject(forKey: "ritoras_deferred_text")
         UserDefaults.standard.removeObject(forKey: "ritoras_deferred_ts")
         UserDefaults.standard.removeObject(forKey: "ritoras_deferred_doc_id")
-        stopDeferredFlushRetryTimer()
     }
 
     private func startDeferredFlushRetryTimer() {
@@ -1550,6 +1550,7 @@ class KeyboardViewController: UIInputViewController {
             FileLogger.shared.info(.keyboard, "Deferred dictation result expired on flush check",
                                    payload: ["age": age])
             clearDeferredResult()
+            stopDeferredFlushRetryTimer()
             if pendingRequestId == nil {
                 state = .idle
             }
