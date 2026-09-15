@@ -92,6 +92,7 @@ final class DictationViewModel: ObservableObject {
     }
     @Published private(set) var livePartial: String = ""
     @Published private(set) var activeModeLabel: String = ""
+    @Published private(set) var vadCalibrating = false
 
     // MARK: - Localhost Server (Phase 1)
 
@@ -424,13 +425,22 @@ final class DictationViewModel: ObservableObject {
             do {
                 let recorder = StreamingAudioRecorder()
                 streamRecorder = recorder
+                vadCalibrating = (SharedConfig.streamVadMode() == .calibrated)
 
                 let wavURL = RecordingStore.shared.streamWavURL(for: id)
-                try await recorder.start(fileURL: wavURL) { [chunkQueue = self.chunkSendQueue] chunkId, samples in
-                    FileLogger.shared.debug(.audio, "Stream: chunk produced",
-                                            payload: ["chunkId": chunkId, "sampleCount": samples.count])
-                    chunkQueue.enqueue(id: chunkId, samples: samples)
-                }
+                try await recorder.start(
+                    fileURL: wavURL,
+                    onVADCalibration: { calibrating in
+                        Task { @MainActor [weak self] in
+                            self?.vadCalibrating = calibrating
+                        }
+                    },
+                    onChunk: { [chunkQueue = self.chunkSendQueue] chunkId, samples in
+                        FileLogger.shared.debug(.audio, "Stream: chunk produced",
+                                                payload: ["chunkId": chunkId, "sampleCount": samples.count])
+                        chunkQueue.enqueue(id: chunkId, samples: samples)
+                    }
+                )
                 FileLogger.shared.info(.audio, "Stream: recorder started")
                 recordingStartTime = Date()
                 phase = .recording
@@ -452,6 +462,7 @@ final class DictationViewModel: ObservableObject {
                 receiveTask = nil
                 streamClient = nil
                 streamRecorder = nil
+                vadCalibrating = false
                 DispatchQueue.global(qos: .utility).async {
                     let deactivateStart = Date()
                     AudioSession.deactivate()
@@ -610,6 +621,7 @@ final class DictationViewModel: ObservableObject {
     }
 
     func stop() async {
+        vadCalibrating = false
         let stopStartTime = Date()
         switch SharedConfig.dictationMode() {
         case .batch:
@@ -1288,6 +1300,7 @@ final class DictationViewModel: ObservableObject {
 
     func cancel() async {
         FileLogger.shared.info(.transcription, "cancel: stream teardown")
+        vadCalibrating = false
         let id = activeID
         let sessionRecorder = streamRecorder
 

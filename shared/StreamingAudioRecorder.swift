@@ -38,7 +38,7 @@ struct VADEmission {
 /// All mutable state is protected — callers call `process()`/`flush()` directly.
 private final class VADContext: @unchecked Sendable {
     // MARK: Configuration (constants)
-    let speechRms: Float
+    let gate: VADThresholdGate
     let silenceThresholdSamples: Int
     let minSpeechSamples: Int
     let minChunkSamples: Int
@@ -53,13 +53,24 @@ private final class VADContext: @unchecked Sendable {
     var silenceSamples: Int = 0
     var speechSamples: Int = 0
     var chunkId: UInt32 = 0
+    var onCalibrationChange: ((Bool) -> Void)?
+    private var wasCalibrating: Bool
+    private var didLogCalibrationStart = false
+    private var didLogFallback = false
 
-    init(speechRms: Float, silenceThresholdSamples: Int, minSpeechSamples: Int, minChunkSamples: Int, maxNoiseSamples: Int) {
-        self.speechRms = speechRms
+    init(gateConfig: VADGateConfig, silenceThresholdSamples: Int, minSpeechSamples: Int, minChunkSamples: Int, maxNoiseSamples: Int) {
+        self.gate = VADThresholdGate(config: gateConfig)
         self.silenceThresholdSamples = silenceThresholdSamples
         self.minSpeechSamples = minSpeechSamples
         self.minChunkSamples = minChunkSamples
         self.maxNoiseSamples = maxNoiseSamples
+        self.wasCalibrating = gateConfig.mode == .calibrated
+    }
+
+    func setCalibrationChangeHandler(_ handler: ((Bool) -> Void)?) {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+        onCalibrationChange = handler
     }
 
     /// Process one audio frame. Returns a `VADEmission` if a chunk boundary
@@ -72,13 +83,43 @@ private final class VADContext: @unchecked Sendable {
         // No isSpeaking gating, no pre-roll ring. Matches the reference client.
         accumulator.append(contentsOf: frame)
 
-        if rms >= speechRms {
+        let frameDb = Double(AudioMath.dbFromRms(rms))
+        let frameDuration = Double(frameLength) / 16000.0
+        let out = gate.process(frameDb: frameDb, frameDuration: frameDuration)
+
+        if out.usedFallback && !didLogFallback {
+            didLogFallback = true
+            var payload: [String: Any] = ["thresholdDb": out.thresholdDb]
+            if let floorDb = out.floorDb {
+                payload["floorDb"] = floorDb
+            }
+            FileLogger.shared.warn(.audio, "VAD: calibration contaminated — adaptive fallback",
+                                   payload: payload)
+        }
+
+        if wasCalibrating && !out.calibrating {
+            var payload: [String: Any] = ["thresholdDb": out.thresholdDb]
+            if let floorDb = out.floorDb {
+                payload["floorDb"] = floorDb
+            }
+            FileLogger.shared.info(.audio, "VAD: calibration complete", payload: payload)
+            onCalibrationChange?(false)
+        }
+        wasCalibrating = out.calibrating
+
+        if out.isSpeech {
             // Speech frame — resets the consecutive-silence counter.
             silenceSamples = 0
             speechSamples += frameLength
         } else {
             // Silence frame — accumulates the consecutive-silence counter.
             silenceSamples += frameLength
+        }
+        if out.retroactiveSpeechMs > 0 {
+            speechSamples += Int(out.retroactiveSpeechMs * 16.0)
+        }
+        if let trailingSilenceMs = out.trailingSilenceMs {
+            silenceSamples = Int(trailingSilenceMs * 16.0)
         }
 
         // Pause emit: consecutive silence AND min total length AND min speech —
@@ -296,6 +337,7 @@ actor StreamingAudioRecorder {
 
     /// VAD state machine; accessed only via `process()`/`flush()` which lock internally.
     private let vad: VADContext
+    private let vadGateConfig: VADGateConfig
 
     // MARK: - Initialization
 
@@ -304,9 +346,17 @@ actor StreamingAudioRecorder {
         let minSpeechSamples = Int(Double(SharedConfig.streamVadMinSpeechMs()) * 16.0)
         let minChunkSamples = Int(Double(SharedConfig.streamVadMinChunkMs()) * 16.0)
         let maxNoiseSamples = Int(SharedConfig.streamVadMaxNoiseSec() * 16000.0)
-        let speechRms = SharedConfig.streamVadSpeechRms()
+        let vadGateConfig = VADGateConfig(
+            mode: SharedConfig.streamVadMode(),
+            staticRms: SharedConfig.streamVadSpeechRms(),
+            calibrationMs: SharedConfig.streamVadCalibrationMs(),
+            calibratedOffsetDb: SharedConfig.streamVadCalibratedOffsetDb(),
+            adaptiveDeltaDb: SharedConfig.streamVadAdaptiveDeltaDb(),
+            adaptiveHysteresisEnabled: SharedConfig.streamVadAdaptiveHysteresisEnabled()
+        )
+        self.vadGateConfig = vadGateConfig
         vad = VADContext(
-            speechRms: speechRms,
+            gateConfig: vadGateConfig,
             silenceThresholdSamples: silenceSamples,
             minSpeechSamples: minSpeechSamples,
             minChunkSamples: minChunkSamples,
@@ -318,6 +368,8 @@ actor StreamingAudioRecorder {
 
     /// Begins streaming audio capture.
     ///
+    /// - Parameter onVADCalibration: Called when calibrated VAD finishes its
+    ///   calibration window. The argument is the current calibration state.
     /// - Parameter onChunk: Called on vadQueue for each detected speech
     ///   segment. The first argument is a monotonically increasing chunk ID
     ///   (starting at 0); the second is float32 PCM samples at 16 kHz mono.
@@ -325,7 +377,7 @@ actor StreamingAudioRecorder {
     ///   if mic access is unavailable; `AudioRecorder.AudioRecorderError.invalidSessionConfiguration`
     ///   if session setup fails; `StreamingRecorderError.engineStartFailed` if
     ///   the audio engine cannot start.
-    func start(fileURL: URL? = nil, onChunk: @escaping ChunkHandler) async throws {
+    func start(fileURL: URL? = nil, onVADCalibration: ((Bool) -> Void)? = nil, onChunk: @escaping ChunkHandler) async throws {
         guard !isRecording else {
             throw StreamingRecorderError.alreadyStreaming
         }
@@ -394,6 +446,7 @@ actor StreamingAudioRecorder {
         // Capture references for the closure (no actor self capture).
         let handler = onChunk
         let vad = self.vad
+        vad.setCalibrationChangeHandler(onVADCalibration)
         let vadQueue = self.vadQueue
         let converterHolder = self.converterHolder
         let diskWriter = self.diskWriter
@@ -468,12 +521,29 @@ actor StreamingAudioRecorder {
 
         isRecording = true
 
-        FileLogger.shared.info(.audio, "Started",
-                               payload: ["rms": SharedConfig.streamVadSpeechRms(),
-                                         "silenceMs": SharedConfig.streamVadSilenceMs(),
-                                         "minSpeechMs": SharedConfig.streamVadMinSpeechMs(),
-                                         "minChunkMs": SharedConfig.streamVadMinChunkMs(),
-                                         "maxNoiseSec": SharedConfig.streamVadMaxNoiseSec()])
+        var startedPayload: [String: Any] = [
+            "rms": vadGateConfig.staticRms,
+            "mode": vadGateConfig.mode.rawValue,
+            "silenceMs": SharedConfig.streamVadSilenceMs(),
+            "minSpeechMs": SharedConfig.streamVadMinSpeechMs(),
+            "minChunkMs": SharedConfig.streamVadMinChunkMs(),
+            "maxNoiseSec": SharedConfig.streamVadMaxNoiseSec()
+        ]
+        switch vadGateConfig.mode {
+        case .staticMode:
+            break
+        case .calibrated:
+            startedPayload["calibrationMs"] = vadGateConfig.calibrationMs
+            startedPayload["offsetDb"] = vadGateConfig.calibratedOffsetDb
+        case .adaptive:
+            startedPayload["deltaDb"] = vadGateConfig.adaptiveDeltaDb
+            startedPayload["hysteresis"] = vadGateConfig.adaptiveHysteresisEnabled
+        }
+        FileLogger.shared.info(.audio, "Started", payload: startedPayload)
+        if vadGateConfig.mode == .calibrated, !didLogCalibrationStart {
+            didLogCalibrationStart = true
+            FileLogger.shared.debug(.audio, "VAD: calibration start")
+        }
     }
 
     // MARK: - Process Tap Buffer
@@ -635,13 +705,13 @@ actor StreamingAudioRecorder {
                                               "expected": Int(expectedOutput.rounded()),
                                               "iterations": iterations,
                                               "statuses": statusChars,
-                                              "inRms": Self.dcCorrectedRMS(inputChannelSamples),
-                                              "outRms": Self.dcCorrectedRMS(drained)])
+                                              "inRms": AudioMath.dcCorrectedRMS(inputChannelSamples),
+                                              "outRms": AudioMath.dcCorrectedRMS(drained)])
         }
 
         // RMS computation (off audio thread) — DC-corrected (mean-subtracted),
         // matching the reference client: rms = sqrt(mean((s - mean(s))^2)).
-        let rms = Self.dcCorrectedRMS(drained)
+        let rms = AudioMath.dcCorrectedRMS(drained)
 
         // VAD processing (locks internally via os_unfair_lock)
         // frameLength = post-conversion (16 kHz) — VAD tunables are in 16 kHz samples
@@ -654,23 +724,6 @@ actor StreamingAudioRecorder {
                                               "sampleCount": emission.samples.count])
             handler(emission.chunkId, emission.samples)
         }
-    }
-
-    private static func dcCorrectedRMS(_ samples: [Float]) -> Float {
-        guard !samples.isEmpty else { return 0 }
-
-        var mean: Float = 0
-        for sample in samples {
-            mean += sample
-        }
-        mean /= Float(samples.count)
-
-        var sumSquares: Float = 0
-        for sample in samples {
-            let centered = sample - mean
-            sumSquares += centered * centered
-        }
-        return sqrt(sumSquares / Float(samples.count))
     }
 
     // MARK: - Teardown

@@ -16,6 +16,12 @@ enum AudioSession {
     /// speech, producing robotic, chopped-up audio that Whisper transcribes poorly.
     /// `.record` yields unprocessed capture ideal for speech-to-text.
     ///
+    /// The audio-measurement toggle routes all recording paths (batch, stream,
+    /// and tester) through `.measurement`, which strips iOS's hidden AGC/HPF
+    /// for stable levels. This changes the absolute level scale, so static
+    /// thresholds may need retuning; it pairs best with calibrated or adaptive
+    /// VAD modes.
+    ///
     /// **Ordering:** `setCategory` → `setActive(true)`, then construct
     /// `AVAudioRecorder` / start the engine. Activating the session before the
     /// recorder is configured can trigger
@@ -30,11 +36,13 @@ enum AudioSession {
     /// caused this gain regression.
     static func configure() throws {
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.record, mode: .default)
+        let mode: AVAudioSession.Mode = SharedConfig.audioMeasurementModeEnabled() ? .measurement : .default
+        try session.setCategory(.record, mode: mode)
         try session.setActive(true, options: .notifyOthersOnDeactivation)
         FileLogger.shared.info(.audio, "session configured", payload: [
             "sampleRate": session.sampleRate,
-            "category": session.category.rawValue
+            "category": session.category.rawValue,
+            "mode": mode.rawValue
         ])
     }
 
