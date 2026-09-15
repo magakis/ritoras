@@ -65,9 +65,11 @@
 **Ritoras examples:**
 - `"trigram unloaded (memory pressure)"` — adaptive unloading under 48 MB Jetsam cap
 - `"containerURL nil — falling back to documents directory"`
-- Fallback path used because preferred path failed (`"health probe failed, using default server"`)
+- Health probe failed; streaming will try all configured servers, with the
+  probe-selected server first when available
 - `"ignoring stale payload (age 12.0s > timeout 10.0s)"`
-- Transcription retry exhausted (`"all 3 retries failed, giving up"`)
+- Bounded retries exhausted on a batch or poll path; streaming chunk sends retry
+  unboundedly while recording
 - Audio format change during recording
 
 **Anti-examples:**
@@ -84,7 +86,7 @@
 **Ritoras examples:**
 - `"prediction engine failed to load dictionary"`
 - `"audio input unavailable"`
-- `"Transcription request failed — no fallback"`
+- `"Streaming failed — recording preserved for retry"`
 - `"WhisperClient: invalid response (HTTP 500)"`
 - Recording setup failure (`"AudioRecorder: prepareToRecord returned false"`)
 
@@ -123,8 +125,8 @@ Each `LogComponent` (defined in `shared/FileLogger.swift`) maps to a subsystem i
 |---|---|---|---|---|---|
 | `.prediction` | TrigramProvider, WordListLoader, SymSpell | trigram first-suggestion debug, stale-data checks | `"PredictionEngine ready"`, `"Trigram load started"`, `"Trigram ready (N tokens)"` | `"trigram unloaded (memory pressure)"` | `"prediction engine failed to load dictionary"` |
 | `.keyboard` | KeyboardViewController, KeyboardView | layout/geometry debug, key-press timing | `"KeyboardView did load"`, `"KeyboardView will appear"` | degraded operation, unexpected input mode | hard keyboard failure |
-| `.network` | WhisperClient, LocalhostServer, DictationViewModel | individual health-probe responses, poll scheduling, socket-level events | `"connection established"`, `"PONG received"`, `"localhost server started on port 47321"` | timeout after retries exhausted, stale-payload discard, server health-probe failures | `"Transcription request failed"`, `"connection failed — no fallback available"` |
-| `.audio` | AudioRecorder, AudioSession | VAD state transitions, chunk queue depth | `"Recording started"`, `"Recording stopped"`, `"AudioSession category set to .playAndRecord"` | format change during recording, audio session interruption | `"audio input unavailable"`, `"prepareToRecord returned false"` |
+| `.network` | WhisperClient, LocalhostServer, DictationViewModel | individual health-probe responses, poll scheduling, socket-level events, connect-attempt/backoff traces | `"connection established"`, `"PONG received"`, first-chunk-sent and first-partial-received timings, `"localhost server started on port 47321"` | timeout after retries exhausted, stale-payload discard, server health-probe failures | `"Transcription request failed"`, `"Streaming failed — recording preserved for retry"` |
+| `.audio` | AudioRecorder, AudioSession | VAD state transitions, chunk queue depth, per-buffer converter accounting for the first 10 buffers | `"Recording started"`, `"Recording stopped"`, converter session-formats log, stop-time converter session summary, `"AudioSession category set to .playAndRecord"` | format change during recording, audio session interruption, converter drain-loop iteration-cap warning | `"audio input unavailable"`, `"prepareToRecord returned false"` |
 | `.dictionary` | WordListLoader, word-frequency resources | load progress percentage | `"dictionary load completed (N items)"` | partial load under memory pressure | `"dictionary file not found"` |
 | `.transcription` | DictationViewModel, WhisperClient transcription path | poll iteration details, raw response | `"transcription received"`, `"transcription inserted: N chars"` | server returned empty transcription, async job still pending after long wait | `"transcription failed — server error"` |
 | `.app` | ContainerApp (RitorasApp, SettingsView) | — | `"App did finish launching"`, `"Settings updated"` | app-group container unavailable | `"AppGroup resolution failed"` |

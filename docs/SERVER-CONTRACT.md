@@ -1,75 +1,46 @@
-# Ritoras ↔ Whisper Server Contract
+# Ritoras ↔ Whisper-compatible transcription server contract
 
-> **Authoritative request/response spec** between the Ritoras keyboard extension
-> and the self-hosted Whisper server at `~/whisper/server-v2/`. Both sides must
-> agree on this contract.
-
----
-
-## 1. Cross-process IPC (app-group UserDefaults)
-
-> **Canonical transport for dictation state and results: app-group UserDefaults.**
-> Full architecture spec: [`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md).
-
-The container app writes a `DictationPayload` snapshot to app-group UserDefaults
-on every phase transition, guarded by a `stateLock` with a monotonically
-increasing `revision` counter. The write happens **before** the Darwin
-notification is posted (write-before-signal ordering). The keyboard reads the
-snapshot via `SharedConfig.dictationSnapshot()` + `readSharedSnapshot(for:)`.
-
-- **App-group UserDefaults** is the single canonical channel — proven reliable
-  under SideStore via `AppGroupResolver` (which handles the Team-ID suffix
-  that SideStore appends to app-group identifiers at resign time).
-- **Darwin notification** (`com.ritoras.dictationStateChanged`) is the sole
-  trigger — posted by the container app after the snapshot write, observed by
-  the keyboard, which calls `refreshFromSharedState()`. It is payload-free by
-  iOS design.
-- **Emergency fallback** — `GET /jobs/{id}` on the Whisper server, activated
-  only after 6 consecutive app-group snapshot misses (proving the container
-  app is genuinely not writing). Both paths route through the same
-  `handleTerminalResult(id:text:errorMessage:)` handler with id-based dedup.
-- **Idempotency** — id-based (`ritoras_last_pid` UserDefaults key), not
-  wall-clock. The old timestamp guard (`ritoras_last_ts`) has been deleted.
-
-For the complete architecture, snapshot data model, state machines, and
-troubleshooting guide, see [`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md).
+> Current client/server request, response, and streaming wire contract. This
+> document describes only behavior that the Ritoras client sends or observes.
 
 ---
 
-## 2. Endpoint
+## 1. Purpose and scope
 
-```
-POST {BASE_URL}/transcribe
-```
+Ritoras communicates with a **Whisper-compatible transcription server** for
+batch and streaming dictation. The client contract covers the request shapes,
+WebSocket frames, response types, and client-side lifecycle described below.
 
-`{BASE_URL}` is the user-configured server URL (e.g. `http://localhost:5000`
-or `http://100.x.y.z:5000` via Tailscale IP).
-
-The server runs on **port 5000** (not 8000) — see [Server details](#8-server-details).
-
-> **Synchronous, still supported.** This endpoint remains the primary batch
-> transcription endpoint and is unchanged from prior versions.
+The client does not assume a specific ASR engine, model, quantization, or
+language limitation. Where behavior depends on the server deployment rather
+than on the Ritoras client, this document says so explicitly. Deployment-
+specific behavior is summarized in §9.
 
 ---
 
-## 3. Request format
+## 2. Server URL and endpoints
 
-### Headers
+The base URL is configured in Ritoras settings. The client uses these paths
+relative to that base URL:
 
-| Header | Value | Condition |
-|--------|-------|-----------|
-| `Content-Type` | `multipart/form-data; boundary={boundary}` | Always |
+| Operation | Endpoint |
+|-----------|----------|
+| Batch transcription | `POST {BASE_URL}/transcribe` |
+| Streaming transcription | WebSocket `{BASE_URL}/stream` |
 
-No `Authorization` header is sent — the server has no authentication. The
-`apiKey` field is retained in `SharedConfig` for forward compatibility but is
-empty by default and not used by this server.
+The WebSocket endpoint uses the URL scheme corresponding to the configured base
+URL (`ws` for `http`, or `wss` for `https`).
 
-### Multipart body
+---
 
-The body contains the audio file part, plus an optional `language` form field
-(see the client-side note below).
+## 3. Batch transcription
 
-```
+### Request
+
+Ritoras sends a `multipart/form-data` request to `POST /transcribe` with the
+audio part and, when available, an optional language form field:
+
+```text
 --{boundary}\r\n
 Content-Disposition: form-data; name="audio"; filename="audio.m4a"\r\n
 Content-Type: audio/mp4\r\n
@@ -81,709 +52,178 @@ Content-Type: audio/mp4\r\n
 
 | Property | Value |
 |----------|-------|
-| Field name | `audio` |
-| `filename` | `audio.m4a` |
-| `Content-Type` | `audio/mp4` |
+| Multipart field name | `audio` |
+| Filename | `audio.m4a` |
+| Content-Type | `audio/mp4` |
+| Optional form field | `language` |
 
-**Important:** The field name is `audio`, **not** `file`. The server is not
-OpenAI-compatible — it expects the field named `audio`.
+The field name is **`audio`**, not `file`. The optional `language` field is a
+client-provided value; how the deployment interprets it is deployment-specific.
 
-**Optional `language` field (client-side note):** the client sends an optional
-per-request `language` form field (ISO-639-1, `el`) derived from the keyboard's
-active language at dictation time — sent ONLY when the active language is not
-English; English requests omit the field entirely (matching the pre-Greek wire
-format). parakeet-v3 ignores it either way — it can only autodetect language
-and cannot be constrained — while whisper-family engines consume it.
-Code-switching between scripts is not reliable with parakeet-v3.
+Ritoras sends no `Authorization` header. That describes the client request,
+not whether a particular deployment requires or supports authentication.
 
-### Parameters the server ignores
+### Response
 
-The following parameters are not used by this server:
-
-- `model` — hardcoded to `small.en` on the server side
-- `language` — the client sends an optional `language` field only when the
-  keyboard's active language is not English (see §3); the parakeet-v3 engine
-  ignores it (autodetect only, cannot be constrained)
-- `response_format` — the server always returns JSON
-
-These fields remain in `SharedConfig` for future use if the user switches to
-an OpenAI-compatible server.
-
----
-
-## 4. Response format
-
-### Success (HTTP 200)
+On a successful JSON response, the client expects a `transcription` field:
 
 ```json
 {
     "success": true,
-    "transcription": "This is the transcribed text. "
+    "transcription": "The transcribed text."
 }
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `success` | `boolean` | Always `true` on success |
-| `transcription` | `string` | The transcribed text |
+For a JSON response, the client accepts the transcription only when the
+response indicates success. If JSON decoding fails, the client also accepts a
+non-empty plain-text response. A non-200 HTTP response is surfaced as an error.
+The server's choice of error body and any text processing applied to the
+returned transcription are deployment-specific.
 
-**Note:** The `transcription` string always ends with a trailing space
-(server-side behavior). The client handles this in post-processing.
+### Audio upload and timeout
 
-### Error (HTTP 200 with `success: false`)
+The client uploads AAC/MPEG-4 audio. Accepted formats and server-side decoding
+are deployment-specific; the client does not require or assert a particular
+server conversion pipeline.
 
-The server returns HTTP 200 even on transcription failure, with
-`"success": false`. The client throws `WhisperError.httpError(200, ...)` in
-this case.
-
-```json
-{
-    "success": false,
-    "transcription": ""
-}
-```
-
-### Error (HTTP 4xx / 5xx)
-
-Non-200 HTTP status codes (e.g. missing file, invalid request). The client
-surfaces the status code and response body to the user.
-
-```json
-{ "detail": "No audio file provided" }
-```
+The client-side timeout setting is `SharedConfig.timeoutSeconds`, whose default
+is **20 seconds**.
 
 ---
 
-## 5. Audio format
+## 4. Streaming lifecycle
 
-Ritoras records audio using `AVAudioRecorder` with these settings:
+Streaming recording begins **immediately**. The microphone starts before server
+selection and WebSocket connection complete. Server selection and connection
+attempts run in the background while the user dictates.
 
-| Property | Value |
-|----------|-------|
-| Format | AAC (MPEG-4 Audio) |
-| File extension | `.m4a` |
-| Sample rate | 48 kHz |
-| Channels | 1 (mono) |
-| Bit rate | 64 kbps |
-| Quality | `.high` |
+The background connection loop:
 
-### Server-side processing
+1. Tries all configured servers, putting the probe-selected server first when a
+   probe result is available.
+2. Waits with an increasing backoff between failed rounds, starting at 1 second
+   and doubling up to an 8-second cap.
+3. Continues trying for the duration of the dictation session.
 
-The server converts uploaded audio to **16 kHz mono WAV** via `ffmpeg` before
-transcribing. Any audio format that `ffmpeg` supports will work — M4A, WAV,
-MP3, OGG, etc. Our M4A/AAC 48 kHz mono recording is already ideal and
-requires no client-side resampling.
-
-### Post-processing
-
-After transcription, the server applies:
-
-- **Word substitutions** — e.g. "athena" → "Athina", domain-specific terms
-- **Time format conversion** — e.g. "three o'clock" → "3:00"
-- **Text normalization** — punctuation, casing, whitespace
+Audio chunks produced while disconnected are held in a FIFO queue. Nothing is
+dropped because the WebSocket is not connected. A late successful connection is
+wired into the active session exactly once, and one WebSocket session spans one
+dictation.
 
 ---
 
-## 6. App Transport Security (ATS)
+## 5. Streaming wire protocol
 
-### The problem
-
-iOS's App Transport Security (ATS) blocks plain HTTP by default. The Tailscale
-100.64.0.0/10 (CGNAT, RFC 6598) range is **not** treated as "local" by ATS —
-only RFC 1918 ranges (10.x, 172.16.x, 192.168.x) qualify. This means a request
-to `http://100.x.y.z:5000/transcribe` **will fail** without an ATS exception,
-and the error will be a silent connection failure.
-
-### v1 solution: NSAllowsArbitraryLoads
-
-The keyboard's `Info.plist` currently includes:
-
-```xml
-<key>NSAppTransportSecurity</key>
-<dict>
-    <key>NSAllowsArbitraryLoads</key>
-    <true/>
-</dict>
-```
-
-This disables ATS entirely for the keyboard extension. Acceptable for a
-sideloaded personal-use app; **not** acceptable for App Store distribution.
-
-### Recommended solution: HTTPS via Tailscale
-
-Set up a Tailscale HTTPS certificate for your Whisper node:
-
-```bash
-# On the Whisper node, if it runs Tailscale:
-tailscale cert your-hostname.your-tailnet.ts.net
-```
-
-Then configure Ritoras with `https://your-hostname.your-tailnet.ts.net:5000`.
-No ATS exception is needed, and traffic is encrypted over Tailscale's
-WireGuard tunnel + TLS.
-
----
-
-## 7. Testing with curl
-
-Use this command to test your Whisper server independently of the iOS app:
-
-```bash
-curl -X POST http://your-server:5000/transcribe \
-  -F "audio=@recording.m4a"
-```
-
-Expected success response (HTTP 200):
-
-```json
-{"success": true, "transcription": "hello world this is a test transcription. "}
-```
-
-No API key, no model parameter, no language parameter — just the audio file.
-
----
-
-## 8. Server details
-
-| Property | Value |
-|----------|-------|
-| Framework | FastAPI + uvicorn |
-| Port | 5000 (`0.0.0.0:5000`) |
-| Engine | faster-whisper |
-| Model | `small.en` (English-only, hardcoded) |
-| Language | English (hardcoded, not configurable) |
-| Quantization | int8 |
-| Auth | None |
-| Stream endpoint | WebSocket `/stream` (real-time streaming, used by Ritoras in stream mode — see §11) |
-
-### File location
-
-The server runs from `~/whisper/server-v2/` and is configured via
-`server-v2/config.json`.
-
----
-
-## 9. Future: OpenAI-compatible server
-
-If the user later switches to an OpenAI-compatible Whisper server (e.g.
-faster-whisper-server with `--openai-compat`, or the official OpenAI API),
-the client can be extended with a configuration flag for API format selection.
-The `SharedConfig.model`, `SharedConfig.language`, and `SharedConfig.apiKey`
-fields are already preserved for this purpose.
-
----
-
-## 10. Client implementation reference
-
-### Batch mode (`/transcribe`)
-
-The batch client is at `keyboard/Sources/WhisperClient.swift`. Key design
-decisions:
-
-- **No third-party HTTP libraries** — uses `URLSession.shared.data(for:)` with
-  `async/await` (iOS 15+).
-- **Multipart body hand-built** using `Data.append` with explicit `\r\n`
-  separators. Only one field (`audio`) is sent.
-- **Timeout** — configurable via `SharedConfig.timeoutSeconds` (default 30 s).
-  Whisper on CPU with int8 quantization can take 10–30 seconds for longer
-  recordings. Mapped to `WhisperError.timeout` on `URLError.timedOut`.
-- **Error handling** — every failure path produces a `WhisperError` with a
-  user-readable description for Phase 8's error UI.
-- **Defensive decoding** — attempts JSON decode first (checks `success` field),
-  falls back to plain text extraction if JSON parsing fails.
-- **File cleanup** — the caller (Phase 8 / `KeyboardViewController`) is
-  responsible for deleting `audioURL` after transcription completes.
-
-### Stream mode (`/stream`)
-
-The streaming client spans three files:
-
-- `shared/WhisperStreamClient.swift` — WebSocket connection lifecycle (connect,
-  send binary chunks, send END/PING, receive partial/final/error/PONG frames,
-  disconnect).
-- `shared/StreamingAudioRecorder.swift` — client-side energy-based VAD state
-  machine running on an `AVAudioEngine` tap, emitting 16 kHz mono float32 PCM
-  chunks per detected speech segment.
-- `shared/Config.swift` — `DictationMode` enum (`.batch` / `.stream`) and all
-  streaming tunables (see §11 for reference).
-
----
-
-## 11. Streaming mode (`/stream` WebSocket)
-
-> **Still supported.** This streaming endpoint remains the primary real-time
-> transcription endpoint and is unchanged from prior versions.
-
-### Overview
-
-Ritoras uses the `/stream` WebSocket endpoint behind a user-facing
-`DictationMode` toggle (default `.batch`, values: `.batch` | `.stream`). When
-`.stream` is selected, the container app opens a persistent WebSocket
-connection, streams 16 kHz mono float32 PCM chunks emitted by a client-side
-energy VAD, and receives live `partial` transcriptions followed by a single
-normalized `final` when the user stops dictating.
-
-Unlike the stateless `POST /transcribe` endpoint, `/stream` maintains a session
-spanning one dictation: one WebSocket connect → N binary audio frames → one
-`{"type":"END"}` → drain worker → `final` response → close.
-
-### Client → Server frames
+### Client → server
 
 | Frame | Shape | Purpose |
 |-------|-------|---------|
-| Binary | `[4-byte BE uint32 chunk_id][float32 LE PCM @ 16 kHz mono]` | One audio chunk (one Whisper call) |
-| Text JSON | `{"type":"END"}` | End of session — server drains worker and responds with `final` |
-| Text JSON | `{"type":"PING"}` | Keepalive — server responds `{"type":"PONG"}` |
-| Text JSON | `{"type":"CONTEXT","text":"..."}` | Optional Whisper `initial_prompt` (unused by Ritoras v1) |
+| Binary | `[4-byte BE uint32 chunk_id][float32 LE PCM @ 16 kHz mono]` | One audio chunk |
+| Text JSON | `{"type":"END"}` | Signals that no more audio chunks will follow |
+| Text JSON | `{"type":"PING"}` | Keepalive and connection probe |
+| Text JSON | `{"type":"CONTEXT","text":"..."}` | Defined protocol frame; unused by the Ritoras client |
 
-The server decodes binary frames as (`server.py:749-760`):
-
-```python
-chunk_id = struct.unpack("!I", raw[:4])[0]
-audio = np.frombuffer(raw[4:], dtype=np.float32)
-```
-
-**Binary frame layout:**
+The binary frame layout is:
 
 | Offset | Size | Field |
 |--------|------|-------|
-| 0 | 4 | `chunk_id` (uint32, big-endian) |
-| 4 | N×4 | PCM samples (float32, little-endian, 16 kHz mono) |
+| 0 | 4 bytes | `chunk_id`, unsigned 32-bit integer, big-endian |
+| 4 | N × 4 bytes | Float32 PCM samples, little-endian, 16 kHz mono |
 
-Total frame size: `4 + N×4` bytes, where N is the number of audio samples.
+Ritoras starts a connection with a PING/PONG handshake. A PONG confirms that
+the WebSocket connection is usable.
 
-### Server → Client frames (all text JSON)
+### Server → client
 
-| Frame | Shape | Description |
-|-------|-------|-------------|
-| `partial` | `{"type":"partial","transcription":"...","chunk_id":N}` | Per-chunk result, **RAW** (not normalized) |
-| `final` | `{"type":"final","transcription":"...","chunk_id":last}` | After END + worker drain, **FULLY NORMALIZED** |
-| `PONG` | `{"type":"PONG"}` | Keepalive response |
-| `error` | `{"type":"error","message":"..."}` | Server error |
+The client handles these text JSON response types:
 
-**partial vs final:**
+| Type | Shape | Meaning |
+|------|-------|---------|
+| `partial` | `{"type":"partial","transcription":"...","chunk_id":N}` | Result associated with one audio chunk |
+| `final` | `{"type":"final","transcription":"...","chunk_id":N}` | Terminal result after END and drain |
+| `PONG` | `{"type":"PONG"}` | Response to PING |
 
-- `partial` transcriptions are the raw output from a single Whisper call (the
-  per-chunk result). They are NOT passed through the server's post-processing
-  pipeline — no substitutions, no time-format conversion, no normalization.
-  Ritoras displays them live in the container app for immediate feedback.
-- `final` is produced after the server receives `{"type":"END"}` and all
-  outstanding workers have drained. It runs through the identical pipeline as
-  `POST /transcribe`:
-  `normalize_text(convert_time_format(apply_substitutions(...)))`, including the
-  trailing space.
+---
 
-**END / PING / CONTEXT:**
+## 6. Result semantics and stop behavior
 
-- **END** (`{"type":"END"}`) — the client must send this to signal that no more
-  audio chunks will follow. The server stops accepting new chunks, waits for the
-  worker queue to drain, and returns a single `final` transcription.
-- **PING** (`{"type":"PING"}`) — keepalive. The server's idle timeout
-  (`STREAM_RECV_TIMEOUT = 600 s`, `server.py:120, 853-862`) closes the
-  connection if no frame is received within that window. The client should send
-  a PING well before 600 s of silence during long pauses.
-- **CONTEXT** (`{"type":"CONTEXT","text":"..."}`) — sets the Whisper
-  `initial_prompt` for the session. Ritoras does not send this in v1; the
-  server provides automatic cross-chunk context by threading the last 300
-  characters of accumulated transcript as `initial_prompt` to each new chunk
-  (`server.py:828`).
+- `partial` responses are **raw per-chunk outputs**. They are display-only in
+  the app and are not accepted as the terminal transcription.
+- The `final` response is the accepted streaming result.
+- A **non-empty** `final` is accepted even when the session produced zero
+  partial responses.
 
-### Client-side VAD (architectural note)
+When the user stops recording, the client:
 
-The server's `VAD_ENABLED` flag (`server.py:159`) and `VAD_PARAMETERS`
-(threshold 0.2, min_speech 250 ms, min_silence 1000 ms, speech_pad 400 ms) are
-passed to faster-whisper's built-in Silero VAD **inside** `model.transcribe()`.
-This only trims silence within a single chunk before transcribing; it does
-**not** perform real-time segmentation of the inbound audio stream.
+1. Allows up to **2 seconds** for a connection to arrive late.
+2. Waits for the chunk-consumer task to complete. The stream is considered
+   drained only when the FIFO queue is empty and no chunk is in flight.
+3. Sends `{"type":"END"}` after the drain completes.
+4. Awaits the `final` response, bounded by
+   `SharedConfig.Defaults.streamFinalTimeout` (**30 seconds**).
 
-Therefore, Ritoras implements client-side pause detection using an energy-based
-VAD state machine in `shared/StreamingAudioRecorder.swift`. The VAD computes
-RMS energy per audio frame (buffer of 4096 samples at 16 kHz) and tracks
-speech/silence durations:
+---
 
-| Tunable | Default | Purpose |
+## 7. Client-side VAD
+
+Streaming uses an energy-based RMS voice-activity detector with DC-corrected
+RMS. The accumulator includes leading silence, speech, audio between pauses,
+and trailing silence. A chunk is emitted when all of these conditions hold:
+
+- consecutive silence is at least the configured silence threshold;
+- total accumulated audio is at least the minimum chunk duration; and
+- detected speech is at least the minimum speech duration.
+
+Stopping flushes the remainder when it contains at least the minimum speech
+duration. A noise guard discards the accumulator when more than the configured
+noise window of audio contains less than **0.1 seconds** of detected speech.
+
+All five values are user-configurable in **Settings → Streaming VAD**. User
+values override these defaults:
+
+| Setting | Default | Meaning |
 |---------|---------|---------|
-| `SharedConfig.Defaults.streamVadSpeechRms` | `0.02` | RMS threshold for speech detection. Higher = less sensitive. |
-| `SharedConfig.Defaults.streamVadSilenceMs` | `600` | Silence duration (ms) before a chunk is finalized (pause timeout). |
-| `SharedConfig.Defaults.streamVadMinSpeechMs` | `300` | Minimum speech duration (ms) to accept a chunk. Rejects brief noise. |
-| `SharedConfig.Defaults.streamMaxChunkSeconds` | `8.0` | Maximum audio segment length before forced chunk finalization. |
+| `speechRms` | `0.025` | RMS threshold for detected speech |
+| `silence` | `2000 ms` | Consecutive silence required to emit a chunk |
+| `minSpeech` | `300 ms` | Minimum detected speech in an emitted chunk or stop flush |
+| `minChunk` | `300 ms` | Minimum total audio in an emitted chunk |
+| `maxNoise` | `6.0 s` | Audio window used by the noise guard |
 
-When the VAD detects `streamVadSilenceMs` ms of continuous silence after
-speech, it emits the accumulated audio as one binary frame (with an atomically
-incrementing `chunk_id`). The same emission happens if the chunk exceeds
-`streamMaxChunkSeconds` regardless of VAD state. This delivers the
-"transcribe on pause" user experience.
-
-### Chunking model
-
-The server transcribes whatever the client sends as one binary frame as one
-Whisper call. The background worker pulls `(chunk_id, audio_array)` off an
-async queue and calls faster-whisper per chunk. Cross-chunk context continuity
-is automatic: the server threads the last 300 characters of accumulated
-transcript as `initial_prompt` for each new chunk (`server.py:828`).
-
-### Result delivery invariant
-
-In stream mode, exactly **one** terminal `DictationPayload` is written to the
-app-group UserDefaults snapshot per session, carrying the server's `final`
-(normalized) text. The keyboard extension reads it from the shared store via
-`readSharedSnapshot(for:)`. If the container app is killed before the terminal
-snapshot is written, the keyboard falls back to `GET /jobs/{id}` on the Whisper
-server (see [`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md) §7).
-
-Live `partial` transcriptions are display-only in the container app and are
-**never** sent to the keyboard extension.
-
-### Other tunables
-
-| Tunable | Default | Purpose |
-|---------|---------|---------|
-| `SharedConfig.Defaults.streamWsConnectTimeout` | `8.0 s` | WebSocket connection timeout (includes PING/PONG handshake probe). |
-| `SharedConfig.Defaults.streamFinalTimeout` | `30.0 s` | How long to wait for a `final` transcription after sending END. |
-
-### ATS note for streaming
-
-The container app connects to the WebSocket at `ws://100.x:5000/stream` (plain
-WS, not WSS). Batch mode already works over plain HTTP from the container app,
-and `URLSessionWebSocketTask` to `ws://` falls under the same ATS rules.
-
-The keyboard extension's `Info.plist` already declares
-`NSAllowsArbitraryLoads = true`. The container app's `Info.plist` does not
-currently declare an ATS exception, but if an on-device test reveals an ATS
-block for the WebSocket connection, the fix is to mirror the keyboard's
-`NSAppTransportSecurity` → `NSAllowsArbitraryLoads = true` block into
-`app/Info.plist`.
-
-### Testing with Python
-
-A self-contained test using the `websockets` library:
-
-```python
-import asyncio, json, struct, wave, numpy as np
-import websockets
-
-async def test_stream():
-    uri = "ws://100.107.181.45:5000/stream"
-    async with websockets.connect(uri) as ws:
-        # Open a 16 kHz mono WAV file
-        with wave.open("test.wav", "rb") as w:
-            assert w.getnchannels() == 1
-            assert w.getframerate() == 16000
-
-            raw = w.readframes(w.getnframes())
-            if w.getsampwidth() == 2:          # 16-bit PCM
-                samples = (
-                    np.frombuffer(raw, dtype=np.int16).astype(np.float32)
-                    / 32768.0
-                )
-            else:                               # already float32
-                samples = np.frombuffer(raw, dtype=np.float32)
-
-        # Send in 2-second chunks
-        chunk_size = 32000  # 2 s × 16 kHz
-        for i in range(0, len(samples), chunk_size):
-            chunk = samples[i:i + chunk_size]
-            frame = struct.pack("!I", i // chunk_size) + chunk.tobytes()
-            await ws.send(frame)
-
-        await ws.send(json.dumps({"type": "END"}))
-
-        async for msg in ws:
-            print(json.loads(msg))
-
-asyncio.run(test_stream())
-```
-
-Expected output (the server echoes partial results per chunk, then the final):
-
-```
-{'type': 'partial', 'transcription': 'hello world', 'chunk_id': 0}
-{'type': 'partial', 'transcription': 'hello world this is a', 'chunk_id': 1}
-{'type': 'final', 'transcription': 'hello world this is a test transcription. ', 'chunk_id': 1}
-```
-
-Note: `partial` transcriptions are unnormalized per-chunk Whisper output. Only
-the `final` is fully normalized through substitutions, time-format conversion,
-and text normalization — identical to the `POST /transcribe` pipeline.
+There is **no maximum chunk length** and no forced-finalization timer based on
+chunk duration.
 
 ---
 
-## 12. Async transcription (recommended for new clients)
+## 8. Failure and retry
 
-```
-POST {BASE_URL}/transcriptions
-```
+Connection retries continue throughout the streaming session. While recording,
+queued streaming chunk sends retry without a fixed attempt limit, using the
+client's backoff between attempts.
 
-### When to use async
+If streaming cannot complete, the continuous WAV recording is preserved for a
+later retry. The user-facing failure messages are:
 
-The synchronous `POST /transcribe` endpoint works well when the client can hold
-a connection open for the duration of the transcription. However, constrained
-environments — such as iOS keyboard extensions under the 48 MB Jetsam memory
-cap — may be terminated by the OS mid-request. The async pattern decouples
-upload from result retrieval so the client can submit audio and check back for
-the result later, even after a crash and relaunch.
+- `Server unreachable — recording preserved for retry` when no streaming
+  connection becomes available;
+- `stream send failed — recording preserved for retry` when a connection exists
+  but queued audio cannot be completed.
 
-### Request
-
-#### Headers
-
-| Header | Value | Condition |
-|--------|-------|-----------|
-| `Content-Type` | `multipart/form-data; boundary={boundary}` | Always |
-| `Idempotency-Key` | `{UUID}` | Always — see §14 for contract details |
-
-No `Authorization` header is sent (same as `POST /transcribe`).
-
-#### Multipart body
-
-Identical to `POST /transcribe` — see [§3](#3-request-format). The field name is
-`audio`, the filename is `audio.m4a`, and the content type is `audio/mp4`.
-
-### Response (HTTP 202 Accepted)
-
-```json
-{
-    "job_id": "3a1b2c3d-4e5f-6789-abcd-ef0123456789",
-    "status_endpoint": "/jobs/3a1b2c3d-4e5f-6789-abcd-ef0123456789"
-}
-```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `job_id` | `string` (UUID) | Unique job identifier, also used as the path component of the status endpoint |
-| `status_endpoint` | `string` | Relative URL for `GET /jobs/{id}` — the client should poll this to retrieve the result |
-
-### Idempotency
-
-If a duplicate request with the same `Idempotency-Key` arrives within the
-retention window (10 minutes), the server returns HTTP 202 with the same
-`job_id` rather than re-transcribing. See [§14](#14-idempotency-key-contract)
-for the full contract.
+The client sends a keepalive PING every **25 seconds**. The WebSocket connection
+attempt timeout is `streamWsConnectTimeout`, **8.0 seconds**.
 
 ---
 
-## 13. Job status polling
+## 9. Deployment-specific behavior
 
-```
-GET {BASE_URL}/jobs/{job_id}
-```
+The following are properties of a particular server deployment, not assumptions
+made by the Ritoras client contract:
 
-Poll this endpoint to retrieve the transcription result after submitting via
-`POST /transcriptions`. The `job_id` is obtained from the `status_endpoint`
-field in the async submission response.
-
-### Response (HTTP 200)
-
-```json
-{
-    "status": "ready",
-    "text": "This is the transcribed text. ",
-    "revision": 3
-}
-```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `status` | `string` | One of: `pending`, `transcribing`, `ready`, `failed` |
-| `text` | `string` or `null` | The transcribed text. `null` unless `status` is `ready`. |
-| `revision` | `integer` | Monotonically increasing counter bumped on every job update. Clients use this to detect stale reads — if `revision` hasn't changed, the cached response is still current. |
-
-### Status values
-
-| Status | Meaning |
-|--------|---------|
-| `pending` | Job accepted but not yet picked up by a worker |
-| `transcribing` | Audio is being transcribed |
-| `ready` | Transcription complete. `text` is populated. |
-| `failed` | Transcription failed. `text` is `null`. |
-
-### Polling cadence
-
-- **While visible (UI on screen):** Poll every 500–1000 ms.
-- **Stop polling** once `status` is `ready` or `failed` (terminal states).
-- **Background recovery (crash relaunch):** Poll once at startup with a short
-  timeout. If `status` is `ready`, retrieve the result; otherwise abandon — the
-  job is likely too old or was a different session.
-
-### Error response (HTTP 404)
-
-```json
-{ "detail": "Job not found" }
-```
-
-Returned when the `job_id` does not correspond to any known or retained job.
-The client should treat this the same as an expired or never-existing job.
-
-### Job retention
-
-Jobs are retained for at least 10 minutes after reaching a terminal state
-(`ready` or `failed`). After that, the server may evict them. The
-`Idempotency-Key` retention window (see [§14](#14-idempotency-key-contract)) is
-independent and may extend beyond job retention to prevent duplicate
-submissions.
-
----
-
-## 14. Idempotency-Key contract
-
-The `Idempotency-Key` header provides at-least-once semantics for
-`POST /transcriptions`.
-
-### Format
-
-A UUID string in canonical 8-4-4-4-12 lowercase hex format:
-
-```
-Idempotency-Key: 3a1b2c3d-4e5f-6789-abcd-ef0123456789
-```
-
-### Generation
-
-The client MUST generate the idempotency key **before** starting the upload.
-For Ritoras, the key is the `jobId` UUID produced by
-`shared/TranscriptionInbox.swift` — the same identifier used for cross-target
-delivery. This ensures that a retry after a crash reuses the same key and does
-not double-transcribe.
-
-### Retention
-
-The server MUST retain the idempotency key for **at least 10 minutes** from the
-initial request. During this window:
-
-- A replay (same key, any identical audio) returns the **same `job_id`** as the
-  original response.
-- A replay with a key that has already been consumed but whose job is still
-  pending or transcribing returns the same `job_id`. The server does not start
-  a second transcription.
-- After the retention window expires, the server MAY forget the key and treat
-  the next request with that key as a new submission.
-
-### Replay response
-
-On key replay within the retention window, the server returns HTTP 202 with the
-original `job_id` and `status_endpoint`. The response body is identical to the
-original submission response — no re-transcription occurs.
-
-### Error on duplicate with different content
-
-If the same `Idempotency-Key` is used with **different** audio content within
-the retention window, the server SHOULD return HTTP 422 Unprocessable Entity.
-This signals a client bug (the key should be unique per payload), not a
-transient failure.
-
----
-
-## 15. Removed endpoints
-
-### Endpoint (REMOVED — client side)
-
-```
-GET {BASE_URL}/dictation_result/latest
-POST {BASE_URL}/dictation_result
-```
-
-### What they did
-
-The keyboard extension polled `GET /dictation_result/latest` as a fallback
-transport when the container app was killed mid-transcription. The container app
-wrote dictation results to `POST /dictation_result` after transcription
-completed (in both batch and stream modes).
-
-### Response shape (historical, for server-only compatibility)
-
-```json
-{
-    "status": "completed",
-    "text": "This is the transcribed text. ",
-    "timestamp": 1712345678.0
-}
-```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `status` | `string` | One of: `completed`, `error`, `cancelled`, `transcribing`, `recording`, `none` |
-| `text` | `string` | The transcribed text (present when `status` is `completed`) |
-| `timestamp` | `double` | Epoch seconds of the result. Clients use this to ignore stale results. |
-| `errorMessage` | `string` or `null` | Present when `status` is `error`. |
-| `detail` | `string` or `null` | Present on 404 — value is `"Not Found"`. |
-
-If no result was available, the server returned HTTP 404 with
-`{"detail": "Not Found"}`.
-
-### Status
-
-**REMOVED (client-side)** — deprecated in Phase 5, removed in Phase 6.
-
-The keyboard extension no longer uses these endpoints. All dictation result
-delivery now flows through the app-group UserDefaults canonical channel (see
-[`docs/LOCALHOST-IPC.md`](LOCALHOST-IPC.md)). The emergency fallback when the
-container app cannot deliver the result via app-group is now `GET /jobs/{id}`
-(see [§13](#13-job-status-polling)) — polled only after 6 consecutive
-app-group snapshot misses, using the same id-dedup guard.
-
-### Server-side status
-
-The server may retain these endpoints for backward compatibility with older
-clients, but no active Ritoras client relies on them. Server teams may remove
-them at their discretion.
-
----
-
-## 16. Migration status
-
-The following table summarises the state of all documented server endpoints:
-
-| Endpoint | Type | Status | Used by |
-|----------|------|--------|---------|
-| `POST /transcribe` | Sync | Stable — primary batch endpoint | Container app (batch mode) |
-| `WS /stream` | Streaming | Stable — primary streaming endpoint | Container app (stream mode) |
-| `POST /transcriptions` + `GET /jobs/{id}` | Async (request-reply) | **ADOPTED** — emergency fallback for crash recovery | Keyboard extension (read-only via `GET /jobs/{id}`) |
-| `GET /dictation_result/latest` | Sync polling | **REMOVED** (client-side) — see §15 | None |
-
-### Key design rationale
-
-- **`POST /transcribe`** and **`WS /stream`** remain the primary endpoints for
-  the container app today. They are synchronous, well-tested, and unchanged.
-- **`POST /transcriptions`** + **`GET /jobs/{id}`** are adopted as the
-  emergency fallback transport. The keyboard polls `GET /jobs/{id}` only when
-  the app-group UserDefaults path fails after 6 consecutive misses (proving the
-  container app is genuinely not writing). Both paths route through the same
-  `handleTerminalResult(id:text:errorMessage:)` handler with id-based dedup,
-  preventing double-insertion.
-- **`GET /dictation_result/latest`** has been removed from the client. The
-  server may retain the endpoint for backward compatibility, but no active
-  Ritoras client relies on it.
-
-## 17. Warm-up (POST /warmup)
-
-```
-POST {BASE_URL}/warmup
-```
-
-The request has an empty body and no authentication. Responses are:
-
-Cold model (HTTP 202):
-```json
-{"status":"warming","mode":"on-demand-trim","ttl":180}
-```
-Resident model (HTTP 200):
-```json
-{"status":"warm","mode":"on-demand-trim","ttl":180}
-```
-Always-loaded model (HTTP 200):
-```json
-{"status":"warm","mode":"always"}
-```
-Disabled with `model_idle_ttl=0` (HTTP 200):
-```json
-{"status":"skipped","mode":"on-demand","detail":"..."}
-```
-Every response includes a `"mode"` field.
-The client sends this at batch-mode record-button press, fire-and-forget, with
-a 5-second timeout. Stream mode skips it because WebSocket connection already
-warms the server. Failures, including 404 while unsupported, are swallowed.
-
-Test with:
-```bash
-curl -X POST http://your-server:5000/warmup
-```
+- ASR engine and model choice;
+- server-side VAD, segmentation, silence trimming, and other preprocessing;
+- cross-chunk context behavior;
+- supported languages and the interpretation of the optional `language` field;
+- authentication requirements and authorization policy;
+- accepted batch audio formats and server-side audio decoding;
+- normalization, punctuation, substitutions, casing, and other result
+  post-processing;
+- performance, latency, concurrency, and resource behavior.

@@ -1,5 +1,14 @@
 # Ritoras — Implementation Plan
 
+> **HISTORICAL NOTICE:** This document is a historical planning artifact
+> describing the original implementation plan. Several details were never
+> built or have changed: it references an OpenAI-compatible
+> `/v1/audio/transcriptions` endpoint, `file`/`model` multipart fields, and a
+> four-state UI. The implemented product uses `POST /transcribe` with the
+> `audio` field, a WebSocket `/stream` protocol, and a five-state lifecycle
+> including `.connecting`. See [`docs/SERVER-CONTRACT.md`](SERVER-CONTRACT.md)
+> for current behavior.
+
 **iOS Custom Keyboard Extension → self-hosted Whisper over Tailscale → paste transcript.**
 Personal sideload. Linux-only developer. $0 budget. iOS-first.
 
