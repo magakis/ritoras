@@ -30,22 +30,25 @@ struct VADSettingsView: View {
             }
         }
         .onChange(of: settings.streamVadMode) { _, _ in
-            tester.rebuildGate()
+            rebuildTesterGate()
         }
         .onChange(of: settings.streamVadCalibrationMs) { _, _ in
-            tester.rebuildGate()
+            rebuildTesterGate()
         }
         .onChange(of: settings.streamVadCalibratedOffsetDb) { _, _ in
-            tester.rebuildGate()
+            rebuildTesterGate()
         }
         .onChange(of: settings.streamVadAdaptiveDeltaDb) { _, _ in
-            tester.rebuildGate()
+            rebuildTesterGate()
         }
         .onChange(of: settings.streamVadAdaptiveHysteresisEnabled) { _, _ in
-            tester.rebuildGate()
+            rebuildTesterGate()
+        }
+        .onChange(of: settings.streamVadSpeechRms) { _, _ in
+            rebuildTesterGate()
         }
         .onChange(of: settings.audioMeasurementModeEnabled) { _, _ in
-            tester.rebuildGate()
+            rebuildTesterGate()
         }
     }
 
@@ -221,6 +224,17 @@ struct VADSettingsView: View {
         case .adaptive:
             Text("Tracks the noise floor continuously from the first half-second. Δ is how far above the floor speech must be — lower it for whispering (try 6–8). Best hands-off choice across environments. Hysteresis closes chunks more decisively.")
         }
+    }
+
+    private func rebuildTesterGate() {
+        tester.rebuildGate(using: VADGateConfig(
+            mode: settings.streamVadMode,
+            staticRms: settings.streamVadSpeechRms,
+            calibrationMs: settings.streamVadCalibrationMs,
+            calibratedOffsetDb: settings.streamVadCalibratedOffsetDb,
+            adaptiveDeltaDb: settings.streamVadAdaptiveDeltaDb,
+            adaptiveHysteresisEnabled: settings.streamVadAdaptiveHysteresisEnabled
+        ))
     }
 
     private var signalPathSection: some View {

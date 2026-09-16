@@ -121,7 +121,7 @@ final class AudioLevelTesterViewModel: ObservableObject {
     }
 
     func rebuildGate() {
-        gate = VADThresholdGate(config: VADGateConfig(
+        rebuildGate(using: VADGateConfig(
             mode: SharedConfig.streamVadMode(),
             staticRms: SharedConfig.streamVadSpeechRms(),
             calibrationMs: SharedConfig.streamVadCalibrationMs(),
@@ -129,9 +129,13 @@ final class AudioLevelTesterViewModel: ObservableObject {
             adaptiveDeltaDb: SharedConfig.streamVadAdaptiveDeltaDb(),
             adaptiveHysteresisEnabled: SharedConfig.streamVadAdaptiveHysteresisEnabled()
         ))
+    }
+
+    func rebuildGate(using config: VADGateConfig) {
+        gate = VADThresholdGate(config: config)
 
         let output = gate?.snapshot
-        thresholdDb = output?.thresholdDb ?? Double(AudioMath.dbFromRms(SharedConfig.streamVadSpeechRms()))
+        thresholdDb = output?.thresholdDb ?? Double(AudioMath.dbFromRms(config.staticRms))
         floorDb = output?.floorDb
         calibrating = isMonitoring && (output?.calibrating ?? false)
         isSpeech = false
