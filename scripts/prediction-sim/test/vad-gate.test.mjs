@@ -16,7 +16,7 @@ function seedAdaptiveGate(partial = {}, seedDb = -50) {
     mode: 'adaptive',
     ...partial,
   }));
-  for (let i = 0; i < 6; i++) gate.process(seedDb, 0.1);
+  for (let i = 0; i < 10; i++) gate.process(seedDb, 0.1);
   return gate;
 }
 
@@ -107,6 +107,7 @@ describe('VADThresholdGate', () => {
       assert.strictEqual(output.isSpeech, false);
       assert.strictEqual(output.floorDb, -60);
       assert.ok(Math.abs(output.retroactiveSpeechMs - 400) < 0.001);
+      gate.process(-70, 0.5);
       gate.updateFloorIfIdle(-70, 0.5);
       const expectedFloor = -60 + (1 - Math.exp(-1)) * (-10);
       assert.ok(Math.abs(gate.snapshot.floorDb - expectedFloor) < 0.001);
@@ -155,33 +156,53 @@ describe('VADThresholdGate', () => {
   });
 
   describe('adaptive mode', () => {
-    it('seeds the floor from the minimum of the first six frames', () => {
+    it('holds startup as ambiguous until the provisional half-second seed', () => {
       const gate = new VADThresholdGate(config({
         mode: 'adaptive',
       }));
-      for (const frameDb of [-50, -49, -48, -47, -46, -70]) {
-        gate.process(frameDb, 0.1);
+      for (let i = 0; i < 4; i++) {
+        const output = gate.process(-30, 0.1);
+        assert.strictEqual(output.evidence, 'ambiguous');
+        assert.strictEqual(output.floorDb, null);
       }
-      assert.strictEqual(gate.snapshot.floorDb, -70);
-
-      const speech = gate.process(-30, 0.1);
-      assert.strictEqual(speech.isSpeech, true);
-      assert.strictEqual(speech.floorDb, -70);
-      assert.strictEqual(gate.process(-30, 0.1).floorDb, -70);
+      const provisional = gate.process(-30, 0.1);
+      assert.strictEqual(provisional.floorDb, -30);
+      assert.strictEqual(provisional.evidence, 'silence');
     });
 
-    it('uses the fast fall and slow rise time constants', () => {
-      const fallGate = seedAdaptiveGate({ adaptiveDeltaDb: 20 }, -50);
+    it('seeds from an interpolated tenth percentile instead of a single dip', () => {
+      const gate = new VADThresholdGate(config({ mode: 'adaptive' }));
+      for (const frameDb of [...Array(9).fill(-65), -78]) {
+        gate.process(frameDb, 0.1);
+      }
+      const output = gate.snapshot;
+      assert.ok(Math.abs(output.floorDb - -66.3) < 0.001);
+      assert.strictEqual(output.evidence, 'silence');
+      assert.strictEqual(gate.process(-30, 0.1).isSpeech, true);
+    });
+
+    it('does not let speech occupying forty percent of the seed raise the floor', () => {
+      const gate = new VADThresholdGate(config({ mode: 'adaptive' }));
+      for (const frameDb of [...Array(6).fill(-65), ...Array(4).fill(-30)]) {
+        gate.process(frameDb, 0.1);
+      }
+      assert.ok(gate.snapshot.floorDb <= -62);
+      assert.ok(gate.snapshot.floorDb >= -67);
+    });
+
+    it('uses the fast fall tau and capped upward movement', () => {
+      const fallGate = seedAdaptiveGate({ adaptiveDeltaDb: 20 }, -60);
+      fallGate.floorDb = -50;
       fallGate.process(-60, 0.1);
       const fall = fallGate.updateFloorIfIdle(-60, 0.5) || fallGate.snapshot;
       const expectedFall = -50 + (1 - Math.exp(-1)) * (-10);
       assert.ok(Math.abs(fall.floorDb - expectedFall) < 0.001);
 
-      const riseGate = seedAdaptiveGate({ adaptiveDeltaDb: 10 }, -60);
-      riseGate.process(-30, 0.1);
+      const riseGate = seedAdaptiveGate({ adaptiveDeltaDb: 10 }, -58);
+      riseGate.floorDb = -60;
       riseGate.updateFloorIfIdle(-58, 7);
       const rise = riseGate.snapshot;
-      const expectedRise = Math.min(-60 + (1 - Math.exp(-1)) * 2, -60 + 1.5 * 7);
+      const expectedRise = -58;
       assert.ok(Math.abs(rise.floorDb - expectedRise) < 0.001);
     });
 
@@ -203,17 +224,55 @@ describe('VADThresholdGate', () => {
       assert.strictEqual(output.isSpeech, true);
     });
 
-    it('does not adapt during speech and resumes after stable idle silence', () => {
+    it('freezes during non-idle states and resumes immediately when idle', () => {
       const gate = seedAdaptiveGate({ adaptiveDeltaDb: 10 }, -50);
       gate.process(-30, 0.1);
       assert.strictEqual(gate.snapshot.floorDb, -50);
 
-      gate.updateFloorIfIdle(-60, 0.1);
+      for (let i = 0; i < 31; i++) {
+        gate.process(-60, 0.1);
+        gate.updateFloorIfIdle(-60, 0.1, false);
+      }
       assert.strictEqual(gate.snapshot.floorDb, -50);
-      gate.updateFloorIfIdle(-60, 0.1);
-      assert.strictEqual(gate.snapshot.floorDb, -50);
-      gate.updateFloorIfIdle(-60, 0.1);
+      gate.process(-60, 0.1);
+      gate.updateFloorIfIdle(-60, 0.1, true);
       assert.ok(gate.snapshot.floorDb < -50);
+    });
+
+    it('keeps baseline rise capped before sustained idle and then catches up', () => {
+      const gate = seedAdaptiveGate({}, -65);
+      gate.floorDb = -78;
+
+      for (let i = 0; i < 14; i++) {
+        gate.process(-65, 0.1);
+        gate.updateFloorIfIdle(-65, 0.1, true);
+      }
+      assert.ok(gate.snapshot.floorDb <= -75.9 + 0.001);
+
+      for (let i = 0; i < 16; i++) {
+        gate.process(-65, 0.1);
+        gate.updateFloorIfIdle(-65, 0.1, true);
+      }
+      assert.ok(Math.abs(gate.snapshot.floorDb - -66.3) < 0.001);
+    });
+
+    it('does not reset sustained idle time for a cancelled onset', () => {
+      const gate = seedAdaptiveGate({}, -65);
+      gate.floorDb = -78;
+
+      for (let i = 0; i < 14; i++) {
+        gate.process(-65, 0.1);
+        gate.updateFloorIfIdle(-65, 0.1, true);
+      }
+      const beforeBlip = gate.snapshot.floorDb;
+      gate.updateFloorIfIdle(-65, 0.1, false);
+      gate.updateFloorIfIdle(-65, 0.1, true);
+      assert.ok(gate.snapshot.floorDb - beforeBlip >= 0.6 - 0.001);
+
+      gate.updateFloorIfIdle(-65, 0.1, false, true);
+      gate.process(-65, 0.1);
+      gate.updateFloorIfIdle(-65, 0.1, true);
+      assert.ok(gate.snapshot.floorDb - (beforeBlip + 0.6) <= 0.15 + 0.001);
     });
 
     it('classifies the gap between silence and continuation as ambiguous', () => {
@@ -224,18 +283,19 @@ describe('VADThresholdGate', () => {
     });
 
     it('converges to the same floor for equivalent variable frame durations', () => {
-      const coarse = seedAdaptiveGate({ adaptiveDeltaDb: 30 }, -50);
-      const fine = seedAdaptiveGate({ adaptiveDeltaDb: 30 }, -50);
-      const trajectory = [-60, -55, -65, -58, -62];
-      for (const frameDb of trajectory) {
-        coarse.process(frameDb, 0.08533);
-        coarse.updateFloorIfIdle(frameDb, 0.08533);
+      const coarse = seedAdaptiveGate({ adaptiveDeltaDb: 30 }, -60);
+      const fine = seedAdaptiveGate({ adaptiveDeltaDb: 30 }, -60);
+      coarse.floorDb = -50;
+      fine.floorDb = -50;
+      for (let i = 0; i < 5; i++) {
+        coarse.process(-60, 0.08533);
+        coarse.updateFloorIfIdle(-60, 0.08533);
       }
-      for (const frameDb of trajectory) {
-        fine.process(frameDb, 0.042665);
-        fine.updateFloorIfIdle(frameDb, 0.042665);
-        fine.process(frameDb, 0.042665);
-        fine.updateFloorIfIdle(frameDb, 0.042665);
+      for (let i = 0; i < 5; i++) {
+        fine.process(-60, 0.042665);
+        fine.updateFloorIfIdle(-60, 0.042665);
+        fine.process(-60, 0.042665);
+        fine.updateFloorIfIdle(-60, 0.042665);
       }
       assert.ok(Math.abs(coarse.snapshot.floorDb - fine.snapshot.floorDb) < 1e-9);
     });

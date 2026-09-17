@@ -220,9 +220,12 @@ private final class VADContext: @unchecked Sendable {
             if previousState != endpoint.state {
                 FileLogger.shared.debug(.audio, "VAD state \(previousState.rawValue) → \(endpoint.state.rawValue)")
             }
-            if previousState == .idle, evidence == .silence {
-                gate.updateFloorIfIdle(frameDb: frameDb, duration: frameDuration)
-            }
+            gate.updateFloorIfIdle(
+                frameDb: frameDb,
+                duration: frameDuration,
+                machineIsIdle: previousState == .idle && endpoint.state == .idle,
+                utteranceOpened: previousState != .speechActive && endpoint.state == .speechActive
+            )
 
             var appendedLiveSamples = 0
             let wasReentryPending = reentryPending
@@ -300,7 +303,11 @@ private final class VADContext: @unchecked Sendable {
             // Legacy kill-switch path: retain the former consecutive-silence
             // behavior while the endpoint state machine is disabled.
             if !out.isSpeech, accumulator.isEmpty {
-                gate.updateFloorIfIdle(frameDb: frameDb, duration: frameDuration)
+                gate.updateFloorIfIdle(
+                    frameDb: frameDb,
+                    duration: frameDuration,
+                    machineIsIdle: true
+                )
             }
             let appendCount = min(frame.count, max(0, maxUtteranceSamples - accumulator.count))
             accumulator.append(contentsOf: frame.prefix(appendCount))

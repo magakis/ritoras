@@ -112,22 +112,22 @@ describe('StreamingEndpoint', () => {
 
   it('tracks gradually rising background noise without opening an utterance', () => {
     const gate = new VADThresholdGate(makeVadGateConfig({ mode: 'adaptive' }));
-    for (let i = 0; i < 6; i++) gate.process(-60, 0.1);
+    for (let i = 0; i < 10; i++) gate.process(-60, 0.1);
     const initialFloor = gate.snapshot.floorDb;
-    for (let i = 0; i < 20; i++) {
-      const frameDb = gate.snapshot.floorDb + 2;
+    for (let i = 0; i < 31; i++) {
+      const frameDb = -58;
       const output = gate.process(frameDb, 0.1);
       assert.notStrictEqual(output.evidence, 'strong');
       gate.updateFloorIfIdle(frameDb, 0.1);
     }
     assert.ok(gate.snapshot.floorDb > initialFloor);
-    assert.ok(gate.snapshot.floorDb - initialFloor <= 3.0);
+    assert.ok(gate.snapshot.floorDb - initialFloor <= 2.0);
   });
 
   it('keeps the floor fixed through active and end-pending states', () => {
     const gate = new VADThresholdGate(makeVadGateConfig({ mode: 'adaptive' }));
     const endpoint = new StreamingEndpoint();
-    for (let i = 0; i < 6; i++) gate.process(-50, 0.1);
+    for (let i = 0; i < 10; i++) gate.process(-50, 0.1);
     for (let i = 0; i < 7; i++) {
       const output = gate.process(-30, 0.01);
       endpoint.process(output.evidence, samples(10));
@@ -146,10 +146,10 @@ describe('StreamingEndpoint', () => {
     assert.strictEqual(endpoint.process(finalOutput.evidence, samples(100)).type, 'finalizeUtterance');
     assert.strictEqual(endpoint.state, 'idle');
 
-    gate.updateFloorIfIdle(-60, 0.1);
-    gate.updateFloorIfIdle(-60, 0.1);
-    assert.strictEqual(gate.snapshot.floorDb, initialFloor);
-    gate.updateFloorIfIdle(-60, 0.1);
+    for (let i = 0; i < 31; i++) {
+      gate.process(-60, 0.1);
+      gate.updateFloorIfIdle(-60, 0.1, true);
+    }
     assert.ok(gate.snapshot.floorDb < initialFloor);
   });
 

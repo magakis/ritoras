@@ -19,6 +19,8 @@ final class AudioLevelTesterViewModel: ObservableObject {
 
     private let monitor = AudioLevelMonitor()
     private var gate: VADThresholdGate?
+    private var endpoint: StreamingEndpoint?
+    private var endpointMachineEnabled = true
     private var sessionToken = 0
 
     func start() async {
@@ -61,19 +63,43 @@ final class AudioLevelTesterViewModel: ObservableObject {
         do {
             try await monitor.start { [weak self] smoothed, peak, frameDuration in
                 Task { @MainActor [weak self] in
-                    guard let self, self.sessionToken == token, let gate = self.gate else { return }
+                    guard let self,
+                          self.sessionToken == token,
+                          let gate = self.gate,
+                          let endpoint = self.endpoint else { return }
                     let frameDb = Double(AudioMath.dbFromRms(smoothed))
                     let output = gate.process(frameDb: frameDb, frameDuration: frameDuration)
+                    let previousState = endpoint.state
+                    if self.endpointMachineEnabled {
+                        let durationSamples = max(0, Int((frameDuration * 16000.0).rounded()))
+                        let evidence = StreamingEndpointEvidence(rawValue: output.evidence.rawValue) ?? .silence
+                        _ = endpoint.process(evidence: evidence, durationSamples: durationSamples)
+                        gate.updateFloorIfIdle(
+                            frameDb: frameDb,
+                            duration: frameDuration,
+                            machineIsIdle: previousState == .idle && endpoint.state == .idle,
+                            utteranceOpened: previousState != .speechActive && endpoint.state == .speechActive
+                        )
+                    } else {
+                        gate.updateFloorIfIdle(
+                            frameDb: frameDb,
+                            duration: frameDuration,
+                            machineIsIdle: !output.isSpeech
+                        )
+                    }
+                    let effectiveOutput = gate.snapshot
                     self.currentRms = smoothed
                     self.peakRms = peak
-                    self.thresholdDb = output.thresholdDb
-                    self.continuationThresholdDb = output.continuationThresholdDb
-                    self.silenceThresholdDb = output.silenceThresholdDb
-                    self.floorDb = output.floorDb
-                    self.calibrating = output.calibrating
-                    self.isSpeech = output.isSpeech
-                    self.usedFallback = output.usedFallback
-                    if output.calibrating {
+                    self.thresholdDb = effectiveOutput.thresholdDb
+                    self.continuationThresholdDb = effectiveOutput.continuationThresholdDb
+                    self.silenceThresholdDb = effectiveOutput.silenceThresholdDb
+                    self.floorDb = effectiveOutput.floorDb
+                    self.calibrating = effectiveOutput.calibrating
+                    self.isSpeech = self.endpointMachineEnabled
+                        ? endpoint.state == .speechActive || endpoint.state == .endPending
+                        : effectiveOutput.isSpeech
+                    self.usedFallback = effectiveOutput.usedFallback
+                    if effectiveOutput.calibrating {
                         let calibrationMs = Double(SharedConfig.streamVadCalibrationMs())
                         self.calibrationElapsedMs = min(
                             self.calibrationElapsedMs + frameDuration * 1000.0,
@@ -141,6 +167,11 @@ final class AudioLevelTesterViewModel: ObservableObject {
 
     func rebuildGate(using config: VADGateConfig) {
         gate = VADThresholdGate(config: config)
+        endpoint = StreamingEndpoint(configuration: StreamingEndpointConfiguration(
+            endpointSilenceSamples: Int(Double(SharedConfig.streamVadSilenceMs()) * 16.0),
+            preRollSamples: Int(Double(SharedConfig.Defaults.streamVadPreRollMsDefault) * 16.0)
+        ))
+        endpointMachineEnabled = SharedConfig.streamEndpointMachineEnabled()
 
         let output = gate?.snapshot
         thresholdDb = output?.thresholdDb ?? Double(AudioMath.dbFromRms(config.staticRms))

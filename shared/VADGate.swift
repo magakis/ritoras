@@ -47,17 +47,21 @@ final class VADThresholdGate: @unchecked Sendable {
 
     // Fixed algorithm constants. They are intentionally not user-facing settings.
     private static let tauFall = 0.5
-    private static let tauRise = 7.0
     private static let silenceDeltaDb = 3.0
     private static let staticContinuationOffsetDb = 4.0
     private static let staticSilenceOffsetDb = 6.0
     private static let maximumRiseDbPerSecond = 1.5
-    private static let stableSilenceForAdaptation = 0.3
+    private static let elevatedRiseDbPerSecond = 6.0
+    private static let adaptiveProvisionalSeedDuration = 0.5
+    private static let adaptiveFinalSeedDuration = 1.0
+    private static let adaptiveRollingWindowDuration = 3.0
+    private static let adaptiveRollingWindowCapacity = 256
     private static let floorMinDb = -80.0
     private static let floorMaxDb = -20.0
     private static let calibrationQuartile = 0.25
     private static let quietBandDb = 6.0
-    private static let adaptiveSeedFrames = 6
+    private static let adaptiveSeedPercentile = 0.1
+    private static let adaptiveIdleElevationDuration = 1.5
     private static let calibrationCompletionEpsilon = 1e-9
 
     private let config: VADGateConfig
@@ -66,15 +70,19 @@ final class VADThresholdGate: @unchecked Sendable {
     private var calibrationElapsed = 0.0
     private var calibrationFrames: [CalibrationFrame] = []
     private var adaptiveSeedDbs: [Double] = []
+    private var adaptiveSeedElapsed = 0.0
     private var adaptiveSeedComplete: Bool
-    private var adaptiveSeedLocked = false
     private var floorDb: Double?
     private var thresholdDb: Double
     private var usedFallback = false
     private var pendingRetroactiveSpeechMs = 0.0
     private var pendingTrailingSilenceMs: Double?
-    private var idleSilenceElapsed = 0.0
-    private var requiresStableSilence = false
+    private var continuousIdleElapsed = 0.0
+    private var adaptiveRollingDbs: [Double] = []
+    private var adaptiveRollingDurations: [Double] = []
+    private var adaptiveRollingWriteIndex = 0
+    private var adaptiveRollingCount = 0
+    private var adaptiveRollingElapsed = 0.0
     private var unfairLock = os_unfair_lock()
     private var lastOutput: VADGateOutput
 
@@ -96,7 +104,9 @@ final class VADThresholdGate: @unchecked Sendable {
             trailingSilenceMs: nil
         )
         calibrationFrames.reserveCapacity(36)
-        adaptiveSeedDbs.reserveCapacity(Self.adaptiveSeedFrames)
+        adaptiveSeedDbs.reserveCapacity(16)
+        adaptiveRollingDbs = Array(repeating: 0, count: Self.adaptiveRollingWindowCapacity)
+        adaptiveRollingDurations = Array(repeating: 0, count: Self.adaptiveRollingWindowCapacity)
     }
 
     func process(frameDb: Double, frameDuration: Double) -> VADGateOutput {
@@ -154,7 +164,7 @@ final class VADThresholdGate: @unchecked Sendable {
         // Every frame in the window is held as non-speech. The threshold is only
         // reported for diagnostics; the calibrated floor remains nil until the
         // window has ended. The running Q1 gives a stable interim value after the
-        // first frame, while the running minimum is the empty-window fallback.
+        // first frame, while the existing threshold is the empty-window fallback.
         return emit(
             evidence: .silence,
             isSpeech: false,
@@ -202,8 +212,8 @@ final class VADThresholdGate: @unchecked Sendable {
             floorDb = seededFloor
             thresholdDb = seededFloor + config.adaptiveDeltaDb
             adaptiveSeedDbs.removeAll(keepingCapacity: true)
+            adaptiveSeedElapsed = 0
             adaptiveSeedComplete = true
-            adaptiveSeedLocked = false
             behaviorMode = .adaptive
             usedFallback = true
         }
@@ -232,15 +242,14 @@ final class VADThresholdGate: @unchecked Sendable {
     }
 
     private func processAdaptive(frameDb: Double, frameDuration: Double) -> VADGateOutput {
+        appendAdaptiveRollingFrame(db: frameDb, duration: frameDuration)
         if !adaptiveSeedComplete {
-            return processAdaptiveSeed(frameDb: frameDb)
+            return processAdaptiveSeed(frameDb: frameDb, frameDuration: frameDuration)
         }
 
         guard let currentFloor = floorDb else {
-            // This is only reachable before the first adaptive seed frame. Keep
-            // the interim behavior identical to the running-min seed path.
             adaptiveSeedComplete = false
-            return processAdaptiveSeed(frameDb: frameDb)
+            return processAdaptiveSeed(frameDb: frameDb, frameDuration: frameDuration)
         }
 
         let startDb = currentFloor + config.adaptiveDeltaDb
@@ -250,7 +259,6 @@ final class VADThresholdGate: @unchecked Sendable {
             continuationThresholdDb: currentFloor + config.adaptiveContinuationDeltaDb,
             silenceThresholdDb: currentFloor + Self.silenceDeltaDb
         )
-        noteEvidence(levels.evidence)
         let (retroactiveSpeechMs, trailingSilenceMs) = takeRetroactiveCredit()
         return emit(
             evidence: levels.evidence,
@@ -265,69 +273,77 @@ final class VADThresholdGate: @unchecked Sendable {
         )
     }
 
-    private func processAdaptiveSeed(frameDb: Double) -> VADGateOutput {
+    private func processAdaptiveSeed(frameDb: Double, frameDuration: Double) -> VADGateOutput {
         adaptiveSeedDbs.append(frameDb)
-        let runningMinimum = adaptiveSeedDbs.min() ?? frameDb
-        let runningFloor = clampFloor(runningMinimum)
-        let levels = classify(
-            frameDb: frameDb,
-            strongThresholdDb: runningMinimum + config.adaptiveDeltaDb,
-            continuationThresholdDb: runningMinimum + config.adaptiveContinuationDeltaDb,
-            silenceThresholdDb: runningMinimum + Self.silenceDeltaDb
-        )
-        // Seed only while the window still looks idle. Once strong or
-        // continuing evidence appears, speech cannot move the floor.
-        if !adaptiveSeedLocked {
-            floorDb = runningFloor
-        }
-        noteEvidence(levels.evidence)
-        if levels.evidence == .strong || levels.evidence == .continuing {
-            adaptiveSeedLocked = true
+        adaptiveSeedElapsed += max(0, frameDuration)
+
+        guard adaptiveSeedElapsed + Self.calibrationCompletionEpsilon >= Self.adaptiveProvisionalSeedDuration else {
+            return emit(
+                evidence: .ambiguous,
+                isSpeech: false,
+                thresholdDb: thresholdDb,
+                continuationThresholdDb: thresholdDb - Self.staticContinuationOffsetDb,
+                silenceThresholdDb: thresholdDb - Self.staticSilenceOffsetDb,
+                floorDb: nil,
+                calibrating: false,
+                retroactiveSpeechMs: 0,
+                trailingSilenceMs: nil
+            )
         }
 
-        if adaptiveSeedDbs.count >= Self.adaptiveSeedFrames {
+        floorDb = clampFloor(percentile(adaptiveSeedDbs, percentile: Self.adaptiveSeedPercentile))
+        if adaptiveSeedElapsed + Self.calibrationCompletionEpsilon >= Self.adaptiveFinalSeedDuration {
             adaptiveSeedComplete = true
             adaptiveSeedDbs.removeAll(keepingCapacity: true)
         }
 
+        let levels = classify(
+            frameDb: frameDb,
+            strongThresholdDb: floorDb! + config.adaptiveDeltaDb,
+            continuationThresholdDb: floorDb! + config.adaptiveContinuationDeltaDb,
+            silenceThresholdDb: floorDb! + Self.silenceDeltaDb
+        )
         let (retroactiveSpeechMs, trailingSilenceMs) = takeRetroactiveCredit()
         return emit(
             evidence: levels.evidence,
             isSpeech: levels.evidence == .strong || levels.evidence == .continuing,
-            thresholdDb: (floorDb ?? runningFloor) + config.adaptiveDeltaDb,
-            continuationThresholdDb: (floorDb ?? runningFloor) + config.adaptiveContinuationDeltaDb,
-            silenceThresholdDb: (floorDb ?? runningFloor) + Self.silenceDeltaDb,
-            floorDb: floorDb ?? runningFloor,
+            thresholdDb: levels.strongThresholdDb,
+            continuationThresholdDb: levels.continuationThresholdDb,
+            silenceThresholdDb: levels.silenceThresholdDb,
+            floorDb: floorDb,
             calibrating: false,
             retroactiveSpeechMs: retroactiveSpeechMs,
             trailingSilenceMs: trailingSilenceMs
         )
     }
 
-    /// Updates the adaptive floor only after the endpoint machine has reported
-    /// confident idle. The caller supplies that state explicitly so speech and
-    /// end-pending audio can never contaminate the floor.
-    func updateFloorIfIdle(frameDb: Double, duration: Double) {
+    /// Updates the adaptive floor only while the endpoint machine is idle. The
+    /// rolling percentile remains populated by every processed frame, so a
+    /// poisoned floor cannot prevent ambient audio from becoming adaptation
+    /// evidence.
+    func updateFloorIfIdle(
+        frameDb: Double,
+        duration: Double,
+        machineIsIdle: Bool = true,
+        utteranceOpened: Bool = false
+    ) {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
-        guard behaviorMode == .adaptive, let floor = floorDb else { return }
+        guard behaviorMode == .adaptive else { return }
 
-        let levels = classify(
-            frameDb: frameDb,
-            strongThresholdDb: floor + config.adaptiveDeltaDb,
-            continuationThresholdDb: floor + config.adaptiveContinuationDeltaDb,
-            silenceThresholdDb: floor + Self.silenceDeltaDb
-        )
-        guard levels.evidence == .silence else {
-            idleSilenceElapsed = 0
+        if utteranceOpened {
+            continuousIdleElapsed = 0
             return
         }
+        guard machineIsIdle else { return }
 
-        idleSilenceElapsed += duration
-        if requiresStableSilence && idleSilenceElapsed + Self.calibrationCompletionEpsilon < Self.stableSilenceForAdaptation {
-            return
-        }
-        updateFloor(frameDb: frameDb, frameDuration: duration)
+        continuousIdleElapsed += max(0, duration)
+        guard floorDb != nil else { return }
+        guard let target = adaptiveRollingPercentile() else { return }
+        let riseCap = continuousIdleElapsed + Self.calibrationCompletionEpsilon >= Self.adaptiveIdleElevationDuration
+            ? Self.elevatedRiseDbPerSecond
+            : Self.maximumRiseDbPerSecond
+        updateFloor(targetDb: target, frameDuration: duration, maximumRiseDbPerSecond: riseCap)
         refreshAdaptiveOutput()
     }
 
@@ -339,8 +355,8 @@ final class VADThresholdGate: @unchecked Sendable {
         case .adaptive:
             behaviorMode = .adaptive
             adaptiveSeedDbs.removeAll(keepingCapacity: true)
+            adaptiveSeedElapsed = 0
             adaptiveSeedComplete = false
-            adaptiveSeedLocked = false
             floorDb = nil
         case .calibrated:
             behaviorMode = .calibrated
@@ -351,14 +367,14 @@ final class VADThresholdGate: @unchecked Sendable {
             pendingTrailingSilenceMs = nil
             floorDb = nil
             adaptiveSeedDbs.removeAll(keepingCapacity: true)
+            adaptiveSeedElapsed = 0
             adaptiveSeedComplete = false
-            adaptiveSeedLocked = false
         case .staticMode:
             return
         }
         thresholdDb = Double(AudioMath.dbFromRms(config.staticRms))
-        idleSilenceElapsed = 0
-        requiresStableSilence = false
+        continuousIdleElapsed = 0
+        resetAdaptiveRollingWindow()
         usedFallback = false
         lastOutput = VADGateOutput(
             isSpeech: false,
@@ -374,24 +390,72 @@ final class VADThresholdGate: @unchecked Sendable {
         )
     }
 
-    private func updateFloor(frameDb: Double, frameDuration: Double) {
+    private func updateFloor(
+        targetDb: Double,
+        frameDuration: Double,
+        maximumRiseDbPerSecond: Double
+    ) {
         guard var floor = floorDb else { return }
-        let tau = frameDb < floor ? Self.tauFall : Self.tauRise
-        let alpha = 1.0 - exp(-frameDuration / tau)
-        let proposed = floor + alpha * (frameDb - floor)
-        if proposed > floor {
-            floor = min(proposed, floor + Self.maximumRiseDbPerSecond * frameDuration)
+        if targetDb > floor {
+            floor = min(targetDb, floor + maximumRiseDbPerSecond * frameDuration)
         } else {
-            floor = proposed
+            let alpha = 1.0 - exp(-frameDuration / Self.tauFall)
+            floor += alpha * (targetDb - floor)
         }
         floorDb = clampFloor(floor)
     }
 
-    private func noteEvidence(_ evidence: VADEvidence) {
-        if evidence == .strong || evidence == .continuing {
-            requiresStableSilence = true
-            idleSilenceElapsed = 0
+    private func appendAdaptiveRollingFrame(db: Double, duration: Double) {
+        guard duration > 0 else { return }
+        if adaptiveRollingCount == Self.adaptiveRollingWindowCapacity {
+            let oldestIndex = (adaptiveRollingWriteIndex - adaptiveRollingCount + Self.adaptiveRollingWindowCapacity)
+                % Self.adaptiveRollingWindowCapacity
+            adaptiveRollingElapsed -= adaptiveRollingDurations[oldestIndex]
+        } else {
+            adaptiveRollingCount += 1
         }
+
+        adaptiveRollingDbs[adaptiveRollingWriteIndex] = db
+        adaptiveRollingDurations[adaptiveRollingWriteIndex] = duration
+        adaptiveRollingWriteIndex = (adaptiveRollingWriteIndex + 1) % Self.adaptiveRollingWindowCapacity
+        adaptiveRollingElapsed += duration
+
+        while adaptiveRollingCount > 0,
+              adaptiveRollingElapsed > Self.adaptiveRollingWindowDuration {
+            let oldestIndex = (adaptiveRollingWriteIndex - adaptiveRollingCount + Self.adaptiveRollingWindowCapacity)
+                % Self.adaptiveRollingWindowCapacity
+            adaptiveRollingElapsed -= adaptiveRollingDurations[oldestIndex]
+            adaptiveRollingCount -= 1
+        }
+    }
+
+    private func resetAdaptiveRollingWindow() {
+        adaptiveRollingWriteIndex = 0
+        adaptiveRollingCount = 0
+        adaptiveRollingElapsed = 0
+    }
+
+    private func adaptiveRollingPercentile() -> Double? {
+        guard adaptiveRollingCount > 0 else { return nil }
+        var values: [Double] = []
+        values.reserveCapacity(adaptiveRollingCount)
+        for offset in 0..<adaptiveRollingCount {
+            let index = (adaptiveRollingWriteIndex - adaptiveRollingCount + offset + Self.adaptiveRollingWindowCapacity)
+                % Self.adaptiveRollingWindowCapacity
+            values.append(adaptiveRollingDbs[index])
+        }
+        return percentile(values, percentile: Self.adaptiveSeedPercentile)
+    }
+
+    private func percentile(_ values: [Double], percentile: Double) -> Double {
+        let sortedValues = values.sorted()
+        guard let first = sortedValues.first else { return 0 }
+        guard sortedValues.count > 1 else { return first }
+        let position = percentile * Double(sortedValues.count - 1)
+        let lowerIndex = Int(floor(position))
+        let upperIndex = min(lowerIndex + 1, sortedValues.count - 1)
+        let fraction = position - Double(lowerIndex)
+        return sortedValues[lowerIndex] + fraction * (sortedValues[upperIndex] - sortedValues[lowerIndex])
     }
 
     private func refreshAdaptiveOutput() {

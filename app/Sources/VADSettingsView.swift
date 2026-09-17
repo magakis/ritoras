@@ -77,7 +77,7 @@ struct VADSettingsView: View {
                 meterRow
             }
         } footer: {
-            Text("Use the live meter to check microphone levels and tune the selected VAD mode.")
+            Text("Use the live meter to check microphone levels and tune the selected VAD mode. Green means an utterance is in progress; brief noise bumps stay red.")
         }
     }
 
@@ -256,7 +256,7 @@ struct VADSettingsView: View {
         case .calibrated:
             Text("Start talking whenever you like — the measurement ignores speech and needs no quiet period. It reads the quiet quarter of the first moments of each dictation. Raise Δ if chunks fire on noise; if you talk through the whole window it switches to adaptive tracking automatically.")
         case .adaptive:
-            Text("Tracks the noise floor continuously from the first half-second. Δ is how far above the floor speech must be — lower it for whispering (try 6–8). Best hands-off choice across environments.")
+            Text("Seeds the noise floor from the quietest tenth of the first second, then tracks it continuously. Δ is how far above the floor speech must be — lower it for whispering (try 6–8). Best hands-off choice across environments.")
         }
     }
 
