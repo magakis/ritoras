@@ -41,7 +41,10 @@ struct VADSettingsView: View {
         .onChange(of: settings.streamVadAdaptiveDeltaDb) { _, _ in
             rebuildTesterGate()
         }
-        .onChange(of: settings.streamVadAdaptiveHysteresisEnabled) { _, _ in
+        .onChange(of: settings.streamVadSensitivityProfile) { _, _ in
+            rebuildTesterGate()
+        }
+        .onChange(of: settings.streamVadPauseProfile) { _, _ in
             rebuildTesterGate()
         }
         .onChange(of: settings.streamVadSpeechRms) { _, _ in
@@ -143,7 +146,15 @@ struct VADSettingsView: View {
                 Spacer()
                 Text("peak \(String(format: "%.4f", tester.peakRms))")
                 Spacer()
-                Text(String(format: "threshold %.1f dB", tester.thresholdDb))
+                Text(String(format: "onset %.1f dB", tester.thresholdDb))
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+
+            HStack {
+                Text(String(format: "continue %.1f dB", tester.continuationThresholdDb))
+                Spacer()
+                Text(String(format: "silence %.1f dB", tester.silenceThresholdDb))
             }
             .font(.caption)
             .foregroundColor(.secondary)
@@ -166,31 +177,54 @@ struct VADSettingsView: View {
 
     @ViewBuilder
     private var controlsSection: some View {
-        modeSection
+        normalSection
 
-        Section {
-            silenceDurationRow
-            switch settings.streamVadMode {
-            case .staticMode:
-                speechRmsRow
-            case .calibrated:
-                calibrationMsRow
-                calibratedOffsetRow
-            case .adaptive:
-                adaptiveDeltaRow
-                Toggle("Hysteresis", isOn: $settings.streamVadAdaptiveHysteresisEnabled)
+        DisclosureGroup("Advanced") {
+            modeSection
+
+            Section {
+                silenceDurationRow
+                switch settings.streamVadMode {
+                case .staticMode:
+                    speechRmsRow
+                case .calibrated:
+                    calibrationMsRow
+                    calibratedOffsetRow
+                case .adaptive:
+                    adaptiveDeltaRow
+                }
+                minSpeechDurationRow
+                minChunkDurationRow
+                maxNoiseRow
+            } footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Silence duration is a legacy control; changing it selects the nearest pause profile.")
+                    Text("Changes apply live to this tester and on the next recording.")
+                }
             }
-            minSpeechDurationRow
-            minChunkDurationRow
-            maxNoiseRow
-        } footer: {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Silence duration is how long a pause closes a chunk — 3000 ms ≈ 3 s.")
-                Text("Changes apply live to this tester and on the next recording.")
-            }
+
+            signalPathSection
         }
+    }
 
-        signalPathSection
+    private var normalSection: some View {
+        Section {
+            Picker("Sensitivity", selection: $settings.streamVadSensitivityProfile) {
+                Text("Automatic").tag(VADSensitivityProfile.automatic)
+                Text("Quiet Voice").tag(VADSensitivityProfile.quietVoice)
+                Text("Noisy Environment").tag(VADSensitivityProfile.noisyEnvironment)
+            }
+
+            Picker("Pause", selection: $settings.streamVadPauseProfile) {
+                Text("Fast").tag(VADPauseProfile.fast)
+                Text("Balanced").tag(VADPauseProfile.balanced)
+                Text("Long").tag(VADPauseProfile.long)
+            }
+        } header: {
+            Text("Normal")
+        } footer: {
+            Text("Sensitivity adjusts voice detection for your environment. Pause closes after 450 ms, 700 ms, or 1100 ms of silence.")
+        }
     }
 
     private var modeSection: some View {
@@ -222,7 +256,7 @@ struct VADSettingsView: View {
         case .calibrated:
             Text("Start talking whenever you like — the measurement ignores speech and needs no quiet period. It reads the quiet quarter of the first moments of each dictation. Raise Δ if chunks fire on noise; if you talk through the whole window it switches to adaptive tracking automatically.")
         case .adaptive:
-            Text("Tracks the noise floor continuously from the first half-second. Δ is how far above the floor speech must be — lower it for whispering (try 6–8). Best hands-off choice across environments. Hysteresis closes chunks more decisively.")
+            Text("Tracks the noise floor continuously from the first half-second. Δ is how far above the floor speech must be — lower it for whispering (try 6–8). Best hands-off choice across environments.")
         }
     }
 
@@ -232,8 +266,8 @@ struct VADSettingsView: View {
             staticRms: settings.streamVadSpeechRms,
             calibrationMs: settings.streamVadCalibrationMs,
             calibratedOffsetDb: settings.streamVadCalibratedOffsetDb,
-            adaptiveDeltaDb: settings.streamVadAdaptiveDeltaDb,
-            adaptiveHysteresisEnabled: settings.streamVadAdaptiveHysteresisEnabled
+            adaptiveDeltaDb: SharedConfig.streamVadAdaptiveDeltaDb(),
+            adaptiveContinuationDeltaDb: SharedConfig.streamVadAdaptiveContinuationDeltaDb()
         ))
     }
 
@@ -243,7 +277,7 @@ struct VADSettingsView: View {
         } header: {
             Text("Signal Path")
         } footer: {
-            Text("Applies globally to ALL recording (dictation, batch, and this tester); strips iOS's hidden mic processing (AGC) for stable levels; changes the absolute level scale so the Static threshold may need retuning; pairs best with Calibrated/Adaptive.")
+            Text("Off by default. Strips iOS audio processing (AGC); this can sound worse in wind or crowds and changes the absolute level scale.")
         }
     }
 
@@ -260,7 +294,7 @@ struct VADSettingsView: View {
                     get: { Double(settings.streamVadSilenceMs) },
                     set: { settings.streamVadSilenceMs = Int($0) }
                 ),
-                in: 500...5000,
+                in: 450...5000,
                 step: 100
             )
         }

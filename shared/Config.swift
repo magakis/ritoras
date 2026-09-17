@@ -1,5 +1,119 @@
 import Foundation
 
+enum VADSensitivityProfile: String, CaseIterable {
+    case automatic
+    case quietVoice
+    case noisyEnvironment
+}
+
+enum VADPauseProfile: String, CaseIterable {
+    case fast
+    case balanced
+    case long
+}
+
+struct VADAdaptiveThresholds {
+    let strongDeltaDb: Double
+    let continuingDeltaDb: Double
+    let silenceDeltaDb: Double
+}
+
+enum VADProfileResolver {
+    static let defaultSensitivityProfile = VADSensitivityProfile.automatic
+    static let defaultPauseProfile = VADPauseProfile.balanced
+    static let defaultStrongDeltaDb = 10.0
+    static let defaultContinuingDeltaDb = 6.0
+    static let defaultSilenceDeltaDb = 3.0
+    static let minimumAdaptiveDeltaDb = 3.0
+    static let maximumAdaptiveDeltaDb = 24.0
+    static let oldSilenceDefaultMs = 2_000
+
+    static func sensitivity(
+        profile: VADSensitivityProfile,
+        rawAdaptiveDeltaDb: Double?,
+        rawOverrideExplicit: Bool = false
+    ) -> VADAdaptiveThresholds {
+        let profileValues: (strong: Double, continuing: Double)
+        switch profile {
+        case .automatic:
+            profileValues = (10.0, 6.0)
+        case .quietVoice:
+            profileValues = (7.0, 4.0)
+        case .noisyEnvironment:
+            profileValues = (13.0, 8.0)
+        }
+
+        let strongDeltaDb: Double
+        if let rawAdaptiveDeltaDb,
+           rawAdaptiveDeltaDb.isFinite,
+           rawOverrideExplicit || rawAdaptiveDeltaDb != defaultStrongDeltaDb {
+            strongDeltaDb = min(
+                max(rawAdaptiveDeltaDb, minimumAdaptiveDeltaDb),
+                maximumAdaptiveDeltaDb
+            )
+        } else {
+            strongDeltaDb = profileValues.strong
+        }
+
+        return VADAdaptiveThresholds(
+            strongDeltaDb: strongDeltaDb,
+            continuingDeltaDb: profileValues.continuing,
+            silenceDeltaDb: defaultSilenceDeltaDb
+        )
+    }
+
+    static func sensitivity(
+        profileRawValue: String?,
+        rawAdaptiveDeltaDb: Double?,
+        rawOverrideExplicit: Bool = false
+    ) -> VADAdaptiveThresholds {
+        sensitivity(
+            profile: VADSensitivityProfile(rawValue: profileRawValue ?? "")
+                ?? defaultSensitivityProfile,
+            rawAdaptiveDeltaDb: rawAdaptiveDeltaDb,
+            rawOverrideExplicit: rawOverrideExplicit
+        )
+    }
+
+    static func pauseProfile(
+        profileRawValue: String?,
+        legacySilenceMs: Int?
+    ) -> VADPauseProfile {
+        if let profileRawValue,
+           let profile = VADPauseProfile(rawValue: profileRawValue) {
+            return profile
+        }
+
+        guard let legacySilenceMs,
+              legacySilenceMs != oldSilenceDefaultMs else {
+            return defaultPauseProfile
+        }
+        return pauseProfile(forLegacySilenceMs: legacySilenceMs)
+    }
+
+    static func pauseProfile(forLegacySilenceMs value: Int) -> VADPauseProfile {
+        let clampedValue = min(max(value, 0), 5_000)
+        if clampedValue < 575 {
+            return .fast
+        }
+        if clampedValue <= 900 {
+            return .balanced
+        }
+        return .long
+    }
+
+    static func pauseDurationMs(for profile: VADPauseProfile) -> Int {
+        switch profile {
+        case .fast:
+            return 450
+        case .balanced:
+            return 700
+        case .long:
+            return 1_100
+        }
+    }
+}
+
 struct SharedConfig {
     struct Defaults {
         static let baseUrl = "http://100.107.181.45:5000"
@@ -78,11 +192,31 @@ struct SharedConfig {
         static let streamVadCalibratedOffsetDbDefault: Double = 10.0
         static let streamVadAdaptiveDeltaDbKey = "streamVadAdaptiveDeltaDb"
         static let streamVadAdaptiveDeltaDbDefault: Double = 10.0
-        static let streamVadAdaptiveHysteresisEnabledKey = "streamVadAdaptiveHysteresisEnabled"
-        static let streamVadAdaptiveHysteresisEnabledDefault = true
-        /// Silence duration (ms) before a chunk is finalized (~2 s).
+        static let streamVadAdaptiveDeltaDbOverrideKey = "streamVadAdaptiveDeltaDbOverride"
+        static let streamVadSensitivityProfileKey = "streamVadSensitivityProfile"
+        static let streamVadSensitivityProfileDefault: VADSensitivityProfile = .automatic
+        static let streamVadPauseProfileKey = "streamVadPauseProfile"
+        static let streamVadPauseProfileDefault: VADPauseProfile = .balanced
+        /// Enables the sample-count endpoint state machine for streaming VAD.
+        static let streamEndpointMachineEnabledKey = "streamEndpointMachineEnabled"
+        static let streamEndpointMachineEnabledDefault = true
+        /// Balanced endpoint silence duration (ms). The legacy key below is
+        /// still the user-configurable source of this value.
+        static let streamVadEndpointSilenceMsDefault: Int = 700
+        /// Legacy silence duration key, retained for stored user preferences.
         static let streamVadSilenceMsKey = "streamVadSilenceMs"
-        static let streamVadSilenceMsDefault: Int = 2000
+        static let streamVadLegacySilenceMsDefault: Int = 2_000
+        static let streamVadSilenceMsDefault: Int = streamVadEndpointSilenceMsDefault
+        /// Pre-roll requested from the recorder when an utterance starts.
+        static let streamVadPreRollMsDefault: Int = 250
+        /// Hard upper bound for one streamed utterance before forced splitting.
+        static let streamVadMaxUtteranceSecDefault: Double = 20.0
+        /// Internal A/B control; zero means forced chunks have no overlap.
+        static let streamVadSplitOverlapMsDefault: Int = 0
+        /// Analysis-only wind filter cutoff. Captured PCM is never filtered.
+        static let streamVadHpfCutoffHzDefault: Double = 100.0
+        static let streamVadAnalysisHpfEnabledKey = "streamVadAnalysisHpfEnabled"
+        static let streamVadAnalysisHpfEnabledDefault = true
         /// Minimum speech duration (ms) to accept a chunk.
         static let streamVadMinSpeechMsKey = "streamVadMinSpeechMs"
         static let streamVadMinSpeechMsDefault: Int = 300
@@ -465,22 +599,84 @@ struct SharedConfig {
             ?? Defaults.streamVadCalibratedOffsetDbDefault
     }
 
-    /// Reads the adaptive VAD threshold delta (dB) from the App Group.
-    static func streamVadAdaptiveDeltaDb() -> Double {
+    /// Reads the user-facing VAD sensitivity profile from the App Group.
+    /// Invalid or missing values resolve to the automatic profile.
+    static func streamVadSensitivityProfile() -> VADSensitivityProfile {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return Defaults.streamVadAdaptiveDeltaDbDefault
+            return Defaults.streamVadSensitivityProfileDefault
         }
-        return (defaults.object(forKey: Defaults.streamVadAdaptiveDeltaDbKey) as? Double)
-            ?? Defaults.streamVadAdaptiveDeltaDbDefault
+        return VADSensitivityProfile(rawValue: defaults.string(
+            forKey: Defaults.streamVadSensitivityProfileKey
+        ) ?? "") ?? Defaults.streamVadSensitivityProfileDefault
     }
 
-    /// Reads the adaptive VAD hysteresis flag from the App Group.
-    static func streamVadAdaptiveHysteresisEnabled() -> Bool {
+    /// Returns whether the legacy adaptive delta key is present. Presence is the
+    /// explicit Advanced override marker; profile values are used when it is absent.
+    static func streamVadAdaptiveDeltaDbOverridePresent() -> Bool {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return Defaults.streamVadAdaptiveHysteresisEnabledDefault
+            return false
         }
-        return (defaults.object(forKey: Defaults.streamVadAdaptiveHysteresisEnabledKey) as? Bool)
-            ?? Defaults.streamVadAdaptiveHysteresisEnabledDefault
+        if (defaults.object(forKey: Defaults.streamVadAdaptiveDeltaDbOverrideKey) as? Bool) == true {
+            return true
+        }
+        guard let rawValue = (defaults.object(
+            forKey: Defaults.streamVadAdaptiveDeltaDbKey
+        ) as? NSNumber)?.doubleValue,
+        rawValue.isFinite else {
+            return false
+        }
+        return rawValue != Defaults.streamVadAdaptiveDeltaDbDefault
+    }
+
+    /// Resolves all adaptive threshold deltas from the shared App Group values.
+    /// An explicitly stored adaptive delta overrides only the profile's onset delta;
+    /// the profile continues to coordinate the continuation delta.
+    static func streamVadAdaptiveThresholds() -> VADAdaptiveThresholds {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return VADProfileResolver.sensitivity(
+                profile: Defaults.streamVadSensitivityProfileDefault,
+                rawAdaptiveDeltaDb: nil
+            )
+        }
+        let rawAdaptiveDeltaDb = (defaults.object(
+            forKey: Defaults.streamVadAdaptiveDeltaDbKey
+        ) as? NSNumber)?.doubleValue
+        let rawOverrideExplicit = (defaults.object(
+            forKey: Defaults.streamVadAdaptiveDeltaDbOverrideKey
+        ) as? Bool) == true
+        return VADProfileResolver.sensitivity(
+            profile: streamVadSensitivityProfile(),
+            rawAdaptiveDeltaDb: rawAdaptiveDeltaDb,
+            rawOverrideExplicit: rawOverrideExplicit
+        )
+    }
+
+    /// Reads the adaptive VAD threshold delta (dB) from the App Group.
+    static func streamVadAdaptiveDeltaDb() -> Double {
+        streamVadAdaptiveThresholds().strongDeltaDb
+    }
+
+    /// Reads the effective adaptive continuation delta (dB) from the App Group.
+    static func streamVadAdaptiveContinuationDeltaDb() -> Double {
+        streamVadAdaptiveThresholds().continuingDeltaDb
+    }
+
+    /// Reads the streaming endpoint state-machine kill switch from the App Group.
+    static func streamEndpointMachineEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamEndpointMachineEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.streamEndpointMachineEnabledKey) as? Bool)
+            ?? Defaults.streamEndpointMachineEnabledDefault
+    }
+
+    /// Reads the analysis-only VAD high-pass kill switch from the App Group.
+    static func streamVadAnalysisHpfEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadAnalysisHpfEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadAnalysisHpfEnabledKey) as? Bool)
+            ?? Defaults.streamVadAnalysisHpfEnabledDefault
     }
 
     /// Reads the audio measurement mode flag from the App Group.
@@ -496,11 +692,22 @@ struct SharedConfig {
     /// Used by the keyboard extension, which cannot link `AppSettings`.
     /// Returns the default when the App Group is unavailable or the key is unset.
     static func streamVadSilenceMs() -> Int {
+        VADProfileResolver.pauseDurationMs(for: streamVadPauseProfile())
+    }
+
+    /// Reads the user-facing VAD pause profile from the App Group. A legacy
+    /// silence value is used only when no profile has been stored yet.
+    static func streamVadPauseProfile() -> VADPauseProfile {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return Defaults.streamVadSilenceMsDefault
+            return Defaults.streamVadPauseProfileDefault
         }
-        return (defaults.object(forKey: Defaults.streamVadSilenceMsKey) as? Int)
-            ?? Defaults.streamVadSilenceMsDefault
+        let legacySilenceMs = (defaults.object(
+            forKey: Defaults.streamVadSilenceMsKey
+        ) as? NSNumber)?.intValue
+        return VADProfileResolver.pauseProfile(
+            profileRawValue: defaults.string(forKey: Defaults.streamVadPauseProfileKey),
+            legacySilenceMs: legacySilenceMs
+        )
     }
 
     /// Reads the streaming VAD minimum speech duration (ms) from the App Group.

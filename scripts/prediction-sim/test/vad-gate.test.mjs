@@ -14,7 +14,6 @@ function config(partial = {}) {
 function seedAdaptiveGate(partial = {}, seedDb = -50) {
   const gate = new VADThresholdGate(config({
     mode: 'adaptive',
-    adaptiveHysteresisEnabled: false,
     ...partial,
   }));
   for (let i = 0; i < 6; i++) gate.process(seedDb, 0.1);
@@ -104,11 +103,13 @@ describe('VADThresholdGate', () => {
       }
 
       const output = gate.process(-70, 0.5);
-      const expectedFloor = -60 + (1 - Math.exp(-1)) * (-10);
       assert.strictEqual(output.usedFallback, true);
       assert.strictEqual(output.isSpeech, false);
-      assert.ok(Math.abs(output.floorDb - expectedFloor) < 0.001);
+      assert.strictEqual(output.floorDb, -60);
       assert.ok(Math.abs(output.retroactiveSpeechMs - 400) < 0.001);
+      gate.updateFloorIfIdle(-70, 0.5);
+      const expectedFloor = -60 + (1 - Math.exp(-1)) * (-10);
+      assert.ok(Math.abs(gate.snapshot.floorDb - expectedFloor) < 0.001);
     });
 
     it('accepts exactly the quiet-count quality boundary and rejects one fewer', () => {
@@ -157,7 +158,6 @@ describe('VADThresholdGate', () => {
     it('seeds the floor from the minimum of the first six frames', () => {
       const gate = new VADThresholdGate(config({
         mode: 'adaptive',
-        adaptiveHysteresisEnabled: false,
       }));
       for (const frameDb of [-50, -49, -48, -47, -46, -70]) {
         gate.process(frameDb, 0.1);
@@ -172,13 +172,16 @@ describe('VADThresholdGate', () => {
 
     it('uses the fast fall and slow rise time constants', () => {
       const fallGate = seedAdaptiveGate({ adaptiveDeltaDb: 20 }, -50);
-      const fall = fallGate.process(-60, 0.5);
+      fallGate.process(-60, 0.1);
+      const fall = fallGate.updateFloorIfIdle(-60, 0.5) || fallGate.snapshot;
       const expectedFall = -50 + (1 - Math.exp(-1)) * (-10);
       assert.ok(Math.abs(fall.floorDb - expectedFall) < 0.001);
 
-      const riseGate = seedAdaptiveGate({ adaptiveDeltaDb: 20 }, -60);
-      const rise = riseGate.process(-50, 7);
-      const expectedRise = -60 + (1 - Math.exp(-1)) * 10;
+      const riseGate = seedAdaptiveGate({ adaptiveDeltaDb: 10 }, -60);
+      riseGate.process(-30, 0.1);
+      riseGate.updateFloorIfIdle(-58, 7);
+      const rise = riseGate.snapshot;
+      const expectedRise = Math.min(-60 + (1 - Math.exp(-1)) * 2, -60 + 1.5 * 7);
       assert.ok(Math.abs(rise.floorDb - expectedRise) < 0.001);
     });
 
@@ -190,31 +193,49 @@ describe('VADThresholdGate', () => {
       assert.strictEqual(highGate.snapshot.floorDb, -20);
     });
 
-    it('uses hysteresis for entering and continuing speech', () => {
+    it('uses a lower continuation threshold than the onset threshold', () => {
       const gate = seedAdaptiveGate({
         adaptiveDeltaDb: 10,
-        adaptiveHysteresisEnabled: true,
       }, -50);
-      const inSpeechProbe = -50 + 10 + 1.5;
-      assert.strictEqual(gate.process(inSpeechProbe, 0.1).isSpeech, true);
-      assert.strictEqual(gate.process(inSpeechProbe, 0.1).isSpeech, false);
+      const output = gate.process(-42, 0.1);
+      assert.ok(output.continuationThresholdDb < output.thresholdDb);
+      assert.strictEqual(output.evidence, 'continuing');
+      assert.strictEqual(output.isSpeech, true);
+    });
 
-      const noHysteresisGate = seedAdaptiveGate({
-        adaptiveDeltaDb: 10,
-        adaptiveHysteresisEnabled: false,
-      }, -50);
-      assert.strictEqual(noHysteresisGate.process(inSpeechProbe, 0.1).isSpeech, true);
-      assert.strictEqual(noHysteresisGate.process(inSpeechProbe, 0.1).isSpeech, true);
+    it('does not adapt during speech and resumes after stable idle silence', () => {
+      const gate = seedAdaptiveGate({ adaptiveDeltaDb: 10 }, -50);
+      gate.process(-30, 0.1);
+      assert.strictEqual(gate.snapshot.floorDb, -50);
+
+      gate.updateFloorIfIdle(-60, 0.1);
+      assert.strictEqual(gate.snapshot.floorDb, -50);
+      gate.updateFloorIfIdle(-60, 0.1);
+      assert.strictEqual(gate.snapshot.floorDb, -50);
+      gate.updateFloorIfIdle(-60, 0.1);
+      assert.ok(gate.snapshot.floorDb < -50);
+    });
+
+    it('classifies the gap between silence and continuation as ambiguous', () => {
+      const gate = seedAdaptiveGate({ adaptiveDeltaDb: 10 }, -50);
+      const output = gate.process(-45, 0.1);
+      assert.strictEqual(output.evidence, 'ambiguous');
+      assert.strictEqual(output.isSpeech, false);
     });
 
     it('converges to the same floor for equivalent variable frame durations', () => {
       const coarse = seedAdaptiveGate({ adaptiveDeltaDb: 30 }, -50);
       const fine = seedAdaptiveGate({ adaptiveDeltaDb: 30 }, -50);
       const trajectory = [-60, -55, -65, -58, -62];
-      for (const frameDb of trajectory) coarse.process(frameDb, 0.08533);
+      for (const frameDb of trajectory) {
+        coarse.process(frameDb, 0.08533);
+        coarse.updateFloorIfIdle(frameDb, 0.08533);
+      }
       for (const frameDb of trajectory) {
         fine.process(frameDb, 0.042665);
+        fine.updateFloorIfIdle(frameDb, 0.042665);
         fine.process(frameDb, 0.042665);
+        fine.updateFloorIfIdle(frameDb, 0.042665);
       }
       assert.ok(Math.abs(coarse.snapshot.floorDb - fine.snapshot.floorDb) < 1e-9);
     });

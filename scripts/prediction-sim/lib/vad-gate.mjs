@@ -4,7 +4,12 @@
 
 export const VAD_TAU_FALL_S = 0.5;
 export const VAD_TAU_RISE_S = 7.0;
-export const VAD_HYSTERESIS_BUMP_DB = 3.0;
+const VAD_CONTINUATION_DELTA_DB = 6.0;
+export const VAD_SILENCE_DELTA_DB = 3.0;
+export const VAD_STATIC_CONTINUATION_OFFSET_DB = 4.0;
+export const VAD_STATIC_SILENCE_OFFSET_DB = 6.0;
+export const VAD_MAX_RISE_DB_PER_SECOND = 1.5;
+export const VAD_STABLE_SILENCE_FOR_ADAPTATION_S = 0.3;
 export const VAD_FLOOR_MIN_DB = -80;
 export const VAD_FLOOR_MAX_DB = -20;
 export const CALIBRATION_QUARTILE = 0.25;
@@ -28,7 +33,7 @@ export function makeVadGateConfig(partial = {}) {
     calibrationMs: 1500,
     calibratedOffsetDb: 10.0,
     adaptiveDeltaDb: 10.0,
-    adaptiveHysteresisEnabled: true,
+    adaptiveContinuationDeltaDb: 6.0,
     ...(partial ?? {}),
   };
 }
@@ -42,15 +47,20 @@ export class VADThresholdGate {
     this.calibrationFrames = [];
     this.adaptiveSeedDbs = [];
     this.adaptiveSeedComplete = this.config.mode !== 'adaptive';
-    this.inSpeech = false;
+    this.adaptiveSeedLocked = false;
     this.floorDb = null;
     this.thresholdDb = dbFromRms(this.config.staticRms);
     this.usedFallback = false;
     this.pendingRetroactiveSpeechMs = 0;
     this.pendingTrailingSilenceMs = null;
+    this.idleSilenceElapsed = 0;
+    this.requiresStableSilence = false;
     this.lastOutput = {
       isSpeech: false,
+      evidence: 'silence',
       thresholdDb: this.thresholdDb,
+      continuationThresholdDb: this.thresholdDb - VAD_STATIC_CONTINUATION_OFFSET_DB,
+      silenceThresholdDb: this.thresholdDb - VAD_STATIC_SILENCE_OFFSET_DB,
       floorDb: null,
       calibrating: this.config.mode === 'calibrated',
       usedFallback: false,
@@ -80,10 +90,16 @@ export class VADThresholdGate {
   }
 
   processStatic(frameDb) {
-    const isSpeech = frameDb >= this.thresholdDb;
+    const levels = this.classify(
+      frameDb,
+      this.thresholdDb,
+      this.thresholdDb - VAD_STATIC_CONTINUATION_OFFSET_DB,
+      this.thresholdDb - VAD_STATIC_SILENCE_OFFSET_DB,
+    );
     return this.emit({
-      isSpeech,
-      thresholdDb: this.thresholdDb,
+      ...levels,
+      isSpeech: levels.evidence === 'strong',
+      thresholdDb: levels.strongThresholdDb,
       floorDb: null,
       calibrating: false,
       retroactiveSpeechMs: 0,
@@ -94,19 +110,18 @@ export class VADThresholdGate {
   processCalibration(frameDb, frameDuration) {
     this.calibrationFrames.push({ db: frameDb, duration: frameDuration });
     this.calibrationElapsed += frameDuration;
-    // Tolerate the representation error from summing frame durations such
-    // as ten 0.1-second frames without changing the elapsed-time boundary.
     if (this.calibrationElapsed + CALIBRATION_COMPLETION_EPSILON_S >= this.config.calibrationMs / 1000) {
       this.finishCalibration();
     }
 
-    // Every frame in the window is held as non-speech. The threshold is only
-    // reported for diagnostics; the calibrated floor remains null until the
-    // window has ended. The running Q1 gives an interim value after the first
-    // frame, while the running minimum is the empty-window fallback.
+    const thresholdDb = this.calibrationThresholdDb();
     return this.emit({
+      evidence: 'silence',
       isSpeech: false,
-      thresholdDb: this.calibrationThresholdDb(),
+      strongThresholdDb: thresholdDb,
+      continuationThresholdDb: thresholdDb - VAD_STATIC_CONTINUATION_OFFSET_DB,
+      silenceThresholdDb: thresholdDb - VAD_STATIC_SILENCE_OFFSET_DB,
+      thresholdDb,
       floorDb: null,
       calibrating: true,
       retroactiveSpeechMs: 0,
@@ -140,15 +155,12 @@ export class VADThresholdGate {
       this.floorDb = null;
       this.behaviorMode = 'calibrated';
     } else {
-      // A contaminated window starts Adaptive from its measured Q1 rather
-      // than collecting a second seed window, so calibration cannot gate
-      // away speech that occurred during the first window.
       const seededFloor = this.clampFloor(q1);
       this.floorDb = seededFloor;
       this.thresholdDb = seededFloor + this.config.adaptiveDeltaDb;
       this.adaptiveSeedDbs.length = 0;
       this.adaptiveSeedComplete = true;
-      this.inSpeech = false;
+      this.adaptiveSeedLocked = false;
       this.behaviorMode = 'adaptive';
       this.usedFallback = true;
     }
@@ -156,11 +168,17 @@ export class VADThresholdGate {
   }
 
   processCalibrated(frameDb) {
-    const isSpeech = frameDb >= this.thresholdDb;
+    const levels = this.classify(
+      frameDb,
+      this.thresholdDb,
+      this.thresholdDb - VAD_STATIC_CONTINUATION_OFFSET_DB,
+      this.thresholdDb - VAD_STATIC_SILENCE_OFFSET_DB,
+    );
     const [retroactiveSpeechMs, trailingSilenceMs] = this.takeRetroactiveCredit();
     return this.emit({
-      isSpeech,
-      thresholdDb: this.thresholdDb,
+      ...levels,
+      isSpeech: levels.evidence === 'strong',
+      thresholdDb: levels.strongThresholdDb,
       floorDb: null,
       calibrating: false,
       retroactiveSpeechMs,
@@ -174,35 +192,23 @@ export class VADThresholdGate {
     }
 
     if (this.floorDb === null) {
-      // This is only reachable before the first adaptive seed frame. Keep
-      // the interim behavior identical to the running-min seed path.
       this.adaptiveSeedComplete = false;
       return this.processAdaptiveSeed(frameDb);
     }
 
-    const currentFloor = this.floorDb;
-    const startDb = currentFloor + this.config.adaptiveDeltaDb;
-    const continueDb = this.config.adaptiveHysteresisEnabled
-      ? startDb + VAD_HYSTERESIS_BUMP_DB
-      : startDb;
-    const decisionThreshold = this.inSpeech ? continueDb : startDb;
-    const isSpeech = frameDb >= decisionThreshold;
-    this.inSpeech = isSpeech;
-
-    if (!isSpeech) {
-      this.updateFloor(frameDb, frameDuration);
-    }
-
-    const outputFloor = this.floorDb;
-    const outputStartDb = outputFloor + this.config.adaptiveDeltaDb;
-    const outputThreshold = this.inSpeech && this.config.adaptiveHysteresisEnabled
-      ? outputStartDb + VAD_HYSTERESIS_BUMP_DB
-      : outputStartDb;
+    const levels = this.classify(
+      frameDb,
+      this.floorDb + this.config.adaptiveDeltaDb,
+      this.floorDb + this.config.adaptiveContinuationDeltaDb,
+      this.floorDb + VAD_SILENCE_DELTA_DB,
+    );
+    this.noteEvidence(levels.evidence);
     const [retroactiveSpeechMs, trailingSilenceMs] = this.takeRetroactiveCredit();
     return this.emit({
-      isSpeech,
-      thresholdDb: outputThreshold,
-      floorDb: outputFloor,
+      ...levels,
+      isSpeech: levels.evidence === 'strong' || levels.evidence === 'continuing',
+      thresholdDb: levels.strongThresholdDb,
+      floorDb: this.floorDb,
       calibrating: false,
       retroactiveSpeechMs,
       trailingSilenceMs,
@@ -213,43 +219,141 @@ export class VADThresholdGate {
     this.adaptiveSeedDbs.push(frameDb);
     const runningMinimum = Math.min(...this.adaptiveSeedDbs);
     const runningFloor = this.clampFloor(runningMinimum);
-    // Before the sixth frame, decisions use the raw running minimum. The
-    // exposed floor is clamped, and the sixth frame makes that clamped
-    // value the steady-state floor.
-    const startDb = runningMinimum + this.config.adaptiveDeltaDb;
-    const continueDb = this.config.adaptiveHysteresisEnabled
-      ? startDb + VAD_HYSTERESIS_BUMP_DB
-      : startDb;
-    const decisionThreshold = this.inSpeech ? continueDb : startDb;
-    const isSpeech = frameDb >= decisionThreshold;
-    this.inSpeech = isSpeech;
-    this.floorDb = runningFloor;
+    const levels = this.classify(
+      frameDb,
+      runningMinimum + this.config.adaptiveDeltaDb,
+      runningMinimum + this.config.adaptiveContinuationDeltaDb,
+      runningMinimum + VAD_SILENCE_DELTA_DB,
+    );
+    if (!this.adaptiveSeedLocked) this.floorDb = runningFloor;
+    this.noteEvidence(levels.evidence);
+    if (levels.evidence === 'strong' || levels.evidence === 'continuing') {
+      this.adaptiveSeedLocked = true;
+    }
 
     if (this.adaptiveSeedDbs.length >= ADAPTIVE_SEED_FRAMES) {
       this.adaptiveSeedComplete = true;
       this.adaptiveSeedDbs.length = 0;
     }
 
-    const outputThreshold = this.inSpeech && this.config.adaptiveHysteresisEnabled
-      ? runningFloor + this.config.adaptiveDeltaDb + VAD_HYSTERESIS_BUMP_DB
-      : runningFloor + this.config.adaptiveDeltaDb;
     const [retroactiveSpeechMs, trailingSilenceMs] = this.takeRetroactiveCredit();
     return this.emit({
-      isSpeech,
-      thresholdDb: outputThreshold,
-      floorDb: runningFloor,
+      ...levels,
+      isSpeech: levels.evidence === 'strong' || levels.evidence === 'continuing',
+      thresholdDb: (this.floorDb ?? runningFloor) + this.config.adaptiveDeltaDb,
+      continuationThresholdDb: (this.floorDb ?? runningFloor) + this.config.adaptiveContinuationDeltaDb,
+      silenceThresholdDb: (this.floorDb ?? runningFloor) + VAD_SILENCE_DELTA_DB,
+      floorDb: this.floorDb ?? runningFloor,
       calibrating: false,
       retroactiveSpeechMs,
       trailingSilenceMs,
     });
   }
 
+  updateFloorIfIdle(frameDb, duration) {
+    if (this.behaviorMode !== 'adaptive' || this.floorDb === null) return;
+    const levels = this.classify(
+      frameDb,
+      this.floorDb + this.config.adaptiveDeltaDb,
+      this.floorDb + this.config.adaptiveContinuationDeltaDb,
+      this.floorDb + VAD_SILENCE_DELTA_DB,
+    );
+    if (levels.evidence !== 'silence') {
+      this.idleSilenceElapsed = 0;
+      return;
+    }
+
+    this.idleSilenceElapsed += duration;
+    if (this.requiresStableSilence && this.idleSilenceElapsed + CALIBRATION_COMPLETION_EPSILON_S < VAD_STABLE_SILENCE_FOR_ADAPTATION_S) {
+      return;
+    }
+    this.updateFloor(frameDb, duration);
+    this.refreshAdaptiveOutput();
+  }
+
+  recalibrateFloor() {
+    if (this.config.mode === 'static') return;
+    if (this.config.mode === 'adaptive') {
+      this.behaviorMode = 'adaptive';
+      this.adaptiveSeedDbs.length = 0;
+      this.adaptiveSeedComplete = false;
+      this.adaptiveSeedLocked = false;
+      this.floorDb = null;
+    } else {
+      this.behaviorMode = 'calibrated';
+      this.calibrationFinished = false;
+      this.calibrationElapsed = 0;
+      this.calibrationFrames.length = 0;
+      this.pendingRetroactiveSpeechMs = 0;
+      this.pendingTrailingSilenceMs = null;
+      this.floorDb = null;
+      this.adaptiveSeedDbs.length = 0;
+      this.adaptiveSeedComplete = false;
+      this.adaptiveSeedLocked = false;
+    }
+    this.thresholdDb = dbFromRms(this.config.staticRms);
+    this.idleSilenceElapsed = 0;
+    this.requiresStableSilence = false;
+    this.usedFallback = false;
+    this.lastOutput = {
+      isSpeech: false,
+      evidence: 'silence',
+      thresholdDb: this.thresholdDb,
+      continuationThresholdDb: this.thresholdDb - VAD_STATIC_CONTINUATION_OFFSET_DB,
+      silenceThresholdDb: this.thresholdDb - VAD_STATIC_SILENCE_OFFSET_DB,
+      floorDb: null,
+      calibrating: this.config.mode === 'calibrated',
+      usedFallback: false,
+      retroactiveSpeechMs: 0,
+      trailingSilenceMs: null,
+    };
+  }
+
   updateFloor(frameDb, frameDuration) {
     const tau = frameDb < this.floorDb ? VAD_TAU_FALL_S : VAD_TAU_RISE_S;
     const alpha = 1 - Math.exp(-frameDuration / tau);
-    this.floorDb = this.clampFloor(
-      this.floorDb + alpha * (frameDb - this.floorDb),
-    );
+    const proposed = this.floorDb + alpha * (frameDb - this.floorDb);
+    const next = proposed > this.floorDb
+      ? Math.min(proposed, this.floorDb + VAD_MAX_RISE_DB_PER_SECOND * frameDuration)
+      : proposed;
+    this.floorDb = this.clampFloor(next);
+  }
+
+  noteEvidence(evidence) {
+    if (evidence === 'strong' || evidence === 'continuing') {
+      this.requiresStableSilence = true;
+      this.idleSilenceElapsed = 0;
+    }
+  }
+
+  refreshAdaptiveOutput() {
+    this.lastOutput = {
+      ...this.lastOutput,
+      thresholdDb: this.floorDb + this.config.adaptiveDeltaDb,
+      continuationThresholdDb: this.floorDb + this.config.adaptiveContinuationDeltaDb,
+      silenceThresholdDb: this.floorDb + VAD_SILENCE_DELTA_DB,
+      floorDb: this.floorDb,
+      usedFallback: this.usedFallback,
+    };
+  }
+
+  classify(frameDb, strongThresholdDb, continuationThresholdDb, silenceThresholdDb) {
+    let evidence;
+    if (frameDb >= strongThresholdDb) {
+      evidence = 'strong';
+    } else if (frameDb >= continuationThresholdDb) {
+      evidence = 'continuing';
+    } else if (frameDb < silenceThresholdDb) {
+      evidence = 'silence';
+    } else {
+      evidence = 'ambiguous';
+    }
+    return {
+      evidence,
+      strongThresholdDb,
+      continuationThresholdDb,
+      silenceThresholdDb,
+    };
   }
 
   calibrationQ1() {
@@ -275,8 +379,12 @@ export class VADThresholdGate {
   }
 
   emit({
+    evidence,
     isSpeech,
     thresholdDb,
+    strongThresholdDb,
+    continuationThresholdDb,
+    silenceThresholdDb,
     floorDb,
     calibrating,
     retroactiveSpeechMs,
@@ -284,7 +392,10 @@ export class VADThresholdGate {
   }) {
     this.lastOutput = {
       isSpeech,
-      thresholdDb,
+      evidence,
+      thresholdDb: thresholdDb ?? strongThresholdDb,
+      continuationThresholdDb,
+      silenceThresholdDb,
       floorDb,
       calibrating,
       usedFallback: this.usedFallback,

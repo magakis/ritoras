@@ -10,18 +10,28 @@ enum VADMode: String, CaseIterable {
     case adaptive = "adaptive"
 }
 
+enum VADEvidence: String {
+    case strong
+    case continuing
+    case ambiguous
+    case silence
+}
+
 struct VADGateConfig {
     let mode: VADMode
     let staticRms: Float
     let calibrationMs: Int
     let calibratedOffsetDb: Double
     let adaptiveDeltaDb: Double
-    let adaptiveHysteresisEnabled: Bool
+    let adaptiveContinuationDeltaDb: Double
 }
 
 struct VADGateOutput {
     let isSpeech: Bool
+    let evidence: VADEvidence
     let thresholdDb: Double
+    let continuationThresholdDb: Double
+    let silenceThresholdDb: Double
     let floorDb: Double?
     let calibrating: Bool
     let usedFallback: Bool
@@ -38,7 +48,11 @@ final class VADThresholdGate: @unchecked Sendable {
     // Fixed algorithm constants. They are intentionally not user-facing settings.
     private static let tauFall = 0.5
     private static let tauRise = 7.0
-    private static let hysteresisBumpDb = 3.0
+    private static let silenceDeltaDb = 3.0
+    private static let staticContinuationOffsetDb = 4.0
+    private static let staticSilenceOffsetDb = 6.0
+    private static let maximumRiseDbPerSecond = 1.5
+    private static let stableSilenceForAdaptation = 0.3
     private static let floorMinDb = -80.0
     private static let floorMaxDb = -20.0
     private static let calibrationQuartile = 0.25
@@ -53,12 +67,14 @@ final class VADThresholdGate: @unchecked Sendable {
     private var calibrationFrames: [CalibrationFrame] = []
     private var adaptiveSeedDbs: [Double] = []
     private var adaptiveSeedComplete: Bool
-    private var inSpeech = false
+    private var adaptiveSeedLocked = false
     private var floorDb: Double?
     private var thresholdDb: Double
     private var usedFallback = false
     private var pendingRetroactiveSpeechMs = 0.0
     private var pendingTrailingSilenceMs: Double?
+    private var idleSilenceElapsed = 0.0
+    private var requiresStableSilence = false
     private var unfairLock = os_unfair_lock()
     private var lastOutput: VADGateOutput
 
@@ -69,7 +85,10 @@ final class VADThresholdGate: @unchecked Sendable {
         self.thresholdDb = Double(AudioMath.dbFromRms(config.staticRms))
         self.lastOutput = VADGateOutput(
             isSpeech: false,
+            evidence: .silence,
             thresholdDb: Double(AudioMath.dbFromRms(config.staticRms)),
+            continuationThresholdDb: Double(AudioMath.dbFromRms(config.staticRms)) - Self.staticContinuationOffsetDb,
+            silenceThresholdDb: Double(AudioMath.dbFromRms(config.staticRms)) - Self.staticSilenceOffsetDb,
             floorDb: nil,
             calibrating: config.mode == .calibrated,
             usedFallback: false,
@@ -104,10 +123,18 @@ final class VADThresholdGate: @unchecked Sendable {
     }
 
     private func processStatic(frameDb: Double) -> VADGateOutput {
-        let isSpeech = frameDb >= thresholdDb
+        let levels = classify(
+            frameDb: frameDb,
+            strongThresholdDb: thresholdDb,
+            continuationThresholdDb: thresholdDb - Self.staticContinuationOffsetDb,
+            silenceThresholdDb: thresholdDb - Self.staticSilenceOffsetDb
+        )
         return emit(
-            isSpeech: isSpeech,
+            evidence: levels.evidence,
+            isSpeech: levels.evidence == .strong,
             thresholdDb: thresholdDb,
+            continuationThresholdDb: levels.continuationThresholdDb,
+            silenceThresholdDb: levels.silenceThresholdDb,
             floorDb: nil,
             calibrating: false,
             retroactiveSpeechMs: 0,
@@ -129,8 +156,11 @@ final class VADThresholdGate: @unchecked Sendable {
         // window has ended. The running Q1 gives a stable interim value after the
         // first frame, while the running minimum is the empty-window fallback.
         return emit(
+            evidence: .silence,
             isSpeech: false,
             thresholdDb: calibrationThresholdDb(),
+            continuationThresholdDb: calibrationThresholdDb() - Self.staticContinuationOffsetDb,
+            silenceThresholdDb: calibrationThresholdDb() - Self.staticSilenceOffsetDb,
             floorDb: nil,
             calibrating: true,
             retroactiveSpeechMs: 0,
@@ -173,7 +203,7 @@ final class VADThresholdGate: @unchecked Sendable {
             thresholdDb = seededFloor + config.adaptiveDeltaDb
             adaptiveSeedDbs.removeAll(keepingCapacity: true)
             adaptiveSeedComplete = true
-            inSpeech = false
+            adaptiveSeedLocked = false
             behaviorMode = .adaptive
             usedFallback = true
         }
@@ -181,11 +211,19 @@ final class VADThresholdGate: @unchecked Sendable {
     }
 
     private func processCalibrated(frameDb: Double) -> VADGateOutput {
-        let isSpeech = frameDb >= thresholdDb
+        let levels = classify(
+            frameDb: frameDb,
+            strongThresholdDb: thresholdDb,
+            continuationThresholdDb: thresholdDb - Self.staticContinuationOffsetDb,
+            silenceThresholdDb: thresholdDb - Self.staticSilenceOffsetDb
+        )
         let (retroactiveSpeechMs, trailingSilenceMs) = takeRetroactiveCredit()
         return emit(
-            isSpeech: isSpeech,
+            evidence: levels.evidence,
+            isSpeech: levels.evidence == .strong,
             thresholdDb: thresholdDb,
+            continuationThresholdDb: levels.continuationThresholdDb,
+            silenceThresholdDb: levels.silenceThresholdDb,
             floorDb: nil,
             calibrating: false,
             retroactiveSpeechMs: retroactiveSpeechMs,
@@ -206,32 +244,21 @@ final class VADThresholdGate: @unchecked Sendable {
         }
 
         let startDb = currentFloor + config.adaptiveDeltaDb
-        let continueDb = config.adaptiveHysteresisEnabled
-            ? startDb + Self.hysteresisBumpDb
-            : startDb
-        let decisionThreshold = inSpeech ? continueDb : startDb
-        let isSpeech = frameDb >= decisionThreshold
-        inSpeech = isSpeech
-
-        if !isSpeech {
-            updateFloor(frameDb: frameDb, frameDuration: frameDuration)
-        }
-
-        let outputFloor = floorDb
-        let outputThreshold: Double
-        if let outputFloor {
-            let outputStartDb = outputFloor + config.adaptiveDeltaDb
-            outputThreshold = inSpeech && config.adaptiveHysteresisEnabled
-                ? outputStartDb + Self.hysteresisBumpDb
-                : outputStartDb
-        } else {
-            outputThreshold = decisionThreshold
-        }
+        let levels = classify(
+            frameDb: frameDb,
+            strongThresholdDb: startDb,
+            continuationThresholdDb: currentFloor + config.adaptiveContinuationDeltaDb,
+            silenceThresholdDb: currentFloor + Self.silenceDeltaDb
+        )
+        noteEvidence(levels.evidence)
         let (retroactiveSpeechMs, trailingSilenceMs) = takeRetroactiveCredit()
         return emit(
-            isSpeech: isSpeech,
-            thresholdDb: outputThreshold,
-            floorDb: outputFloor,
+            evidence: levels.evidence,
+            isSpeech: levels.evidence == .strong || levels.evidence == .continuing,
+            thresholdDb: levels.strongThresholdDb,
+            continuationThresholdDb: levels.continuationThresholdDb,
+            silenceThresholdDb: levels.silenceThresholdDb,
+            floorDb: floorDb,
             calibrating: false,
             retroactiveSpeechMs: retroactiveSpeechMs,
             trailingSilenceMs: trailingSilenceMs
@@ -242,34 +269,108 @@ final class VADThresholdGate: @unchecked Sendable {
         adaptiveSeedDbs.append(frameDb)
         let runningMinimum = adaptiveSeedDbs.min() ?? frameDb
         let runningFloor = clampFloor(runningMinimum)
-        // Before the sixth frame, decisions use the raw running minimum. The
-        // exposed floor is clamped, and the sixth frame makes that clamped
-        // value the steady-state floor.
-        let startDb = runningMinimum + config.adaptiveDeltaDb
-        let continueDb = config.adaptiveHysteresisEnabled
-            ? startDb + Self.hysteresisBumpDb
-            : startDb
-        let decisionThreshold = inSpeech ? continueDb : startDb
-        let isSpeech = frameDb >= decisionThreshold
-        inSpeech = isSpeech
-        floorDb = runningFloor
+        let levels = classify(
+            frameDb: frameDb,
+            strongThresholdDb: runningMinimum + config.adaptiveDeltaDb,
+            continuationThresholdDb: runningMinimum + config.adaptiveContinuationDeltaDb,
+            silenceThresholdDb: runningMinimum + Self.silenceDeltaDb
+        )
+        // Seed only while the window still looks idle. Once strong or
+        // continuing evidence appears, speech cannot move the floor.
+        if !adaptiveSeedLocked {
+            floorDb = runningFloor
+        }
+        noteEvidence(levels.evidence)
+        if levels.evidence == .strong || levels.evidence == .continuing {
+            adaptiveSeedLocked = true
+        }
 
         if adaptiveSeedDbs.count >= Self.adaptiveSeedFrames {
             adaptiveSeedComplete = true
             adaptiveSeedDbs.removeAll(keepingCapacity: true)
         }
 
-        let outputThreshold = inSpeech && config.adaptiveHysteresisEnabled
-            ? runningFloor + config.adaptiveDeltaDb + Self.hysteresisBumpDb
-            : runningFloor + config.adaptiveDeltaDb
         let (retroactiveSpeechMs, trailingSilenceMs) = takeRetroactiveCredit()
         return emit(
-            isSpeech: isSpeech,
-            thresholdDb: outputThreshold,
-            floorDb: runningFloor,
+            evidence: levels.evidence,
+            isSpeech: levels.evidence == .strong || levels.evidence == .continuing,
+            thresholdDb: (floorDb ?? runningFloor) + config.adaptiveDeltaDb,
+            continuationThresholdDb: (floorDb ?? runningFloor) + config.adaptiveContinuationDeltaDb,
+            silenceThresholdDb: (floorDb ?? runningFloor) + Self.silenceDeltaDb,
+            floorDb: floorDb ?? runningFloor,
             calibrating: false,
             retroactiveSpeechMs: retroactiveSpeechMs,
             trailingSilenceMs: trailingSilenceMs
+        )
+    }
+
+    /// Updates the adaptive floor only after the endpoint machine has reported
+    /// confident idle. The caller supplies that state explicitly so speech and
+    /// end-pending audio can never contaminate the floor.
+    func updateFloorIfIdle(frameDb: Double, duration: Double) {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+        guard behaviorMode == .adaptive, let floor = floorDb else { return }
+
+        let levels = classify(
+            frameDb: frameDb,
+            strongThresholdDb: floor + config.adaptiveDeltaDb,
+            continuationThresholdDb: floor + config.adaptiveContinuationDeltaDb,
+            silenceThresholdDb: floor + Self.silenceDeltaDb
+        )
+        guard levels.evidence == .silence else {
+            idleSilenceElapsed = 0
+            return
+        }
+
+        idleSilenceElapsed += duration
+        if requiresStableSilence && idleSilenceElapsed + Self.calibrationCompletionEpsilon < Self.stableSilenceForAdaptation {
+            return
+        }
+        updateFloor(frameDb: frameDb, frameDuration: duration)
+        refreshAdaptiveOutput()
+    }
+
+    /// Resets adaptive tracking or calibration after an audio-route change.
+    func recalibrateFloor() {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+        switch config.mode {
+        case .adaptive:
+            behaviorMode = .adaptive
+            adaptiveSeedDbs.removeAll(keepingCapacity: true)
+            adaptiveSeedComplete = false
+            adaptiveSeedLocked = false
+            floorDb = nil
+        case .calibrated:
+            behaviorMode = .calibrated
+            calibrationFinished = false
+            calibrationElapsed = 0
+            calibrationFrames.removeAll(keepingCapacity: true)
+            pendingRetroactiveSpeechMs = 0
+            pendingTrailingSilenceMs = nil
+            floorDb = nil
+            adaptiveSeedDbs.removeAll(keepingCapacity: true)
+            adaptiveSeedComplete = false
+            adaptiveSeedLocked = false
+        case .staticMode:
+            return
+        }
+        thresholdDb = Double(AudioMath.dbFromRms(config.staticRms))
+        idleSilenceElapsed = 0
+        requiresStableSilence = false
+        usedFallback = false
+        lastOutput = VADGateOutput(
+            isSpeech: false,
+            evidence: .silence,
+            thresholdDb: thresholdDb,
+            continuationThresholdDb: thresholdDb - Self.staticContinuationOffsetDb,
+            silenceThresholdDb: thresholdDb - Self.staticSilenceOffsetDb,
+            floorDb: nil,
+            calibrating: config.mode == .calibrated,
+            usedFallback: false,
+            retroactiveSpeechMs: 0,
+            trailingSilenceMs: nil
         )
     }
 
@@ -277,8 +378,55 @@ final class VADThresholdGate: @unchecked Sendable {
         guard var floor = floorDb else { return }
         let tau = frameDb < floor ? Self.tauFall : Self.tauRise
         let alpha = 1.0 - exp(-frameDuration / tau)
-        floor += alpha * (frameDb - floor)
+        let proposed = floor + alpha * (frameDb - floor)
+        if proposed > floor {
+            floor = min(proposed, floor + Self.maximumRiseDbPerSecond * frameDuration)
+        } else {
+            floor = proposed
+        }
         floorDb = clampFloor(floor)
+    }
+
+    private func noteEvidence(_ evidence: VADEvidence) {
+        if evidence == .strong || evidence == .continuing {
+            requiresStableSilence = true
+            idleSilenceElapsed = 0
+        }
+    }
+
+    private func refreshAdaptiveOutput() {
+        guard let floorDb else { return }
+        lastOutput = VADGateOutput(
+            isSpeech: lastOutput.isSpeech,
+            evidence: lastOutput.evidence,
+            thresholdDb: floorDb + config.adaptiveDeltaDb,
+            continuationThresholdDb: floorDb + config.adaptiveContinuationDeltaDb,
+            silenceThresholdDb: floorDb + Self.silenceDeltaDb,
+            floorDb: floorDb,
+            calibrating: lastOutput.calibrating,
+            usedFallback: usedFallback,
+            retroactiveSpeechMs: lastOutput.retroactiveSpeechMs,
+            trailingSilenceMs: lastOutput.trailingSilenceMs
+        )
+    }
+
+    private func classify(
+        frameDb: Double,
+        strongThresholdDb: Double,
+        continuationThresholdDb: Double,
+        silenceThresholdDb: Double
+    ) -> (evidence: VADEvidence, strongThresholdDb: Double, continuationThresholdDb: Double, silenceThresholdDb: Double) {
+        let evidence: VADEvidence
+        if frameDb >= strongThresholdDb {
+            evidence = .strong
+        } else if frameDb >= continuationThresholdDb {
+            evidence = .continuing
+        } else if frameDb < silenceThresholdDb {
+            evidence = .silence
+        } else {
+            evidence = .ambiguous
+        }
+        return (evidence, strongThresholdDb, continuationThresholdDb, silenceThresholdDb)
     }
 
     private func calibrationQ1() -> Double {
@@ -311,8 +459,11 @@ final class VADThresholdGate: @unchecked Sendable {
     }
 
     private func emit(
+        evidence: VADEvidence,
         isSpeech: Bool,
         thresholdDb: Double,
+        continuationThresholdDb: Double,
+        silenceThresholdDb: Double,
         floorDb: Double?,
         calibrating: Bool,
         retroactiveSpeechMs: Double,
@@ -320,7 +471,10 @@ final class VADThresholdGate: @unchecked Sendable {
     ) -> VADGateOutput {
         let output = VADGateOutput(
             isSpeech: isSpeech,
+            evidence: evidence,
             thresholdDb: thresholdDb,
+            continuationThresholdDb: continuationThresholdDb,
+            silenceThresholdDb: silenceThresholdDb,
             floorDb: floorDb,
             calibrating: calibrating,
             usedFallback: usedFallback,

@@ -7,6 +7,8 @@ final class AudioLevelTesterViewModel: ObservableObject {
     @Published private(set) var currentRms: Float = 0
     @Published private(set) var peakRms: Float = 0
     @Published private(set) var thresholdDb: Double = Double(AudioMath.dbFromRms(SharedConfig.streamVadSpeechRms()))
+    @Published private(set) var continuationThresholdDb: Double = Double(AudioMath.dbFromRms(SharedConfig.streamVadSpeechRms())) - 4.0
+    @Published private(set) var silenceThresholdDb: Double = Double(AudioMath.dbFromRms(SharedConfig.streamVadSpeechRms())) - 6.0
     @Published private(set) var floorDb: Double?
     @Published private(set) var calibrating = false
     @Published private(set) var isSpeech = false
@@ -65,6 +67,8 @@ final class AudioLevelTesterViewModel: ObservableObject {
                     self.currentRms = smoothed
                     self.peakRms = peak
                     self.thresholdDb = output.thresholdDb
+                    self.continuationThresholdDb = output.continuationThresholdDb
+                    self.silenceThresholdDb = output.silenceThresholdDb
                     self.floorDb = output.floorDb
                     self.calibrating = output.calibrating
                     self.isSpeech = output.isSpeech
@@ -85,6 +89,8 @@ final class AudioLevelTesterViewModel: ObservableObject {
             isMonitoring = true
             if let output = gate?.snapshot {
                 thresholdDb = output.thresholdDb
+                continuationThresholdDb = output.continuationThresholdDb
+                silenceThresholdDb = output.silenceThresholdDb
                 floorDb = output.floorDb
                 calibrating = output.calibrating
                 usedFallback = output.usedFallback
@@ -107,6 +113,8 @@ final class AudioLevelTesterViewModel: ObservableObject {
         currentRms = 0
         peakRms = 0
         thresholdDb = Double(AudioMath.dbFromRms(SharedConfig.streamVadSpeechRms()))
+        continuationThresholdDb = 0
+        silenceThresholdDb = 0
         floorDb = nil
         calibrating = false
         isSpeech = false
@@ -127,7 +135,7 @@ final class AudioLevelTesterViewModel: ObservableObject {
             calibrationMs: SharedConfig.streamVadCalibrationMs(),
             calibratedOffsetDb: SharedConfig.streamVadCalibratedOffsetDb(),
             adaptiveDeltaDb: SharedConfig.streamVadAdaptiveDeltaDb(),
-            adaptiveHysteresisEnabled: SharedConfig.streamVadAdaptiveHysteresisEnabled()
+            adaptiveContinuationDeltaDb: SharedConfig.streamVadAdaptiveContinuationDeltaDb()
         ))
     }
 
@@ -136,6 +144,8 @@ final class AudioLevelTesterViewModel: ObservableObject {
 
         let output = gate?.snapshot
         thresholdDb = output?.thresholdDb ?? Double(AudioMath.dbFromRms(config.staticRms))
+        continuationThresholdDb = output?.continuationThresholdDb ?? 0
+        silenceThresholdDb = output?.silenceThresholdDb ?? 0
         floorDb = output?.floorDb
         calibrating = isMonitoring && (output?.calibrating ?? false)
         isSpeech = false
