@@ -19,6 +19,8 @@ export const VAD_PROFILE_DEFAULTS = Object.freeze({
   continuingDeltaDb: 6,
   silenceDeltaDb: 3,
   legacySilenceMs: 2000,
+  minimumSilenceMs: 450,
+  maximumSilenceMs: 5000,
 });
 
 const SENSITIVITY_VALUES = Object.freeze({
@@ -35,6 +37,13 @@ const PAUSE_DURATIONS_MS = Object.freeze({
 
 function clampAdaptiveDeltaDb(value) {
   return Math.min(Math.max(value, 3), 24);
+}
+
+function clampSilenceMs(value) {
+  return Math.min(
+    Math.max(value, VAD_PROFILE_DEFAULTS.minimumSilenceMs),
+    VAD_PROFILE_DEFAULTS.maximumSilenceMs,
+  );
 }
 
 export function resolveSensitivity({
@@ -69,6 +78,8 @@ export function legacySilenceToPauseProfile(value) {
 export function resolvePauseProfile({
   profile,
   legacySilenceMs,
+  rawSilenceMs,
+  rawOverrideExplicit = false,
 } = {}) {
   const hasProfile = Object.prototype.hasOwnProperty.call(PAUSE_DURATIONS_MS, profile);
   const selectedProfile = hasProfile
@@ -77,9 +88,13 @@ export function resolvePauseProfile({
       ? legacySilenceToPauseProfile(legacySilenceMs)
       : VAD_PROFILE_DEFAULTS.pause);
 
+  const silenceMs = rawOverrideExplicit && Number.isFinite(rawSilenceMs)
+    ? clampSilenceMs(rawSilenceMs)
+    : PAUSE_DURATIONS_MS[selectedProfile];
+
   return {
     profile: selectedProfile,
-    silenceMs: PAUSE_DURATIONS_MS[selectedProfile],
+    silenceMs,
   };
 }
 
@@ -89,6 +104,8 @@ export function resolveVadProfiles({
   rawAdaptiveDeltaDb,
   rawAdaptiveDeltaOverride = false,
   legacySilenceMs,
+  rawSilenceMs,
+  rawSilenceOverride = false,
 } = {}) {
   return {
     sensitivity: resolveSensitivity({
@@ -99,6 +116,8 @@ export function resolveVadProfiles({
     pause: resolvePauseProfile({
       profile: pauseProfile,
       legacySilenceMs,
+      rawSilenceMs,
+      rawOverrideExplicit: rawSilenceOverride,
     }),
   };
 }

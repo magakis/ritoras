@@ -198,7 +198,8 @@ struct VADSettingsView: View {
                 maxNoiseRow
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Silence duration is a legacy control; changing it selects the nearest pause profile.")
+                    Text("Silence duration is an Advanced override. Changing the Normal pause profile resets it to that profile's duration.")
+                    Text("Changing the Normal sensitivity profile resets the Advanced Sensitivity Δ.")
                     Text("Changes apply live to this tester and on the next recording.")
                 }
             }

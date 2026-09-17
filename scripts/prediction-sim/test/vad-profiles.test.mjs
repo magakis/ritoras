@@ -60,17 +60,52 @@ describe('VAD profile resolution', () => {
     assert.strictEqual(resolvePauseProfile({ profile: VADPauseProfile.long }).silenceMs, 1100);
   });
 
+  it('honors explicit silence overrides and clamps them to the supported range', () => {
+    assert.strictEqual(resolvePauseProfile({
+      profile: VADPauseProfile.balanced,
+      rawSilenceMs: 1234,
+      rawOverrideExplicit: true,
+    }).silenceMs, 1234);
+    assert.strictEqual(resolvePauseProfile({
+      profile: VADPauseProfile.balanced,
+      rawSilenceMs: 1,
+      rawOverrideExplicit: true,
+    }).silenceMs, 450);
+    assert.strictEqual(resolvePauseProfile({
+      profile: VADPauseProfile.balanced,
+      rawSilenceMs: 9999,
+      rawOverrideExplicit: true,
+    }).silenceMs, 5000);
+    assert.strictEqual(resolvePauseProfile({
+      profile: VADPauseProfile.balanced,
+      rawSilenceMs: 1234,
+    }).silenceMs, 700);
+  });
+
   it('migrates legacy silence values only when no profile is stored', () => {
     assert.strictEqual(resolvePauseProfile({ legacySilenceMs: 2000 }).profile, 'balanced');
+    assert.strictEqual(resolvePauseProfile({ legacySilenceMs: 2000 }).silenceMs, 700);
     assert.strictEqual(resolvePauseProfile({ legacySilenceMs: 500 }).profile, 'fast');
+    assert.strictEqual(resolvePauseProfile({ legacySilenceMs: 500 }).silenceMs, 450);
     assert.strictEqual(resolvePauseProfile({ legacySilenceMs: 700 }).profile, 'balanced');
+    assert.strictEqual(resolvePauseProfile({ legacySilenceMs: 700 }).silenceMs, 700);
     assert.strictEqual(resolvePauseProfile({ legacySilenceMs: 1200 }).profile, 'long');
+    assert.strictEqual(resolvePauseProfile({ legacySilenceMs: 1200 }).silenceMs, 1100);
     assert.strictEqual(resolvePauseProfile({ profile: 'long', legacySilenceMs: 500 }).profile, 'long');
+    assert.strictEqual(resolvePauseProfile({ profile: 'long', legacySilenceMs: 500 }).silenceMs, 1100);
   });
 
   it('clamps corrupt legacy silence values to a valid profile', () => {
     assert.strictEqual(resolvePauseProfile({ legacySilenceMs: -1 }).silenceMs, 450);
     assert.strictEqual(resolvePauseProfile({ legacySilenceMs: 999999 }).silenceMs, 1100);
     assert.strictEqual(resolveVadProfiles({ pauseProfile: 'invalid' }).pause.profile, 'balanced');
+  });
+
+  it('keeps the flagged adaptive delta override at the default value', () => {
+    assert.strictEqual(resolveVadProfiles({
+      sensitivityProfile: VADSensitivityProfile.quietVoice,
+      rawAdaptiveDeltaDb: 10,
+      rawAdaptiveDeltaOverride: true,
+    }).sensitivity.strongDeltaDb, 10);
   });
 });

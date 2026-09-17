@@ -29,6 +29,7 @@ class AppSettings: ObservableObject {
     private var appGroupDefaults: UserDefaults?
     private var cancellables = Set<AnyCancellable>()
     private var streamVadAdaptiveDeltaOverridePresent = false
+    private var streamVadSilenceOverridePresent = false
     private var updatingDerivedVadValue = false
 
     private init() {
@@ -56,6 +57,7 @@ class AppSettings: ObservableObject {
         streamVadMaxNoiseSec = SharedConfig.streamVadMaxNoiseSec()
         audioMeasurementModeEnabled = SharedConfig.audioMeasurementModeEnabled()
         streamVadAdaptiveDeltaOverridePresent = SharedConfig.streamVadAdaptiveDeltaDbOverridePresent()
+        streamVadSilenceOverridePresent = SharedConfig.streamVadSilenceMsOverridePresent()
 
         $servers.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving servers",
@@ -100,8 +102,11 @@ class AppSettings: ObservableObject {
         $streamVadSensitivityProfile.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving streamVadSensitivityProfile",
                                    payload: ["value": newValue.rawValue])
-            self?.saveStreamVadSensitivityProfile(newValue)
-            guard let self, !self.streamVadAdaptiveDeltaOverridePresent else { return }
+            guard let self else { return }
+            self.streamVadAdaptiveDeltaOverridePresent = false
+            self.appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadAdaptiveDeltaDbKey)
+            self.appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadAdaptiveDeltaDbOverrideKey)
+            self.saveStreamVadSensitivityProfile(newValue)
             self.updatingDerivedVadValue = true
             self.streamVadAdaptiveDeltaDb = SharedConfig.streamVadAdaptiveDeltaDb()
             self.updatingDerivedVadValue = false
@@ -109,10 +114,13 @@ class AppSettings: ObservableObject {
         $streamVadPauseProfile.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving streamVadPauseProfile",
                                    payload: ["value": newValue.rawValue])
-            self?.saveStreamVadPauseProfile(newValue)
             guard let self else { return }
+            self.streamVadSilenceOverridePresent = false
+            self.appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
+            self.appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
+            self.saveStreamVadPauseProfile(newValue)
             self.updatingDerivedVadValue = true
-            self.streamVadSilenceMs = SharedConfig.streamVadSilenceMs()
+            self.streamVadSilenceMs = VADProfileResolver.pauseDurationMs(for: newValue)
             self.updatingDerivedVadValue = false
         }.store(in: &cancellables)
         $streamVadMode.dropFirst().sink { [weak self] newValue in
@@ -146,16 +154,8 @@ class AppSettings: ObservableObject {
             guard let self, !self.updatingDerivedVadValue else { return }
             FileLogger.shared.info(.settings, "saving streamVadSilenceMs",
                                    payload: ["value": newValue])
+            self.streamVadSilenceOverridePresent = true
             self.saveStreamVadSilenceMs(newValue)
-            if newValue != VADProfileResolver.oldSilenceDefaultMs {
-                let profile = VADProfileResolver.pauseProfile(forLegacySilenceMs: newValue)
-                if self.streamVadPauseProfile != profile {
-                    self.streamVadPauseProfile = profile
-                }
-            }
-            self.updatingDerivedVadValue = true
-            self.streamVadSilenceMs = SharedConfig.streamVadSilenceMs()
-            self.updatingDerivedVadValue = false
         }.store(in: &cancellables)
         $streamVadMinSpeechMs.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving streamVadMinSpeechMs",
@@ -205,7 +205,10 @@ class AppSettings: ObservableObject {
             appGroupDefaults?.set(true, forKey: SharedConfig.Defaults.streamVadAdaptiveDeltaDbOverrideKey)
         }
         appGroupDefaults?.set(streamVadSpeechRms, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
-        appGroupDefaults?.set(streamVadSilenceMs, forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
+        if streamVadSilenceOverridePresent {
+            appGroupDefaults?.set(streamVadSilenceMs, forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
+            appGroupDefaults?.set(true, forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
+        }
         appGroupDefaults?.set(streamVadMinSpeechMs, forKey: SharedConfig.Defaults.streamVadMinSpeechMsKey)
         appGroupDefaults?.set(streamVadMinChunkMs, forKey: SharedConfig.Defaults.streamVadMinChunkMsKey)
         appGroupDefaults?.set(streamVadMaxNoiseSec, forKey: SharedConfig.Defaults.streamVadMaxNoiseSecKey)
@@ -293,6 +296,7 @@ class AppSettings: ObservableObject {
 
     private func saveStreamVadSilenceMs(_ value: Int) {
         appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
+        appGroupDefaults?.set(true, forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
         postSettingsChanged()
     }
 
@@ -337,6 +341,9 @@ class AppSettings: ObservableObject {
         streamVadAdaptiveDeltaOverridePresent = false
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadAdaptiveDeltaDbKey)
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadAdaptiveDeltaDbOverrideKey)
+        streamVadSilenceOverridePresent = false
+        appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
+        appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
         streamVadSensitivityProfile = SharedConfig.Defaults.streamVadSensitivityProfileDefault
         streamVadPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
         streamVadMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .staticMode
@@ -344,9 +351,9 @@ class AppSettings: ObservableObject {
         streamVadCalibratedOffsetDb = SharedConfig.Defaults.streamVadCalibratedOffsetDbDefault
         updatingDerivedVadValue = true
         streamVadAdaptiveDeltaDb = SharedConfig.Defaults.streamVadAdaptiveDeltaDbDefault
+        streamVadSilenceMs = SharedConfig.Defaults.streamVadSilenceMsDefault
         updatingDerivedVadValue = false
         streamVadSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
-        streamVadSilenceMs = SharedConfig.Defaults.streamVadSilenceMsDefault
         streamVadMinSpeechMs = SharedConfig.Defaults.streamVadMinSpeechMsDefault
         streamVadMinChunkMs = SharedConfig.Defaults.streamVadMinChunkMsDefault
         streamVadMaxNoiseSec = SharedConfig.Defaults.streamVadMaxNoiseSecDefault

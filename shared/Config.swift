@@ -27,6 +27,8 @@ enum VADProfileResolver {
     static let minimumAdaptiveDeltaDb = 3.0
     static let maximumAdaptiveDeltaDb = 24.0
     static let oldSilenceDefaultMs = 2_000
+    static let minimumSilenceMs = 450
+    static let maximumSilenceMs = 5_000
 
     static func sensitivity(
         profile: VADSensitivityProfile,
@@ -111,6 +113,17 @@ enum VADProfileResolver {
         case .long:
             return 1_100
         }
+    }
+
+    static func silenceDurationMs(
+        for profile: VADPauseProfile,
+        rawSilenceMs: Int?,
+        rawOverrideExplicit: Bool = false
+    ) -> Int {
+        guard rawOverrideExplicit, let rawSilenceMs else {
+            return pauseDurationMs(for: profile)
+        }
+        return min(max(rawSilenceMs, minimumSilenceMs), maximumSilenceMs)
     }
 }
 
@@ -200,11 +213,12 @@ struct SharedConfig {
         /// Enables the sample-count endpoint state machine for streaming VAD.
         static let streamEndpointMachineEnabledKey = "streamEndpointMachineEnabled"
         static let streamEndpointMachineEnabledDefault = true
-        /// Balanced endpoint silence duration (ms). The legacy key below is
-        /// still the user-configurable source of this value.
+        /// Balanced endpoint silence duration (ms).
         static let streamVadEndpointSilenceMsDefault: Int = 700
         /// Legacy silence duration key, retained for stored user preferences.
         static let streamVadSilenceMsKey = "streamVadSilenceMs"
+        static let streamVadSilenceMsOverrideKey = "streamVadSilenceMsOverride"
+        static let streamVadSilenceMsOverrideDefault = false
         static let streamVadLegacySilenceMsDefault: Int = 2_000
         static let streamVadSilenceMsDefault: Int = streamVadEndpointSilenceMsDefault
         /// Pre-roll requested from the recorder when an utterance starts.
@@ -690,9 +704,32 @@ struct SharedConfig {
 
     /// Reads the streaming VAD silence threshold (ms) from the App Group.
     /// Used by the keyboard extension, which cannot link `AppSettings`.
-    /// Returns the default when the App Group is unavailable or the key is unset.
+    /// Returns an explicit override when present, otherwise the selected pause
+    /// profile duration.
     static func streamVadSilenceMs() -> Int {
-        VADProfileResolver.pauseDurationMs(for: streamVadPauseProfile())
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadSilenceMsDefault
+        }
+        let rawSilenceMs = (defaults.object(
+            forKey: Defaults.streamVadSilenceMsKey
+        ) as? NSNumber)?.intValue
+        let rawOverrideExplicit = (defaults.object(
+            forKey: Defaults.streamVadSilenceMsOverrideKey
+        ) as? Bool) ?? Defaults.streamVadSilenceMsOverrideDefault
+        return VADProfileResolver.silenceDurationMs(
+            for: streamVadPauseProfile(),
+            rawSilenceMs: rawSilenceMs,
+            rawOverrideExplicit: rawOverrideExplicit
+        )
+    }
+
+    /// Returns whether the silence duration is explicitly overridden in Advanced.
+    static func streamVadSilenceMsOverridePresent() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadSilenceMsOverrideDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadSilenceMsOverrideKey) as? Bool)
+            ?? Defaults.streamVadSilenceMsOverrideDefault
     }
 
     /// Reads the user-facing VAD pause profile from the App Group. A legacy
