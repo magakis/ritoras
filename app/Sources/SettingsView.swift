@@ -209,7 +209,7 @@ struct SettingsView: View {
         } header: {
             Text("Diagnostics")
         } footer: {
-            Text("Verbose Logging writes additional debug-level entries to the log. Off by default.")
+            Text("Captures developer-level diagnostics in the debug log. Off by default.")
         }
     }
 

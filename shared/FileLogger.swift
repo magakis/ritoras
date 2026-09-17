@@ -21,6 +21,7 @@ final class FileLogger {
         let (url, fallback) = Self.resolveURL()
         self.resolvedURL = url
         self.usingFallbackDir = fallback
+        self.verboseLoggingDefaults = UserDefaults(suiteName: SharedConfig.Defaults.appGroupId)
 
         queue.setSpecific(key: Self.queueKey, value: true)
 
@@ -45,9 +46,15 @@ final class FileLogger {
 
     private let resolvedURL: URL?
     private let usingFallbackDir: Bool
+    private let verboseLoggingDefaults: UserDefaults?
     private var writeHandle: FileHandle?
     private var currentBytes: Int64 = 0
     private var isRotating = false
+
+    private var verboseLoggingEnabled: Bool {
+        verboseLoggingDefaults?.bool(forKey: SharedConfig.Defaults.verboseLoggingKey)
+            ?? SharedConfig.Defaults.verboseLoggingDefault
+    }
 
     /// Optional broadcast hook invoked on every log call. Set by keyboard targets
     /// to ship logs to the container app's DebugLogView via LocalhostServer.
@@ -136,7 +143,7 @@ final class FileLogger {
 
     func log(_ level: LogLevel, _ component: LogComponent,
              _ message: String, payload: [String: Any]? = nil) {
-        if level == .debug, !SharedConfig.verboseLoggingEnabled() { return }
+        if level == .debug, !verboseLoggingEnabled { return }
         let ts = dateFormatter.string(from: Date())
 
         var dict: [String: Any] = [
@@ -222,7 +229,7 @@ final class FileLogger {
         var batch: [(LogLevel, LogComponent, String, [String: Any]?, String)] = []
 
         for (level, component, message, payload) in entries {
-            if level == .debug, !SharedConfig.verboseLoggingEnabled() { continue }
+            if level == .debug, !verboseLoggingEnabled { continue }
 
             let ts = dateFormatter.string(from: Date())
             var dict: [String: Any] = [

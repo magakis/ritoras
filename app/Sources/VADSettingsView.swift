@@ -195,7 +195,6 @@ struct VADSettingsView: View {
                 }
                 minSpeechDurationRow
                 minChunkDurationRow
-                maxNoiseRow
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Silence duration is an Advanced override. Changing the Normal pause profile resets it to that profile's duration.")
@@ -379,17 +378,6 @@ struct VADSettingsView: View {
                 Text("Min Chunk Duration")
                 Spacer()
                 Text("\(settings.streamVadMinChunkMs) ms")
-                    .foregroundColor(.secondary)
-            }
-        }
-    }
-
-    private var maxNoiseRow: some View {
-        Stepper(value: $settings.streamVadMaxNoiseSec, in: 2...15, step: 1) {
-            HStack {
-                Text("Max Noise Duration")
-                Spacer()
-                Text("\(settings.streamVadMaxNoiseSec, specifier: "%.0f") s")
                     .foregroundColor(.secondary)
             }
         }
