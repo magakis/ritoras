@@ -52,15 +52,15 @@ final class VADThresholdGate: @unchecked Sendable {
     private static let staticSilenceOffsetDb = 6.0
     private static let maximumRiseDbPerSecond = 1.5
     private static let elevatedRiseDbPerSecond = 6.0
-    private static let adaptiveProvisionalSeedDuration = 0.5
-    private static let adaptiveFinalSeedDuration = 1.0
+    private static let adaptiveMinRefinementDuration = 1.0
+    private static let adaptiveEarlyWindowDuration = 5.0
     private static let adaptiveRollingWindowDuration = 3.0
     private static let adaptiveRollingWindowCapacity = 256
     private static let floorMinDb = -80.0
     private static let floorMaxDb = -20.0
     private static let calibrationQuartile = 0.25
     private static let quietBandDb = 6.0
-    private static let adaptiveSeedPercentile = 0.1
+    private static let adaptiveRollingPercentile = 0.1
     private static let adaptiveIdleElevationDuration = 1.5
     private static let calibrationCompletionEpsilon = 1e-9
 
@@ -69,9 +69,9 @@ final class VADThresholdGate: @unchecked Sendable {
     private var calibrationFinished = false
     private var calibrationElapsed = 0.0
     private var calibrationFrames: [CalibrationFrame] = []
-    private var adaptiveSeedDbs: [Double] = []
-    private var adaptiveSeedElapsed = 0.0
-    private var adaptiveSeedComplete: Bool
+    private var adaptiveRefinementElapsed = 0.0
+    private var adaptiveElapsed = 0.0
+    private var adaptiveRefinementComplete: Bool
     private var floorDb: Double?
     private var thresholdDb: Double
     private var usedFallback = false
@@ -87,24 +87,32 @@ final class VADThresholdGate: @unchecked Sendable {
     private var lastOutput: VADGateOutput
 
     init(config: VADGateConfig) {
+        let initialFloorDb: Double? = config.mode == .adaptive ? Self.floorMinDb : nil
+        let initialThresholdDb = config.mode == .adaptive
+            ? Self.floorMinDb + config.adaptiveDeltaDb
+            : Double(AudioMath.dbFromRms(config.staticRms))
         self.config = config
         self.behaviorMode = config.mode
-        self.adaptiveSeedComplete = config.mode != .adaptive
-        self.thresholdDb = Double(AudioMath.dbFromRms(config.staticRms))
+        self.adaptiveRefinementComplete = config.mode != .adaptive
+        self.floorDb = initialFloorDb
+        self.thresholdDb = initialThresholdDb
         self.lastOutput = VADGateOutput(
             isSpeech: false,
             evidence: .silence,
-            thresholdDb: Double(AudioMath.dbFromRms(config.staticRms)),
-            continuationThresholdDb: Double(AudioMath.dbFromRms(config.staticRms)) - Self.staticContinuationOffsetDb,
-            silenceThresholdDb: Double(AudioMath.dbFromRms(config.staticRms)) - Self.staticSilenceOffsetDb,
-            floorDb: nil,
+            thresholdDb: initialThresholdDb,
+            continuationThresholdDb: config.mode == .adaptive
+                ? Self.floorMinDb + config.adaptiveContinuationDeltaDb
+                : initialThresholdDb - Self.staticContinuationOffsetDb,
+            silenceThresholdDb: config.mode == .adaptive
+                ? Self.floorMinDb + Self.silenceDeltaDb
+                : initialThresholdDb - Self.staticSilenceOffsetDb,
+            floorDb: initialFloorDb,
             calibrating: config.mode == .calibrated,
             usedFallback: false,
             retroactiveSpeechMs: 0,
             trailingSilenceMs: nil
         )
         calibrationFrames.reserveCapacity(36)
-        adaptiveSeedDbs.reserveCapacity(16)
         adaptiveRollingDbs = Array(repeating: 0, count: Self.adaptiveRollingWindowCapacity)
         adaptiveRollingDurations = Array(repeating: 0, count: Self.adaptiveRollingWindowCapacity)
     }
@@ -211,9 +219,9 @@ final class VADThresholdGate: @unchecked Sendable {
             let seededFloor = clampFloor(q1)
             floorDb = seededFloor
             thresholdDb = seededFloor + config.adaptiveDeltaDb
-            adaptiveSeedDbs.removeAll(keepingCapacity: true)
-            adaptiveSeedElapsed = 0
-            adaptiveSeedComplete = true
+            adaptiveRefinementElapsed = 0
+            adaptiveRefinementComplete = true
+            adaptiveElapsed = Self.adaptiveEarlyWindowDuration
             behaviorMode = .adaptive
             usedFallback = true
         }
@@ -242,14 +250,18 @@ final class VADThresholdGate: @unchecked Sendable {
     }
 
     private func processAdaptive(frameDb: Double, frameDuration: Double) -> VADGateOutput {
+        adaptiveElapsed += max(0, frameDuration)
         appendAdaptiveRollingFrame(db: frameDb, duration: frameDuration)
-        if !adaptiveSeedComplete {
-            return processAdaptiveSeed(frameDb: frameDb, frameDuration: frameDuration)
+        if !adaptiveRefinementComplete {
+            return processAdaptiveRefinement(frameDb: frameDb, frameDuration: frameDuration)
         }
 
         guard let currentFloor = floorDb else {
-            adaptiveSeedComplete = false
-            return processAdaptiveSeed(frameDb: frameDb, frameDuration: frameDuration)
+            floorDb = Self.floorMinDb
+            adaptiveRefinementComplete = false
+            adaptiveRefinementElapsed = 0
+            adaptiveElapsed = 0
+            return processAdaptiveRefinement(frameDb: frameDb, frameDuration: frameDuration)
         }
 
         let startDb = currentFloor + config.adaptiveDeltaDb
@@ -273,35 +285,23 @@ final class VADThresholdGate: @unchecked Sendable {
         )
     }
 
-    private func processAdaptiveSeed(frameDb: Double, frameDuration: Double) -> VADGateOutput {
-        adaptiveSeedDbs.append(frameDb)
-        adaptiveSeedElapsed += max(0, frameDuration)
-
-        guard adaptiveSeedElapsed + Self.calibrationCompletionEpsilon >= Self.adaptiveProvisionalSeedDuration else {
-            return emit(
-                evidence: .ambiguous,
-                isSpeech: false,
-                thresholdDb: thresholdDb,
-                continuationThresholdDb: thresholdDb - Self.staticContinuationOffsetDb,
-                silenceThresholdDb: thresholdDb - Self.staticSilenceOffsetDb,
-                floorDb: nil,
-                calibrating: false,
-                retroactiveSpeechMs: 0,
-                trailingSilenceMs: nil
-            )
+    private func processAdaptiveRefinement(frameDb: Double, frameDuration: Double) -> VADGateOutput {
+        adaptiveRefinementElapsed += max(0, frameDuration)
+        if let floorDb {
+            self.floorDb = min(floorDb, clampFloor(frameDb))
+        } else {
+            floorDb = Self.floorMinDb
+        }
+        if adaptiveRefinementElapsed + Self.calibrationCompletionEpsilon >= Self.adaptiveMinRefinementDuration {
+            adaptiveRefinementComplete = true
         }
 
-        floorDb = clampFloor(percentile(adaptiveSeedDbs, percentile: Self.adaptiveSeedPercentile))
-        if adaptiveSeedElapsed + Self.calibrationCompletionEpsilon >= Self.adaptiveFinalSeedDuration {
-            adaptiveSeedComplete = true
-            adaptiveSeedDbs.removeAll(keepingCapacity: true)
-        }
-
+        let currentFloor = floorDb ?? Self.floorMinDb
         let levels = classify(
             frameDb: frameDb,
-            strongThresholdDb: floorDb! + config.adaptiveDeltaDb,
-            continuationThresholdDb: floorDb! + config.adaptiveContinuationDeltaDb,
-            silenceThresholdDb: floorDb! + Self.silenceDeltaDb
+            strongThresholdDb: currentFloor + config.adaptiveDeltaDb,
+            continuationThresholdDb: currentFloor + config.adaptiveContinuationDeltaDb,
+            silenceThresholdDb: currentFloor + Self.silenceDeltaDb
         )
         let (retroactiveSpeechMs, trailingSilenceMs) = takeRetroactiveCredit()
         return emit(
@@ -310,7 +310,7 @@ final class VADThresholdGate: @unchecked Sendable {
             thresholdDb: levels.strongThresholdDb,
             continuationThresholdDb: levels.continuationThresholdDb,
             silenceThresholdDb: levels.silenceThresholdDb,
-            floorDb: floorDb,
+            floorDb: currentFloor,
             calibrating: false,
             retroactiveSpeechMs: retroactiveSpeechMs,
             trailingSilenceMs: trailingSilenceMs
@@ -339,10 +339,19 @@ final class VADThresholdGate: @unchecked Sendable {
 
         continuousIdleElapsed += max(0, duration)
         guard floorDb != nil else { return }
+        guard adaptiveRefinementComplete else { return }
         guard let target = adaptiveRollingPercentile() else { return }
-        let riseCap = continuousIdleElapsed + Self.calibrationCompletionEpsilon >= Self.adaptiveIdleElevationDuration
-            ? Self.elevatedRiseDbPerSecond
-            : Self.maximumRiseDbPerSecond
+        // The low seed is deliberately optimistic. Quiet surroundings must pull
+        // the floor up to ambient within a few seconds so ambient stops
+        // classifying as strong; if the user is speaking, the utterance opens
+        // and the floor catches up after it finalizes.
+        let riseCap: Double
+        if adaptiveElapsed <= Self.adaptiveEarlyWindowDuration + Self.calibrationCompletionEpsilon
+            || continuousIdleElapsed + Self.calibrationCompletionEpsilon >= Self.adaptiveIdleElevationDuration {
+            riseCap = Self.elevatedRiseDbPerSecond
+        } else {
+            riseCap = Self.maximumRiseDbPerSecond
+        }
         updateFloor(targetDb: target, frameDuration: duration, maximumRiseDbPerSecond: riseCap)
         refreshAdaptiveOutput()
     }
@@ -354,10 +363,10 @@ final class VADThresholdGate: @unchecked Sendable {
         switch config.mode {
         case .adaptive:
             behaviorMode = .adaptive
-            adaptiveSeedDbs.removeAll(keepingCapacity: true)
-            adaptiveSeedElapsed = 0
-            adaptiveSeedComplete = false
-            floorDb = nil
+            adaptiveRefinementElapsed = 0
+            adaptiveRefinementComplete = false
+            adaptiveElapsed = 0
+            floorDb = Self.floorMinDb
         case .calibrated:
             behaviorMode = .calibrated
             calibrationFinished = false
@@ -366,13 +375,15 @@ final class VADThresholdGate: @unchecked Sendable {
             pendingRetroactiveSpeechMs = 0
             pendingTrailingSilenceMs = nil
             floorDb = nil
-            adaptiveSeedDbs.removeAll(keepingCapacity: true)
-            adaptiveSeedElapsed = 0
-            adaptiveSeedComplete = false
+            adaptiveRefinementElapsed = 0
+            adaptiveRefinementComplete = false
+            adaptiveElapsed = 0
         case .staticMode:
             return
         }
-        thresholdDb = Double(AudioMath.dbFromRms(config.staticRms))
+        thresholdDb = config.mode == .adaptive
+            ? Self.floorMinDb + config.adaptiveDeltaDb
+            : Double(AudioMath.dbFromRms(config.staticRms))
         continuousIdleElapsed = 0
         resetAdaptiveRollingWindow()
         usedFallback = false
@@ -380,9 +391,13 @@ final class VADThresholdGate: @unchecked Sendable {
             isSpeech: false,
             evidence: .silence,
             thresholdDb: thresholdDb,
-            continuationThresholdDb: thresholdDb - Self.staticContinuationOffsetDb,
-            silenceThresholdDb: thresholdDb - Self.staticSilenceOffsetDb,
-            floorDb: nil,
+            continuationThresholdDb: config.mode == .adaptive
+                ? Self.floorMinDb + config.adaptiveContinuationDeltaDb
+                : thresholdDb - Self.staticContinuationOffsetDb,
+            silenceThresholdDb: config.mode == .adaptive
+                ? Self.floorMinDb + Self.silenceDeltaDb
+                : thresholdDb - Self.staticSilenceOffsetDb,
+            floorDb: floorDb,
             calibrating: config.mode == .calibrated,
             usedFallback: false,
             retroactiveSpeechMs: 0,
@@ -444,7 +459,7 @@ final class VADThresholdGate: @unchecked Sendable {
                 % Self.adaptiveRollingWindowCapacity
             values.append(adaptiveRollingDbs[index])
         }
-        return percentile(values, percentile: Self.adaptiveSeedPercentile)
+        return percentile(values, percentile: Self.adaptiveRollingPercentile)
     }
 
     private func percentile(_ values: [Double], percentile: Double) -> Double {

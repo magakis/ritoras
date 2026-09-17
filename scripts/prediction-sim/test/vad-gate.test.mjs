@@ -6,6 +6,7 @@ import {
   makeVadGateConfig,
   VADThresholdGate,
 } from '../lib/vad-gate.mjs';
+import { StreamingEndpoint } from '../lib/streaming-endpoint.mjs';
 
 function config(partial = {}) {
   return makeVadGateConfig(partial);
@@ -18,6 +19,13 @@ function seedAdaptiveGate(partial = {}, seedDb = -50) {
   }));
   for (let i = 0; i < 10; i++) gate.process(seedDb, 0.1);
   return gate;
+}
+
+function advancePastAdaptiveEarlyWindow(gate, frameDb = -65) {
+  for (let i = 0; i < 41; i++) {
+    gate.process(frameDb, 0.1);
+    gate.updateFloorIfIdle(frameDb, 0.1, false);
+  }
 }
 
 describe('VADThresholdGate', () => {
@@ -156,38 +164,62 @@ describe('VADThresholdGate', () => {
   });
 
   describe('adaptive mode', () => {
-    it('holds startup as ambiguous until the provisional half-second seed', () => {
+    it('opens a speech utterance from frame one and flushes a quick recording', () => {
       const gate = new VADThresholdGate(config({
         mode: 'adaptive',
       }));
-      for (let i = 0; i < 4; i++) {
-        const output = gate.process(-30, 0.1);
-        assert.strictEqual(output.evidence, 'ambiguous');
-        assert.strictEqual(output.floorDb, null);
+      const endpoint = new StreamingEndpoint();
+      const frameSamples = 160;
+      let openedAtMs = null;
+      let speechSamples = 0;
+
+      for (let i = 0; i < 150; i++) {
+        const output = gate.process(-45, 0.01);
+        if (i === 0) assert.strictEqual(output.evidence, 'strong');
+        if (output.isSpeech) speechSamples += frameSamples;
+        const decision = endpoint.process(output.evidence, frameSamples);
+        if (decision.type === 'startUtterance' && openedAtMs === null) {
+          openedAtMs = (i + 1) * 10;
+        }
       }
-      const provisional = gate.process(-30, 0.1);
-      assert.strictEqual(provisional.floorDb, -30);
-      assert.strictEqual(provisional.evidence, 'silence');
+
+      assert.ok(openedAtMs !== null && openedAtMs <= 70);
+      assert.ok(speechSamples >= 300 * 16);
+      assert.deepStrictEqual(endpoint.forceFinalize('stop'), {
+        type: 'finalizeUtterance',
+        kind: 'stop',
+      });
     });
 
-    it('seeds from an interpolated tenth percentile instead of a single dip', () => {
+    it('keeps the low seed from rising when speech starts on frame one', () => {
       const gate = new VADThresholdGate(config({ mode: 'adaptive' }));
-      for (const frameDb of [...Array(9).fill(-65), -78]) {
-        gate.process(frameDb, 0.1);
+      for (let i = 0; i < 10; i++) {
+        gate.process(-45, 0.1);
       }
-      const output = gate.snapshot;
-      assert.ok(Math.abs(output.floorDb - -66.3) < 0.001);
-      assert.strictEqual(output.evidence, 'silence');
-      assert.strictEqual(gate.process(-30, 0.1).isSpeech, true);
+      assert.ok(gate.snapshot.floorDb <= -45);
     });
 
-    it('does not let speech occupying forty percent of the seed raise the floor', () => {
+    it('stabilizes a quiet room near ambient during the five-second early window', () => {
       const gate = new VADThresholdGate(config({ mode: 'adaptive' }));
-      for (const frameDb of [...Array(6).fill(-65), ...Array(4).fill(-30)]) {
-        gate.process(frameDb, 0.1);
+      for (let i = 0; i < 50; i++) {
+        gate.process(-65, 0.1);
+        gate.updateFloorIfIdle(-65, 0.1, true);
       }
-      assert.ok(gate.snapshot.floorDb <= -62);
-      assert.ok(gate.snapshot.floorDb >= -67);
+      assert.ok(Math.abs(gate.snapshot.floorDb - -65) <= 3);
+      assert.notStrictEqual(gate.process(-65, 0.1).evidence, 'strong');
+    });
+
+    it('returns to the sustained-idle rise gate after the early window', () => {
+      const gate = new VADThresholdGate(config({ mode: 'adaptive' }));
+      for (let i = 0; i < 50; i++) {
+        gate.process(-65, 0.1);
+        gate.updateFloorIfIdle(-65, 0.1, false);
+      }
+      gate.floorDb = -78;
+
+      gate.process(-65, 0.1);
+      gate.updateFloorIfIdle(-65, 0.1, true);
+      assert.ok(Math.abs(gate.snapshot.floorDb - -77.85) < 0.001);
     });
 
     it('uses the fast fall tau and capped upward movement', () => {
@@ -211,6 +243,7 @@ describe('VADThresholdGate', () => {
       assert.strictEqual(lowGate.snapshot.floorDb, -80);
 
       const highGate = seedAdaptiveGate({ adaptiveDeltaDb: 10 }, -10);
+      highGate.updateFloorIfIdle(-10, 10, true);
       assert.strictEqual(highGate.snapshot.floorDb, -20);
     });
 
@@ -218,6 +251,7 @@ describe('VADThresholdGate', () => {
       const gate = seedAdaptiveGate({
         adaptiveDeltaDb: 10,
       }, -50);
+      gate.floorDb = -50;
       const output = gate.process(-42, 0.1);
       assert.ok(output.continuationThresholdDb < output.thresholdDb);
       assert.strictEqual(output.evidence, 'continuing');
@@ -226,6 +260,8 @@ describe('VADThresholdGate', () => {
 
     it('freezes during non-idle states and resumes immediately when idle', () => {
       const gate = seedAdaptiveGate({ adaptiveDeltaDb: 10 }, -50);
+      gate.floorDb = -50;
+      advancePastAdaptiveEarlyWindow(gate, -60);
       gate.process(-30, 0.1);
       assert.strictEqual(gate.snapshot.floorDb, -50);
 
@@ -241,6 +277,7 @@ describe('VADThresholdGate', () => {
 
     it('keeps baseline rise capped before sustained idle and then catches up', () => {
       const gate = seedAdaptiveGate({}, -65);
+      advancePastAdaptiveEarlyWindow(gate, -65);
       gate.floorDb = -78;
 
       for (let i = 0; i < 14; i++) {
@@ -258,6 +295,7 @@ describe('VADThresholdGate', () => {
 
     it('does not reset sustained idle time for a cancelled onset', () => {
       const gate = seedAdaptiveGate({}, -65);
+      advancePastAdaptiveEarlyWindow(gate, -65);
       gate.floorDb = -78;
 
       for (let i = 0; i < 14; i++) {
@@ -277,6 +315,10 @@ describe('VADThresholdGate', () => {
 
     it('classifies the gap between silence and continuation as ambiguous', () => {
       const gate = seedAdaptiveGate({ adaptiveDeltaDb: 10 }, -50);
+      for (let i = 0; i < 50; i++) {
+        gate.process(-50, 0.1);
+        gate.updateFloorIfIdle(-50, 0.1, true);
+      }
       const output = gate.process(-45, 0.1);
       assert.strictEqual(output.evidence, 'ambiguous');
       assert.strictEqual(output.isSpeech, false);
