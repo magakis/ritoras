@@ -30,6 +30,23 @@ struct VADEmission {
     let samples: [Float]
 }
 
+struct StreamingVADFrameState: Sendable {
+    let endpointState: String
+    let evidence: String
+    let frameDb: Double
+    let thresholdDb: Double
+    let continuationThresholdDb: Double
+    let silenceThresholdDb: Double
+    let floorDb: Double?
+    let calibrating: Bool
+    let accumulatedSilenceMs: Double
+    let silenceTargetMs: Double
+    let utteranceDurationMs: Double
+    let maxUtteranceMs: Double
+    let resumeEvidenceMs: Double
+    let lastEmissionReason: String?
+}
+
 private final class SampleRingBuffer {
     private let capacity: Int
     private var storage: [Float]
@@ -105,6 +122,8 @@ private final class VADContext: @unchecked Sendable {
     private var wasCalibrating: Bool
     private var didLogFallback = false
     private var diagnosticElapsed = 0.0
+    private var lastFrameDb = 0.0
+    private var pendingEmissionReason: String?
     private var bufferHighWaterSamples = 0
     private var liveSegments: [VADAudioSegment] = []
     private var reentryBuffer: [Float] = []
@@ -168,6 +187,38 @@ private final class VADContext: @unchecked Sendable {
         gate.recalibrateFloor()
     }
 
+    func frameState(lastEmissionReason: String?) -> StreamingVADFrameState {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+
+        let gateSnapshot = gate.snapshot
+        return StreamingVADFrameState(
+            endpointState: endpoint.state.rawValue,
+            evidence: gateSnapshot.evidence.rawValue,
+            frameDb: lastFrameDb,
+            thresholdDb: gateSnapshot.thresholdDb,
+            continuationThresholdDb: gateSnapshot.continuationThresholdDb,
+            silenceThresholdDb: gateSnapshot.silenceThresholdDb,
+            floorDb: gateSnapshot.floorDb,
+            calibrating: gateSnapshot.calibrating,
+            accumulatedSilenceMs: Double(endpoint.accumulatedSilenceSamples) / 16.0,
+            silenceTargetMs: Double(silenceThresholdSamples) / 16.0,
+            utteranceDurationMs: Double(endpoint.utteranceDurationSamples) / 16.0,
+            maxUtteranceMs: Double(maxUtteranceSamples) / 16.0,
+            resumeEvidenceMs: Double(endpoint.resumeEvidenceSamples) / 16.0,
+            lastEmissionReason: lastEmissionReason
+        )
+    }
+
+    func takePendingEmissionReason() -> String? {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+
+        let reason = pendingEmissionReason
+        pendingEmissionReason = nil
+        return reason
+    }
+
     /// Process one audio frame. Returns a `VADEmission` if a chunk boundary
     /// is detected (pause timeout), otherwise `nil`.
     func process(frame: [Float], frameLength: Int) -> VADEmission? {
@@ -177,6 +228,8 @@ private final class VADContext: @unchecked Sendable {
         let analysisFrame = analysisHpf?.process(frame) ?? frame
         let rms = AudioMath.dcCorrectedRMS(analysisFrame)
         let frameDb = Double(AudioMath.dbFromRms(rms))
+        lastFrameDb = frameDb
+        pendingEmissionReason = nil
         let frameDuration = Double(frameLength) / 16000.0
         let out = gate.process(frameDb: frameDb, frameDuration: frameDuration)
 
@@ -495,6 +548,7 @@ private final class VADContext: @unchecked Sendable {
         discardSilentReentryIfIdle()
 
         guard chunkSamples.count >= minChunkSamples else { return nil }
+        pendingEmissionReason = splitPoint.reason.rawValue
         return nextEmission(samples: chunkSamples)
     }
 
@@ -563,6 +617,7 @@ private final class VADContext: @unchecked Sendable {
     /// Emit current accumulator and reset all VAD state.
     /// - parameter reason: Label for log distinguishability ("pause", "flush").
     func emit(reason: String = "pause") -> VADEmission {
+        pendingEmissionReason = reason
         let snapshot = accumulator
         let id = chunkId
         chunkId &+= 1
@@ -749,6 +804,7 @@ actor StreamingAudioRecorder {
     private let engine = AVAudioEngine()
     private var isRecording = false
     private var onChunk: ChunkHandler?
+    private var onVADState: ((StreamingVADFrameState) -> Void)?
 
     /// Thread-safe holder for the lazy `AVAudioConverter`; access only
     /// through its lock-protected methods (never actor-isolated `var`).
@@ -820,11 +876,13 @@ actor StreamingAudioRecorder {
     /// - Parameter onChunk: Called on vadQueue for each detected speech
     ///   segment. The first argument is a monotonically increasing chunk ID
     ///   (starting at 0); the second is float32 PCM samples at 16 kHz mono.
+    /// - Parameter onVADState: Called on vadQueue after each processed audio
+    ///   frame with the current VAD and endpoint state.
     /// - Throws: `AudioRecorder.AudioRecorderError.permissionDenied` or `.permissionNotRequested`
     ///   if mic access is unavailable; `AudioRecorder.AudioRecorderError.invalidSessionConfiguration`
     ///   if session setup fails; `StreamingRecorderError.engineStartFailed` if
     ///   the audio engine cannot start.
-    func start(fileURL: URL? = nil, onVADCalibration: ((Bool) -> Void)? = nil, onChunk: @escaping ChunkHandler) async throws {
+    func start(fileURL: URL? = nil, onVADCalibration: ((Bool) -> Void)? = nil, onChunk: @escaping ChunkHandler, onVADState: ((StreamingVADFrameState) -> Void)? = nil) async throws {
         guard !isRecording else {
             throw StreamingRecorderError.alreadyStreaming
         }
@@ -850,6 +908,7 @@ actor StreamingAudioRecorder {
         }
 
         self.onChunk = onChunk
+        self.onVADState = onVADState
 
         // 3. Build the 16 kHz mono target format (converter output)
         guard let targetFormat = AVAudioFormat(
@@ -892,6 +951,7 @@ actor StreamingAudioRecorder {
 
         // Capture references for the closure (no actor self capture).
         let handler = onChunk
+        let stateHandler = onVADState
         let vad = self.vad
         vad.setCalibrationChangeHandler(onVADCalibration)
         let vadQueue = self.vadQueue
@@ -941,6 +1001,7 @@ actor StreamingAudioRecorder {
                     targetFormat: targetFormat,
                     vad: vad,
                     handler: handler,
+                    stateHandler: stateHandler,
                     diskWriter: diskWriter,
                     stoppedFlag: stoppedFlag,
                     accounting: accounting
@@ -963,6 +1024,7 @@ actor StreamingAudioRecorder {
         } catch {
             teardownEngine()
             self.onChunk = nil
+            self.onVADState = nil
             AudioSession.deactivate()
             throw StreamingRecorderError.engineStartFailed(error)
         }
@@ -1018,6 +1080,7 @@ actor StreamingAudioRecorder {
         targetFormat: AVAudioFormat,
         vad: VADContext,
         handler: ChunkHandler,
+        stateHandler: ((StreamingVADFrameState) -> Void)?,
         diskWriter: DiskWriterHolder,
         stoppedFlag: StoppedFlag,
         accounting: ConverterAccounting
@@ -1171,6 +1234,11 @@ actor StreamingAudioRecorder {
         // frameLength = post-conversion (16 kHz) — VAD tunables are in 16 kHz samples
         let emission = vad.process(frame: drained, frameLength: drained.count)
 
+        if let stateHandler = stateHandler {
+            let lastEmissionReason = vad.takePendingEmissionReason()
+            stateHandler(vad.frameState(lastEmissionReason: lastEmissionReason))
+        }
+
         // Emit chunk if ready (handler runs synchronously on vadQueue)
         if let emission = emission {
             FileLogger.shared.debug(.audio, "vadQueue: emission",
@@ -1247,6 +1315,7 @@ actor StreamingAudioRecorder {
         }
 
         onChunk = nil
+        onVADState = nil
 
         FileLogger.shared.info(.audio, "Stopped")
     }

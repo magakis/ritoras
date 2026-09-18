@@ -162,6 +162,13 @@ struct DictationView: View {
                 }
             }
 
+            if let state = viewModel.vadState {
+                SilenceProgressIndicator(
+                    state: state,
+                    chunkDispatchCount: viewModel.chunkDispatchCount
+                )
+            }
+
             Image(systemName: "waveform")
                 .font(.system(size: 48))
                 .foregroundColor(Color(.systemRed))

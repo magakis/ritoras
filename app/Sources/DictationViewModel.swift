@@ -93,6 +93,8 @@ final class DictationViewModel: ObservableObject {
     @Published private(set) var livePartial: String = ""
     @Published private(set) var activeModeLabel: String = ""
     @Published private(set) var vadCalibrating = false
+    @Published private(set) var vadState: StreamingVADFrameState?
+    @Published private(set) var chunkDispatchCount = 0
 
     // MARK: - Localhost Server (Phase 1)
 
@@ -131,6 +133,8 @@ final class DictationViewModel: ObservableObject {
 
     private var streamRecorder: StreamingAudioRecorder?
     private var streamClient: WhisperStreamClient?
+    private var lastVADPublishTime: Date?
+    private var lastPublishedVADState: StreamingVADFrameState?
 
     private var selectedServer: String?
     private var serverSelectionTask: Task<String?, Never>?
@@ -322,6 +326,10 @@ final class DictationViewModel: ObservableObject {
     func start(id: UUID) async {
         activeID = id
         livePartial = ""
+        vadState = nil
+        chunkDispatchCount = 0
+        lastVADPublishTime = nil
+        lastPublishedVADState = nil
         transcriptionDeliveredThisSession = false
         firstChunkSentAt = nil
         firstPartialReceivedAt = nil
@@ -439,6 +447,31 @@ final class DictationViewModel: ObservableObject {
                         FileLogger.shared.debug(.audio, "Stream: chunk produced",
                                                 payload: ["chunkId": chunkId, "sampleCount": samples.count])
                         chunkQueue.enqueue(id: chunkId, samples: samples)
+                        Task { @MainActor [weak self] in
+                            self?.chunkDispatchCount += 1
+                        }
+                    },
+                    onVADState: { state in
+                        Task { @MainActor [weak self] in
+                            guard let self else { return }
+
+                            let now = Date()
+                            let shouldPublish: Bool
+                            if let previous = self.lastPublishedVADState {
+                                let evidenceChanged = (previous.evidence == "silence") != (state.evidence == "silence")
+                                shouldPublish = now.timeIntervalSince(self.lastVADPublishTime ?? .distantPast) >= 0.05
+                                    || previous.endpointState != state.endpointState
+                                    || previous.lastEmissionReason != state.lastEmissionReason
+                                    || evidenceChanged
+                            } else {
+                                shouldPublish = true
+                            }
+
+                            guard shouldPublish else { return }
+                            self.vadState = state
+                            self.lastVADPublishTime = now
+                            self.lastPublishedVADState = state
+                        }
                     }
                 )
                 FileLogger.shared.info(.audio, "Stream: recorder started")
@@ -463,6 +496,9 @@ final class DictationViewModel: ObservableObject {
                 streamClient = nil
                 streamRecorder = nil
                 vadCalibrating = false
+                vadState = nil
+                lastVADPublishTime = nil
+                lastPublishedVADState = nil
                 DispatchQueue.global(qos: .utility).async {
                     let deactivateStart = Date()
                     AudioSession.deactivate()
@@ -622,6 +658,9 @@ final class DictationViewModel: ObservableObject {
 
     func stop() async {
         vadCalibrating = false
+        vadState = nil
+        lastVADPublishTime = nil
+        lastPublishedVADState = nil
         let stopStartTime = Date()
         switch SharedConfig.dictationMode() {
         case .batch:
@@ -799,6 +838,9 @@ final class DictationViewModel: ObservableObject {
             await sessionRecorder?.stop()
 
             guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
+            vadState = nil
+            lastVADPublishTime = nil
+            lastPublishedVADState = nil
             chunkSendQueue.setRecordingActive(false)
 
             if streamClient == nil {
@@ -1301,6 +1343,9 @@ final class DictationViewModel: ObservableObject {
     func cancel() async {
         FileLogger.shared.info(.transcription, "cancel: stream teardown")
         vadCalibrating = false
+        vadState = nil
+        lastVADPublishTime = nil
+        lastPublishedVADState = nil
         let id = activeID
         let sessionRecorder = streamRecorder
 
@@ -1329,6 +1374,9 @@ final class DictationViewModel: ObservableObject {
         chunkSendQueue.clearAll()
         await sessionRecorder?.stop()
         guard activeID == id else { return }
+        vadState = nil
+        lastVADPublishTime = nil
+        lastPublishedVADState = nil
         await streamClient?.disconnect()
         guard activeID == id else { return }
         streamClient = nil
