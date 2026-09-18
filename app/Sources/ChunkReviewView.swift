@@ -110,10 +110,8 @@ final class ChunkAudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     private func configureAudioSession() -> Bool {
-        let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playback, mode: .default, options: [])
-            try session.setActive(true)
+            try AudioSession.configurePlayback()
             return true
         } catch {
             return false
@@ -121,13 +119,13 @@ final class ChunkAudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate 
     }
 
     private func deactivateAudioSession() {
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        AudioSession.deactivate()
     }
 
     deinit {
         audioPlayer?.stop()
         if audioPlayer != nil {
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            AudioSession.deactivate()
         }
     }
 }
