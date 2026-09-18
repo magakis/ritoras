@@ -1,4 +1,3 @@
-import AVFoundation
 import Foundation
 
 final class ChunkAudioStore: @unchecked Sendable {
@@ -35,34 +34,64 @@ final class ChunkAudioStore: @unchecked Sendable {
             return nil
         }
 
-        guard let format = AVAudioFormat(
-            commonFormat: .pcmFormatInt16,
-            sampleRate: 16000,
-            channels: 1,
-            interleaved: false
-        ) else {
-            FileLogger.shared.warn(.audio, "Chunk audio format unavailable")
+        let dataByteCount = samples.count * MemoryLayout<Int16>.size
+        guard let dataSize = UInt32(exactly: dataByteCount),
+              let chunkSize = UInt32(exactly: 36 + dataByteCount) else {
+            FileLogger.shared.warn(.audio, "Chunk audio write failed")
             return nil
         }
 
-        guard let buffer = AVAudioPCMBuffer(
-            pcmFormat: format,
-            frameCapacity: AVAudioFrameCount(samples.count)
-        ), let channelData = buffer.int16ChannelData?[0] else {
-            FileLogger.shared.warn(.audio, "Chunk audio buffer unavailable")
-            return nil
-        }
+        // AVAudioFile(forWriting:) traps in AudioToolboxCore/caulk on device (builds 316/319/321, symbolicated at ChunkAudioStore.write); this path uses plain byte I/O only.
+        var wavData = Data(repeating: 0, count: 44 + dataByteCount)
+        wavData.withUnsafeMutableBytes { rawBytes in
+            let bytes = rawBytes.bindMemory(to: UInt8.self)
 
-        buffer.frameLength = AVAudioFrameCount(samples.count)
-        for (index, sample) in samples.enumerated() {
-            let clampedSample = max(-1.0, min(1.0, sample))
-            channelData[index] = Int16(clampedSample * Float(Int16.max))
+            bytes[0] = 0x52
+            bytes[1] = 0x49
+            bytes[2] = 0x46
+            bytes[3] = 0x46
+            bytes[4] = UInt8(truncatingIfNeeded: chunkSize)
+            bytes[5] = UInt8(truncatingIfNeeded: chunkSize >> 8)
+            bytes[6] = UInt8(truncatingIfNeeded: chunkSize >> 16)
+            bytes[7] = UInt8(truncatingIfNeeded: chunkSize >> 24)
+            bytes[8] = 0x57
+            bytes[9] = 0x41
+            bytes[10] = 0x56
+            bytes[11] = 0x45
+            bytes[12] = 0x66
+            bytes[13] = 0x6D
+            bytes[14] = 0x74
+            bytes[15] = 0x20
+            bytes[16] = 16
+            bytes[20] = 1
+            bytes[22] = 1
+            bytes[24] = 0x80
+            bytes[25] = 0x3E
+            bytes[28] = 0x00
+            bytes[29] = 0x7D
+            bytes[32] = 2
+            bytes[34] = 16
+            bytes[36] = 0x64
+            bytes[37] = 0x61
+            bytes[38] = 0x74
+            bytes[39] = 0x61
+            bytes[40] = UInt8(truncatingIfNeeded: dataSize)
+            bytes[41] = UInt8(truncatingIfNeeded: dataSize >> 8)
+            bytes[42] = UInt8(truncatingIfNeeded: dataSize >> 16)
+            bytes[43] = UInt8(truncatingIfNeeded: dataSize >> 24)
+
+            for (index, sample) in samples.enumerated() {
+                let clampedSample = max(-1.0, min(1.0, sample.isFinite ? sample : 0))
+                let pcmSample = Int16(clampedSample * Float(Int16.max))
+                let byteIndex = 44 + index * 2
+                bytes[byteIndex] = UInt8(truncatingIfNeeded: pcmSample)
+                bytes[byteIndex + 1] = UInt8(truncatingIfNeeded: pcmSample >> 8)
+            }
         }
 
         let url = sessionDirectory.appendingPathComponent("\(chunkId).wav")
         do {
-            let file = try AVAudioFile(forWriting: url, settings: format.settings)
-            try file.write(from: buffer)
+            try wavData.write(to: url, options: .atomic)
             return url
         } catch {
             FileLogger.shared.warn(.audio, "Chunk audio write failed")
