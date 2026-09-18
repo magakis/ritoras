@@ -53,7 +53,11 @@ final class ChunkAudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate 
     @Published private(set) var playingID: UInt32?
 
     private var audioPlayer: AVAudioPlayer?
-    private var audioSessionConfigured = false
+
+    // The player is a TRANSIENT owner of the shared AVAudioSession — configure on
+    // play, deactivate on every end path. The recorder assumes an inactive session
+    // at start; leaving .playback active traps AudioToolboxCore on the record
+    // transition (crash build 316).
 
     func toggle(recordID: UInt32, url: URL) {
         if playingID == recordID {
@@ -63,8 +67,6 @@ final class ChunkAudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
         stop()
 
-        guard configureAudioSession() else { return }
-
         do {
             let player = try AVAudioPlayer(contentsOf: url)
             player.delegate = self
@@ -72,20 +74,21 @@ final class ChunkAudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate 
             playingID = recordID
 
             guard player.prepareToPlay() else {
-                audioSessionConfigured = false
+                stop()
+                return
+            }
+
+            guard configureAudioSession() else {
                 stop()
                 return
             }
 
             guard player.play() else {
-                audioSessionConfigured = false
                 stop()
                 return
             }
         } catch {
-            audioSessionConfigured = false
-            audioPlayer = nil
-            playingID = nil
+            stop()
         }
     }
 
@@ -93,6 +96,7 @@ final class ChunkAudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate 
         audioPlayer?.stop()
         audioPlayer = nil
         playingID = nil
+        deactivateAudioSession()
     }
 
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
@@ -101,28 +105,30 @@ final class ChunkAudioPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate 
 
             self.audioPlayer = nil
             self.playingID = nil
+            self.deactivateAudioSession()
         }
     }
 
     private func configureAudioSession() -> Bool {
         let session = AVAudioSession.sharedInstance()
         do {
-            if !audioSessionConfigured {
-                try session.setCategory(.playback, mode: .default, options: [])
-            }
-            // Device verification: recording teardown deactivates the session;
-            // reactivate playback here or audio may be silent.
+            try session.setCategory(.playback, mode: .default, options: [])
             try session.setActive(true)
-            audioSessionConfigured = true
             return true
         } catch {
-            audioSessionConfigured = false
             return false
         }
     }
 
+    private func deactivateAudioSession() {
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
     deinit {
         audioPlayer?.stop()
+        if audioPlayer != nil {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
     }
 }
 
