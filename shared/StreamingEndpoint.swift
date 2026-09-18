@@ -19,7 +19,6 @@ enum StreamingEndpointState: String {
 
 enum StreamingEndpointFinalizeKind: String {
     case endpoint
-    case forcedSplit
     case stop
 }
 

@@ -74,14 +74,13 @@ final class AudioLevelTesterViewModel: ObservableObject {
                         let durationSamples = max(0, Int((frameDuration * 16000.0).rounded()))
                         let evidence = StreamingEndpointEvidence(rawValue: output.evidence.rawValue) ?? .silence
                         _ = endpoint.process(evidence: evidence, durationSamples: durationSamples)
-                        gate.updateFloorIfIdle(
+                        gate.updateFloorTracking(
                             frameDb: frameDb,
                             duration: frameDuration,
-                            machineIsIdle: previousState == .idle && endpoint.state == .idle,
-                            utteranceOpened: previousState != .speechActive && endpoint.state == .speechActive
+                            machineIsIdle: previousState == .idle && endpoint.state == .idle
                         )
                     } else {
-                        gate.updateFloorIfIdle(
+                        gate.updateFloorTracking(
                             frameDb: frameDb,
                             duration: frameDuration,
                             machineIsIdle: !output.isSpeech

@@ -127,7 +127,7 @@ describe('StreamingEndpoint', () => {
     for (let i = 0; i < 50; i++) {
       const frameDb = -70 + i * 0.1;
       gate.process(frameDb, 0.1);
-      gate.updateFloorIfIdle(frameDb, 0.1);
+      gate.updateFloorTracking(frameDb, 0.1);
     }
 
     const ambientDb = -65.1;
@@ -141,12 +141,12 @@ describe('StreamingEndpoint', () => {
     assert.strictEqual(endpoint.state, 'idle');
   });
 
-  it('keeps the floor fixed through active and end-pending states', () => {
+  it('pins gate floor stability independent of endpoint state', () => {
     const gate = new VADThresholdGate(makeVadGateConfig({ mode: 'adaptive' }));
     const endpoint = new StreamingEndpoint();
     for (let i = 0; i < 50; i++) {
       gate.process(-50, 0.1);
-      gate.updateFloorIfIdle(-50, 0.1, true);
+      gate.updateFloorTracking(-50, 0.1, true);
     }
     for (let i = 0; i < 7; i++) {
       const output = gate.process(-30, 0.01);
@@ -168,7 +168,7 @@ describe('StreamingEndpoint', () => {
 
     for (let i = 0; i < 31; i++) {
       gate.process(-60, 0.1);
-      gate.updateFloorIfIdle(-60, 0.1, true);
+      gate.updateFloorTracking(-60, 0.1, true);
     }
     assert.ok(gate.snapshot.floorDb < initialFloor);
   });

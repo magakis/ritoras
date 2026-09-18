@@ -25,7 +25,6 @@ export const StreamingEndpointState = Object.freeze({
 
 export const StreamingEndpointFinalizeKind = Object.freeze({
   endpoint: 'endpoint',
-  forcedSplit: 'forcedSplit',
   stop: 'stop',
 });
 
@@ -72,7 +71,7 @@ export class StreamingEndpoint {
     }
   }
 
-  forceFinalize(kind = StreamingEndpointFinalizeKind.forcedSplit) {
+  forceFinalize(kind) {
     if (this.state === StreamingEndpointState.idle) return this.none();
     if (this.state === StreamingEndpointState.onsetPending) {
       this.reset();

@@ -42,7 +42,6 @@ struct StreamingVADFrameState: Sendable {
     let accumulatedSilenceMs: Double
     let silenceTargetMs: Double
     let utteranceDurationMs: Double
-    let maxUtteranceMs: Double
     let resumeEvidenceMs: Double
     let lastEmissionReason: String?
 }
@@ -81,13 +80,6 @@ private final class SampleRingBuffer {
     }
 }
 
-private struct VADAudioSegment {
-    let startSamples: Int
-    let endSamples: Int
-    let evidence: StreamingEndpointEvidence
-    let isSpeech: Bool
-}
-
 // MARK: - VAD Context (Thread-safe via internal lock)
 
 /// Energy-based Voice Activity Detection state machine.
@@ -105,8 +97,6 @@ private final class VADContext: @unchecked Sendable {
     let endpointMachineEnabled: Bool
     let endpoint: StreamingEndpoint
     let preRollSamples: Int
-    let maxUtteranceSamples: Int
-    let splitPlanner: StreamingSplitPlanner
     let analysisHpf: VADHighPassFilter?
 
     // MARK: Lock
@@ -124,11 +114,8 @@ private final class VADContext: @unchecked Sendable {
     private var diagnosticElapsed = 0.0
     private var lastFrameDb = 0.0
     private var pendingEmissionReason: String?
+    private var requiresPostReanchorSpeech = false
     private var bufferHighWaterSamples = 0
-    private var liveSegments: [VADAudioSegment] = []
-    private var reentryBuffer: [Float] = []
-    private var reentryPending = false
-    private var reentrySpeechSamples = 0
 
     init(
         gateConfig: VADGateConfig,
@@ -138,8 +125,6 @@ private final class VADContext: @unchecked Sendable {
         maxNoiseSamples: Int,
         endpointMachineEnabled: Bool,
         preRollSamples: Int,
-        maxUtteranceSamples: Int,
-        splitOverlapSamples: Int,
         analysisHpfEnabled: Bool,
         analysisHpfCutoffHz: Double
     ) {
@@ -154,18 +139,11 @@ private final class VADContext: @unchecked Sendable {
             preRollSamples: preRollSamples
         ))
         self.preRollSamples = max(0, preRollSamples)
-        self.maxUtteranceSamples = max(0, maxUtteranceSamples)
-        self.splitPlanner = StreamingSplitPlanner(
-            maxUtteranceSamples: maxUtteranceSamples,
-            overlapSamples: splitOverlapSamples
-        )
         self.analysisHpf = analysisHpfEnabled
             ? VADHighPassFilter(cutoffHz: analysisHpfCutoffHz)
             : nil
         self.wasCalibrating = gateConfig.mode == .calibrated
         self.preRollBuffer = SampleRingBuffer(capacity: max(0, preRollSamples))
-        self.liveSegments.reserveCapacity(100)
-        self.reentryBuffer.reserveCapacity(max(0, maxUtteranceSamples))
     }
 
     func setCalibrationChangeHandler(_ handler: ((Bool) -> Void)?) {
@@ -204,7 +182,6 @@ private final class VADContext: @unchecked Sendable {
             accumulatedSilenceMs: Double(endpoint.accumulatedSilenceSamples) / 16.0,
             silenceTargetMs: Double(silenceThresholdSamples) / 16.0,
             utteranceDurationMs: Double(endpoint.utteranceDurationSamples) / 16.0,
-            maxUtteranceMs: Double(maxUtteranceSamples) / 16.0,
             resumeEvidenceMs: Double(endpoint.resumeEvidenceSamples) / 16.0,
             lastEmissionReason: lastEmissionReason
         )
@@ -219,8 +196,8 @@ private final class VADContext: @unchecked Sendable {
         return reason
     }
 
-    /// Process one audio frame. Returns a `VADEmission` if a chunk boundary
-    /// is detected (pause timeout), otherwise `nil`.
+    /// Process one audio frame. Returns a `VADEmission` if a silence endpoint
+    /// is detected, otherwise `nil`.
     func process(frame: [Float], frameLength: Int) -> VADEmission? {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
@@ -232,6 +209,7 @@ private final class VADContext: @unchecked Sendable {
         pendingEmissionReason = nil
         let frameDuration = Double(frameLength) / 16000.0
         let out = gate.process(frameDb: frameDb, frameDuration: frameDuration)
+        let reanchorEvent = gate.takePendingReanchorEvent()
 
         if out.usedFallback && !didLogFallback {
             didLogFallback = true
@@ -267,60 +245,36 @@ private final class VADContext: @unchecked Sendable {
         let decision: StreamingEndpointDecision
         if endpointMachineEnabled {
             let previousState = endpoint.state
+            if reanchorEvent,
+               (previousState == .speechActive || previousState == .endPending) {
+                requiresPostReanchorSpeech = true
+            } else if !reanchorEvent,
+                      requiresPostReanchorSpeech,
+                      out.evidence == .strong {
+                requiresPostReanchorSpeech = false
+            }
             let evidence = StreamingEndpointEvidence(rawValue: out.evidence.rawValue) ?? .silence
             decision = endpoint.process(evidence: evidence, durationSamples: frameLength)
             let decisionSilenceSamples = endpoint.accumulatedSilenceSamples
             if previousState != endpoint.state {
                 FileLogger.shared.debug(.audio, "VAD state \(previousState.rawValue) → \(endpoint.state.rawValue)")
             }
-            gate.updateFloorIfIdle(
+            gate.updateFloorTracking(
                 frameDb: frameDb,
                 duration: frameDuration,
-                machineIsIdle: previousState == .idle && endpoint.state == .idle,
-                utteranceOpened: previousState != .speechActive && endpoint.state == .speechActive
+                machineIsIdle: previousState == .idle && endpoint.state == .idle
             )
 
-            var appendedLiveSamples = 0
-            let wasReentryPending = reentryPending
-            if case .startUtterance = decision {
-                liveSegments.removeAll(keepingCapacity: true)
-            }
             switch decision {
             case .startUtterance:
-                if wasReentryPending {
-                    appendReentryFrame(frame, isSpeech: out.isSpeech)
-                    accumulator = reentryBuffer
-                    reentryBuffer.removeAll(keepingCapacity: true)
-                    reentryPending = false
-                    reentrySpeechSamples = 0
-                    splitPlanner.begin(initialSamples: accumulator.count)
-                } else {
-                    accumulator.removeAll(keepingCapacity: true)
-                    preRollBuffer.append(to: &accumulator)
-                    preRollBuffer.removeAll()
-                    splitPlanner.begin(initialSamples: accumulator.count)
-                    appendedLiveSamples = appendLiveFrame(
-                        frame,
-                        evidence: evidence,
-                        isSpeech: out.isSpeech
-                    )
-                }
+                accumulator.removeAll(keepingCapacity: true)
+                preRollBuffer.append(to: &accumulator)
+                preRollBuffer.removeAll()
+                appendLiveFrame(frame)
             case .continueUtterance, .finalizeUtterance:
-                if reentryPending {
-                    appendReentryFrame(frame, isSpeech: out.isSpeech)
-                } else {
-                    appendedLiveSamples = appendLiveFrame(
-                        frame,
-                        evidence: evidence,
-                        isSpeech: out.isSpeech
-                    )
-                }
+                appendLiveFrame(frame)
             case .none:
-                if reentryPending {
-                    appendReentryFrame(frame, isSpeech: out.isSpeech)
-                } else {
-                    appendToPreRoll(frame)
-                }
+                appendToPreRoll(frame)
             }
 
             if case .finalizeUtterance(let kind) = decision {
@@ -329,8 +283,16 @@ private final class VADContext: @unchecked Sendable {
                     accumulator.removeAll(keepingCapacity: true)
                     speechSamples = 0
                     silenceSamples = 0
-                    splitPlanner.reset()
-                    liveSegments.removeAll(keepingCapacity: true)
+                    requiresPostReanchorSpeech = false
+                    bufferHighWaterSamples = 0
+                    return nil
+                }
+                if requiresPostReanchorSpeech {
+                    FileLogger.shared.info(.audio, "VAD: ambient-only utterance discarded")
+                    accumulator.removeAll(keepingCapacity: true)
+                    speechSamples = 0
+                    silenceSamples = 0
+                    requiresPostReanchorSpeech = false
                     bufferHighWaterSamples = 0
                     return nil
                 }
@@ -344,31 +306,20 @@ private final class VADContext: @unchecked Sendable {
                                                  "sampleCount": accumulator.count])
                 return emit(reason: kind.rawValue)
             }
-
-            if !reentryPending, splitPlanner.splitPoint() != nil {
-                let overflow = appendedLiveSamples < frame.count
-                    ? Array(frame.dropFirst(appendedLiveSamples))
-                    : []
-                return forceSplit(overflow: overflow, evidence: evidence, isSpeech: out.isSpeech)
-            }
-            discardSilentReentryIfIdle()
         } else {
             // Legacy kill-switch path: retain the former consecutive-silence
             // behavior while the endpoint state machine is disabled.
-            if !out.isSpeech, accumulator.isEmpty {
-                gate.updateFloorIfIdle(
-                    frameDb: frameDb,
-                    duration: frameDuration,
-                    machineIsIdle: true
-                )
-            }
-            let appendCount = min(frame.count, max(0, maxUtteranceSamples - accumulator.count))
-            accumulator.append(contentsOf: frame.prefix(appendCount))
+            gate.updateFloorTracking(
+                frameDb: frameDb,
+                duration: frameDuration,
+                machineIsIdle: accumulator.isEmpty
+            )
+            accumulator.append(contentsOf: frame)
             bufferHighWaterSamples = max(bufferHighWaterSamples, accumulator.count)
             if out.isSpeech {
                 silenceSamples = 0
             } else {
-                silenceSamples += appendCount
+                silenceSamples += frame.count
             }
             if silenceSamples >= silenceThresholdSamples,
                accumulator.count >= minChunkSamples,
@@ -382,25 +333,6 @@ private final class VADContext: @unchecked Sendable {
                                                  "speechMs": speechMs,
                                                  "sampleCount": accumulator.count])
                 return emit(reason: "pause")
-            }
-
-            if accumulator.count >= maxUtteranceSamples, maxUtteranceSamples > 0 {
-                let overflow = Array(frame.dropFirst(appendCount))
-                FileLogger.shared.info(.audio, "VAD: forced split", payload: [
-                    "reason": "cap",
-                    "utteranceMs": Double(accumulator.count) / 16.0,
-                    "chunkMs": Double(accumulator.count) / 16.0,
-                    "carriedMs": Double(overflow.count) / 16.0,
-                    "overlapMs": 0.0
-                ])
-                let emission = emit(reason: "forcedSplit")
-                accumulator.append(contentsOf: overflow)
-                if out.isSpeech {
-                    speechSamples = overflow.count
-                } else {
-                    silenceSamples = overflow.count
-                }
-                return emission
             }
 
             // Noise guard: less than 0.1 s of speech within the max-noise
@@ -436,187 +368,14 @@ private final class VADContext: @unchecked Sendable {
         preRollBuffer.append(contentsOf: frame)
     }
 
-    private func appendToReentry(_ frame: [Float]) -> Int {
-        guard !frame.isEmpty else { return 0 }
-        let available = max(0, maxUtteranceSamples - reentryBuffer.count)
-        let appendCount = min(frame.count, available)
-        guard appendCount > 0 else { return 0 }
-        reentryBuffer.append(contentsOf: frame.prefix(appendCount))
-        return appendCount
-    }
-
-    private func discardSilentReentryIfIdle() {
-        guard reentryPending,
-              endpoint.state == .idle,
-              reentrySpeechSamples == 0,
-              !reentryBuffer.isEmpty else { return }
-        reentryBuffer.removeAll(keepingCapacity: true)
-        reentrySpeechSamples = 0
-        FileLogger.shared.debug(.audio, "VAD: silent re-entry discard")
-    }
-
-    private func appendReentryFrame(_ frame: [Float], isSpeech: Bool) {
-        let appended = appendToReentry(frame)
-        if isSpeech {
-            reentrySpeechSamples += appended
-        }
-    }
-
-    private func appendLiveFrame(
-        _ frame: [Float],
-        evidence: StreamingEndpointEvidence,
-        isSpeech: Bool
-    ) -> Int {
-        let startSamples = accumulator.count
-        let appendCount = min(frame.count, max(0, maxUtteranceSamples - startSamples))
-        guard appendCount > 0 else { return 0 }
-
-        accumulator.append(contentsOf: frame.prefix(appendCount))
-        splitPlanner.append(evidence: evidence, durationSamples: appendCount)
-        addLiveSegment(
-            evidence: evidence,
-            isSpeech: isSpeech,
-            startSamples: startSamples,
-            endSamples: accumulator.count
-        )
+    private func appendLiveFrame(_ frame: [Float]) {
+        accumulator.append(contentsOf: frame)
         bufferHighWaterSamples = max(bufferHighWaterSamples, accumulator.count)
-        return appendCount
-    }
-
-    private func addLiveSegment(
-        evidence: StreamingEndpointEvidence,
-        isSpeech: Bool,
-        startSamples: Int,
-        endSamples: Int
-    ) {
-        guard endSamples > startSamples else { return }
-        liveSegments.append(VADAudioSegment(
-            startSamples: startSamples,
-            endSamples: endSamples,
-            evidence: evidence,
-            isSpeech: isSpeech
-        ))
-    }
-
-    private func forceSplit(
-        overflow: [Float],
-        evidence: StreamingEndpointEvidence,
-        isSpeech: Bool
-    ) -> VADEmission? {
-        guard let splitPoint = splitPlanner.splitPoint(), !accumulator.isEmpty else {
-            return nil
-        }
-
-        let oldAccumulatorCount = accumulator.count
-        let splitIndex = min(max(1, splitPoint.offsetSamples), oldAccumulatorCount)
-        let chunkSamples = Array(accumulator.prefix(splitIndex))
-        var carriedSamples = Array(accumulator.dropFirst(splitIndex))
-        carriedSamples.append(contentsOf: overflow)
-
-        let carriedSegments = liveSegments
-        let forcedDurationMs = Double(oldAccumulatorCount) / 16.0
-        let chunkDurationMs = Double(chunkSamples.count) / 16.0
-        let carriedDurationMs = Double(carriedSamples.count) / 16.0
-        FileLogger.shared.info(.audio, "VAD: forced split", payload: [
-            "reason": splitPoint.reason.rawValue,
-            "utteranceMs": forcedDurationMs,
-            "chunkMs": chunkDurationMs,
-            "carriedMs": carriedDurationMs,
-            "overlapMs": Double(splitPlanner.overlapSamples) / 16.0
-        ])
-
-        _ = endpoint.forceFinalize(kind: .forcedSplit)
-        accumulator.removeAll(keepingCapacity: true)
-        liveSegments.removeAll(keepingCapacity: true)
-        preRollBuffer.removeAll()
-        splitPlanner.reset()
-        silenceSamples = 0
-        speechSamples = 0
-        bufferHighWaterSamples = 0
-
-        reentryBuffer.removeAll(keepingCapacity: true)
-        reentryPending = true
-        replayCarriedAudio(
-            carriedSamples: carriedSamples,
-            splitIndex: splitIndex,
-            oldAccumulatorCount: oldAccumulatorCount,
-            segments: carriedSegments,
-            overflow: overflow,
-            overflowEvidence: evidence,
-            overflowIsSpeech: isSpeech
-        )
-        discardSilentReentryIfIdle()
-
-        guard chunkSamples.count >= minChunkSamples else { return nil }
-        pendingEmissionReason = splitPoint.reason.rawValue
-        return nextEmission(samples: chunkSamples)
-    }
-
-    private func replayCarriedAudio(
-        carriedSamples: [Float],
-        splitIndex: Int,
-        oldAccumulatorCount: Int,
-        segments: [VADAudioSegment],
-        overflow: [Float],
-        overflowEvidence: StreamingEndpointEvidence,
-        overflowIsSpeech: Bool
-    ) {
-        func replaySegment(
-            samples: ArraySlice<Float>,
-            evidence: StreamingEndpointEvidence,
-            isSpeech: Bool
-        ) {
-            guard !samples.isEmpty else { return }
-            if reentryPending {
-                reentryBuffer.append(contentsOf: samples)
-                if isSpeech {
-                    reentrySpeechSamples += samples.count
-                }
-            } else {
-                accumulator.append(contentsOf: samples)
-                bufferHighWaterSamples = max(bufferHighWaterSamples, accumulator.count)
-            }
-
-            let decision = endpoint.process(evidence: evidence, durationSamples: samples.count)
-            if isSpeech {
-                speechSamples += samples.count
-            }
-            if case .startUtterance = decision, reentryPending {
-                accumulator = reentryBuffer
-                reentryBuffer.removeAll(keepingCapacity: true)
-                reentryPending = false
-                reentrySpeechSamples = 0
-                splitPlanner.begin(initialSamples: accumulator.count)
-                bufferHighWaterSamples = max(bufferHighWaterSamples, accumulator.count)
-            }
-        }
-
-        for segment in segments {
-            let start = max(segment.startSamples, splitIndex)
-            let end = min(segment.endSamples, oldAccumulatorCount)
-            guard end > start else { continue }
-            let localStart = start - splitIndex
-            let localEnd = end - splitIndex
-            replaySegment(
-                samples: carriedSamples[localStart..<localEnd],
-                evidence: segment.evidence,
-                isSpeech: segment.isSpeech
-            )
-        }
-
-        if !overflow.isEmpty {
-            let overflowStart = max(0, carriedSamples.count - overflow.count)
-            replaySegment(
-                samples: carriedSamples[overflowStart...],
-                evidence: overflowEvidence,
-                isSpeech: overflowIsSpeech
-            )
-        }
     }
 
     /// Emit current accumulator and reset all VAD state.
     /// - parameter reason: Label for log distinguishability ("pause", "flush").
-    func emit(reason: String = "pause") -> VADEmission {
+    func emit(reason: String) -> VADEmission {
         pendingEmissionReason = reason
         let snapshot = accumulator
         let id = chunkId
@@ -626,19 +385,9 @@ private final class VADContext: @unchecked Sendable {
         silenceSamples = 0
         speechSamples = 0
         endpoint.reset()
-        splitPlanner.reset()
-        liveSegments.removeAll(keepingCapacity: true)
+        requiresPostReanchorSpeech = false
         bufferHighWaterSamples = 0
-        reentryBuffer.removeAll(keepingCapacity: true)
-        reentryPending = false
-        reentrySpeechSamples = 0
         return VADEmission(chunkId: id, samples: snapshot)
-    }
-
-    private func nextEmission(samples: [Float]) -> VADEmission {
-        let id = chunkId
-        chunkId &+= 1
-        return VADEmission(chunkId: id, samples: samples)
     }
 
     /// Flush any remaining accumulator into an emission (for `stop()`).
@@ -646,12 +395,6 @@ private final class VADContext: @unchecked Sendable {
     func flush() -> VADEmission? {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
-        if accumulator.isEmpty, reentryPending, !reentryBuffer.isEmpty {
-            accumulator = reentryBuffer
-            reentryBuffer.removeAll(keepingCapacity: true)
-            reentryPending = false
-            reentrySpeechSamples = 0
-        }
         _ = endpoint.forceFinalize(kind: .stop)
         guard !accumulator.isEmpty else { return nil }
         guard speechSamples >= minSpeechSamples else {
@@ -660,8 +403,6 @@ private final class VADContext: @unchecked Sendable {
                                               "speechSamples": speechSamples])
             accumulator.removeAll(keepingCapacity: true)
             preRollBuffer.removeAll()
-            splitPlanner.reset()
-            liveSegments.removeAll(keepingCapacity: true)
             bufferHighWaterSamples = 0
             return nil
         }
@@ -841,8 +582,6 @@ actor StreamingAudioRecorder {
         let minSpeechSamples = Int(Double(SharedConfig.streamVadMinSpeechMs()) * 16.0)
         let minChunkSamples = Int(Double(SharedConfig.streamVadMinChunkMs()) * 16.0)
         let maxNoiseSamples = Int(SharedConfig.streamVadMaxNoiseSec() * 16000.0)
-        let maxUtteranceSamples = Int(SharedConfig.streamVadMaxUtteranceSec() * 16000.0)
-        let splitOverlapSamples = Int(Double(SharedConfig.Defaults.streamVadSplitOverlapMsDefault) * 16.0)
         let vadGateConfig = VADGateConfig(
             mode: SharedConfig.streamVadMode(),
             staticRms: SharedConfig.streamVadSpeechRms(),
@@ -860,8 +599,6 @@ actor StreamingAudioRecorder {
             maxNoiseSamples: maxNoiseSamples,
             endpointMachineEnabled: SharedConfig.streamEndpointMachineEnabled(),
             preRollSamples: Int(Double(SharedConfig.Defaults.streamVadPreRollMsDefault) * 16.0),
-            maxUtteranceSamples: maxUtteranceSamples,
-            splitOverlapSamples: splitOverlapSamples,
             analysisHpfEnabled: SharedConfig.streamVadAnalysisHpfEnabled(),
             analysisHpfCutoffHz: SharedConfig.Defaults.streamVadHpfCutoffHzDefault
         )
@@ -1045,7 +782,6 @@ actor StreamingAudioRecorder {
             "minSpeechMs": SharedConfig.streamVadMinSpeechMs(),
             "minChunkMs": SharedConfig.streamVadMinChunkMs(),
             "maxNoiseSec": SharedConfig.streamVadMaxNoiseSec(),
-            "maxUtteranceSec": SharedConfig.Defaults.streamVadMaxUtteranceSecDefault,
             "analysisHpf": SharedConfig.streamVadAnalysisHpfEnabled(),
             "hpfCutoffHz": SharedConfig.Defaults.streamVadHpfCutoffHzDefault
         ]

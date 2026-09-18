@@ -23,7 +23,6 @@ class AppSettings: ObservableObject {
     @Published var streamVadSilenceMs: Int = SharedConfig.Defaults.streamVadSilenceMsDefault
     @Published var streamVadMinSpeechMs: Int = SharedConfig.Defaults.streamVadMinSpeechMsDefault
     @Published var streamVadMinChunkMs: Int = SharedConfig.Defaults.streamVadMinChunkMsDefault
-    @Published var streamVadMaxUtteranceSec: Double = SharedConfig.Defaults.streamVadMaxUtteranceSecDefault
     @Published var audioMeasurementModeEnabled: Bool = SharedConfig.Defaults.audioMeasurementModeEnabledDefault
 
     private var appGroupDefaults: UserDefaults?
@@ -54,7 +53,6 @@ class AppSettings: ObservableObject {
         streamVadSilenceMs = SharedConfig.streamVadSilenceMs()
         streamVadMinSpeechMs = SharedConfig.streamVadMinSpeechMs()
         streamVadMinChunkMs = SharedConfig.streamVadMinChunkMs()
-        streamVadMaxUtteranceSec = SharedConfig.streamVadMaxUtteranceSec()
         audioMeasurementModeEnabled = SharedConfig.audioMeasurementModeEnabled()
         streamVadAdaptiveDeltaOverridePresent = SharedConfig.streamVadAdaptiveDeltaDbOverridePresent()
         streamVadSilenceOverridePresent = SharedConfig.streamVadSilenceMsOverridePresent()
@@ -167,11 +165,6 @@ class AppSettings: ObservableObject {
                                    payload: ["value": newValue])
             self?.saveStreamVadMinChunkMs(newValue)
         }.store(in: &cancellables)
-        $streamVadMaxUtteranceSec.dropFirst().sink { [weak self] newValue in
-            FileLogger.shared.info(.settings, "saving streamVadMaxUtteranceSec",
-                                   payload: ["value": newValue])
-            self?.saveStreamVadMaxUtteranceSec(newValue)
-        }.store(in: &cancellables)
         $audioMeasurementModeEnabled.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving audioMeasurementModeEnabled",
                                    payload: ["value": newValue])
@@ -211,7 +204,6 @@ class AppSettings: ObservableObject {
         }
         appGroupDefaults?.set(streamVadMinSpeechMs, forKey: SharedConfig.Defaults.streamVadMinSpeechMsKey)
         appGroupDefaults?.set(streamVadMinChunkMs, forKey: SharedConfig.Defaults.streamVadMinChunkMsKey)
-        appGroupDefaults?.set(streamVadMaxUtteranceSec, forKey: SharedConfig.Defaults.streamVadMaxUtteranceSecKey)
         appGroupDefaults?.set(audioMeasurementModeEnabled, forKey: SharedConfig.Defaults.audioMeasurementModeEnabledKey)
         postSettingsChanged()
     }
@@ -310,11 +302,6 @@ class AppSettings: ObservableObject {
         postSettingsChanged()
     }
 
-    private func saveStreamVadMaxUtteranceSec(_ value: Double) {
-        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadMaxUtteranceSecKey)
-        postSettingsChanged()
-    }
-
     private func saveAudioMeasurementModeEnabled(_ enabled: Bool) {
         appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.audioMeasurementModeEnabledKey)
         postSettingsChanged()
@@ -356,6 +343,5 @@ class AppSettings: ObservableObject {
         streamVadSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
         streamVadMinSpeechMs = SharedConfig.Defaults.streamVadMinSpeechMsDefault
         streamVadMinChunkMs = SharedConfig.Defaults.streamVadMinChunkMsDefault
-        streamVadMaxUtteranceSec = SharedConfig.Defaults.streamVadMaxUtteranceSecDefault
     }
 }

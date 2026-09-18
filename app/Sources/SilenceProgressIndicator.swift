@@ -69,25 +69,10 @@ struct SilenceProgressIndicator: View {
         switch reason {
         case "endpoint":
             return "sent · endpoint"
-        case "pause":
-            return "sent · forced split (pause)"
-        case "cap":
-            return "sent · forced split (cap)"
-        case "forcedSplit":
-            return "sent · forced split"
         case "flush":
             return "sent · stop"
         default:
             return "sent · \(reason)"
-        }
-    }
-
-    private var dispatchCaptionColor: Color {
-        switch state.lastEmissionReason {
-        case "pause", "cap", "forcedSplit":
-            return .orange
-        default:
-            return .secondary
         }
     }
 
@@ -109,7 +94,7 @@ struct SilenceProgressIndicator: View {
                 if let dispatchCaption = dispatchCaption {
                     Text(dispatchCaption)
                         .font(.caption2)
-                        .foregroundColor(dispatchCaptionColor)
+                        .foregroundColor(.secondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
                         .transition(.opacity)
