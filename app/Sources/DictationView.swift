@@ -9,6 +9,7 @@ struct DictationView: View {
     @State private var elapsed: TimeInterval = 0
     @State private var timer: Timer?
     @State private var showHistory = false
+    @State private var showChunkReview = false
     @State private var showSettings = false
 
     var body: some View {
@@ -39,6 +40,9 @@ struct DictationView: View {
         }
         .sheet(isPresented: $showHistory) {
             HistoryView()
+        }
+        .sheet(isPresented: $showChunkReview) {
+            ChunkReviewView(records: viewModel.chunkReviews)
         }
         .overlay(alignment: .topTrailing) {
             settingsGearButton
@@ -77,6 +81,8 @@ struct DictationView: View {
             switch viewModel.phase {
             case .recording where viewModel.activeID != nil, .connecting where viewModel.activeID != nil:
                 Task { await viewModel.cancel() }
+            case .done, .error, .cancelled:
+                viewModel.clearChunkReviews()
             default:
                 // During transcribing the background task keeps the app alive
                 // until transcription completes — do not cancel mid-flight.
@@ -256,10 +262,21 @@ struct DictationView: View {
                     .foregroundColor(.secondary)
             }
 
-            Button("History") {
-                showHistory = true
+            HStack(spacing: 8) {
+                Button("History") {
+                    showHistory = true
+                }
+                .buttonStyle(.bordered)
+
+                if !viewModel.chunkReviews.isEmpty {
+                    Button {
+                        showChunkReview = true
+                    } label: {
+                        Label("Review Chunks", systemImage: "list.bullet.rectangle")
+                    }
+                    .buttonStyle(.bordered)
+                }
             }
-            .buttonStyle(.bordered)
         }
     }
 

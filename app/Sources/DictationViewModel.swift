@@ -64,6 +64,19 @@ private final class LastPayloadHolder: @unchecked Sendable {
     }
 }
 
+struct ChunkReviewRecord {
+    let id: UInt32
+    let index: Int
+    let reason: String
+    let silenceMs: Double
+    let speechMs: Double
+    let totalMs: Double
+    var sentAt: Date?
+    let offsetMsFromStart: Double
+    var audioURL: URL?
+    var responseText: String?
+}
+
 @MainActor
 final class DictationViewModel: ObservableObject {
     enum DictationPhase: Equatable {
@@ -95,6 +108,7 @@ final class DictationViewModel: ObservableObject {
     @Published private(set) var vadCalibrating = false
     @Published private(set) var vadState: StreamingVADFrameState?
     @Published private(set) var chunkDispatchCount = 0
+    @Published private(set) var chunkReviews: [ChunkReviewRecord] = []
 
     // MARK: - Localhost Server (Phase 1)
 
@@ -133,6 +147,7 @@ final class DictationViewModel: ObservableObject {
 
     private var streamRecorder: StreamingAudioRecorder?
     private var streamClient: WhisperStreamClient?
+    private var chunkAudioStore: ChunkAudioStore?
     private var lastVADPublishTime: Date?
     private var lastPublishedVADState: StreamingVADFrameState?
 
@@ -324,7 +339,9 @@ final class DictationViewModel: ObservableObject {
 
 
     func start(id: UUID) async {
+        clearChunkReviews()
         activeID = id
+        chunkAudioStore = ChunkAudioStore(sessionID: id)
         livePartial = ""
         vadState = nil
         chunkDispatchCount = 0
@@ -443,27 +460,35 @@ final class DictationViewModel: ObservableObject {
                             self?.vadCalibrating = calibrating
                         }
                     },
-                    onChunk: { [chunkQueue = self.chunkSendQueue] chunkId, samples in
+                    onChunk: { [chunkQueue = self.chunkSendQueue,
+                                audioStore = self.chunkAudioStore] chunkId, samples in
                         FileLogger.shared.debug(.audio, "Stream: chunk produced",
                                                 payload: ["chunkId": chunkId, "sampleCount": samples.count])
                         chunkQueue.enqueue(id: chunkId, samples: samples)
+                        let audioURL = audioStore?.write(chunkId: chunkId, samples: samples)
                         Task { @MainActor [weak self] in
-                            self?.chunkDispatchCount += 1
+                            guard let self, self.activeID == id else { return }
+                            self.chunkDispatchCount += 1
+                            self.mergeChunkReview(id: chunkId, update: .audioURL(audioURL))
                         }
                     },
                     onVADState: { state in
                         Task { @MainActor [weak self] in
-                            guard let self else { return }
+                            guard let self, self.activeID == id else { return }
 
                             let now = Date()
                             let shouldPublish: Bool
+                            let emissionChunkChanged: Bool
                             if let previous = self.lastPublishedVADState {
                                 let evidenceChanged = (previous.evidence == "silence") != (state.evidence == "silence")
+                                emissionChunkChanged = previous.lastEmissionChunkId != state.lastEmissionChunkId
                                 shouldPublish = now.timeIntervalSince(self.lastVADPublishTime ?? .distantPast) >= 0.05
                                     || previous.endpointState != state.endpointState
                                     || previous.lastEmissionReason != state.lastEmissionReason
+                                    || emissionChunkChanged
                                     || evidenceChanged
                             } else {
+                                emissionChunkChanged = state.lastEmissionChunkId != nil
                                 shouldPublish = true
                             }
 
@@ -471,6 +496,15 @@ final class DictationViewModel: ObservableObject {
                             self.vadState = state
                             self.lastVADPublishTime = now
                             self.lastPublishedVADState = state
+
+                            if emissionChunkChanged, let chunkId = state.lastEmissionChunkId {
+                                self.upsertChunkReview(
+                                    id: chunkId,
+                                    reason: state.lastEmissionReason ?? "",
+                                    silenceMs: state.lastEmissionSilenceMs,
+                                    speechMs: state.lastEmissionSpeechMs,
+                                    totalMs: state.lastEmissionTotalMs)
+                            }
                         }
                     }
                 )
@@ -638,6 +672,11 @@ final class DictationViewModel: ObservableObject {
                     self.livePartial = partial
                     self.transcriptionDeliveredThisSession = true
                 }
+            }, onChunkResult: { [weak self] chunkId, responseText in
+                Task { @MainActor [weak self] in
+                    guard let self, self.activeID == sessionID else { return }
+                    self.mergeChunkReview(id: chunkId, update: .responseText(responseText))
+                }
             })
         }
 
@@ -645,7 +684,7 @@ final class DictationViewModel: ObservableObject {
         let consumerClient = client
         chunkConsumerTask = Task { [weak self] in
             guard let self = self else { return }
-            await self.runChunkConsumer(client: consumerClient)
+            await self.runChunkConsumer(client: consumerClient, sessionID: sessionID)
         }
 
         let sinceRecordingStartSec = recordingStartTime.map {
@@ -1239,6 +1278,101 @@ final class DictationViewModel: ObservableObject {
         }
     }
 
+    func clearChunkReviews() {
+        chunkReviews.removeAll()
+        chunkAudioStore?.removeSessionDirectory()
+        chunkAudioStore = nil
+    }
+
+    private enum ChunkReviewUpdate {
+        case audioURL(URL?)
+        case responseText(String)
+        case sentAt(Date)
+    }
+
+    private func mergeChunkReview(id: UInt32, update: ChunkReviewUpdate) {
+        if let index = chunkReviews.firstIndex(where: { $0.id == id }) {
+            switch update {
+            case .audioURL(let audioURL):
+                chunkReviews[index].audioURL = audioURL
+            case .responseText(let responseText):
+                chunkReviews[index].responseText = responseText
+            case .sentAt(let sentAt):
+                chunkReviews[index].sentAt = sentAt
+            }
+            return
+        }
+
+        var audioURL: URL?
+        var responseText: String?
+        var sentAt: Date?
+        switch update {
+        case .audioURL(let value):
+            audioURL = value
+        case .responseText(let value):
+            responseText = value
+        case .sentAt(let value):
+            sentAt = value
+        }
+
+        chunkReviews.append(ChunkReviewRecord(
+            id: id,
+            index: chunkReviews.count,
+            reason: "",
+            silenceMs: 0,
+            speechMs: 0,
+            totalMs: 0,
+            sentAt: sentAt,
+            offsetMsFromStart: 0,
+            audioURL: audioURL,
+            responseText: responseText))
+        chunkReviews.sort { $0.id < $1.id }
+    }
+
+    private func upsertChunkReview(
+        id: UInt32,
+        reason: String,
+        silenceMs: Double,
+        speechMs: Double,
+        totalMs: Double
+    ) {
+        // No session sample clock is exposed by the VAD frame, so use the
+        // cumulative durations of earlier records plus this chunk as an approximation
+        // of this chunk's end time.
+        let priorTotalMs = chunkReviews
+            .filter { $0.id < id }
+            .reduce(0.0) { $0 + $1.totalMs }
+        let offsetMsFromStart = priorTotalMs + totalMs
+
+        if let index = chunkReviews.firstIndex(where: { $0.id == id }) {
+            let existing = chunkReviews[index]
+            chunkReviews[index] = ChunkReviewRecord(
+                id: existing.id,
+                index: existing.index,
+                reason: reason,
+                silenceMs: silenceMs,
+                speechMs: speechMs,
+                totalMs: totalMs,
+                sentAt: existing.sentAt,
+                offsetMsFromStart: offsetMsFromStart,
+                audioURL: existing.audioURL,
+                responseText: existing.responseText)
+        } else {
+            chunkReviews.append(ChunkReviewRecord(
+                id: id,
+                index: chunkReviews.count,
+                reason: reason,
+                silenceMs: silenceMs,
+                speechMs: speechMs,
+                totalMs: totalMs,
+                sentAt: nil,
+                offsetMsFromStart: offsetMsFromStart,
+                audioURL: nil,
+                responseText: nil))
+            chunkReviews.sort { $0.id < $1.id }
+        }
+    }
+
     // MARK: - Stream Chunk Queue Helpers
 
     private func streamOffsetMs(from timestamp: Date?) -> Any {
@@ -1249,7 +1383,7 @@ final class DictationViewModel: ObservableObject {
     /// Background task that dequeues and sends chunks with unbounded retry
     /// while recording is active. Runs until the queue is empty AND recording
     /// has stopped (natural completion), or until cancelled.
-    private func runChunkConsumer(client: WhisperStreamClient) async {
+    private func runChunkConsumer(client: WhisperStreamClient, sessionID: UUID) async {
         let backoff = SharedConfig.Defaults.streamChunkRetryBackoffSeconds
         while !Task.isCancelled {
             let entry = chunkSendQueue.dequeue()
@@ -1271,6 +1405,10 @@ final class DictationViewModel: ObservableObject {
                     try await client.sendChunk(id: chunkId, samples: samples)
                     sent = true
                     chunksSentThisSession += 1
+                    Task { @MainActor [weak self] in
+                        guard let self, self.activeID == sessionID else { return }
+                        self.mergeChunkReview(id: chunkId, update: .sentAt(Date()))
+                    }
                     if firstChunkSentAt == nil {
                         let sentAt = Date()
                         firstChunkSentAt = sentAt
@@ -1396,6 +1534,7 @@ final class DictationViewModel: ObservableObject {
         if let currentId = activeID {
             RecordingStore.shared.deleteStreamWav(for: currentId)
         }
+        clearChunkReviews()
         if case .done = phase {
             FileLogger.shared.info(.transcription, "cancel: preserving .done from racing task, skipping cancelled publish")
         } else if case .error = phase {

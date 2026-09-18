@@ -213,19 +213,24 @@ actor WhisperStreamClient {
     /// arrives or the `streamFinalTimeout` expires.
     ///
     /// Partial transcriptions are passed to `onPartial` as they arrive.
+    /// Per-chunk transcriptions are passed to `onChunkResult` when the server
+    /// includes a chunk ID.
     /// On a `final` message the full, normalized transcription is returned.
     /// An `error` frame causes the method to throw `WhisperError.httpError`.
     ///
     /// - Parameter onPartial: Closure invoked on every partial result.
     ///   Called from the receive loop's async context; the caller should
     ///   marshal to `MainActor` if UI updates are needed.
+    /// - Parameter onChunkResult: Optional closure invoked with the server's
+    ///   chunk ID and transcription for each partial result that includes an ID.
     /// - Returns: The final, normalized transcription.
     /// - Throws: `WhisperError.timeout` if `streamFinalTimeout` elapses
     ///   without receiving `final`.
     /// - Throws: `WhisperError.httpError` if the server returns an error frame.
     /// - Throws: `WhisperError.networkError` on transport failure.
     func receiveMessages(
-        onPartial: @escaping @Sendable (String) -> Void
+        onPartial: @escaping @Sendable (String) -> Void,
+        onChunkResult: (@Sendable (UInt32, String) -> Void)? = nil
     ) async throws -> String {
         guard let task = task else {
             throw WhisperError.networkError(URLError(.notConnectedToInternet))
@@ -255,6 +260,11 @@ actor WhisperStreamClient {
                                 case "partial":
                                     let msg = try JSONDecoder().decode(
                                         StreamPartial.self, from: data)
+                                    if let chunkId = msg.chunk_id {
+                                        onChunkResult?(chunkId, msg.transcription)
+                                    } else {
+                                        FileLogger.shared.debug(.network, "Received partial without chunk ID")
+                                    }
                                     accumulated = accumulated.isEmpty
                                         ? msg.transcription
                                         : accumulated + " " + msg.transcription

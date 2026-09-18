@@ -30,6 +30,14 @@ struct VADEmission {
     let samples: [Float]
 }
 
+struct EmissionSummary: Sendable {
+    let chunkId: UInt32
+    let reason: String
+    let silenceMs: Double
+    let totalMs: Double
+    let speechMs: Double
+}
+
 struct StreamingVADFrameState: Sendable {
     let endpointState: String
     let evidence: String
@@ -44,6 +52,10 @@ struct StreamingVADFrameState: Sendable {
     let utteranceDurationMs: Double
     let resumeEvidenceMs: Double
     let lastEmissionReason: String?
+    let lastEmissionChunkId: UInt32?
+    let lastEmissionSilenceMs: Double
+    let lastEmissionTotalMs: Double
+    let lastEmissionSpeechMs: Double
 }
 
 private final class SampleRingBuffer {
@@ -113,7 +125,7 @@ private final class VADContext: @unchecked Sendable {
     private var didLogFallback = false
     private var diagnosticElapsed = 0.0
     private var lastFrameDb = 0.0
-    private var pendingEmissionReason: String?
+    private var pendingEmissionSummary: EmissionSummary?
     private var requiresPostReanchorSpeech = false
     private var bufferHighWaterSamples = 0
 
@@ -165,7 +177,7 @@ private final class VADContext: @unchecked Sendable {
         gate.recalibrateFloor()
     }
 
-    func frameState(lastEmissionReason: String?) -> StreamingVADFrameState {
+    func frameState(emissionSummary: EmissionSummary?) -> StreamingVADFrameState {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
 
@@ -183,17 +195,21 @@ private final class VADContext: @unchecked Sendable {
             silenceTargetMs: Double(silenceThresholdSamples) / 16.0,
             utteranceDurationMs: Double(endpoint.utteranceDurationSamples) / 16.0,
             resumeEvidenceMs: Double(endpoint.resumeEvidenceSamples) / 16.0,
-            lastEmissionReason: lastEmissionReason
+            lastEmissionReason: emissionSummary?.reason,
+            lastEmissionChunkId: emissionSummary?.chunkId,
+            lastEmissionSilenceMs: emissionSummary?.silenceMs ?? 0,
+            lastEmissionTotalMs: emissionSummary?.totalMs ?? 0,
+            lastEmissionSpeechMs: emissionSummary?.speechMs ?? 0
         )
     }
 
-    func takePendingEmissionReason() -> String? {
+    func takePendingEmissionSummary() -> EmissionSummary? {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
 
-        let reason = pendingEmissionReason
-        pendingEmissionReason = nil
-        return reason
+        let summary = pendingEmissionSummary
+        pendingEmissionSummary = nil
+        return summary
     }
 
     /// Process one audio frame. Returns a `VADEmission` if a silence endpoint
@@ -206,7 +222,7 @@ private final class VADContext: @unchecked Sendable {
         let rms = AudioMath.dcCorrectedRMS(analysisFrame)
         let frameDb = Double(AudioMath.dbFromRms(rms))
         lastFrameDb = frameDb
-        pendingEmissionReason = nil
+        pendingEmissionSummary = nil
         let frameDuration = Double(frameLength) / 16000.0
         let out = gate.process(frameDb: frameDb, frameDuration: frameDuration)
         let reanchorEvent = gate.takePendingReanchorEvent()
@@ -304,7 +320,10 @@ private final class VADContext: @unchecked Sendable {
                                                  "totalMs": totalMs,
                                                  "speechMs": speechMs,
                                                  "sampleCount": accumulator.count])
-                return emit(reason: kind.rawValue)
+                return emit(reason: kind.rawValue,
+                            silenceMs: silenceMs,
+                            totalMs: totalMs,
+                            speechMs: speechMs)
             }
         } else {
             // Legacy kill-switch path: retain the former consecutive-silence
@@ -332,7 +351,10 @@ private final class VADContext: @unchecked Sendable {
                                                  "totalMs": totalMs,
                                                  "speechMs": speechMs,
                                                  "sampleCount": accumulator.count])
-                return emit(reason: "pause")
+                return emit(reason: "pause",
+                            silenceMs: silenceMs,
+                            totalMs: totalMs,
+                            speechMs: speechMs)
             }
 
             // Noise guard: less than 0.1 s of speech within the max-noise
@@ -375,11 +397,22 @@ private final class VADContext: @unchecked Sendable {
 
     /// Emit current accumulator and reset all VAD state.
     /// - parameter reason: Label for log distinguishability ("pause", "flush").
-    func emit(reason: String) -> VADEmission {
-        pendingEmissionReason = reason
+    func emit(
+        reason: String,
+        silenceMs: Double,
+        totalMs: Double,
+        speechMs: Double
+    ) -> VADEmission {
         let snapshot = accumulator
         let id = chunkId
         chunkId &+= 1
+        pendingEmissionSummary = EmissionSummary(
+            chunkId: id,
+            reason: reason,
+            silenceMs: silenceMs,
+            totalMs: totalMs,
+            speechMs: speechMs
+        )
         accumulator = []
         preRollBuffer.removeAll()
         silenceSamples = 0
@@ -408,7 +441,10 @@ private final class VADContext: @unchecked Sendable {
         }
         FileLogger.shared.info(.audio, "VAD: stop → emit",
                                payload: ["count": accumulator.count])
-        return emit(reason: "flush")
+        return emit(reason: "flush",
+                    silenceMs: 0,
+                    totalMs: Double(accumulator.count) / 16.0,
+                    speechMs: Double(speechSamples) / 16.0)
     }
 }
 
@@ -971,8 +1007,8 @@ actor StreamingAudioRecorder {
         let emission = vad.process(frame: drained, frameLength: drained.count)
 
         if let stateHandler = stateHandler {
-            let lastEmissionReason = vad.takePendingEmissionReason()
-            stateHandler(vad.frameState(lastEmissionReason: lastEmissionReason))
+            let emissionSummary = vad.takePendingEmissionSummary()
+            stateHandler(vad.frameState(emissionSummary: emissionSummary))
         }
 
         // Emit chunk if ready (handler runs synchronously on vadQueue)
@@ -1020,12 +1056,17 @@ actor StreamingAudioRecorder {
         let vadQueue = self.vadQueue
         let vad = self.vad
         let diskWriter = self.diskWriter
+        let stateHandler = self.onVADState
         let stoppedFlag = self.stoppedFlag
         let accounting = self.accounting
         let emission: VADEmission? = await withCheckedContinuation { continuation in
             vadQueue.async {
                 stoppedFlag.set(true)
                 let result = vad.flush()
+                if let stateHandler = stateHandler {
+                    let emissionSummary = vad.takePendingEmissionSummary()
+                    stateHandler(vad.frameState(emissionSummary: emissionSummary))
+                }
                 diskWriter.close()
                 let ratio = accounting.outputFramesTotal > 0
                     ? Double(accounting.inputFramesTotal) / Double(accounting.outputFramesTotal)
