@@ -101,13 +101,24 @@ describe('StreamingEndpoint', () => {
     assert.strictEqual(feed(endpoint, E.silence, 1).type, 'finalizeUtterance');
   });
 
-  it('pauses rather than resets the silence counter for ambiguous frames', () => {
+  it('brief ambiguous blips do not rescue end-pending', () => {
     const endpoint = startEndpoint();
     feed(endpoint, E.silence, 100);
-    feed(endpoint, E.ambiguous, 500);
+    feed(endpoint, E.ambiguous, 319);
+    assert.strictEqual(endpoint.accumulatedSilenceSamples, samples(100));
     feed(endpoint, E.silence, 599);
     assert.strictEqual(endpoint.state, 'endPending');
     assert.strictEqual(feed(endpoint, E.silence, 1).type, 'finalizeUtterance');
+  });
+
+  it('ambiguous speech rescues end-pending after 320ms', () => {
+    const endpoint = startEndpoint();
+    feed(endpoint, E.silence, 100);
+    feed(endpoint, E.ambiguous, 319);
+    assert.strictEqual(endpoint.state, 'endPending');
+    assert.strictEqual(feed(endpoint, E.ambiguous, 1).type, 'continueUtterance');
+    assert.strictEqual(endpoint.state, 'speechActive');
+    assert.strictEqual(endpoint.accumulatedSilenceSamples, 0);
   });
 
   it('stabilizes gradually rising background noise before endpoint classification', () => {
@@ -172,7 +183,7 @@ describe('StreamingEndpoint', () => {
     assert.strictEqual(decision.withPreRollSamples, 4000);
   });
 
-  it('finalizes at about 700ms of confirmed silence', () => {
+  it('silence still finalizes after the full endpoint duration', () => {
     const endpoint = startEndpoint();
     feed(endpoint, E.silence, 100);
     assert.strictEqual(feed(endpoint, E.silence, 599).type, 'continueUtterance');

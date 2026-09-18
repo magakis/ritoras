@@ -6,6 +6,7 @@ export const STREAM_ENDPOINT_SILENCE_MS = 700;
 export const STREAM_ENDPOINT_ONSET_SAMPLES = 1120;
 export const STREAM_ENDPOINT_END_EVIDENCE_SAMPLES = 1600;
 export const STREAM_ENDPOINT_RESUME_SAMPLES = 1920;
+export const STREAM_ENDPOINT_AMBIGUOUS_RESCUE_SAMPLES = 5120;
 export const STREAM_ENDPOINT_PREROLL_SAMPLES = 4000;
 
 export const StreamingEndpointEvidence = Object.freeze({
@@ -34,6 +35,7 @@ export function makeStreamingEndpointConfig(partial = {}) {
     endEvidenceSamples: STREAM_ENDPOINT_END_EVIDENCE_SAMPLES,
     endpointSilenceSamples: STREAM_ENDPOINT_SILENCE_MS * 16,
     resumeSamples: STREAM_ENDPOINT_RESUME_SAMPLES,
+    ambiguousRescueSamples: STREAM_ENDPOINT_AMBIGUOUS_RESCUE_SAMPLES,
     preRollSamples: STREAM_ENDPOINT_PREROLL_SAMPLES,
     ...(partial ?? {}),
   };
@@ -50,6 +52,7 @@ export class StreamingEndpoint {
     this.utteranceDurationSamples = 0;
     this.accumulatedSilenceSamples = 0;
     this.resumeEvidenceSamples = 0;
+    this.ambiguousEvidenceSamples = 0;
     this.onsetEvidenceSamples = 0;
   }
 
@@ -84,6 +87,7 @@ export class StreamingEndpoint {
     this.utteranceDurationSamples = 0;
     this.accumulatedSilenceSamples = 0;
     this.resumeEvidenceSamples = 0;
+    this.ambiguousEvidenceSamples = 0;
     this.onsetEvidenceSamples = 0;
   }
 
@@ -112,6 +116,7 @@ export class StreamingEndpoint {
     this.utteranceDurationSamples = this.configuration.preRollSamples + this.onsetEvidenceSamples;
     this.accumulatedSilenceSamples = 0;
     this.resumeEvidenceSamples = 0;
+    this.ambiguousEvidenceSamples = 0;
     return {
       type: 'startUtterance',
       withPreRollSamples: this.configuration.preRollSamples,
@@ -143,8 +148,17 @@ export class StreamingEndpoint {
     this.utteranceDurationSamples += durationSamples;
     switch (evidence) {
       case StreamingEndpointEvidence.ambiguous:
+        this.ambiguousEvidenceSamples += durationSamples;
+        if (this.ambiguousEvidenceSamples < this.configuration.ambiguousRescueSamples) {
+          return this.continue();
+        }
+        this.state = StreamingEndpointState.speechActive;
+        this.accumulatedSilenceSamples = 0;
+        this.resumeEvidenceSamples = 0;
+        this.ambiguousEvidenceSamples = 0;
         return this.continue();
       case StreamingEndpointEvidence.silence:
+        this.ambiguousEvidenceSamples = 0;
         this.accumulatedSilenceSamples += durationSamples;
         this.resumeEvidenceSamples = 0;
         if (this.accumulatedSilenceSamples < this.configuration.endpointSilenceSamples) {
@@ -156,6 +170,7 @@ export class StreamingEndpoint {
       case StreamingEndpointEvidence.continuing:
         // Resume evidence pauses the silence timer but cannot cancel the
         // pending end until the resume threshold is reached.
+        this.ambiguousEvidenceSamples = 0;
         this.resumeEvidenceSamples += durationSamples;
         if (this.resumeEvidenceSamples < this.configuration.resumeSamples) {
           return this.continue();
