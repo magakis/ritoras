@@ -1,6 +1,8 @@
 // Pure-logic JS mirror of shared/StreamingSplitPlanner.swift. It tracks only
 // sample offsets; the recorder owns audio storage and forced-split replay.
 
+// Mirrors SharedConfig.Defaults.streamVadMaxUtteranceSecDefault (20 s). The app
+// exposes a user-adjustable 10–60 s range; JS keeps the 20 s default.
 export const STREAM_VAD_MAX_UTTERANCE_SAMPLES = 20 * 16000;
 export const STREAM_VAD_USABLE_PAUSE_SAMPLES = 300 * 16;
 export const STREAM_VAD_MIN_SPLIT_UTTERANCE_SAMPLES = 1000 * 16;

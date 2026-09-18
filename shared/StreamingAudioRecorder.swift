@@ -841,7 +841,7 @@ actor StreamingAudioRecorder {
         let minSpeechSamples = Int(Double(SharedConfig.streamVadMinSpeechMs()) * 16.0)
         let minChunkSamples = Int(Double(SharedConfig.streamVadMinChunkMs()) * 16.0)
         let maxNoiseSamples = Int(SharedConfig.streamVadMaxNoiseSec() * 16000.0)
-        let maxUtteranceSamples = Int(SharedConfig.Defaults.streamVadMaxUtteranceSecDefault * 16000.0)
+        let maxUtteranceSamples = Int(SharedConfig.streamVadMaxUtteranceSec() * 16000.0)
         let splitOverlapSamples = Int(Double(SharedConfig.Defaults.streamVadSplitOverlapMsDefault) * 16.0)
         let vadGateConfig = VADGateConfig(
             mode: SharedConfig.streamVadMode(),

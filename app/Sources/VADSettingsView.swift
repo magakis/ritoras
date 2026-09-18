@@ -184,6 +184,7 @@ struct VADSettingsView: View {
 
             Section {
                 silenceDurationRow
+                maxUtteranceDurationRow
                 switch settings.streamVadMode {
                 case .staticMode:
                     speechRmsRow
@@ -197,7 +198,8 @@ struct VADSettingsView: View {
                 minChunkDurationRow
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Silence duration is an Advanced override. Changing the Normal pause profile resets it to that profile's duration.")
+                    Text("Silence duration is an Advanced override. Picking a Pause profile resets the silence slider to that profile's value.")
+                    Text("Continuous speech is split at this length even without silence — raise it if long monologues feel cut short.")
                     Text("Changing the Normal sensitivity profile resets the Advanced Sensitivity Δ.")
                     Text("Changes apply live to this tester and on the next recording.")
                 }
@@ -297,6 +299,18 @@ struct VADSettingsView: View {
                 in: 450...5000,
                 step: 100
             )
+        }
+    }
+
+    private var maxUtteranceDurationRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Max Utterance Length")
+                Spacer()
+                Text("\(settings.streamVadMaxUtteranceSec, specifier: "%.0f") s")
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: $settings.streamVadMaxUtteranceSec, in: 10...60, step: 5)
         }
     }
 

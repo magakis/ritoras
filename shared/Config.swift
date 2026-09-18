@@ -224,6 +224,7 @@ struct SharedConfig {
         /// Pre-roll requested from the recorder when an utterance starts.
         static let streamVadPreRollMsDefault: Int = 250
         /// Hard upper bound for one streamed utterance before forced splitting.
+        static let streamVadMaxUtteranceSecKey = "streamVadMaxUtteranceSec"
         static let streamVadMaxUtteranceSecDefault: Double = 20.0
         /// Internal A/B control; zero means forced chunks have no overlap.
         static let streamVadSplitOverlapMsDefault: Int = 0
@@ -778,6 +779,20 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.streamVadMaxNoiseSecKey) as? Double)
             ?? Defaults.streamVadMaxNoiseSecDefault
+    }
+
+    /// Reads the streaming VAD maximum utterance duration (seconds) from the App Group.
+    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Returns the default (`20.0`) when the App Group is unavailable or the key is unset,
+    /// and clamps stored values to the supported 10–60 second range.
+    static func streamVadMaxUtteranceSec() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadMaxUtteranceSecDefault
+        }
+        let rawValue = (defaults.object(
+            forKey: Defaults.streamVadMaxUtteranceSecKey
+        ) as? Double) ?? Defaults.streamVadMaxUtteranceSecDefault
+        return min(max(rawValue, 10.0), 60.0)
     }
 
     /// Reads the probe-selected server URL for the current/next dictation.
