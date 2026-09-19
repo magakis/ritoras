@@ -85,6 +85,7 @@ final class VADThresholdGate: @unchecked Sendable {
     private var adaptiveRollingWriteIndex = 0
     private var adaptiveRollingCount = 0
     private var adaptiveRollingElapsed = 0.0
+    private var lastKnownMachineIsIdle = true
     private var speechCeilingDb: Double?
     private var unfairLock = os_unfair_lock()
     private var lastOutput: VADGateOutput
@@ -155,15 +156,18 @@ final class VADThresholdGate: @unchecked Sendable {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         guard behaviorMode == .adaptive else { return }
-        speechCeilingDb = quietestStrongDb
+        // Headroom guard: trust an utterance's quietest strong frame as a speech
+        // ceiling only when it clears the floor by delta + margin — the relation
+        // the finalize path used to check retroactively. An utterance whose strong
+        // evidence hugs the floor is ambient-shaped; adopting it would pin the
+        // floor below ambient and wedge the endpointer in speechActive.
+        if let quietestStrongDb,
+           let floorDb,
+           quietestStrongDb >= floorDb + config.adaptiveDeltaDb + Self.speechCeilingMarginDb {
+            speechCeilingDb = quietestStrongDb
+        }
+        // Rejected or nil: keep the previous ceiling (idle decay still releases it).
         resetAdaptiveRollingWindow()
-    }
-
-    func speechClearsCurrentFloor(_ quietestStrongDb: Double) -> Bool {
-        os_unfair_lock_lock(&unfairLock)
-        defer { os_unfair_lock_unlock(&unfairLock) }
-        guard let floorDb = floorDb else { return false }
-        return quietestStrongDb >= floorDb + config.adaptiveDeltaDb + Self.speechCeilingMarginDb
     }
 
     private func processStatic(frameDb: Double) -> VADGateOutput {
@@ -299,6 +303,7 @@ final class VADThresholdGate: @unchecked Sendable {
         } else {
             elapsedSinceSilenceEvidence += max(0, frameDuration)
             if elapsedSinceSilenceEvidence + Self.calibrationCompletionEpsilon >= Self.adaptiveStaleFloorSeconds,
+               lastKnownMachineIsIdle,
                let target = adaptiveRollingPercentile() {
                 elapsedSinceSilenceEvidence = 0
                 let reanchoredFloor: Double
@@ -389,6 +394,7 @@ final class VADThresholdGate: @unchecked Sendable {
     ) {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
+        lastKnownMachineIsIdle = machineIsIdle
         guard behaviorMode == .adaptive else { return }
         guard floorDb != nil else { return }
         guard adaptiveRefinementComplete else { return }
@@ -399,7 +405,7 @@ final class VADThresholdGate: @unchecked Sendable {
         case .continuing:
             riseCap = machineIsIdle ? Self.elevatedRiseDbPerSecond : 0
         case .ambiguous, .silence:
-            riseCap = Self.elevatedRiseDbPerSecond
+            riseCap = machineIsIdle ? Self.elevatedRiseDbPerSecond : 0
         }
         if machineIsIdle, let speechCeilingDb {
             let decayedCeilingDb = speechCeilingDb + Self.elevatedRiseDbPerSecond * max(0, duration)

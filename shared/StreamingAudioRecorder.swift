@@ -128,7 +128,7 @@ private final class VADContext: @unchecked Sendable {
     private var diagnosticElapsed = 0.0
     private var lastFrameDb = 0.0
     private var pendingEmissionSummary: EmissionSummary?
-    private var requiresPostReanchorSpeech = false
+    private var sawReanchorDuringUtterance = false
     private var bufferHighWaterSamples = 0
     private var utteranceQuietestStrongDb: Double?
     private var sustainedContinuingMs = 0.0
@@ -181,6 +181,7 @@ private final class VADContext: @unchecked Sendable {
         analysisHpf?.reset()
         gate.recalibrateFloor()
         utteranceQuietestStrongDb = nil
+        sawReanchorDuringUtterance = false
         sustainedContinuingMs = 0
         sustainedContinuingOnsetLatched = false
     }
@@ -271,18 +272,19 @@ private final class VADContext: @unchecked Sendable {
             let previousState = endpoint.state
             let endpointWasIdle = previousState == .idle
             if reanchorEvent,
-               (previousState == .speechActive || previousState == .endPending) {
-                requiresPostReanchorSpeech = true
-            } else if !reanchorEvent,
-                      requiresPostReanchorSpeech,
-                      out.evidence == .strong {
-                requiresPostReanchorSpeech = false
+               previousState == .speechActive || previousState == .endPending {
+                sawReanchorDuringUtterance = true
             }
             let evidence = StreamingEndpointEvidence(rawValue: out.evidence.rawValue) ?? .silence
             let adaptivePath = out.floorDb != nil
             if adaptivePath && out.evidence == .continuing && endpointWasIdle {
                 sustainedContinuingMs += frameDuration * 1000.0
             } else if !sustainedContinuingOnsetLatched {
+                let lostStreakMs = sustainedContinuingMs
+                if lostStreakMs >= 500.0 {  // 0.5 s — avoid per-frame ambient-noise logs
+                    FileLogger.shared.debug(.audio, "VAD: continuing onset streak lost before latch",
+                                            payload: ["streakMs": lostStreakMs])
+                }
                 sustainedContinuingMs = 0
             }
 
@@ -337,34 +339,20 @@ private final class VADContext: @unchecked Sendable {
             if case .finalizeUtterance(let kind) = decision {
                 guard accumulator.count >= minChunkSamples,
                       speechSamples >= minSpeechSamples else {
+                    FileLogger.shared.info(.audio, "VAD: finalize discarded - below minimum speech or chunk duration",
+                                           payload: ["sampleCount": accumulator.count,
+                                                     "speechSamples": speechSamples])
                     accumulator.removeAll(keepingCapacity: true)
                     speechSamples = 0
                     silenceSamples = 0
-                    requiresPostReanchorSpeech = false
+                    sawReanchorDuringUtterance = false
                     bufferHighWaterSamples = 0
                     return nil
                 }
-                if requiresPostReanchorSpeech {
-                    requiresPostReanchorSpeech = false
-                    let speechClearsFloor = utteranceQuietestStrongDb.map {
-                        gate.speechClearsCurrentFloor($0)
-                    } ?? false
-                    if !speechClearsFloor {
-                        FileLogger.shared.info(
-                            .audio,
-                            "VAD: re-anchored utterance discarded - no speech above floor",
-                            payload: [
-                                "quietestStrongDb": utteranceQuietestStrongDb ?? NSNull(),
-                                "floorDb": gate.snapshot.floorDb ?? NSNull()
-                            ]
-                        )
-                        accumulator.removeAll(keepingCapacity: true)
-                        speechSamples = 0
-                        silenceSamples = 0
-                        bufferHighWaterSamples = 0
-                        return nil
-                    }
-                    FileLogger.shared.debug(.audio, "VAD: kept re-anchored utterance - speech clears floor")
+                if sawReanchorDuringUtterance {
+                    FileLogger.shared.debug(.audio, "VAD: kept utterance after mid-utterance re-anchor",
+                                            payload: ["quietestStrongDb": utteranceQuietestStrongDb ?? NSNull(),
+                                                      "floorDb": gate.snapshot.floorDb ?? NSNull()])
                 }
                 let silenceMs = Double(decisionSilenceSamples) / 16.0
                 let totalMs = Double(accumulator.count) / 16.0
@@ -472,7 +460,7 @@ private final class VADContext: @unchecked Sendable {
         silenceSamples = 0
         speechSamples = 0
         endpoint.reset()
-        requiresPostReanchorSpeech = false
+        sawReanchorDuringUtterance = false
         bufferHighWaterSamples = 0
         gate.noteUtteranceEnded(quietestStrongDb: utteranceQuietestStrongDb)
         utteranceQuietestStrongDb = nil

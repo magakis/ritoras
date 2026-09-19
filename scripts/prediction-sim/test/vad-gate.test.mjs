@@ -43,6 +43,20 @@ describe('VADThresholdGate', () => {
         assert.strictEqual(Number.isNaN(result.thresholdDb), false);
       }
     });
+
+    it('N8/R5: keeps static mode free of re-anchor events and floor movement', () => {
+      const gate = new VADThresholdGate(config({ mode: 'static' }));
+      let reanchorEvent = false;
+
+      for (let i = 0; i < 6000; i++) {
+        const output = gate.process(-10, 0.01);
+        reanchorEvent ||= gate.takePendingReanchorEvent();
+        assert.strictEqual(output.floorDb, null);
+      }
+
+      assert.strictEqual(reanchorEvent, false);
+      assert.strictEqual(gate.snapshot.floorDb, null);
+    });
   });
 
   describe('calibrated mode', () => {
@@ -192,11 +206,11 @@ describe('VADThresholdGate', () => {
       assert.ok(gate.snapshot.floorDb <= -45);
     });
 
-    it('tracks a quiet room toward ambient without machine-idle gating', () => {
+    it('tracks a quiet room toward ambient while the machine is idle', () => {
       const gate = new VADThresholdGate(config({ mode: 'adaptive' }));
       for (let i = 0; i < 50; i++) {
         gate.process(-65, 0.1);
-        gate.updateFloorTracking(-65, 0.1, false);
+        gate.updateFloorTracking(-65, 0.1, true);
       }
       assert.ok(Math.abs(gate.snapshot.floorDb - -65) <= 3);
       assert.notStrictEqual(gate.process(-65, 0.1).evidence, 'strong');
@@ -222,7 +236,7 @@ describe('VADThresholdGate', () => {
       assert.strictEqual(strongGate.snapshot.floorDb, -70);
     });
 
-    it('uses the fast fall tau and capped upward movement', () => {
+    it('uses the fast fall tau and capped upward movement while idle', () => {
       const fallGate = seedAdaptiveGate({ adaptiveDeltaDb: 20 }, -60);
       fallGate.floorDb = -50;
       fallGate.process(-60, 0.1);
@@ -233,7 +247,7 @@ describe('VADThresholdGate', () => {
       const riseGate = seedAdaptiveGate({ adaptiveDeltaDb: 10 }, -58);
       riseGate.floorDb = -60;
       riseGate.process(-58, 0.1);
-      riseGate.updateFloorTracking(-58, 7, false);
+      riseGate.updateFloorTracking(-58, 7, true);
       const rise = riseGate.snapshot;
       const expectedRise = -58;
       assert.ok(Math.abs(rise.floorDb - expectedRise) < 0.001);
@@ -261,7 +275,7 @@ describe('VADThresholdGate', () => {
       assert.strictEqual(output.isSpeech, true);
     });
 
-    it('uses the elevated rate for ambient evidence even while the machine is active', () => {
+    it('freezes ambient evidence while the machine is active', () => {
       const gate = seedAdaptiveGate({}, -65);
       gate.floorDb = -70;
 
@@ -269,7 +283,7 @@ describe('VADThresholdGate', () => {
         gate.process(-65, 0.1);
         gate.updateFloorTracking(-65, 0.1, false);
       }
-      assert.ok(Math.abs(gate.snapshot.floorDb - -65) < 0.001);
+      assert.strictEqual(gate.snapshot.floorDb, -70);
     });
 
     it('freezes continuing evidence on the non-idle ceiling', () => {
@@ -287,7 +301,7 @@ describe('VADThresholdGate', () => {
       const gate = seedAdaptiveGate({ adaptiveDeltaDb: 10 }, -50);
       for (let i = 0; i < 50; i++) {
         gate.process(-50, 0.1);
-        gate.updateFloorTracking(-50, 0.1, false);
+        gate.updateFloorTracking(-50, 0.1, true);
       }
       const output = gate.process(-45, 0.1);
       assert.strictEqual(output.evidence, 'ambiguous');

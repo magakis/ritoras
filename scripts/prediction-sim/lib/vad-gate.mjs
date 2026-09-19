@@ -69,6 +69,7 @@ export class VADThresholdGate {
     this.adaptiveRollingWriteIndex = 0;
     this.adaptiveRollingCount = 0;
     this.adaptiveRollingElapsed = 0;
+    this.lastKnownMachineIsIdle = true;
     this.lastOutput = {
       isSpeech: false,
       evidence: 'silence',
@@ -115,15 +116,15 @@ export class VADThresholdGate {
 
   noteUtteranceEnded(quietestStrongDb) {
     if (this.behaviorMode !== 'adaptive') return;
-    this.speechCeilingDb = quietestStrongDb ?? null;
+    if (this.floorDb !== null
+      && quietestStrongDb !== null
+      && quietestStrongDb !== undefined
+      && quietestStrongDb >= this.floorDb
+        + this.config.adaptiveDeltaDb
+        + VAD_SPEECH_CEILING_MARGIN_DB) {
+      this.speechCeilingDb = quietestStrongDb;
+    }
     this.resetAdaptiveRollingWindow();
-  }
-
-  speechClearsCurrentFloor(quietestStrongDb) {
-    if (this.floorDb === null) return false;
-    return quietestStrongDb >= this.floorDb
-      + this.config.adaptiveDeltaDb
-      + VAD_SPEECH_CEILING_MARGIN_DB;
   }
 
   processStatic(frameDb) {
@@ -246,7 +247,8 @@ export class VADThresholdGate {
     } else {
       this.elapsedSinceSilenceEvidence += Math.max(0, frameDuration);
       if (this.elapsedSinceSilenceEvidence + CALIBRATION_COMPLETION_EPSILON_S
-        >= VAD_ADAPTIVE_STALE_FLOOR_DURATION_S) {
+        >= VAD_ADAPTIVE_STALE_FLOOR_DURATION_S
+        && this.lastKnownMachineIsIdle) {
         const target = this.adaptiveRollingPercentile();
         if (target !== null) {
           this.elapsedSinceSilenceEvidence = 0;
@@ -325,6 +327,7 @@ export class VADThresholdGate {
   }
 
   updateFloorTracking(frameDb, duration, machineIsIdle = true) {
+    this.lastKnownMachineIsIdle = machineIsIdle;
     if (this.behaviorMode !== 'adaptive') return;
     if (this.floorDb === null) return;
     if (!this.adaptiveRefinementComplete) return;
@@ -338,10 +341,10 @@ export class VADThresholdGate {
         break;
       case 'ambiguous':
       case 'silence':
-        riseCap = VAD_ELEVATED_RISE_DB_PER_SECOND;
+        riseCap = machineIsIdle ? VAD_ELEVATED_RISE_DB_PER_SECOND : 0;
         break;
       default:
-        riseCap = VAD_ELEVATED_RISE_DB_PER_SECOND;
+        riseCap = machineIsIdle ? VAD_ELEVATED_RISE_DB_PER_SECOND : 0;
         break;
     }
     if (machineIsIdle && this.speechCeilingDb !== null) {
