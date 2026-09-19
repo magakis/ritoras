@@ -2,6 +2,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   makeVadGateConfig,
+  VAD_SPEECH_CEILING_MARGIN_DB,
+  VAD_SUSTAINED_CONTINUING_ONSET_S,
   VADThresholdGate,
 } from '../lib/vad-gate.mjs';
 import { StreamingEndpoint } from '../lib/streaming-endpoint.mjs';
@@ -31,18 +33,24 @@ function driveFrame(gate, endpoint, frameDb) {
   return { output, decision, previousState, reanchorEvent };
 }
 
-function makeRecorderHarness() {
+function makeRecorderHarness({ frameMs = frameDurationMs } = {}) {
+  const recorderFrameDuration = frameMs / 1000;
+  const recorderFrameSamples = frameMs * 16;
   const harness = {
     gate: makeGate(),
     endpoint: makeEndpoint(),
     chunkCount: 0,
     reanchorEventCount: 0,
     requiresPostReanchorSpeech: false,
+    utteranceQuietestStrongDb: null,
+    sustainedContinuingMs: 0,
+    sustainedContinuingOnsetLatched: false,
 
     drive(frameDb) {
-      const output = this.gate.process(frameDb, frameDuration);
+      const output = this.gate.process(frameDb, recorderFrameDuration);
       const reanchorEvent = this.gate.takePendingReanchorEvent();
       const previousState = this.endpoint.state;
+      const endpointWasIdle = previousState === 'idle';
       if (reanchorEvent) this.reanchorEventCount += 1;
 
       if (reanchorEvent
@@ -54,12 +62,53 @@ function makeRecorderHarness() {
         this.requiresPostReanchorSpeech = false;
       }
 
-      const decision = this.endpoint.process(output.evidence, frameSamples);
+      const adaptivePath = output.floorDb !== null;
+      if (adaptivePath && output.evidence === 'continuing' && endpointWasIdle) {
+        this.sustainedContinuingMs += recorderFrameDuration * 1000;
+      } else if (!this.sustainedContinuingOnsetLatched) {
+        this.sustainedContinuingMs = 0;
+      }
+
+      if (adaptivePath
+        && output.evidence === 'continuing'
+        && endpointWasIdle
+        && this.sustainedContinuingMs >= VAD_SUSTAINED_CONTINUING_ONSET_S * 1000) {
+        this.sustainedContinuingOnsetLatched = true;
+      }
+      const endpointInOnsetLimb = endpointWasIdle || previousState === 'onsetPending';
+      if (this.sustainedContinuingOnsetLatched
+        && (!adaptivePath
+          || !endpointInOnsetLimb
+          || output.evidence === 'ambiguous'
+          || output.evidence === 'silence')) {
+        this.sustainedContinuingOnsetLatched = false;
+        this.sustainedContinuingMs = 0;
+      }
+      const latchedContinuingOnset = this.sustainedContinuingOnsetLatched
+        && output.evidence === 'continuing'
+        && endpointInOnsetLimb;
+      const endpointEvidence = adaptivePath
+        && latchedContinuingOnset
+        ? 'strong'
+        : output.evidence;
+      const decision = this.endpoint.process(endpointEvidence, recorderFrameSamples);
       this.gate.updateFloorTracking(
         frameDb,
-        frameDuration,
+        recorderFrameDuration,
         previousState === 'idle' && this.endpoint.state === 'idle',
       );
+
+      if (decision.type === 'startUtterance') {
+        this.utteranceQuietestStrongDb = null;
+        this.sustainedContinuingMs = 0;
+        this.sustainedContinuingOnsetLatched = false;
+      }
+      if (adaptivePath && output.evidence === 'strong' && this.endpoint.state !== 'idle') {
+        this.utteranceQuietestStrongDb = Math.min(
+          this.utteranceQuietestStrongDb ?? frameDb,
+          frameDb,
+        );
+      }
 
       let discarded = false;
       if (decision.type === 'finalizeUtterance') {
@@ -68,9 +117,13 @@ function makeRecorderHarness() {
           discarded = true;
         } else {
           this.chunkCount += 1;
+          this.gate.noteUtteranceEnded(this.utteranceQuietestStrongDb);
+          this.utteranceQuietestStrongDb = null;
+          this.sustainedContinuingMs = 0;
+          this.sustainedContinuingOnsetLatched = false;
         }
       }
-      return { output, decision, reanchorEvent, discarded };
+      return { output, decision, endpointEvidence, reanchorEvent, discarded };
     },
   };
   return harness;
@@ -283,18 +336,12 @@ describe('adaptive VAD convergence', () => {
     assert.strictEqual(harness.endpoint.state, 'idle');
   });
 
-  it('documents flat monotone speech re-anchoring onto itself', () => {
+  it('flat monotone cold-start speech endpoints mid-utterance but resumed speech re-onsets', () => {
     const gate = makeGate();
     const endpoint = makeEndpoint();
     let finalizedAtMs = null;
 
-    // With fewer than 3 dB of dynamics, the stale window's P10 is the speech
-    // level itself. The floor re-anchors to -40 dB, so the thresholds become
-    // -30/-34/-37 dB and this flat monologue is classified as silence and ends
-    // at the configured silence duration.
-    // Realistic speech has inter-word dips of at least 10 dB, placing P10 below
-    // the speech mode instead of on top of it.
-    for (let i = 0; i < 6000; i++) {
+    for (let i = 0; i < 710; i++) {
       const { decision } = driveFrame(gate, endpoint, -40);
       if (decision.type === 'finalizeUtterance') {
         finalizedAtMs = (i + 1) * frameDurationMs;
@@ -305,5 +352,247 @@ describe('adaptive VAD convergence', () => {
     assert.ok(finalizedAtMs !== null);
     assert.ok(finalizedAtMs >= 5000 && finalizedAtMs <= 7100);
     assert.strictEqual(endpoint.state, 'idle');
+    assert.strictEqual(gate.speechCeilingDb, null);
+
+    gate.noteUtteranceEnded(-40);
+    let onsetMs = null;
+    for (let i = 0; i < 20; i++) {
+      const { decision } = driveFrame(gate, endpoint, -40);
+      if (decision.type === 'startUtterance') {
+        onsetMs = (i + 1) * frameDurationMs;
+        break;
+      }
+    }
+
+    assert.ok(onsetMs !== null && onsetMs < 200);
+    assert.strictEqual(endpoint.state, 'speechActive');
+  });
+
+  it('post-endpoint floor does not eat speech — resumed speech re-onsets', () => {
+    const harness = makeRecorderHarness();
+    const quietestStrongDb = -35;
+    const ceilingFloor = quietestStrongDb
+      - makeVadGateConfig({ mode: 'adaptive' }).adaptiveDeltaDb
+      - VAD_SPEECH_CEILING_MARGIN_DB;
+
+    for (let i = 0; i < 100; i++) harness.drive(quietestStrongDb);
+    assert.strictEqual(harness.endpoint.state, 'speechActive');
+
+    for (let i = 0; i < 30; i++) harness.drive(-80);
+    assert.strictEqual(harness.endpoint.state, 'endPending');
+
+    let sawAmbiguousEndPending = false;
+    let emitted = false;
+    for (let i = 0; i < 500; i++) {
+      const frame = harness.drive(i % 10 === 9 ? -75 : -80);
+      if (harness.endpoint.state === 'endPending' && frame.output.evidence === 'ambiguous') {
+        sawAmbiguousEndPending = true;
+      }
+      if (frame.decision.type === 'finalizeUtterance') {
+        emitted = true;
+        break;
+      }
+    }
+
+    assert.strictEqual(sawAmbiguousEndPending, true);
+    assert.strictEqual(emitted, true);
+    assert.strictEqual(harness.chunkCount, 1);
+    assert.strictEqual(harness.gate.speechCeilingDb, quietestStrongDb);
+    assert.strictEqual(harness.endpoint.state, 'idle');
+
+    for (let i = 0; i < 200; i++) {
+      harness.drive(-75);
+      assert.strictEqual(harness.endpoint.state, 'idle');
+      assert.ok(harness.gate.snapshot.floorDb <= ceilingFloor);
+    }
+
+    let onsetMs = null;
+    for (let i = 0; i < 50; i++) {
+      const frame = harness.drive(quietestStrongDb);
+      if (frame.decision.type === 'startUtterance') {
+        onsetMs = (i + 1) * frameDurationMs;
+        break;
+      }
+    }
+    assert.ok(onsetMs !== null && onsetMs <= 500);
+  });
+
+  it('uniform quiet speech re-onsets despite stale re-anchor via the sustained continuing fallback', () => {
+    const frameMs = 100;
+    const harness = makeRecorderHarness({ frameMs });
+    let onsetMs = null;
+    let usedSustainedFallback = false;
+
+    for (let i = 0; i < 150; i++) {
+      const frame = harness.drive(-73);
+      if (frame.endpointEvidence === 'strong' && frame.output.evidence === 'continuing') {
+        usedSustainedFallback = true;
+      }
+      if (frame.decision.type === 'startUtterance') {
+        onsetMs = (i + 1) * frameMs;
+        break;
+      }
+    }
+
+    assert.strictEqual(usedSustainedFallback, true);
+    assert.ok(onsetMs !== null && onsetMs <= 1500);
+    assert.strictEqual(harness.endpoint.state, 'speechActive');
+  });
+
+  it('fallback onset completes with small frames', () => {
+    const harness = makeRecorderHarness();
+    let onsetMs = null;
+    let usedSustainedFallback = false;
+
+    for (let i = 0; i < 200; i++) {
+      const frameDb = harness.gate.snapshot.continuationThresholdDb + 0.1;
+      const frame = harness.drive(frameDb);
+      assert.strictEqual(frame.output.evidence, 'continuing');
+      if (frame.endpointEvidence === 'strong') usedSustainedFallback = true;
+      if (frame.decision.type === 'startUtterance') {
+        onsetMs = (i + 1) * frameDurationMs;
+        break;
+      }
+    }
+
+    assert.strictEqual(usedSustainedFallback, true);
+    assert.ok(onsetMs !== null && onsetMs <= 2000);
+    assert.strictEqual(harness.endpoint.state, 'speechActive');
+  });
+
+  it('re-onsets fluctuating speech after ambiguous interruptions', () => {
+    const frameMs = 100;
+    const harness = makeRecorderHarness({ frameMs });
+    let onsetMs = null;
+    let usedSustainedFallback = false;
+
+    for (let i = 0; i < 60; i++) {
+      let frameDb;
+      if (i < 10) {
+        frameDb = i % 5 === 0 ? -75 : -73;
+      } else {
+        const continuationThreshold = harness.gate.snapshot.continuationThresholdDb;
+        frameDb = continuationThreshold + (i % 2 === 0 ? 0.05 : 0.2);
+      }
+      const frame = harness.drive(frameDb);
+      if (frame.endpointEvidence === 'strong' && frame.output.evidence === 'continuing') {
+        usedSustainedFallback = true;
+      }
+      if (frame.decision.type === 'startUtterance') {
+        onsetMs = (i + 1) * frameMs;
+        break;
+      }
+    }
+
+    assert.strictEqual(usedSustainedFallback, true);
+    assert.ok(onsetMs !== null && onsetMs <= 2500);
+    assert.strictEqual(harness.endpoint.state, 'speechActive');
+  });
+
+  it('steady noise above the floor does not false-open via fallback onset', () => {
+    const harness = makeRecorderHarness();
+    const quietestStrongDb = -25;
+
+    for (let i = 0; i < 100; i++) harness.drive(quietestStrongDb);
+    let emitted = false;
+    for (let i = 0; i < 500; i++) {
+      const frame = harness.drive(-80);
+      if (frame.decision.type === 'finalizeUtterance') {
+        emitted = true;
+        break;
+      }
+    }
+    assert.strictEqual(emitted, true);
+    assert.strictEqual(harness.chunkCount, 1);
+    assert.strictEqual(harness.gate.speechCeilingDb, quietestStrongDb);
+    assert.strictEqual(harness.endpoint.state, 'idle');
+
+    let onset = false;
+    let firstSilenceMs = null;
+    let lastOutput = null;
+    for (let i = 0; i < 200; i++) {
+      lastOutput = harness.drive(-73);
+      if (lastOutput.decision.type === 'startUtterance') onset = true;
+      if (lastOutput.output.evidence === 'silence' && firstSilenceMs === null) {
+        firstSilenceMs = (i + 1) * frameDurationMs;
+      }
+    }
+
+    assert.strictEqual(onset, false);
+    assert.ok(firstSilenceMs !== null && firstSilenceMs < 1000);
+    assert.strictEqual(lastOutput.output.evidence, 'silence');
+    assert.strictEqual(harness.endpoint.state, 'idle');
+  });
+
+  it('speech ceiling caps re-anchor and idle rise until decay releases it', () => {
+    const harness = makeRecorderHarness();
+
+    for (let i = 0; i < 100; i++) harness.drive(-25);
+    let emitted = false;
+    for (let i = 0; i < 500; i++) {
+      const frame = harness.drive(-80);
+      if (frame.decision.type === 'finalizeUtterance') {
+        emitted = true;
+        break;
+      }
+    }
+    assert.strictEqual(emitted, true);
+    assert.strictEqual(harness.chunkCount, 1);
+    assert.strictEqual(harness.endpoint.state, 'idle');
+
+    const gate = harness.gate;
+    const quietestStrongDb = -25;
+    const adaptiveDeltaDb = makeVadGateConfig({ mode: 'adaptive' }).adaptiveDeltaDb;
+    const ceilingFloor = quietestStrongDb - adaptiveDeltaDb - VAD_SPEECH_CEILING_MARGIN_DB;
+    assert.strictEqual(gate.speechCeilingDb, quietestStrongDb);
+    gate.floorDb = -40;
+
+    for (let i = 0; i < 150; i++) {
+      const loudFrameDb = gate.floorDb + 5;
+      gate.process(loudFrameDb, frameDuration);
+      gate.updateFloorTracking(loudFrameDb, frameDuration, false);
+      assert.ok(gate.snapshot.floorDb <= ceilingFloor);
+    }
+    assert.ok(Math.abs(gate.snapshot.floorDb - ceilingFloor) < 0.001);
+
+    for (let i = 0; i < 150; i++) {
+      const loudFrameDb = gate.floorDb + 5;
+      gate.process(loudFrameDb, frameDuration);
+      gate.updateFloorTracking(loudFrameDb, frameDuration, true);
+    }
+
+    assert.strictEqual(gate.speechCeilingDb, null);
+    assert.ok(gate.snapshot.floorDb > ceilingFloor);
+  });
+
+  it('stale re-anchor lands on the speech ceiling cap', () => {
+    const harness = makeRecorderHarness();
+
+    for (let i = 0; i < 100; i++) harness.drive(-25);
+    let emitted = false;
+    for (let i = 0; i < 500; i++) {
+      const frame = harness.drive(-80);
+      if (frame.decision.type === 'finalizeUtterance') {
+        emitted = true;
+        break;
+      }
+    }
+    assert.strictEqual(emitted, true);
+    assert.strictEqual(harness.gate.speechCeilingDb, -25);
+
+    const gate = harness.gate;
+    const ceilingFloor = -25 - 10 - VAD_SPEECH_CEILING_MARGIN_DB;
+    gate.floorDb = -40;
+    let reanchorEvent = false;
+    for (let i = 0; i < 301; i++) {
+      const frameDb = -22;
+      gate.process(frameDb, frameDuration);
+      if (gate.takePendingReanchorEvent()) reanchorEvent = true;
+      gate.updateFloorTracking(frameDb, frameDuration, false);
+    }
+
+    assert.strictEqual(reanchorEvent, true);
+    assert.ok(Math.abs(gate.snapshot.floorDb - ceilingFloor) < 0.001);
+    assert.strictEqual(gate.speechCeilingDb, -25);
   });
 });

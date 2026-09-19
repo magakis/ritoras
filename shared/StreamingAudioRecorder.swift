@@ -106,6 +106,8 @@ private final class VADContext: @unchecked Sendable {
     let minChunkSamples: Int
     let maxNoiseSamples: Int
     let noiseGuardSpeechSamples = 1600  // 0.1 s @ 16 kHz — reference client's fixed noise-floor cutoff
+    // The 10-ms fallback frames are shorter than the endpoint's 70-ms onset requirement.
+    let sustainedContinuingOnsetSeconds = 1.0
     let endpointMachineEnabled: Bool
     let endpoint: StreamingEndpoint
     let preRollSamples: Int
@@ -128,6 +130,9 @@ private final class VADContext: @unchecked Sendable {
     private var pendingEmissionSummary: EmissionSummary?
     private var requiresPostReanchorSpeech = false
     private var bufferHighWaterSamples = 0
+    private var utteranceQuietestStrongDb: Double?
+    private var sustainedContinuingMs = 0.0
+    private var sustainedContinuingOnsetLatched = false
 
     init(
         gateConfig: VADGateConfig,
@@ -175,6 +180,9 @@ private final class VADContext: @unchecked Sendable {
         defer { os_unfair_lock_unlock(&unfairLock) }
         analysisHpf?.reset()
         gate.recalibrateFloor()
+        utteranceQuietestStrongDb = nil
+        sustainedContinuingMs = 0
+        sustainedContinuingOnsetLatched = false
     }
 
     func frameState(emissionSummary: EmissionSummary?) -> StreamingVADFrameState {
@@ -261,6 +269,7 @@ private final class VADContext: @unchecked Sendable {
         let decision: StreamingEndpointDecision
         if endpointMachineEnabled {
             let previousState = endpoint.state
+            let endpointWasIdle = previousState == .idle
             if reanchorEvent,
                (previousState == .speechActive || previousState == .endPending) {
                 requiresPostReanchorSpeech = true
@@ -270,7 +279,32 @@ private final class VADContext: @unchecked Sendable {
                 requiresPostReanchorSpeech = false
             }
             let evidence = StreamingEndpointEvidence(rawValue: out.evidence.rawValue) ?? .silence
-            decision = endpoint.process(evidence: evidence, durationSamples: frameLength)
+            let adaptivePath = out.floorDb != nil
+            if adaptivePath && out.evidence == .continuing && endpointWasIdle {
+                sustainedContinuingMs += frameDuration * 1000.0
+            } else if !sustainedContinuingOnsetLatched {
+                sustainedContinuingMs = 0
+            }
+
+            if adaptivePath &&
+               out.evidence == .continuing &&
+               endpointWasIdle &&
+               sustainedContinuingMs >= sustainedContinuingOnsetSeconds * 1000.0 {
+                sustainedContinuingOnsetLatched = true
+            }
+            let endpointInOnsetLimb = endpointWasIdle || previousState == .onsetPending
+            if sustainedContinuingOnsetLatched &&
+               (!adaptivePath || !endpointInOnsetLimb || out.evidence == .ambiguous || out.evidence == .silence) {
+                sustainedContinuingOnsetLatched = false
+                sustainedContinuingMs = 0
+            }
+            let latchedContinuingOnset = sustainedContinuingOnsetLatched &&
+                                         out.evidence == .continuing &&
+                                         endpointInOnsetLimb
+            let endpointEvidence = adaptivePath && latchedContinuingOnset
+                ? StreamingEndpointEvidence.strong
+                : evidence
+            decision = endpoint.process(evidence: endpointEvidence, durationSamples: frameLength)
             let decisionSilenceSamples = endpoint.accumulatedSilenceSamples
             if previousState != endpoint.state {
                 FileLogger.shared.debug(.audio, "VAD state \(previousState.rawValue) → \(endpoint.state.rawValue)")
@@ -283,6 +317,9 @@ private final class VADContext: @unchecked Sendable {
 
             switch decision {
             case .startUtterance:
+                utteranceQuietestStrongDb = nil
+                sustainedContinuingMs = 0
+                sustainedContinuingOnsetLatched = false
                 accumulator.removeAll(keepingCapacity: true)
                 preRollBuffer.append(to: &accumulator)
                 preRollBuffer.removeAll()
@@ -291,6 +328,10 @@ private final class VADContext: @unchecked Sendable {
                 appendLiveFrame(frame)
             case .none:
                 appendToPreRoll(frame)
+            }
+
+            if adaptivePath, out.evidence == .strong, endpoint.state != .idle {
+                utteranceQuietestStrongDb = min(utteranceQuietestStrongDb ?? frameDb, frameDb)
             }
 
             if case .finalizeUtterance(let kind) = decision {
@@ -420,6 +461,10 @@ private final class VADContext: @unchecked Sendable {
         endpoint.reset()
         requiresPostReanchorSpeech = false
         bufferHighWaterSamples = 0
+        gate.noteUtteranceEnded(quietestStrongDb: utteranceQuietestStrongDb)
+        utteranceQuietestStrongDb = nil
+        sustainedContinuingMs = 0
+        sustainedContinuingOnsetLatched = false
         return VADEmission(chunkId: id, samples: snapshot)
     }
 
@@ -428,6 +473,8 @@ private final class VADContext: @unchecked Sendable {
     func flush() -> VADEmission? {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
+        sustainedContinuingMs = 0
+        sustainedContinuingOnsetLatched = false
         _ = endpoint.forceFinalize(kind: .stop)
         guard !accumulator.isEmpty else { return nil }
         guard speechSamples >= minSpeechSamples else {

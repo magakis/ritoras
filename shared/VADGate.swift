@@ -50,8 +50,8 @@ final class VADThresholdGate: @unchecked Sendable {
     private static let silenceDeltaDb = 3.0
     private static let staticContinuationOffsetDb = 4.0
     private static let staticSilenceOffsetDb = 6.0
-    private static let maximumRiseDbPerSecond = 1.5
     private static let elevatedRiseDbPerSecond = 6.0
+    private static let speechCeilingMarginDb = 2.0
     private static let adaptiveMinRefinementDuration = 1.0
     private static let adaptiveRollingWindowDuration = 3.0
     private static let adaptiveRollingWindowCapacity = 256
@@ -85,6 +85,7 @@ final class VADThresholdGate: @unchecked Sendable {
     private var adaptiveRollingWriteIndex = 0
     private var adaptiveRollingCount = 0
     private var adaptiveRollingElapsed = 0.0
+    private var speechCeilingDb: Double?
     private var unfairLock = os_unfair_lock()
     private var lastOutput: VADGateOutput
 
@@ -148,6 +149,14 @@ final class VADThresholdGate: @unchecked Sendable {
         let event = pendingReanchorEvent
         pendingReanchorEvent = false
         return event
+    }
+
+    func noteUtteranceEnded(quietestStrongDb: Double?) {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+        guard behaviorMode == .adaptive else { return }
+        speechCeilingDb = quietestStrongDb
+        resetAdaptiveRollingWindow()
     }
 
     private func processStatic(frameDb: Double) -> VADGateOutput {
@@ -285,7 +294,15 @@ final class VADThresholdGate: @unchecked Sendable {
             if elapsedSinceSilenceEvidence + Self.calibrationCompletionEpsilon >= Self.adaptiveStaleFloorSeconds,
                let target = adaptiveRollingPercentile() {
                 elapsedSinceSilenceEvidence = 0
-                let reanchoredFloor = clampFloor(target)
+                let reanchoredFloor: Double
+                if let speechCeilingDb {
+                    reanchoredFloor = clampFloor(min(
+                        target,
+                        speechCeilingDb - config.adaptiveDeltaDb - Self.speechCeilingMarginDb
+                    ))
+                } else {
+                    reanchoredFloor = clampFloor(target)
+                }
                 let maximumReanchorFloor = Self.floorMaxDb - config.adaptiveDeltaDb
                 if reanchoredFloor <= maximumReanchorFloor {
                     let floorMoved = abs(reanchoredFloor - currentFloor) > Self.adaptiveFloorMovementEpsilonDb
@@ -373,9 +390,16 @@ final class VADThresholdGate: @unchecked Sendable {
         case .strong:
             riseCap = 0
         case .continuing:
-            riseCap = machineIsIdle ? Self.elevatedRiseDbPerSecond : Self.maximumRiseDbPerSecond
+            riseCap = machineIsIdle ? Self.elevatedRiseDbPerSecond : 0
         case .ambiguous, .silence:
             riseCap = Self.elevatedRiseDbPerSecond
+        }
+        if machineIsIdle, let speechCeilingDb {
+            let decayedCeilingDb = speechCeilingDb + Self.elevatedRiseDbPerSecond * max(0, duration)
+            let clampBound = decayedCeilingDb - config.adaptiveDeltaDb - Self.speechCeilingMarginDb
+            self.speechCeilingDb = clampBound > Self.floorMaxDb - config.adaptiveDeltaDb
+                ? nil
+                : decayedCeilingDb
         }
         if riseCap == 0,
            let floorDb,
@@ -416,6 +440,7 @@ final class VADThresholdGate: @unchecked Sendable {
         elapsedSinceSilenceEvidence = 0
         pendingReanchorEvent = false
         hasRefusedReanchorSinceLastAcceptance = false
+        speechCeilingDb = nil
         resetAdaptiveRollingWindow()
         usedFallback = false
         lastOutput = VADGateOutput(
@@ -447,6 +472,9 @@ final class VADThresholdGate: @unchecked Sendable {
         } else {
             let alpha = 1.0 - exp(-frameDuration / Self.tauFall)
             floor += alpha * (targetDb - floor)
+        }
+        if let speechCeilingDb {
+            floor = min(floor, speechCeilingDb - config.adaptiveDeltaDb - Self.speechCeilingMarginDb)
         }
         floorDb = clampFloor(floor)
     }

@@ -207,7 +207,7 @@ describe('VADThresholdGate', () => {
       continuingGate.floorDb = -70;
       continuingGate.process(-63, 0.1);
       continuingGate.updateFloorTracking(-63, 0.1, false);
-      assert.ok(Math.abs(continuingGate.snapshot.floorDb - -69.85) < 0.001);
+      assert.strictEqual(continuingGate.snapshot.floorDb, -70);
 
       const idleContinuingGate = seedAdaptiveGate({}, -65);
       idleContinuingGate.floorDb = -70;
@@ -272,7 +272,7 @@ describe('VADThresholdGate', () => {
       assert.ok(Math.abs(gate.snapshot.floorDb - -65) < 0.001);
     });
 
-    it('keeps continuing evidence on the non-idle ceiling without an idle timer', () => {
+    it('freezes continuing evidence on the non-idle ceiling', () => {
       const gate = seedAdaptiveGate({}, -65);
       gate.floorDb = -70;
 
@@ -280,7 +280,7 @@ describe('VADThresholdGate', () => {
         gate.process(-63, 0.1);
         gate.updateFloorTracking(-63, 0.1, false);
       }
-      assert.ok(Math.abs(gate.snapshot.floorDb - -69.4) < 0.001);
+      assert.strictEqual(gate.snapshot.floorDb, -70);
     });
 
     it('classifies the gap between silence and continuation as ambiguous', () => {

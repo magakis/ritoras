@@ -7,8 +7,9 @@ const VAD_CONTINUATION_DELTA_DB = 6.0;
 export const VAD_SILENCE_DELTA_DB = 3.0;
 export const VAD_STATIC_CONTINUATION_OFFSET_DB = 4.0;
 export const VAD_STATIC_SILENCE_OFFSET_DB = 6.0;
-export const VAD_MAX_RISE_DB_PER_SECOND = 1.5;
 export const VAD_ELEVATED_RISE_DB_PER_SECOND = 6.0;
+export const VAD_SPEECH_CEILING_MARGIN_DB = 2.0;
+export const VAD_SUSTAINED_CONTINUING_ONSET_S = 1.0;
 export const VAD_ADAPTIVE_MIN_REFINEMENT_DURATION_S = 1.0;
 export const VAD_ADAPTIVE_ROLLING_WINDOW_DURATION_S = 3.0;
 export const VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY = 256;
@@ -62,6 +63,7 @@ export class VADThresholdGate {
     this.hasLoggedReanchorRefusal = false;
     this.hasRefusedReanchorSinceLastAcceptance = false;
     this.elapsedSinceSilenceEvidence = 0;
+    this.speechCeilingDb = null;
     this.adaptiveRollingDbs = Array(VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY).fill(0);
     this.adaptiveRollingDurations = Array(VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY).fill(0);
     this.adaptiveRollingWriteIndex = 0;
@@ -109,6 +111,12 @@ export class VADThresholdGate {
     const event = this.pendingReanchorEvent;
     this.pendingReanchorEvent = false;
     return event;
+  }
+
+  noteUtteranceEnded(quietestStrongDb) {
+    if (this.behaviorMode !== 'adaptive') return;
+    this.speechCeilingDb = quietestStrongDb ?? null;
+    this.resetAdaptiveRollingWindow();
   }
 
   processStatic(frameDb) {
@@ -235,7 +243,14 @@ export class VADThresholdGate {
         const target = this.adaptiveRollingPercentile();
         if (target !== null) {
           this.elapsedSinceSilenceEvidence = 0;
-          const reanchoredFloor = this.clampFloor(target);
+          const reanchoredFloor = this.speechCeilingDb === null
+            ? this.clampFloor(target)
+            : this.clampFloor(Math.min(
+              target,
+              this.speechCeilingDb
+                - this.config.adaptiveDeltaDb
+                - VAD_SPEECH_CEILING_MARGIN_DB,
+            ));
           const maximumReanchorFloor = VAD_FLOOR_MAX_DB - this.config.adaptiveDeltaDb;
           if (reanchoredFloor <= maximumReanchorFloor) {
             const floorMoved = Math.abs(reanchoredFloor - this.floorDb)
@@ -312,7 +327,7 @@ export class VADThresholdGate {
         riseCap = 0;
         break;
       case 'continuing':
-        riseCap = machineIsIdle ? VAD_ELEVATED_RISE_DB_PER_SECOND : VAD_MAX_RISE_DB_PER_SECOND;
+        riseCap = machineIsIdle ? VAD_ELEVATED_RISE_DB_PER_SECOND : 0;
         break;
       case 'ambiguous':
       case 'silence':
@@ -321,6 +336,16 @@ export class VADThresholdGate {
       default:
         riseCap = VAD_ELEVATED_RISE_DB_PER_SECOND;
         break;
+    }
+    if (machineIsIdle && this.speechCeilingDb !== null) {
+      const decayedCeilingDb = this.speechCeilingDb
+        + VAD_ELEVATED_RISE_DB_PER_SECOND * Math.max(0, duration);
+      const clampBound = decayedCeilingDb
+        - this.config.adaptiveDeltaDb
+        - VAD_SPEECH_CEILING_MARGIN_DB;
+      this.speechCeilingDb = clampBound > VAD_FLOOR_MAX_DB - this.config.adaptiveDeltaDb
+        ? null
+        : decayedCeilingDb;
     }
     if (riseCap === 0 && this.adaptiveRollingPercentileAtLeast(this.floorDb)) return;
     const target = this.adaptiveRollingPercentile();
@@ -353,6 +378,7 @@ export class VADThresholdGate {
     this.elapsedSinceSilenceEvidence = 0;
     this.pendingReanchorEvent = false;
     this.hasRefusedReanchorSinceLastAcceptance = false;
+    this.speechCeilingDb = null;
     this.resetAdaptiveRollingWindow();
     this.usedFallback = false;
     this.lastOutput = {
@@ -374,11 +400,20 @@ export class VADThresholdGate {
   }
 
   updateFloor(targetDb, frameDuration, maximumRiseDbPerSecond) {
-    const next = targetDb > this.floorDb
-      ? Math.min(targetDb, this.floorDb + maximumRiseDbPerSecond * frameDuration)
-      : this.floorDb + (1 - Math.exp(-frameDuration / VAD_TAU_FALL_S))
-        * (targetDb - this.floorDb);
-    this.floorDb = this.clampFloor(next);
+    let floor = this.floorDb;
+    if (targetDb > floor) {
+      floor = Math.min(targetDb, floor + maximumRiseDbPerSecond * frameDuration);
+    } else {
+      floor += (1 - Math.exp(-frameDuration / VAD_TAU_FALL_S))
+        * (targetDb - floor);
+    }
+    if (this.speechCeilingDb !== null) {
+      floor = Math.min(
+        floor,
+        this.speechCeilingDb - this.config.adaptiveDeltaDb - VAD_SPEECH_CEILING_MARGIN_DB,
+      );
+    }
+    this.floorDb = this.clampFloor(floor);
   }
 
   appendAdaptiveRollingFrame(db, duration) {
