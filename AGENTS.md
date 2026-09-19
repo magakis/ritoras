@@ -231,6 +231,7 @@ The component-to-subsystem mapping (`LogComponent` cases `.prediction`, `.keyboa
 `.opencode/`:
 - `skills/automation/ritoras-deploy-pipeline/` — full commit-to-device cycle. **Load before any deploy.**
 - `skills/debugging/ritoras-ios-debugging/` — libimobiledevice / pymobiledevice3 device debugging from Linux.
+- `skills/debugging/ritoras-crash-symbolication/` — MetricKit crash symbolication against the exact CI artifact; load when resolving an unsymbolicated Ritoras crash or hang report.
 - `instincts/ritoras.jsonl` — 21 verified facts covering keyboard plist quirks, memory caps, deploy pipeline edge cases, and the committer's empty-output behavior. Query via `ctx_search` before assuming something is undocumented.
 
 `docs/`: `IMPLEMENTATION-PLAN.md`, `SERVER-CONTRACT.md`, `Sideload.md`, `THIRD-PARTY-NOTICES.md`.
