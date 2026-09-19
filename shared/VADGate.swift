@@ -53,6 +53,8 @@ final class VADThresholdGate: @unchecked Sendable {
     private static let elevatedRiseDbPerSecond = 6.0
     private static let speechCeilingMarginDb = 2.0
     private static let adaptiveMinRefinementDuration = 1.0
+    private static let adaptiveColdStartGraceSeconds = 0.4
+    private static let adaptiveColdStartDispersionWindowSeconds = 0.4
     private static let adaptiveRollingWindowDuration = 3.0
     private static let adaptiveRollingWindowCapacity = 256
     private static let floorMinDb = -80.0
@@ -71,6 +73,8 @@ final class VADThresholdGate: @unchecked Sendable {
     private var calibrationFrames: [CalibrationFrame] = []
     private var adaptiveRefinementElapsed = 0.0
     private var adaptiveRefinementComplete: Bool
+    private var coldStartSpeechShapedNow = false
+    private var coldStartConverged = false
     private var floorDb: Double?
     private var thresholdDb: Double
     private var usedFallback = false
@@ -288,6 +292,8 @@ final class VADThresholdGate: @unchecked Sendable {
             floorDb = Self.floorMinDb
             adaptiveRefinementComplete = false
             adaptiveRefinementElapsed = 0
+            coldStartSpeechShapedNow = false
+            coldStartConverged = false
             return processAdaptiveRefinement(frameDb: frameDb, frameDuration: frameDuration)
         }
 
@@ -354,12 +360,41 @@ final class VADThresholdGate: @unchecked Sendable {
 
     private func processAdaptiveRefinement(frameDb: Double, frameDuration: Double) -> VADGateOutput {
         adaptiveRefinementElapsed += max(0, frameDuration)
-        if let floorDb {
-            self.floorDb = min(floorDb, clampFloor(frameDb))
-        } else {
+        if floorDb == nil {
             floorDb = Self.floorMinDb
         }
-        if adaptiveRefinementElapsed + Self.calibrationCompletionEpsilon >= Self.adaptiveMinRefinementDuration {
+
+        let rollingPercentile = adaptiveRollingPercentile()
+        let windowMax = adaptiveRollingMaxDb(coverSeconds: Self.adaptiveColdStartDispersionWindowSeconds)
+        let dispersionDb = (windowMax ?? frameDb) - (rollingPercentile ?? frameDb)
+        coldStartSpeechShapedNow = dispersionDb >= config.adaptiveDeltaDb + Self.speechCeilingMarginDb
+
+        if !coldStartSpeechShapedNow,
+           adaptiveRefinementElapsed >= Self.adaptiveColdStartGraceSeconds,
+           let rollingPercentile {
+            floorDb = clampFloor(rollingPercentile)
+            if !coldStartConverged {
+                coldStartConverged = true
+                FileLogger.shared.info(
+                    .audio,
+                    "VAD: cold-start floor converged",
+                    payload: ["floorDb": floorDb ?? NSNull()]
+                )
+            }
+        } else if !coldStartConverged {
+            if let floorDb {
+                self.floorDb = min(floorDb, clampFloor(frameDb))
+            } else {
+                floorDb = Self.floorMinDb
+            }
+        }
+        // Cold-start refinement is capped at twice the minimum duration so it cannot
+        // defer convergence without bound. This protects the idle case; sustained
+        // dispersive ambient that onsets during refinement can still complete while
+        // unconverged and pin the -80 dB floor, a documented limitation.
+        if coldStartConverged
+            || adaptiveRefinementElapsed + Self.calibrationCompletionEpsilon
+                >= 2 * Self.adaptiveMinRefinementDuration {
             adaptiveRefinementComplete = true
         }
 
@@ -370,10 +405,17 @@ final class VADThresholdGate: @unchecked Sendable {
             continuationThresholdDb: currentFloor + config.adaptiveContinuationDeltaDb,
             silenceThresholdDb: currentFloor + Self.silenceDeltaDb
         )
+        let isDeferredOnset = !coldStartConverged
+            && !coldStartSpeechShapedNow
+            && levels.evidence == .strong
+        let evidence = isDeferredOnset ? VADEvidence.ambiguous : levels.evidence
+        let isSpeech = isDeferredOnset
+            ? false
+            : levels.evidence == .strong || levels.evidence == .continuing
         let (retroactiveSpeechMs, trailingSilenceMs) = takeRetroactiveCredit()
         return emit(
-            evidence: levels.evidence,
-            isSpeech: levels.evidence == .strong || levels.evidence == .continuing,
+            evidence: evidence,
+            isSpeech: isSpeech,
             thresholdDb: levels.strongThresholdDb,
             continuationThresholdDb: levels.continuationThresholdDb,
             silenceThresholdDb: levels.silenceThresholdDb,
@@ -433,6 +475,8 @@ final class VADThresholdGate: @unchecked Sendable {
             behaviorMode = .adaptive
             adaptiveRefinementElapsed = 0
             adaptiveRefinementComplete = false
+            coldStartSpeechShapedNow = false
+            coldStartConverged = false
             floorDb = Self.floorMinDb
         case .calibrated:
             behaviorMode = .calibrated
@@ -532,6 +576,20 @@ final class VADThresholdGate: @unchecked Sendable {
             values.append(adaptiveRollingDbs[index])
         }
         return percentile(values, percentile: Self.adaptiveRollingPercentile)
+    }
+
+    private func adaptiveRollingMaxDb(coverSeconds: Double) -> Double? {
+        guard adaptiveRollingCount > 0 else { return nil }
+        var maximum = -Double.infinity
+        var coveredSeconds = 0.0
+        for offset in 0..<adaptiveRollingCount {
+            let index = (adaptiveRollingWriteIndex - 1 - offset + Self.adaptiveRollingWindowCapacity)
+                % Self.adaptiveRollingWindowCapacity
+            maximum = max(maximum, adaptiveRollingDbs[index])
+            coveredSeconds += adaptiveRollingDurations[index]
+            if coveredSeconds > coverSeconds { break }
+        }
+        return maximum
     }
 
     private func adaptiveRollingPercentileAtLeast(_ floorDb: Double) -> Bool {

@@ -179,10 +179,14 @@ describe('VADThresholdGate', () => {
       const frameSamples = 160;
       let openedAtMs = null;
       let speechSamples = 0;
+      let firstStrongAtMs = null;
 
       for (let i = 0; i < 150; i++) {
-        const output = gate.process(-45, 0.01);
-        if (i === 0) assert.strictEqual(output.evidence, 'strong');
+        const frameDb = i < 2 ? -58 : (i % 8 === 0 ? -58 : -45);
+        const output = gate.process(frameDb, 0.01);
+        if (output.evidence === 'strong' && firstStrongAtMs === null) {
+          firstStrongAtMs = (i + 1) * 10;
+        }
         if (output.isSpeech) speechSamples += frameSamples;
         const decision = endpoint.process(output.evidence, frameSamples);
         if (decision.type === 'startUtterance' && openedAtMs === null) {
@@ -190,7 +194,9 @@ describe('VADThresholdGate', () => {
         }
       }
 
-      assert.ok(openedAtMs !== null && openedAtMs <= 70);
+      assert.ok(firstStrongAtMs !== null && firstStrongAtMs <= 170);
+      assert.strictEqual(gate.coldStartSpeechShapedNow, true);
+      assert.ok(openedAtMs !== null && openedAtMs <= 170);
       assert.ok(speechSamples >= 300 * 16);
       assert.deepStrictEqual(endpoint.forceFinalize('stop'), {
         type: 'finalizeUtterance',
@@ -201,7 +207,7 @@ describe('VADThresholdGate', () => {
     it('keeps the low seed from rising when speech starts on frame one', () => {
       const gate = new VADThresholdGate(config({ mode: 'adaptive' }));
       for (let i = 0; i < 10; i++) {
-        gate.process(-45, 0.1);
+        gate.process(i < 2 ? -58 : (i % 8 === 0 ? -58 : -45), 0.1);
       }
       assert.ok(gate.snapshot.floorDb <= -45);
     });

@@ -7,7 +7,7 @@ export const STREAM_ENDPOINT_ONSET_SAMPLES = 1120;
 export const STREAM_ENDPOINT_END_EVIDENCE_SAMPLES = 1600;
 export const STREAM_ENDPOINT_RESUME_SAMPLES = 1920;
 export const STREAM_ENDPOINT_AMBIGUOUS_RESCUE_SAMPLES = 5120;
-export const STREAM_ENDPOINT_PREROLL_SAMPLES = 4000;
+export const STREAM_ENDPOINT_PREROLL_SAMPLES = 8000;
 
 export const StreamingEndpointEvidence = Object.freeze({
   strong: 'strong',

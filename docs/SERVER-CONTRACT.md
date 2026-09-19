@@ -184,6 +184,9 @@ consecutive-silence fallback remains behind the disabled-by-default
 `streamEndpointMachineEnabled` kill switch and uses the `streamVadSpeechRms`,
 `streamVadSilenceMs`, and `streamVadMaxNoiseSec` settings.
 
+Cold-start refinement-window convergence is deliberately not idle-gated; this is the
+one intentional exception to the rule that the floor rises only while idle.
+
 The endpoint-machine defaults are:
 
 | Parameter | Default | Meaning |

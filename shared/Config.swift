@@ -222,7 +222,7 @@ struct SharedConfig {
         static let streamVadLegacySilenceMsDefault: Int = 2_000
         static let streamVadSilenceMsDefault: Int = streamVadEndpointSilenceMsDefault
         /// Pre-roll requested from the recorder when an utterance starts.
-        static let streamVadPreRollMsDefault: Int = 250
+        static let streamVadPreRollMsDefault: Int = 500
         /// Analysis-only wind filter cutoff. Captured PCM is never filtered.
         static let streamVadHpfCutoffHzDefault: Double = 100.0
         static let streamVadAnalysisHpfEnabledKey = "streamVadAnalysisHpfEnabled"

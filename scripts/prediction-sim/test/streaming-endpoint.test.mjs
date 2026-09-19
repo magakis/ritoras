@@ -173,14 +173,14 @@ describe('StreamingEndpoint', () => {
     assert.ok(gate.snapshot.floorDb < initialFloor);
   });
 
-  it('requires about 70ms of strong onset and requests 250ms of pre-roll', () => {
+  it('requires about 70ms of strong onset and requests 500ms of pre-roll', () => {
     const endpoint = new StreamingEndpoint();
     for (let i = 0; i < 6; i++) {
       assert.strictEqual(feed(endpoint, E.strong, 10).type, 'none');
     }
     const decision = feed(endpoint, E.strong, 10);
     assert.strictEqual(decision.type, 'startUtterance');
-    assert.strictEqual(decision.withPreRollSamples, 4000);
+    assert.strictEqual(decision.withPreRollSamples, 8000);
   });
 
   it('silence still finalizes after the full endpoint duration', () => {
