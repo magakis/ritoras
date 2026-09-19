@@ -166,31 +166,42 @@ When the user stops recording, the client:
 
 ## 7. Client-side VAD
 
-Streaming uses an energy-based RMS voice-activity detector with DC-corrected
-RMS. The accumulator includes leading silence, speech, audio between pauses,
-and trailing silence. A chunk is emitted when all of these conditions hold:
+Streaming uses an energy-based RMS voice-activity detector with DC-corrected RMS
+and an adaptive noise floor. The endpoint machine owns chunk boundaries. A
+chunk is emitted only when one of these events occurs:
 
-- consecutive silence is at least the configured silence threshold;
-- total accumulated audio is at least the minimum chunk duration; and
-- detected speech is at least the minimum speech duration.
+- a real speech-to-silence transition accumulates the endpoint silence
+  threshold, whose default is **700 ms** (`SharedConfig.streamVadEndpointSilenceMs`,
+  or **11,200 samples** at 16 kHz); or
+- recording ends and the stop flush finalizes the in-flight utterance.
 
-Stopping flushes the remainder when it contains at least the minimum speech
-duration. A noise guard discards the accumulator when more than the configured
-noise window of audio contains less than **0.1 seconds** of detected speech.
+The minimum speech and total chunk durations below determine whether the
+accumulated utterance is eligible for emission; they do not create another
+boundary. On the adaptive path, the noise floor is frozen while an utterance is
+in flight and rises only while the endpoint machine is idle. Floor convergence
+therefore cannot create a mid-utterance chunk boundary. A legacy
+consecutive-silence fallback remains behind the disabled-by-default
+`streamEndpointMachineEnabled` kill switch and uses the `streamVadSpeechRms`,
+`streamVadSilenceMs`, and `streamVadMaxNoiseSec` settings.
 
-All five values are user-configurable in **Settings → Streaming VAD**. User
-values override these defaults:
+The endpoint-machine defaults are:
 
-| Setting | Default | Meaning |
-|---------|---------|---------|
-| `speechRms` | `0.025` | RMS threshold for detected speech |
-| `silence` | `2000 ms` | Consecutive silence required to emit a chunk |
-| `minSpeech` | `300 ms` | Minimum detected speech in an emitted chunk or stop flush |
-| `minChunk` | `300 ms` | Minimum total audio in an emitted chunk |
-| `maxNoise` | `6.0 s` | Audio window used by the noise guard |
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `onsetSamples` | `1,120 samples` (**70 ms**) | Strong speech evidence required to start an utterance |
+| `endEvidenceSamples` | `1,600 samples` (**100 ms**) | Silence evidence required to enter endpoint-pending state |
+| `endpointSilenceSamples` | `11,200 samples` (**700 ms**) | Silence accumulation required to emit after a speech-to-silence transition |
+| `resumeSamples` | `1,920 samples` (**120 ms**) | Speech evidence required to resume a pending utterance |
+| `ambiguousRescueSamples` | `5,120 samples` (**320 ms**) | Ambiguous evidence required to rescue a pending endpoint |
+| `preRollSamples` | `4,000 samples` (**250 ms**) | Audio retained before onset |
+| `streamVadMinSpeechMs` | `300 ms` | Minimum detected speech in an emitted chunk or stop flush |
+| `streamVadMinChunkMs` | `300 ms` | Minimum total audio in an emitted chunk |
+
+The chunking semantics described here do not change the wire format or protocol.
 
 There is **no maximum chunk length** and no forced-finalization timer based on
-chunk duration.
+chunk duration. Unbounded continuous speech therefore produces one unbounded
+chunk; clients must treat chunk size as unbounded.
 
 ---
 
