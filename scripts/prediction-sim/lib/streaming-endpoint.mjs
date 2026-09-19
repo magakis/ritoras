@@ -8,6 +8,7 @@ export const STREAM_ENDPOINT_END_EVIDENCE_SAMPLES = 1600;
 export const STREAM_ENDPOINT_RESUME_SAMPLES = 1920;
 export const STREAM_ENDPOINT_AMBIGUOUS_RESCUE_SAMPLES = 5120;
 export const STREAM_ENDPOINT_PREROLL_SAMPLES = 8000;
+const STREAM_ENDPOINT_MIN_SAMPLES = 160;
 
 export const StreamingEndpointEvidence = Object.freeze({
   strong: 'strong',
@@ -38,9 +39,40 @@ export function makeStreamingEndpointConfig(partial = {}) {
     preRollSamples: STREAM_ENDPOINT_PREROLL_SAMPLES,
     ...(partial ?? {}),
   };
-  if (partial?.endpointSilenceMs !== undefined) {
-    config.endpointSilenceSamples = partial.endpointSilenceMs * 16;
+  const millisecondFields = [
+    ['onsetMs', 'onsetSamples'],
+    ['endEvidenceMs', 'endEvidenceSamples'],
+    ['endpointSilenceMs', 'endpointSilenceSamples'],
+    ['resumeMs', 'resumeSamples'],
+    ['ambiguousRescueMs', 'ambiguousRescueSamples'],
+    ['preRollMs', 'preRollSamples'],
+  ];
+  for (const [millisecondsKey, samplesKey] of millisecondFields) {
+    if (partial?.[millisecondsKey] !== undefined) {
+      config[samplesKey] = partial[millisecondsKey] * 16;
+    }
   }
+  config.onsetSamples = Math.max(STREAM_ENDPOINT_MIN_SAMPLES, config.onsetSamples);
+  config.endEvidenceSamples = Math.max(
+    STREAM_ENDPOINT_MIN_SAMPLES,
+    config.endEvidenceSamples,
+  );
+  config.endpointSilenceSamples = Math.max(
+    STREAM_ENDPOINT_MIN_SAMPLES,
+    config.endpointSilenceSamples,
+  );
+  config.endEvidenceSamples = Math.min(
+    config.endEvidenceSamples,
+    config.endpointSilenceSamples,
+  );
+  // Resume above endpoint silence is permitted but inert: evidence classes are
+  // mutually exclusive, so endpoint silence wins before resume can accrue.
+  config.resumeSamples = Math.max(STREAM_ENDPOINT_MIN_SAMPLES, config.resumeSamples);
+  config.ambiguousRescueSamples = Math.max(
+    STREAM_ENDPOINT_MIN_SAMPLES,
+    config.ambiguousRescueSamples,
+  );
+  config.preRollSamples = Math.max(STREAM_ENDPOINT_MIN_SAMPLES, config.preRollSamples);
   return config;
 }
 

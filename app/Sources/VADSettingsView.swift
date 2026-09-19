@@ -41,6 +41,33 @@ struct VADSettingsView: View {
         .onChange(of: settings.streamVadAdaptiveDeltaDb) { _, _ in
             rebuildTesterGate()
         }
+        .onChange(of: settings.streamVadAdaptationSpeed) { _, _ in
+            rebuildTesterGate()
+        }
+        .onChange(of: settings.streamVadAdaptiveSilenceDeltaDb) { _, _ in
+            rebuildTesterGate()
+        }
+        .onChange(of: settings.streamVadStaleFloorSeconds) { _, _ in
+            rebuildTesterGate()
+        }
+        .onChange(of: settings.streamVadFallTauSeconds) { _, _ in
+            rebuildTesterGate()
+        }
+        .onChange(of: settings.streamVadOnsetMs) { _, _ in
+            rebuildTesterGate()
+        }
+        .onChange(of: settings.streamVadEndEvidenceMs) { _, _ in
+            rebuildTesterGate()
+        }
+        .onChange(of: settings.streamVadResumeMs) { _, _ in
+            rebuildTesterGate()
+        }
+        .onChange(of: settings.streamVadAmbiguousRescueMs) { _, _ in
+            rebuildTesterGate()
+        }
+        .onChange(of: settings.streamVadPreRollMs) { _, _ in
+            rebuildTesterGate()
+        }
         .onChange(of: settings.streamVadSensitivityProfile) { _, _ in
             rebuildTesterGate()
         }
@@ -183,7 +210,6 @@ struct VADSettingsView: View {
             modeSection
 
             Section {
-                silenceDurationRow
                 switch settings.streamVadMode {
                 case .staticMode:
                     speechRmsRow
@@ -197,11 +223,13 @@ struct VADSettingsView: View {
                 minChunkDurationRow
             } footer: {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Silence duration is an Advanced override. Picking a Pause profile resets the silence slider to that profile's value.")
                     Text("Changing the Normal sensitivity profile resets the Advanced Sensitivity Δ.")
                     Text("Changes apply live to this tester and on the next recording.")
                 }
             }
+
+            endpointTimingSection
+            floorDynamicsSection
 
             signalPathSection
         }
@@ -267,8 +295,53 @@ struct VADSettingsView: View {
             calibrationMs: settings.streamVadCalibrationMs,
             calibratedOffsetDb: settings.streamVadCalibratedOffsetDb,
             adaptiveDeltaDb: SharedConfig.streamVadAdaptiveDeltaDb(),
-            adaptiveContinuationDeltaDb: SharedConfig.streamVadAdaptiveContinuationDeltaDb()
+            adaptiveContinuationDeltaDb: SharedConfig.streamVadAdaptiveContinuationDeltaDb(),
+            adaptiveRiseSpeedMultiplier: settings.streamVadAdaptationSpeed,
+            adaptiveSilenceDeltaDb: settings.streamVadAdaptiveSilenceDeltaDb,
+            adaptiveStaleFloorSeconds: settings.streamVadStaleFloorSeconds,
+            adaptiveFallTauSeconds: settings.streamVadFallTauSeconds
         ))
+    }
+
+    private var endpointTimingSection: some View {
+        Section {
+            silenceDurationRow
+            onsetConfirmationRow
+            endEvidenceRow
+            resumeGraceRow
+            ambiguousRescueRow
+            preRollRow
+        } header: {
+            Text("Endpoint timing")
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Endpoint timing applies to every mode; floor dynamics only to adaptive.")
+                Button("Reset to Defaults", role: .destructive) {
+                    settings.resetVadEndpointTimingDefaults()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var floorDynamicsSection: some View {
+        if settings.streamVadMode == .adaptive {
+            Section {
+                adaptationSpeedRow
+                adaptiveSilenceDeltaRow
+                staleFloorRow
+                fallTauRow
+            } header: {
+                Text("Floor dynamics")
+            } footer: {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Floor dynamics control how adaptive mode follows changing room noise. 0.5× matches the previous steady feel.")
+                    Button("Reset to Defaults", role: .destructive) {
+                        settings.resetVadFloorDynamicsDefaults()
+                    }
+                }
+            }
+        }
     }
 
     private var signalPathSection: some View {
@@ -346,6 +419,176 @@ struct VADSettingsView: View {
                     .foregroundColor(.secondary)
             }
             Slider(value: $settings.streamVadCalibratedOffsetDb, in: 3...20, step: 1)
+        }
+    }
+
+    private var onsetConfirmationRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Onset Confirmation")
+                Spacer()
+                Text("\(settings.streamVadOnsetMs) ms")
+                    .foregroundColor(.secondary)
+            }
+            Slider(
+                value: Binding(
+                    get: { Double(settings.streamVadOnsetMs) },
+                    set: { settings.streamVadOnsetMs = Int($0) }
+                ),
+                in: 30...500,
+                step: 10
+            )
+            Text("Loud audio must hold this long to start an utterance")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var endEvidenceRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("End Evidence")
+                Spacer()
+                Text("\(settings.streamVadEndEvidenceMs) ms")
+                    .foregroundColor(.secondary)
+            }
+            Slider(
+                value: Binding(
+                    get: { Double(settings.streamVadEndEvidenceMs) },
+                    set: { settings.streamVadEndEvidenceMs = Int($0) }
+                ),
+                in: 50...500,
+                step: 10
+            )
+            Text("Quiet must hold this long before the end timer arms")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var resumeGraceRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Resume Grace")
+                Spacer()
+                Text("\(settings.streamVadResumeMs) ms")
+                    .foregroundColor(.secondary)
+            }
+            Slider(
+                value: Binding(
+                    get: { Double(settings.streamVadResumeMs) },
+                    set: { settings.streamVadResumeMs = Int($0) }
+                ),
+                in: 50...500,
+                step: 10
+            )
+            Text("Speech must persist this long to cancel a pending end")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var ambiguousRescueRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Ambiguous Rescue")
+                Spacer()
+                Text("\(settings.streamVadAmbiguousRescueMs) ms")
+                    .foregroundColor(.secondary)
+            }
+            Slider(
+                value: Binding(
+                    get: { Double(settings.streamVadAmbiguousRescueMs) },
+                    set: { settings.streamVadAmbiguousRescueMs = Int($0) }
+                ),
+                in: 100...1000,
+                step: 10
+            )
+            Text("In-between audio this long pulls back a pending end")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var preRollRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Pre-roll")
+                Spacer()
+                Text("\(settings.streamVadPreRollMs) ms")
+                    .foregroundColor(.secondary)
+            }
+            Slider(
+                value: Binding(
+                    get: { Double(settings.streamVadPreRollMs) },
+                    set: { settings.streamVadPreRollMs = Int($0) }
+                ),
+                in: 100...1000,
+                step: 10
+            )
+            Text("Audio kept before each utterance — keep at or above 250 ms to capture the first word whole")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var adaptationSpeedRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Adaptation Speed")
+                Spacer()
+                Text("\(settings.streamVadAdaptationSpeed, specifier: "%.1f")×")
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: $settings.streamVadAdaptationSpeed, in: 0.5...4.0, step: 0.5)
+            Text("How fast the floor follows the room getting louder")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var adaptiveSilenceDeltaRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Silence Δ")
+                Spacer()
+                Text("\(settings.streamVadAdaptiveSilenceDeltaDb, specifier: "%.1f") dB")
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: $settings.streamVadAdaptiveSilenceDeltaDb, in: 1...5, step: 0.5)
+            Text("How far above the floor still counts as quiet")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var staleFloorRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Stale Window")
+                Spacer()
+                Text("\(settings.streamVadStaleFloorSeconds, specifier: "%.1f") s")
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: $settings.streamVadStaleFloorSeconds, in: 0.5...5.0, step: 0.1)
+            Text("Idle time without quiet before the floor snaps to the room")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var fallTauRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Fall Speed")
+                Spacer()
+                Text("\(settings.streamVadFallTauSeconds, specifier: "%.1f") s")
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: $settings.streamVadFallTauSeconds, in: 0.2...2.0, step: 0.1)
+            Text("How fast the floor drops when the room quiets")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
     }
 

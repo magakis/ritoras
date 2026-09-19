@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   StreamingEndpoint,
   StreamingEndpointEvidence as E,
+  makeStreamingEndpointConfig,
 } from '../lib/streaming-endpoint.mjs';
 import {
   VADThresholdGate,
@@ -23,6 +24,69 @@ function startEndpoint() {
 }
 
 describe('StreamingEndpoint', () => {
+  it('normalizes millisecond inputs to the sample floor and orders end evidence', () => {
+    const configuration = makeStreamingEndpointConfig({
+      onsetMs: 1,
+      endEvidenceMs: 500,
+      endpointSilenceMs: 450,
+      resumeMs: 1,
+      ambiguousRescueMs: 1,
+      preRollMs: 1,
+    });
+
+    assert.strictEqual(configuration.onsetSamples, 160);
+    assert.strictEqual(configuration.endEvidenceSamples, 450 * 16);
+    assert.strictEqual(configuration.endpointSilenceSamples, 450 * 16);
+    assert.strictEqual(configuration.resumeSamples, 160);
+    assert.strictEqual(configuration.ambiguousRescueSamples, 160);
+    assert.strictEqual(configuration.preRollSamples, 160);
+  });
+
+  it('applies the ten-millisecond floor to direct sample configuration', () => {
+    const configuration = makeStreamingEndpointConfig({
+      onsetSamples: 0,
+      endEvidenceSamples: 1,
+      endpointSilenceSamples: 2,
+      resumeSamples: 3,
+      ambiguousRescueSamples: 4,
+      preRollSamples: 5,
+    });
+
+    assert.deepStrictEqual(
+      {
+        onset: configuration.onsetSamples,
+        endEvidence: configuration.endEvidenceSamples,
+        endpointSilence: configuration.endpointSilenceSamples,
+        resume: configuration.resumeSamples,
+        rescue: configuration.ambiguousRescueSamples,
+        preRoll: configuration.preRollSamples,
+      },
+      {
+        onset: 160,
+        endEvidence: 160,
+        endpointSilence: 160,
+        resume: 160,
+        rescue: 160,
+        preRoll: 160,
+      },
+    );
+  });
+
+  it('permits an inert resume threshold above endpoint silence', () => {
+    const endpoint = new StreamingEndpoint({
+      onsetMs: 10,
+      endEvidenceMs: 10,
+      endpointSilenceMs: 20,
+      resumeMs: 100,
+    });
+    assert.ok(endpoint.configuration.resumeSamples > endpoint.configuration.endpointSilenceSamples);
+
+    feed(endpoint, E.strong, 10);
+    feed(endpoint, E.silence, 10);
+    assert.strictEqual(endpoint.state, 'endPending');
+    assert.strictEqual(feed(endpoint, E.silence, 10).type, 'finalizeUtterance');
+  });
+
   it('does not clip a quiet trailing word before 700ms of real silence', () => {
     const endpoint = startEndpoint();
     feed(endpoint, E.continuing, 40);

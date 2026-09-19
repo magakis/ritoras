@@ -19,6 +19,15 @@ class AppSettings: ObservableObject {
     @Published var streamVadCalibrationMs: Int = SharedConfig.Defaults.streamVadCalibrationMsDefault
     @Published var streamVadCalibratedOffsetDb: Double = SharedConfig.Defaults.streamVadCalibratedOffsetDbDefault
     @Published var streamVadAdaptiveDeltaDb: Double = SharedConfig.Defaults.streamVadAdaptiveDeltaDbDefault
+    @Published var streamVadAdaptationSpeed: Double = SharedConfig.Defaults.streamVadAdaptationSpeedDefault
+    @Published var streamVadAdaptiveSilenceDeltaDb: Double = SharedConfig.Defaults.streamVadAdaptiveSilenceDeltaDbDefault
+    @Published var streamVadStaleFloorSeconds: Double = SharedConfig.Defaults.streamVadStaleFloorSecondsDefault
+    @Published var streamVadFallTauSeconds: Double = SharedConfig.Defaults.streamVadFallTauSecondsDefault
+    @Published var streamVadOnsetMs: Int = SharedConfig.Defaults.streamVadOnsetMsDefault
+    @Published var streamVadEndEvidenceMs: Int = SharedConfig.Defaults.streamVadEndEvidenceMsDefault
+    @Published var streamVadResumeMs: Int = SharedConfig.Defaults.streamVadResumeMsDefault
+    @Published var streamVadAmbiguousRescueMs: Int = SharedConfig.Defaults.streamVadAmbiguousRescueMsDefault
+    @Published var streamVadPreRollMs: Int = SharedConfig.Defaults.streamVadPreRollMsDefault
     @Published var streamVadSpeechRms: Float = SharedConfig.Defaults.streamVadSpeechRmsDefault
     @Published var streamVadSilenceMs: Int = SharedConfig.Defaults.streamVadSilenceMsDefault
     @Published var streamVadMinSpeechMs: Int = SharedConfig.Defaults.streamVadMinSpeechMsDefault
@@ -49,6 +58,15 @@ class AppSettings: ObservableObject {
         streamVadCalibrationMs = SharedConfig.streamVadCalibrationMs()
         streamVadCalibratedOffsetDb = SharedConfig.streamVadCalibratedOffsetDb()
         streamVadAdaptiveDeltaDb = SharedConfig.streamVadAdaptiveDeltaDb()
+        streamVadAdaptationSpeed = SharedConfig.streamVadAdaptationSpeed()
+        streamVadAdaptiveSilenceDeltaDb = SharedConfig.streamVadAdaptiveSilenceDeltaDb()
+        streamVadStaleFloorSeconds = SharedConfig.streamVadStaleFloorSeconds()
+        streamVadFallTauSeconds = SharedConfig.streamVadFallTauSeconds()
+        streamVadOnsetMs = SharedConfig.streamVadOnsetMs()
+        streamVadEndEvidenceMs = SharedConfig.streamVadEndEvidenceMs()
+        streamVadResumeMs = SharedConfig.streamVadResumeMs()
+        streamVadAmbiguousRescueMs = SharedConfig.streamVadAmbiguousRescueMs()
+        streamVadPreRollMs = SharedConfig.streamVadPreRollMs()
         streamVadSpeechRms = SharedConfig.streamVadSpeechRms()
         streamVadSilenceMs = SharedConfig.streamVadSilenceMs()
         streamVadMinSpeechMs = SharedConfig.streamVadMinSpeechMs()
@@ -143,6 +161,51 @@ class AppSettings: ObservableObject {
             self.streamVadAdaptiveDeltaOverridePresent = true
             self.saveStreamVadAdaptiveDeltaDb(newValue)
         }.store(in: &cancellables)
+        $streamVadAdaptationSpeed.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadAdaptationSpeed",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadAdaptationSpeed(newValue)
+        }.store(in: &cancellables)
+        $streamVadAdaptiveSilenceDeltaDb.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadAdaptiveSilenceDeltaDb",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadAdaptiveSilenceDeltaDb(newValue)
+        }.store(in: &cancellables)
+        $streamVadStaleFloorSeconds.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadStaleFloorSeconds",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadStaleFloorSeconds(newValue)
+        }.store(in: &cancellables)
+        $streamVadFallTauSeconds.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadFallTauSeconds",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadFallTauSeconds(newValue)
+        }.store(in: &cancellables)
+        $streamVadOnsetMs.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadOnsetMs",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadOnsetMs(newValue)
+        }.store(in: &cancellables)
+        $streamVadEndEvidenceMs.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadEndEvidenceMs",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadEndEvidenceMs(newValue)
+        }.store(in: &cancellables)
+        $streamVadResumeMs.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadResumeMs",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadResumeMs(newValue)
+        }.store(in: &cancellables)
+        $streamVadAmbiguousRescueMs.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadAmbiguousRescueMs",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadAmbiguousRescueMs(newValue)
+        }.store(in: &cancellables)
+        $streamVadPreRollMs.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadPreRollMs",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadPreRollMs(newValue)
+        }.store(in: &cancellables)
         $streamVadSpeechRms.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving streamVadSpeechRms",
                                    payload: ["value": newValue])
@@ -197,6 +260,15 @@ class AppSettings: ObservableObject {
             appGroupDefaults?.set(streamVadAdaptiveDeltaDb, forKey: SharedConfig.Defaults.streamVadAdaptiveDeltaDbKey)
             appGroupDefaults?.set(true, forKey: SharedConfig.Defaults.streamVadAdaptiveDeltaDbOverrideKey)
         }
+        appGroupDefaults?.set(streamVadAdaptationSpeed, forKey: SharedConfig.Defaults.streamVadAdaptationSpeedKey)
+        appGroupDefaults?.set(streamVadAdaptiveSilenceDeltaDb, forKey: SharedConfig.Defaults.streamVadAdaptiveSilenceDeltaDbKey)
+        appGroupDefaults?.set(streamVadStaleFloorSeconds, forKey: SharedConfig.Defaults.streamVadStaleFloorSecondsKey)
+        appGroupDefaults?.set(streamVadFallTauSeconds, forKey: SharedConfig.Defaults.streamVadFallTauSecondsKey)
+        appGroupDefaults?.set(streamVadOnsetMs, forKey: SharedConfig.Defaults.streamVadOnsetMsKey)
+        appGroupDefaults?.set(streamVadEndEvidenceMs, forKey: SharedConfig.Defaults.streamVadEndEvidenceMsKey)
+        appGroupDefaults?.set(streamVadResumeMs, forKey: SharedConfig.Defaults.streamVadResumeMsKey)
+        appGroupDefaults?.set(streamVadAmbiguousRescueMs, forKey: SharedConfig.Defaults.streamVadAmbiguousRescueMsKey)
+        appGroupDefaults?.set(streamVadPreRollMs, forKey: SharedConfig.Defaults.streamVadPreRollMsKey)
         appGroupDefaults?.set(streamVadSpeechRms, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
         if streamVadSilenceOverridePresent {
             appGroupDefaults?.set(streamVadSilenceMs, forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
@@ -281,6 +353,51 @@ class AppSettings: ObservableObject {
         postSettingsChanged()
     }
 
+    private func saveStreamVadAdaptationSpeed(_ value: Double) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadAdaptationSpeedKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamVadAdaptiveSilenceDeltaDb(_ value: Double) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadAdaptiveSilenceDeltaDbKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamVadStaleFloorSeconds(_ value: Double) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadStaleFloorSecondsKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamVadFallTauSeconds(_ value: Double) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadFallTauSecondsKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamVadOnsetMs(_ value: Int) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadOnsetMsKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamVadEndEvidenceMs(_ value: Int) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadEndEvidenceMsKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamVadResumeMs(_ value: Int) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadResumeMsKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamVadAmbiguousRescueMs(_ value: Int) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadAmbiguousRescueMsKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamVadPreRollMs(_ value: Int) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadPreRollMsKey)
+        postSettingsChanged()
+    }
+
     private func saveStreamVadSpeechRms(_ value: Float) {
         appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
         postSettingsChanged()
@@ -324,13 +441,31 @@ class AppSettings: ObservableObject {
         resetVadToDefaults()
     }
 
+    func resetVadEndpointTimingDefaults() {
+        streamVadSilenceOverridePresent = false
+        appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
+        appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
+        streamVadOnsetMs = SharedConfig.Defaults.streamVadOnsetMsDefault
+        streamVadEndEvidenceMs = SharedConfig.Defaults.streamVadEndEvidenceMsDefault
+        streamVadResumeMs = SharedConfig.Defaults.streamVadResumeMsDefault
+        streamVadAmbiguousRescueMs = SharedConfig.Defaults.streamVadAmbiguousRescueMsDefault
+        streamVadPreRollMs = SharedConfig.Defaults.streamVadPreRollMsDefault
+        updatingDerivedVadValue = true
+        streamVadSilenceMs = SharedConfig.Defaults.streamVadSilenceMsDefault
+        updatingDerivedVadValue = false
+    }
+
+    func resetVadFloorDynamicsDefaults() {
+        streamVadAdaptationSpeed = SharedConfig.Defaults.streamVadAdaptationSpeedDefault
+        streamVadAdaptiveSilenceDeltaDb = SharedConfig.Defaults.streamVadAdaptiveSilenceDeltaDbDefault
+        streamVadStaleFloorSeconds = SharedConfig.Defaults.streamVadStaleFloorSecondsDefault
+        streamVadFallTauSeconds = SharedConfig.Defaults.streamVadFallTauSecondsDefault
+    }
+
     func resetVadToDefaults() {
         streamVadAdaptiveDeltaOverridePresent = false
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadAdaptiveDeltaDbKey)
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadAdaptiveDeltaDbOverrideKey)
-        streamVadSilenceOverridePresent = false
-        appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
-        appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
         streamVadSensitivityProfile = SharedConfig.Defaults.streamVadSensitivityProfileDefault
         streamVadPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
         streamVadMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .staticMode
@@ -338,10 +473,11 @@ class AppSettings: ObservableObject {
         streamVadCalibratedOffsetDb = SharedConfig.Defaults.streamVadCalibratedOffsetDbDefault
         updatingDerivedVadValue = true
         streamVadAdaptiveDeltaDb = SharedConfig.Defaults.streamVadAdaptiveDeltaDbDefault
-        streamVadSilenceMs = SharedConfig.Defaults.streamVadSilenceMsDefault
         updatingDerivedVadValue = false
         streamVadSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
         streamVadMinSpeechMs = SharedConfig.Defaults.streamVadMinSpeechMsDefault
         streamVadMinChunkMs = SharedConfig.Defaults.streamVadMinChunkMsDefault
+        resetVadEndpointTimingDefaults()
+        resetVadFloorDynamicsDefaults()
     }
 }

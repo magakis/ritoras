@@ -152,8 +152,12 @@ private final class VADContext: @unchecked Sendable {
         self.maxNoiseSamples = maxNoiseSamples
         self.endpointMachineEnabled = endpointMachineEnabled
         self.endpoint = StreamingEndpoint(configuration: StreamingEndpointConfiguration(
+            onsetSamples: Int(Double(SharedConfig.streamVadOnsetMs()) * 16.0),
+            endEvidenceSamples: Int(Double(SharedConfig.streamVadEndEvidenceMs()) * 16.0),
             endpointSilenceSamples: silenceThresholdSamples,
-            preRollSamples: preRollSamples
+            resumeSamples: Int(Double(SharedConfig.streamVadResumeMs()) * 16.0),
+            ambiguousRescueSamples: Int(Double(SharedConfig.streamVadAmbiguousRescueMs()) * 16.0),
+            preRollSamples: Int(Double(SharedConfig.streamVadPreRollMs()) * 16.0)
         ))
         self.preRollSamples = max(0, preRollSamples)
         self.analysisHpf = analysisHpfEnabled
@@ -672,7 +676,11 @@ actor StreamingAudioRecorder {
             calibrationMs: SharedConfig.streamVadCalibrationMs(),
             calibratedOffsetDb: SharedConfig.streamVadCalibratedOffsetDb(),
             adaptiveDeltaDb: SharedConfig.streamVadAdaptiveDeltaDb(),
-            adaptiveContinuationDeltaDb: SharedConfig.streamVadAdaptiveContinuationDeltaDb()
+            adaptiveContinuationDeltaDb: SharedConfig.streamVadAdaptiveContinuationDeltaDb(),
+            adaptiveRiseSpeedMultiplier: SharedConfig.streamVadAdaptationSpeed(),
+            adaptiveSilenceDeltaDb: SharedConfig.streamVadAdaptiveSilenceDeltaDb(),
+            adaptiveStaleFloorSeconds: SharedConfig.streamVadStaleFloorSeconds(),
+            adaptiveFallTauSeconds: SharedConfig.streamVadFallTauSeconds()
         )
         self.vadGateConfig = vadGateConfig
         vad = VADContext(
@@ -682,7 +690,7 @@ actor StreamingAudioRecorder {
             minChunkSamples: minChunkSamples,
             maxNoiseSamples: maxNoiseSamples,
             endpointMachineEnabled: SharedConfig.streamEndpointMachineEnabled(),
-            preRollSamples: Int(Double(SharedConfig.Defaults.streamVadPreRollMsDefault) * 16.0),
+            preRollSamples: Int(Double(SharedConfig.streamVadPreRollMs()) * 16.0),
             analysisHpfEnabled: SharedConfig.streamVadAnalysisHpfEnabled(),
             analysisHpfCutoffHz: SharedConfig.Defaults.streamVadHpfCutoffHzDefault
         )

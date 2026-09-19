@@ -43,14 +43,26 @@ struct StreamingEndpointConfiguration {
         endpointSilenceSamples: Int = 11_200,
         resumeSamples: Int = 1_920,
         ambiguousRescueSamples: Int = 5_120,
-        preRollSamples: Int = 4_000
+        preRollSamples: Int = 8_000
     ) {
-        self.onsetSamples = onsetSamples
-        self.endEvidenceSamples = endEvidenceSamples
-        self.endpointSilenceSamples = endpointSilenceSamples
-        self.resumeSamples = resumeSamples
-        self.ambiguousRescueSamples = ambiguousRescueSamples
-        self.preRollSamples = preRollSamples
+        let normalizedOnsetSamples = max(160, onsetSamples)
+        let normalizedEndEvidenceSamples = max(160, endEvidenceSamples)
+        let normalizedEndpointSilenceSamples = max(160, endpointSilenceSamples)
+        // Resume above endpoint silence is permitted but inert: evidence classes
+        // are mutually exclusive, so endpoint silence wins before resume can accrue.
+        let normalizedResumeSamples = max(160, resumeSamples)
+        let normalizedAmbiguousRescueSamples = max(160, ambiguousRescueSamples)
+        let normalizedPreRollSamples = max(160, preRollSamples)
+
+        self.onsetSamples = normalizedOnsetSamples
+        self.endEvidenceSamples = min(
+            normalizedEndEvidenceSamples,
+            normalizedEndpointSilenceSamples
+        )
+        self.endpointSilenceSamples = normalizedEndpointSilenceSamples
+        self.resumeSamples = normalizedResumeSamples
+        self.ambiguousRescueSamples = normalizedAmbiguousRescueSamples
+        self.preRollSamples = normalizedPreRollSamples
     }
 }
 

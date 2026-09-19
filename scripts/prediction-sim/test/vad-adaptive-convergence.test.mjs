@@ -12,8 +12,11 @@ const frameDurationMs = 10;
 const frameDuration = frameDurationMs / 1000;
 const frameSamples = frameDurationMs * 16;
 
-function makeGate() {
-  return new VADThresholdGate(makeVadGateConfig({ mode: 'adaptive' }));
+function makeGate(partial = {}) {
+  return new VADThresholdGate(makeVadGateConfig({
+    mode: 'adaptive',
+    ...partial,
+  }));
 }
 
 function makeEndpoint(endpointSilenceMs = 3000) {
@@ -570,6 +573,62 @@ describe('adaptive VAD convergence', () => {
     gate.process(-65, frameDuration);
     assert.strictEqual(gate.takePendingReanchorEvent(), true);
     assert.strictEqual(gate.snapshot.floorDb, -65);
+  });
+
+  it('normalizes stale base time before applying the rise multiplier', () => {
+    const shortGate = makeGate({
+      adaptiveStaleFloorSeconds: 1.5,
+      adaptiveRiseSpeedMultiplier: 4,
+    });
+    const longGate = makeGate({
+      adaptiveStaleFloorSeconds: 3,
+      adaptiveRiseSpeedMultiplier: 0.5,
+    });
+    for (const gate of [shortGate, longGate]) {
+      for (let i = 0; i < 10; i++) gate.process(-65, 0.1);
+      gate.floorDb = -70;
+      gate.adaptiveRefinementComplete = true;
+    }
+
+    function firstReanchorSeconds(gate) {
+      for (let i = 0; i < 700; i++) {
+        gate.process(-65, 0.01);
+        if (gate.takePendingReanchorEvent()) return (i + 1) * 0.01;
+      }
+      return null;
+    }
+
+    const shortReanchorSeconds = firstReanchorSeconds(shortGate);
+    const longReanchorSeconds = firstReanchorSeconds(longGate);
+    assert.ok(shortReanchorSeconds >= 0.37 && shortReanchorSeconds <= 0.39);
+    assert.ok(longReanchorSeconds >= 5.99 && longReanchorSeconds <= 6.01);
+  });
+
+  it('pins the shipped default profile: 12 dB/s rise and 1.5 s stale window', () => {
+    const defaultTiming = {
+      adaptiveRiseSpeedMultiplier: 1,
+      adaptiveStaleFloorSeconds: 1.5,
+    };
+    const staleGate = makeGate(defaultTiming);
+    staleGate.floorDb = -70;
+    staleGate.adaptiveRefinementComplete = true;
+
+    let reanchorSeconds = null;
+    for (let i = 0; i < 200; i++) {
+      staleGate.process(-65, 0.01);
+      if (staleGate.takePendingReanchorEvent()) {
+        reanchorSeconds = (i + 1) * 0.01;
+        break;
+      }
+    }
+    assert.ok(reanchorSeconds >= 1.49 && reanchorSeconds <= 1.51);
+
+    const riseGate = makeGate(defaultTiming);
+    riseGate.floorDb = -70;
+    riseGate.adaptiveRefinementComplete = true;
+    riseGate.process(-63, 0.1);
+    riseGate.updateFloorTracking(-63, 0.1, true);
+    assert.ok(Math.abs(riseGate.snapshot.floorDb - -68.8) < 0.001);
   });
 
   it('keeps an utterance when real speech follows continuous ambient', () => {

@@ -2,12 +2,10 @@
 // VADThresholdGate in shared/VADGate.swift, plus AudioMath in
 // shared/AudioMath.swift. Kept in sync per AGENTS.md → Test policy.
 
-export const VAD_TAU_FALL_S = 0.5;
 const VAD_CONTINUATION_DELTA_DB = 6.0;
-export const VAD_SILENCE_DELTA_DB = 3.0;
 export const VAD_STATIC_CONTINUATION_OFFSET_DB = 4.0;
 export const VAD_STATIC_SILENCE_OFFSET_DB = 6.0;
-export const VAD_ELEVATED_RISE_DB_PER_SECOND = 6.0;
+export const VAD_ELEVATED_RISE_DB_PER_SECOND = 12.0;
 export const VAD_SPEECH_CEILING_MARGIN_DB = 2.0;
 export const VAD_SUSTAINED_CONTINUING_ONSET_S = 1.0;
 export const VAD_ADAPTIVE_MIN_REFINEMENT_DURATION_S = 1.0;
@@ -20,9 +18,23 @@ export const VAD_FLOOR_MAX_DB = -20;
 export const CALIBRATION_QUARTILE = 0.25;
 export const QUIET_BAND_DB = 6.0;
 export const VAD_ADAPTIVE_ROLLING_PERCENTILE = 0.1;
-export const VAD_ADAPTIVE_STALE_FLOOR_DURATION_S = 3.0;
 export const VAD_ADAPTIVE_FLOOR_MOVEMENT_EPSILON_DB = 1e-6;
+export const VAD_ADAPTIVE_RISE_MULTIPLIER_MIN = 0.5;
+export const VAD_ADAPTIVE_RISE_MULTIPLIER_MAX = 4.0;
+export const VAD_ADAPTIVE_STRONG_DELTA_DB_MIN = 3.0;
+export const VAD_ADAPTIVE_STRONG_DELTA_DB_MAX = 24.0;
+export const VAD_ADAPTIVE_CONTINUATION_DELTA_DB_MIN = 2.0;
+export const VAD_ADAPTIVE_SILENCE_DELTA_DB_MIN = 1.0;
+export const VAD_ADAPTIVE_SILENCE_DELTA_DB_MAX = 5.0;
+export const VAD_ADAPTIVE_STALE_FLOOR_SECONDS_MIN = 0.5;
+export const VAD_ADAPTIVE_STALE_FLOOR_SECONDS_MAX = 10.0;
+export const VAD_ADAPTIVE_FALL_TAU_SECONDS_MIN = 0.2;
+export const VAD_ADAPTIVE_FALL_TAU_SECONDS_MAX = 2.0;
 const CALIBRATION_COMPLETION_EPSILON_S = 1e-9;
+
+function clamp(value, lower, upper) {
+  return Math.min(Math.max(value, lower), upper);
+}
 
 export function dbFromRms(rms) {
   const result = 20 * Math.log10(Math.max(rms, 1e-10));
@@ -41,6 +53,10 @@ export function makeVadGateConfig(partial = {}) {
     calibratedOffsetDb: 10.0,
     adaptiveDeltaDb: 10.0,
     adaptiveContinuationDeltaDb: 6.0,
+    adaptiveRiseSpeedMultiplier: 1.0,
+    adaptiveSilenceDeltaDb: 3.0,
+    adaptiveStaleFloorSeconds: 3.0,
+    adaptiveFallTauSeconds: 0.5,
     ...(partial ?? {}),
   };
 }
@@ -48,6 +64,36 @@ export function makeVadGateConfig(partial = {}) {
 export class VADThresholdGate {
   constructor(config) {
     this.config = makeVadGateConfig(config);
+    this.effectiveAdaptiveDeltaDb = clamp(
+      this.config.adaptiveDeltaDb,
+      VAD_ADAPTIVE_STRONG_DELTA_DB_MIN,
+      VAD_ADAPTIVE_STRONG_DELTA_DB_MAX,
+    );
+    this.effectiveAdaptiveContinuationDeltaDb = clamp(
+      this.config.adaptiveContinuationDeltaDb,
+      VAD_ADAPTIVE_CONTINUATION_DELTA_DB_MIN,
+      this.effectiveAdaptiveDeltaDb - 1,
+    );
+    this.effectiveSilenceDeltaDb = clamp(
+      this.config.adaptiveSilenceDeltaDb,
+      VAD_ADAPTIVE_SILENCE_DELTA_DB_MIN,
+      Math.min(5, this.effectiveAdaptiveContinuationDeltaDb - 1),
+    );
+    this.effectiveRiseSpeedMultiplier = clamp(
+      this.config.adaptiveRiseSpeedMultiplier,
+      VAD_ADAPTIVE_RISE_MULTIPLIER_MIN,
+      VAD_ADAPTIVE_RISE_MULTIPLIER_MAX,
+    );
+    this.effectiveStaleFloorSeconds = clamp(
+      this.config.adaptiveStaleFloorSeconds,
+      VAD_ADAPTIVE_STALE_FLOOR_SECONDS_MIN,
+      VAD_ADAPTIVE_STALE_FLOOR_SECONDS_MAX,
+    ) / this.effectiveRiseSpeedMultiplier;
+    this.effectiveFallTauSeconds = clamp(
+      this.config.adaptiveFallTauSeconds,
+      VAD_ADAPTIVE_FALL_TAU_SECONDS_MIN,
+      VAD_ADAPTIVE_FALL_TAU_SECONDS_MAX,
+    );
     this.behaviorMode = this.config.mode;
     this.calibrationFinished = false;
     this.calibrationElapsed = 0;
@@ -58,7 +104,7 @@ export class VADThresholdGate {
     this.coldStartConverged = false;
     this.floorDb = this.config.mode === 'adaptive' ? VAD_FLOOR_MIN_DB : null;
     this.thresholdDb = this.config.mode === 'adaptive'
-      ? VAD_FLOOR_MIN_DB + this.config.adaptiveDeltaDb
+      ? VAD_FLOOR_MIN_DB + this.effectiveAdaptiveDeltaDb
       : dbFromRms(this.config.staticRms);
     this.usedFallback = false;
     this.pendingRetroactiveSpeechMs = 0;
@@ -79,10 +125,10 @@ export class VADThresholdGate {
       evidence: 'silence',
       thresholdDb: this.thresholdDb,
       continuationThresholdDb: this.config.mode === 'adaptive'
-        ? VAD_FLOOR_MIN_DB + this.config.adaptiveContinuationDeltaDb
+        ? VAD_FLOOR_MIN_DB + this.effectiveAdaptiveContinuationDeltaDb
         : this.thresholdDb - VAD_STATIC_CONTINUATION_OFFSET_DB,
       silenceThresholdDb: this.config.mode === 'adaptive'
-        ? VAD_FLOOR_MIN_DB + VAD_SILENCE_DELTA_DB
+        ? VAD_FLOOR_MIN_DB + this.effectiveSilenceDeltaDb
         : this.thresholdDb - VAD_STATIC_SILENCE_OFFSET_DB,
       floorDb: this.floorDb,
       calibrating: this.config.mode === 'calibrated',
@@ -124,7 +170,7 @@ export class VADThresholdGate {
       && quietestStrongDb !== null
       && quietestStrongDb !== undefined
       && quietestStrongDb >= this.floorDb
-        + this.config.adaptiveDeltaDb
+        + this.effectiveAdaptiveDeltaDb
         + VAD_SPEECH_CEILING_MARGIN_DB) {
       this.speechCeilingDb = quietestStrongDb;
     }
@@ -199,7 +245,7 @@ export class VADThresholdGate {
     } else {
       const seededFloor = this.clampFloor(q1);
       this.floorDb = seededFloor;
-      this.thresholdDb = seededFloor + this.config.adaptiveDeltaDb;
+      this.thresholdDb = seededFloor + this.effectiveAdaptiveDeltaDb;
       this.adaptiveRefinementElapsed = 0;
       this.adaptiveRefinementComplete = true;
       this.behaviorMode = 'adaptive';
@@ -244,16 +290,16 @@ export class VADThresholdGate {
 
     let levels = this.classify(
       frameDb,
-      this.floorDb + this.config.adaptiveDeltaDb,
-      this.floorDb + this.config.adaptiveContinuationDeltaDb,
-      this.floorDb + VAD_SILENCE_DELTA_DB,
+      this.floorDb + this.effectiveAdaptiveDeltaDb,
+      this.floorDb + this.effectiveAdaptiveContinuationDeltaDb,
+      this.floorDb + this.effectiveSilenceDeltaDb,
     );
     if (levels.evidence === 'silence') {
       this.elapsedSinceSilenceEvidence = 0;
     } else {
       this.elapsedSinceSilenceEvidence += Math.max(0, frameDuration);
       if (this.elapsedSinceSilenceEvidence + CALIBRATION_COMPLETION_EPSILON_S
-        >= VAD_ADAPTIVE_STALE_FLOOR_DURATION_S
+        >= this.effectiveStaleFloorSeconds
         && this.lastKnownMachineIsIdle) {
         const target = this.adaptiveRollingPercentile();
         if (target !== null) {
@@ -263,10 +309,10 @@ export class VADThresholdGate {
             : this.clampFloor(Math.min(
               target,
               this.speechCeilingDb
-                - this.config.adaptiveDeltaDb
+                - this.effectiveAdaptiveDeltaDb
                 - VAD_SPEECH_CEILING_MARGIN_DB,
             ));
-          const maximumReanchorFloor = VAD_FLOOR_MAX_DB - this.config.adaptiveDeltaDb;
+          const maximumReanchorFloor = VAD_FLOOR_MAX_DB - this.effectiveAdaptiveDeltaDb;
           if (reanchoredFloor <= maximumReanchorFloor) {
             const floorMoved = Math.abs(reanchoredFloor - this.floorDb)
               > VAD_ADAPTIVE_FLOOR_MOVEMENT_EPSILON_DB;
@@ -277,9 +323,9 @@ export class VADThresholdGate {
             this.hasRefusedReanchorSinceLastAcceptance = false;
             levels = this.classify(
               frameDb,
-              reanchoredFloor + this.config.adaptiveDeltaDb,
-              reanchoredFloor + this.config.adaptiveContinuationDeltaDb,
-              reanchoredFloor + VAD_SILENCE_DELTA_DB,
+              reanchoredFloor + this.effectiveAdaptiveDeltaDb,
+              reanchoredFloor + this.effectiveAdaptiveContinuationDeltaDb,
+              reanchoredFloor + this.effectiveSilenceDeltaDb,
             );
           } else {
             this.hasRefusedReanchorSinceLastAcceptance = true;
@@ -310,7 +356,7 @@ export class VADThresholdGate {
     const windowMax = this.adaptiveRollingMaxDb(VAD_ADAPTIVE_COLD_START_DISPERSION_WINDOW_S);
     const dispersionDb = (windowMax ?? frameDb) - (rollingPercentile ?? frameDb);
     this.coldStartSpeechShapedNow = dispersionDb
-      >= this.config.adaptiveDeltaDb + VAD_SPEECH_CEILING_MARGIN_DB;
+      >= this.effectiveAdaptiveDeltaDb + VAD_SPEECH_CEILING_MARGIN_DB;
 
     if (!this.coldStartSpeechShapedNow
       && this.adaptiveRefinementElapsed >= VAD_ADAPTIVE_COLD_START_GRACE_S
@@ -339,9 +385,9 @@ export class VADThresholdGate {
     const currentFloor = this.floorDb ?? VAD_FLOOR_MIN_DB;
     const levels = this.classify(
       frameDb,
-      currentFloor + this.config.adaptiveDeltaDb,
-      currentFloor + this.config.adaptiveContinuationDeltaDb,
-      currentFloor + VAD_SILENCE_DELTA_DB,
+      currentFloor + this.effectiveAdaptiveDeltaDb,
+      currentFloor + this.effectiveAdaptiveContinuationDeltaDb,
+      currentFloor + this.effectiveSilenceDeltaDb,
     );
     const isDeferredOnset = !this.coldStartConverged
       && !this.coldStartSpeechShapedNow
@@ -376,23 +422,31 @@ export class VADThresholdGate {
         riseCap = 0;
         break;
       case 'continuing':
-        riseCap = machineIsIdle ? VAD_ELEVATED_RISE_DB_PER_SECOND : 0;
+        riseCap = machineIsIdle
+          ? VAD_ELEVATED_RISE_DB_PER_SECOND * this.effectiveRiseSpeedMultiplier
+          : 0;
         break;
       case 'ambiguous':
       case 'silence':
-        riseCap = machineIsIdle ? VAD_ELEVATED_RISE_DB_PER_SECOND : 0;
+        riseCap = machineIsIdle
+          ? VAD_ELEVATED_RISE_DB_PER_SECOND * this.effectiveRiseSpeedMultiplier
+          : 0;
         break;
       default:
-        riseCap = machineIsIdle ? VAD_ELEVATED_RISE_DB_PER_SECOND : 0;
+        riseCap = machineIsIdle
+          ? VAD_ELEVATED_RISE_DB_PER_SECOND * this.effectiveRiseSpeedMultiplier
+          : 0;
         break;
     }
     if (machineIsIdle && this.speechCeilingDb !== null) {
       const decayedCeilingDb = this.speechCeilingDb
-        + VAD_ELEVATED_RISE_DB_PER_SECOND * Math.max(0, duration);
+        + VAD_ELEVATED_RISE_DB_PER_SECOND
+          * this.effectiveRiseSpeedMultiplier
+          * Math.max(0, duration);
       const clampBound = decayedCeilingDb
-        - this.config.adaptiveDeltaDb
+        - this.effectiveAdaptiveDeltaDb
         - VAD_SPEECH_CEILING_MARGIN_DB;
-      this.speechCeilingDb = clampBound > VAD_FLOOR_MAX_DB - this.config.adaptiveDeltaDb
+      this.speechCeilingDb = clampBound > VAD_FLOOR_MAX_DB - this.effectiveAdaptiveDeltaDb
         ? null
         : decayedCeilingDb;
     }
@@ -424,7 +478,7 @@ export class VADThresholdGate {
       this.adaptiveRefinementComplete = false;
     }
     this.thresholdDb = this.config.mode === 'adaptive'
-      ? VAD_FLOOR_MIN_DB + this.config.adaptiveDeltaDb
+      ? VAD_FLOOR_MIN_DB + this.effectiveAdaptiveDeltaDb
       : dbFromRms(this.config.staticRms);
     this.elapsedSinceSilenceEvidence = 0;
     this.pendingReanchorEvent = false;
@@ -437,10 +491,10 @@ export class VADThresholdGate {
       evidence: 'silence',
       thresholdDb: this.thresholdDb,
       continuationThresholdDb: this.config.mode === 'adaptive'
-        ? VAD_FLOOR_MIN_DB + this.config.adaptiveContinuationDeltaDb
+        ? VAD_FLOOR_MIN_DB + this.effectiveAdaptiveContinuationDeltaDb
         : this.thresholdDb - VAD_STATIC_CONTINUATION_OFFSET_DB,
       silenceThresholdDb: this.config.mode === 'adaptive'
-        ? VAD_FLOOR_MIN_DB + VAD_SILENCE_DELTA_DB
+        ? VAD_FLOOR_MIN_DB + this.effectiveSilenceDeltaDb
         : this.thresholdDb - VAD_STATIC_SILENCE_OFFSET_DB,
       floorDb: this.floorDb,
       calibrating: this.config.mode === 'calibrated',
@@ -455,13 +509,13 @@ export class VADThresholdGate {
     if (targetDb > floor) {
       floor = Math.min(targetDb, floor + maximumRiseDbPerSecond * frameDuration);
     } else {
-      floor += (1 - Math.exp(-frameDuration / VAD_TAU_FALL_S))
+      floor += (1 - Math.exp(-frameDuration / this.effectiveFallTauSeconds))
         * (targetDb - floor);
     }
     if (this.speechCeilingDb !== null) {
       floor = Math.min(
         floor,
-        this.speechCeilingDb - this.config.adaptiveDeltaDb - VAD_SPEECH_CEILING_MARGIN_DB,
+        this.speechCeilingDb - this.effectiveAdaptiveDeltaDb - VAD_SPEECH_CEILING_MARGIN_DB,
       );
     }
     this.floorDb = this.clampFloor(floor);
@@ -567,9 +621,9 @@ export class VADThresholdGate {
   refreshAdaptiveOutput() {
     this.lastOutput = {
       ...this.lastOutput,
-      thresholdDb: this.floorDb + this.config.adaptiveDeltaDb,
-      continuationThresholdDb: this.floorDb + this.config.adaptiveContinuationDeltaDb,
-      silenceThresholdDb: this.floorDb + VAD_SILENCE_DELTA_DB,
+      thresholdDb: this.floorDb + this.effectiveAdaptiveDeltaDb,
+      continuationThresholdDb: this.floorDb + this.effectiveAdaptiveContinuationDeltaDb,
+      silenceThresholdDb: this.floorDb + this.effectiveSilenceDeltaDb,
       floorDb: this.floorDb,
       usedFallback: this.usedFallback,
     };

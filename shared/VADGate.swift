@@ -24,6 +24,10 @@ struct VADGateConfig {
     let calibratedOffsetDb: Double
     let adaptiveDeltaDb: Double
     let adaptiveContinuationDeltaDb: Double
+    let adaptiveRiseSpeedMultiplier: Double
+    let adaptiveSilenceDeltaDb: Double
+    let adaptiveStaleFloorSeconds: Double
+    let adaptiveFallTauSeconds: Double
 }
 
 struct VADGateOutput {
@@ -46,11 +50,9 @@ final class VADThresholdGate: @unchecked Sendable {
     }
 
     // Fixed algorithm constants. They are intentionally not user-facing settings.
-    private static let tauFall = 0.5
-    private static let silenceDeltaDb = 3.0
     private static let staticContinuationOffsetDb = 4.0
     private static let staticSilenceOffsetDb = 6.0
-    private static let elevatedRiseDbPerSecond = 6.0
+    private static let elevatedRiseDbPerSecond = 12.0
     private static let speechCeilingMarginDb = 2.0
     private static let adaptiveMinRefinementDuration = 1.0
     private static let adaptiveColdStartGraceSeconds = 0.4
@@ -62,11 +64,16 @@ final class VADThresholdGate: @unchecked Sendable {
     private static let calibrationQuartile = 0.25
     private static let quietBandDb = 6.0
     private static let adaptiveRollingPercentile = 0.1
-    private static let adaptiveStaleFloorSeconds = 3.0
     private static let adaptiveFloorMovementEpsilonDb = 1e-6
     private static let calibrationCompletionEpsilon = 1e-9
 
     private let config: VADGateConfig
+    private let effectiveAdaptiveDeltaDb: Double
+    private let effectiveAdaptiveContinuationDeltaDb: Double
+    private let effectiveSilenceDeltaDb: Double
+    private let effectiveRiseSpeedMultiplier: Double
+    private let effectiveStaleFloorSeconds: Double
+    private let effectiveFallTauSeconds: Double
     private var behaviorMode: VADMode
     private var calibrationFinished = false
     private var calibrationElapsed = 0.0
@@ -95,11 +102,35 @@ final class VADThresholdGate: @unchecked Sendable {
     private var lastOutput: VADGateOutput
 
     init(config: VADGateConfig) {
+        let clamp: (Double, Double, Double) -> Double = { value, lower, upper in
+            min(max(value, lower), upper)
+        }
+        let effectiveAdaptiveDeltaDb = clamp(config.adaptiveDeltaDb, 3.0, 24.0)
+        let effectiveAdaptiveContinuationDeltaDb = clamp(
+            config.adaptiveContinuationDeltaDb,
+            2.0,
+            effectiveAdaptiveDeltaDb - 1.0
+        )
+        let effectiveSilenceDeltaDb = clamp(
+            config.adaptiveSilenceDeltaDb,
+            1.0,
+            min(5.0, effectiveAdaptiveContinuationDeltaDb - 1.0)
+        )
+        let effectiveRiseSpeedMultiplier = clamp(config.adaptiveRiseSpeedMultiplier, 0.5, 4.0)
+        let effectiveStaleFloorSeconds = clamp(config.adaptiveStaleFloorSeconds, 0.5, 10.0)
+            / effectiveRiseSpeedMultiplier
+        let effectiveFallTauSeconds = clamp(config.adaptiveFallTauSeconds, 0.2, 2.0)
         let initialFloorDb: Double? = config.mode == .adaptive ? Self.floorMinDb : nil
         let initialThresholdDb = config.mode == .adaptive
-            ? Self.floorMinDb + config.adaptiveDeltaDb
+            ? Self.floorMinDb + effectiveAdaptiveDeltaDb
             : Double(AudioMath.dbFromRms(config.staticRms))
         self.config = config
+        self.effectiveAdaptiveDeltaDb = effectiveAdaptiveDeltaDb
+        self.effectiveAdaptiveContinuationDeltaDb = effectiveAdaptiveContinuationDeltaDb
+        self.effectiveSilenceDeltaDb = effectiveSilenceDeltaDb
+        self.effectiveRiseSpeedMultiplier = effectiveRiseSpeedMultiplier
+        self.effectiveStaleFloorSeconds = effectiveStaleFloorSeconds
+        self.effectiveFallTauSeconds = effectiveFallTauSeconds
         self.behaviorMode = config.mode
         self.adaptiveRefinementComplete = config.mode != .adaptive
         self.floorDb = initialFloorDb
@@ -109,10 +140,10 @@ final class VADThresholdGate: @unchecked Sendable {
             evidence: .silence,
             thresholdDb: initialThresholdDb,
             continuationThresholdDb: config.mode == .adaptive
-                ? Self.floorMinDb + config.adaptiveContinuationDeltaDb
+                ? Self.floorMinDb + effectiveAdaptiveContinuationDeltaDb
                 : initialThresholdDb - Self.staticContinuationOffsetDb,
             silenceThresholdDb: config.mode == .adaptive
-                ? Self.floorMinDb + Self.silenceDeltaDb
+                ? Self.floorMinDb + effectiveSilenceDeltaDb
                 : initialThresholdDb - Self.staticSilenceOffsetDb,
             floorDb: initialFloorDb,
             calibrating: config.mode == .calibrated,
@@ -167,7 +198,7 @@ final class VADThresholdGate: @unchecked Sendable {
         // floor below ambient and wedge the endpointer in speechActive.
         if let quietestStrongDb,
            let floorDb,
-           quietestStrongDb >= floorDb + config.adaptiveDeltaDb + Self.speechCeilingMarginDb {
+           quietestStrongDb >= floorDb + effectiveAdaptiveDeltaDb + Self.speechCeilingMarginDb {
             speechCeilingDb = quietestStrongDb
         }
         // Rejected or nil: keep the previous ceiling (idle decay still releases it).
@@ -252,7 +283,7 @@ final class VADThresholdGate: @unchecked Sendable {
             // away speech that occurred during the first window.
             let seededFloor = clampFloor(q1)
             floorDb = seededFloor
-            thresholdDb = seededFloor + config.adaptiveDeltaDb
+            thresholdDb = seededFloor + effectiveAdaptiveDeltaDb
             adaptiveRefinementElapsed = 0
             adaptiveRefinementComplete = true
             behaviorMode = .adaptive
@@ -297,18 +328,18 @@ final class VADThresholdGate: @unchecked Sendable {
             return processAdaptiveRefinement(frameDb: frameDb, frameDuration: frameDuration)
         }
 
-        let startDb = currentFloor + config.adaptiveDeltaDb
+        let startDb = currentFloor + effectiveAdaptiveDeltaDb
         var levels = classify(
             frameDb: frameDb,
             strongThresholdDb: startDb,
-            continuationThresholdDb: currentFloor + config.adaptiveContinuationDeltaDb,
-            silenceThresholdDb: currentFloor + Self.silenceDeltaDb
+            continuationThresholdDb: currentFloor + effectiveAdaptiveContinuationDeltaDb,
+            silenceThresholdDb: currentFloor + effectiveSilenceDeltaDb
         )
         if levels.evidence == .silence {
             elapsedSinceSilenceEvidence = 0
         } else {
             elapsedSinceSilenceEvidence += max(0, frameDuration)
-            if elapsedSinceSilenceEvidence + Self.calibrationCompletionEpsilon >= Self.adaptiveStaleFloorSeconds,
+            if elapsedSinceSilenceEvidence + Self.calibrationCompletionEpsilon >= effectiveStaleFloorSeconds,
                lastKnownMachineIsIdle,
                let target = adaptiveRollingPercentile() {
                 elapsedSinceSilenceEvidence = 0
@@ -316,12 +347,12 @@ final class VADThresholdGate: @unchecked Sendable {
                 if let speechCeilingDb {
                     reanchoredFloor = clampFloor(min(
                         target,
-                        speechCeilingDb - config.adaptiveDeltaDb - Self.speechCeilingMarginDb
+                        speechCeilingDb - effectiveAdaptiveDeltaDb - Self.speechCeilingMarginDb
                     ))
                 } else {
                     reanchoredFloor = clampFloor(target)
                 }
-                let maximumReanchorFloor = Self.floorMaxDb - config.adaptiveDeltaDb
+                let maximumReanchorFloor = Self.floorMaxDb - effectiveAdaptiveDeltaDb
                 if reanchoredFloor <= maximumReanchorFloor {
                     let floorMoved = abs(reanchoredFloor - currentFloor) > Self.adaptiveFloorMovementEpsilonDb
                     floorDb = reanchoredFloor
@@ -331,9 +362,9 @@ final class VADThresholdGate: @unchecked Sendable {
                     hasRefusedReanchorSinceLastAcceptance = false
                     levels = classify(
                         frameDb: frameDb,
-                        strongThresholdDb: reanchoredFloor + config.adaptiveDeltaDb,
-                        continuationThresholdDb: reanchoredFloor + config.adaptiveContinuationDeltaDb,
-                        silenceThresholdDb: reanchoredFloor + Self.silenceDeltaDb
+                        strongThresholdDb: reanchoredFloor + effectiveAdaptiveDeltaDb,
+                        continuationThresholdDb: reanchoredFloor + effectiveAdaptiveContinuationDeltaDb,
+                        silenceThresholdDb: reanchoredFloor + effectiveSilenceDeltaDb
                     )
                 } else {
                     hasRefusedReanchorSinceLastAcceptance = true
@@ -367,7 +398,7 @@ final class VADThresholdGate: @unchecked Sendable {
         let rollingPercentile = adaptiveRollingPercentile()
         let windowMax = adaptiveRollingMaxDb(coverSeconds: Self.adaptiveColdStartDispersionWindowSeconds)
         let dispersionDb = (windowMax ?? frameDb) - (rollingPercentile ?? frameDb)
-        coldStartSpeechShapedNow = dispersionDb >= config.adaptiveDeltaDb + Self.speechCeilingMarginDb
+        coldStartSpeechShapedNow = dispersionDb >= effectiveAdaptiveDeltaDb + Self.speechCeilingMarginDb
 
         if !coldStartSpeechShapedNow,
            adaptiveRefinementElapsed >= Self.adaptiveColdStartGraceSeconds,
@@ -401,9 +432,9 @@ final class VADThresholdGate: @unchecked Sendable {
         let currentFloor = floorDb ?? Self.floorMinDb
         let levels = classify(
             frameDb: frameDb,
-            strongThresholdDb: currentFloor + config.adaptiveDeltaDb,
-            continuationThresholdDb: currentFloor + config.adaptiveContinuationDeltaDb,
-            silenceThresholdDb: currentFloor + Self.silenceDeltaDb
+            strongThresholdDb: currentFloor + effectiveAdaptiveDeltaDb,
+            continuationThresholdDb: currentFloor + effectiveAdaptiveContinuationDeltaDb,
+            silenceThresholdDb: currentFloor + effectiveSilenceDeltaDb
         )
         let isDeferredOnset = !coldStartConverged
             && !coldStartSpeechShapedNow
@@ -445,14 +476,19 @@ final class VADThresholdGate: @unchecked Sendable {
         case .strong:
             riseCap = 0
         case .continuing:
-            riseCap = machineIsIdle ? Self.elevatedRiseDbPerSecond : 0
+            riseCap = machineIsIdle
+                ? Self.elevatedRiseDbPerSecond * effectiveRiseSpeedMultiplier
+                : 0
         case .ambiguous, .silence:
-            riseCap = machineIsIdle ? Self.elevatedRiseDbPerSecond : 0
+            riseCap = machineIsIdle
+                ? Self.elevatedRiseDbPerSecond * effectiveRiseSpeedMultiplier
+                : 0
         }
         if machineIsIdle, let speechCeilingDb {
-            let decayedCeilingDb = speechCeilingDb + Self.elevatedRiseDbPerSecond * max(0, duration)
-            let clampBound = decayedCeilingDb - config.adaptiveDeltaDb - Self.speechCeilingMarginDb
-            self.speechCeilingDb = clampBound > Self.floorMaxDb - config.adaptiveDeltaDb
+            let decayedCeilingDb = speechCeilingDb
+                + Self.elevatedRiseDbPerSecond * effectiveRiseSpeedMultiplier * max(0, duration)
+            let clampBound = decayedCeilingDb - effectiveAdaptiveDeltaDb - Self.speechCeilingMarginDb
+            self.speechCeilingDb = clampBound > Self.floorMaxDb - effectiveAdaptiveDeltaDb
                 ? nil
                 : decayedCeilingDb
         }
@@ -492,7 +528,7 @@ final class VADThresholdGate: @unchecked Sendable {
             return
         }
         thresholdDb = config.mode == .adaptive
-            ? Self.floorMinDb + config.adaptiveDeltaDb
+            ? Self.floorMinDb + effectiveAdaptiveDeltaDb
             : Double(AudioMath.dbFromRms(config.staticRms))
         elapsedSinceSilenceEvidence = 0
         pendingReanchorEvent = false
@@ -505,10 +541,10 @@ final class VADThresholdGate: @unchecked Sendable {
             evidence: .silence,
             thresholdDb: thresholdDb,
             continuationThresholdDb: config.mode == .adaptive
-                ? Self.floorMinDb + config.adaptiveContinuationDeltaDb
+                ? Self.floorMinDb + effectiveAdaptiveContinuationDeltaDb
                 : thresholdDb - Self.staticContinuationOffsetDb,
             silenceThresholdDb: config.mode == .adaptive
-                ? Self.floorMinDb + Self.silenceDeltaDb
+                ? Self.floorMinDb + effectiveSilenceDeltaDb
                 : thresholdDb - Self.staticSilenceOffsetDb,
             floorDb: floorDb,
             calibrating: config.mode == .calibrated,
@@ -527,11 +563,11 @@ final class VADThresholdGate: @unchecked Sendable {
         if targetDb > floor {
             floor = min(targetDb, floor + maximumRiseDbPerSecond * frameDuration)
         } else {
-            let alpha = 1.0 - exp(-frameDuration / Self.tauFall)
+            let alpha = 1.0 - exp(-frameDuration / effectiveFallTauSeconds)
             floor += alpha * (targetDb - floor)
         }
         if let speechCeilingDb {
-            floor = min(floor, speechCeilingDb - config.adaptiveDeltaDb - Self.speechCeilingMarginDb)
+            floor = min(floor, speechCeilingDb - effectiveAdaptiveDeltaDb - Self.speechCeilingMarginDb)
         }
         floorDb = clampFloor(floor)
     }
@@ -641,9 +677,9 @@ final class VADThresholdGate: @unchecked Sendable {
         lastOutput = VADGateOutput(
             isSpeech: lastOutput.isSpeech,
             evidence: lastOutput.evidence,
-            thresholdDb: floorDb + config.adaptiveDeltaDb,
-            continuationThresholdDb: floorDb + config.adaptiveContinuationDeltaDb,
-            silenceThresholdDb: floorDb + Self.silenceDeltaDb,
+            thresholdDb: floorDb + effectiveAdaptiveDeltaDb,
+            continuationThresholdDb: floorDb + effectiveAdaptiveContinuationDeltaDb,
+            silenceThresholdDb: floorDb + effectiveSilenceDeltaDb,
             floorDb: floorDb,
             calibrating: lastOutput.calibrating,
             usedFallback: usedFallback,

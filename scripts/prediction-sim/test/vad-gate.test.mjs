@@ -4,6 +4,13 @@ import {
   dbFromRms,
   rmsFromDb,
   makeVadGateConfig,
+  VAD_ADAPTIVE_FALL_TAU_SECONDS_MAX,
+  VAD_ADAPTIVE_FALL_TAU_SECONDS_MIN,
+  VAD_ADAPTIVE_RISE_MULTIPLIER_MAX,
+  VAD_ADAPTIVE_RISE_MULTIPLIER_MIN,
+  VAD_ADAPTIVE_SILENCE_DELTA_DB_MAX,
+  VAD_ADAPTIVE_STALE_FLOOR_SECONDS_MAX,
+  VAD_ADAPTIVE_STALE_FLOOR_SECONDS_MIN,
   VADThresholdGate,
 } from '../lib/vad-gate.mjs';
 import { StreamingEndpoint } from '../lib/streaming-endpoint.mjs';
@@ -233,7 +240,7 @@ describe('VADThresholdGate', () => {
       idleContinuingGate.floorDb = -70;
       idleContinuingGate.process(-63, 0.1);
       idleContinuingGate.updateFloorTracking(-63, 0.1, true);
-      assert.ok(Math.abs(idleContinuingGate.snapshot.floorDb - -69.4) < 0.001);
+      assert.ok(Math.abs(idleContinuingGate.snapshot.floorDb - -68.8) < 0.001);
 
       const strongGate = seedAdaptiveGate({}, -65);
       strongGate.floorDb = -70;
@@ -257,6 +264,110 @@ describe('VADThresholdGate', () => {
       const rise = riseGate.snapshot;
       const expectedRise = -58;
       assert.ok(Math.abs(rise.floorDb - expectedRise) < 0.001);
+    });
+
+    it('normalizes adaptive bands and the advanced VAD bounds at construction', () => {
+      const wideSilenceBand = seedAdaptiveGate({
+        adaptiveDeltaDb: 10,
+        adaptiveContinuationDeltaDb: 4,
+        adaptiveSilenceDeltaDb: VAD_ADAPTIVE_SILENCE_DELTA_DB_MAX,
+      });
+      assert.strictEqual(wideSilenceBand.effectiveAdaptiveDeltaDb, 10);
+      assert.strictEqual(wideSilenceBand.effectiveAdaptiveContinuationDeltaDb, 4);
+      assert.strictEqual(wideSilenceBand.effectiveSilenceDeltaDb, 3);
+
+      const narrowStrongBand = seedAdaptiveGate({
+        adaptiveDeltaDb: 3,
+        adaptiveContinuationDeltaDb: 6,
+        adaptiveSilenceDeltaDb: 5,
+      });
+      assert.strictEqual(narrowStrongBand.effectiveAdaptiveDeltaDb, 3);
+      assert.strictEqual(narrowStrongBand.effectiveAdaptiveContinuationDeltaDb, 2);
+      assert.strictEqual(narrowStrongBand.effectiveSilenceDeltaDb, 1);
+
+      const upper = seedAdaptiveGate({
+        adaptiveRiseSpeedMultiplier: 99,
+        adaptiveFallTauSeconds: 99,
+        adaptiveStaleFloorSeconds: 99,
+      });
+      assert.strictEqual(upper.effectiveRiseSpeedMultiplier, VAD_ADAPTIVE_RISE_MULTIPLIER_MAX);
+      assert.strictEqual(upper.effectiveFallTauSeconds, VAD_ADAPTIVE_FALL_TAU_SECONDS_MAX);
+      assert.strictEqual(
+        upper.effectiveStaleFloorSeconds,
+        VAD_ADAPTIVE_STALE_FLOOR_SECONDS_MAX / VAD_ADAPTIVE_RISE_MULTIPLIER_MAX,
+      );
+
+      const lower = seedAdaptiveGate({
+        adaptiveRiseSpeedMultiplier: 0.1,
+        adaptiveFallTauSeconds: 0.1,
+        adaptiveStaleFloorSeconds: 0.1,
+      });
+      assert.strictEqual(lower.effectiveRiseSpeedMultiplier, VAD_ADAPTIVE_RISE_MULTIPLIER_MIN);
+      assert.strictEqual(lower.effectiveFallTauSeconds, VAD_ADAPTIVE_FALL_TAU_SECONDS_MIN);
+      assert.strictEqual(
+        lower.effectiveStaleFloorSeconds,
+        VAD_ADAPTIVE_STALE_FLOOR_SECONDS_MIN / VAD_ADAPTIVE_RISE_MULTIPLIER_MIN,
+      );
+    });
+
+    it('honors silence delta, fall tau, rise multiplier, and ceiling decay', () => {
+      const lowSilence = seedAdaptiveGate({ adaptiveSilenceDeltaDb: 1 }, -50);
+      const highSilence = seedAdaptiveGate({ adaptiveSilenceDeltaDb: 5 }, -50);
+      lowSilence.floorDb = -50;
+      highSilence.floorDb = -50;
+      assert.strictEqual(lowSilence.process(-46, 0.1).evidence, 'ambiguous');
+      assert.strictEqual(highSilence.process(-46, 0.1).evidence, 'silence');
+
+      const fastFall = seedAdaptiveGate({
+        adaptiveDeltaDb: 20,
+        adaptiveFallTauSeconds: 0.2,
+      }, -60);
+      const slowFall = seedAdaptiveGate({
+        adaptiveDeltaDb: 20,
+        adaptiveFallTauSeconds: 2,
+      }, -60);
+      fastFall.floorDb = -50;
+      slowFall.floorDb = -50;
+      fastFall.process(-60, 0.1);
+      slowFall.process(-60, 0.1);
+      fastFall.updateFloorTracking(-60, 0.5);
+      slowFall.updateFloorTracking(-60, 0.5);
+      assert.ok(fastFall.snapshot.floorDb < slowFall.snapshot.floorDb);
+
+      const slowRise = seedAdaptiveGate({ adaptiveRiseSpeedMultiplier: 0.5 }, -65);
+      const fastRise = seedAdaptiveGate({ adaptiveRiseSpeedMultiplier: 2 }, -65);
+      slowRise.floorDb = -70;
+      fastRise.floorDb = -70;
+      slowRise.process(-63, 0.1);
+      fastRise.process(-63, 0.1);
+      slowRise.updateFloorTracking(-63, 0.1, true);
+      fastRise.updateFloorTracking(-63, 0.1, true);
+      assert.ok(fastRise.snapshot.floorDb > slowRise.snapshot.floorDb);
+
+      const slowDecay = seedAdaptiveGate({ adaptiveRiseSpeedMultiplier: 0.5 }, -65);
+      const fastDecay = seedAdaptiveGate({ adaptiveRiseSpeedMultiplier: 2 }, -65);
+      slowDecay.speechCeilingDb = -35;
+      fastDecay.speechCeilingDb = -35;
+      slowDecay.floorDb = -50;
+      fastDecay.floorDb = -50;
+      slowDecay.process(-45, 0.1);
+      fastDecay.process(-45, 0.1);
+      slowDecay.updateFloorTracking(-45, 0.1, true);
+      fastDecay.updateFloorTracking(-45, 0.1, true);
+      assert.ok(fastDecay.speechCeilingDb > slowDecay.speechCeilingDb);
+    });
+
+    it('pins the pre-change adaptive timing at a half-speed rise multiplier', () => {
+      const gate = seedAdaptiveGate({
+        adaptiveRiseSpeedMultiplier: 0.5,
+        adaptiveSilenceDeltaDb: 3,
+        adaptiveStaleFloorSeconds: 3,
+        adaptiveFallTauSeconds: 0.5,
+      }, -65);
+      gate.floorDb = -70;
+      gate.process(-63, 0.1);
+      gate.updateFloorTracking(-63, 0.1, true);
+      assert.ok(Math.abs(gate.snapshot.floorDb - -69.4) < 0.001);
     });
 
     it('respects both floor clamp bounds', () => {
