@@ -164,7 +164,9 @@ final class AudioLevelTesterViewModel: ObservableObject {
             adaptiveRiseSpeedMultiplier: SharedConfig.streamVadAdaptationSpeed(),
             adaptiveSilenceDeltaDb: SharedConfig.streamVadAdaptiveSilenceDeltaDb(),
             adaptiveStaleFloorSeconds: SharedConfig.streamVadStaleFloorSeconds(),
-            adaptiveFallTauSeconds: SharedConfig.streamVadFallTauSeconds()
+            adaptiveFallTauSeconds: SharedConfig.streamVadFallTauSeconds(),
+            adaptiveDynamicsEnabled: SharedConfig.streamVadDynamicsEnabled(),
+            adaptiveDynamicsSpreadDb: SharedConfig.streamVadDynamicsSpreadDb()
         ))
     }
 

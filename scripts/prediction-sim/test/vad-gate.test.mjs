@@ -6,6 +6,8 @@ import {
   makeVadGateConfig,
   VAD_ADAPTIVE_FALL_TAU_SECONDS_MAX,
   VAD_ADAPTIVE_FALL_TAU_SECONDS_MIN,
+  VAD_ADAPTIVE_DYNAMICS_SPREAD_DB_MAX,
+  VAD_ADAPTIVE_DYNAMICS_SPREAD_DB_MIN,
   VAD_ADAPTIVE_RISE_MULTIPLIER_MAX,
   VAD_ADAPTIVE_RISE_MULTIPLIER_MIN,
   VAD_ADAPTIVE_SILENCE_DELTA_DB_MAX,
@@ -267,6 +269,9 @@ describe('VADThresholdGate', () => {
     });
 
     it('normalizes adaptive bands and the advanced VAD bounds at construction', () => {
+      assert.strictEqual(config().adaptiveDynamicsEnabled, true);
+      assert.strictEqual(config().adaptiveDynamicsSpreadDb, 12);
+
       const wideSilenceBand = seedAdaptiveGate({
         adaptiveDeltaDb: 10,
         adaptiveContinuationDeltaDb: 4,
@@ -308,6 +313,96 @@ describe('VADThresholdGate', () => {
         lower.effectiveStaleFloorSeconds,
         VAD_ADAPTIVE_STALE_FLOOR_SECONDS_MIN / VAD_ADAPTIVE_RISE_MULTIPLIER_MIN,
       );
+
+      const dynamicsLower = seedAdaptiveGate({ adaptiveDynamicsSpreadDb: 0 });
+      assert.strictEqual(dynamicsLower.effectiveDynamicsSpreadDb, VAD_ADAPTIVE_DYNAMICS_SPREAD_DB_MIN);
+      const dynamicsUpper = seedAdaptiveGate({ adaptiveDynamicsSpreadDb: 99 });
+      assert.strictEqual(dynamicsUpper.effectiveDynamicsSpreadDb, VAD_ADAPTIVE_DYNAMICS_SPREAD_DB_MAX);
+    });
+
+    it('gates flat strong levels while allowing modulated strong evidence', () => {
+      const flatGate = seedAdaptiveGate({}, -50);
+      flatGate.floorDb = -70;
+      const flatOutput = flatGate.process(-50, 0.1);
+      assert.strictEqual(flatOutput.evidence, 'continuing');
+      assert.strictEqual(flatOutput.isSpeech, true);
+      assert.strictEqual(flatGate.snapshot.evidence, 'continuing');
+
+      const modulatedGate = seedAdaptiveGate({}, -58);
+      modulatedGate.floorDb = -70;
+      const modulatedOutput = modulatedGate.process(-45, 0.1);
+      assert.strictEqual(modulatedOutput.evidence, 'strong');
+      assert.strictEqual(modulatedOutput.isSpeech, true);
+      assert.ok(Math.abs(modulatedOutput.dynamicsSpreadDb - 13) < 0.001);
+    });
+
+    it('uses the inclusive dynamics spread boundary for strong evidence', () => {
+      const belowBoundary = seedAdaptiveGate({}, -61.9);
+      belowBoundary.floorDb = -70;
+      const belowOutput = belowBoundary.process(-50, 0.1);
+      assert.ok(Math.abs(belowOutput.dynamicsSpreadDb - 11.9) < 0.001);
+      assert.strictEqual(belowOutput.evidence, 'continuing');
+
+      const aboveBoundary = seedAdaptiveGate({}, -62.1);
+      aboveBoundary.floorDb = -70;
+      const aboveOutput = aboveBoundary.process(-50, 0.1);
+      assert.ok(Math.abs(aboveOutput.dynamicsSpreadDb - 12.1) < 0.001);
+      assert.strictEqual(aboveOutput.evidence, 'strong');
+    });
+
+    it('disables dynamics gating without changing level-only classification', () => {
+      const gate = seedAdaptiveGate({ adaptiveDynamicsEnabled: false }, -50);
+      gate.floorDb = -70;
+      const output = gate.process(-50, 0.1);
+      assert.strictEqual(output.evidence, 'strong');
+      assert.strictEqual(output.isSpeech, true);
+      assert.strictEqual(output.dynamicsSpreadDb, null);
+    });
+
+    it('uses the spread setting as the cold-start shaped threshold', () => {
+      function probe(spreadDb) {
+        const gate = new VADThresholdGate(config({
+          mode: 'adaptive',
+          adaptiveDynamicsSpreadDb: spreadDb,
+        }));
+        for (let i = 0; i < 10; i++) gate.process(-62, 0.03);
+        const output = gate.process(-50, 0.03);
+        return { gate, output };
+      }
+
+      const belowThreshold = probe(11.9);
+      assert.strictEqual(belowThreshold.gate.coldStartSpeechShapedNow, true);
+      assert.strictEqual(belowThreshold.output.evidence, 'strong');
+
+      const aboveThreshold = probe(12.1);
+      assert.strictEqual(aboveThreshold.gate.coldStartSpeechShapedNow, false);
+      assert.strictEqual(aboveThreshold.output.evidence, 'continuing');
+
+      const killSwitchGate = new VADThresholdGate(config({
+        mode: 'adaptive',
+        adaptiveDynamicsEnabled: false,
+        adaptiveDynamicsSpreadDb: 24,
+      }));
+      for (let i = 0; i < 10; i++) killSwitchGate.process(-62, 0.03);
+      const killSwitchOutput = killSwitchGate.process(-50, 0.03);
+      assert.strictEqual(killSwitchGate.coldStartSpeechShapedNow, true);
+      assert.strictEqual(killSwitchOutput.evidence, 'strong');
+    });
+
+    it('reports dynamics spread only for enabled adaptive frames', () => {
+      const staticOutput = new VADThresholdGate(config({ mode: 'static' })).process(-20, 0.1);
+      assert.strictEqual(staticOutput.dynamicsSpreadDb, null);
+
+      const calibratedOutput = new VADThresholdGate(config({ mode: 'calibrated' }))
+        .process(-50, 0.1);
+      assert.strictEqual(calibratedOutput.dynamicsSpreadDb, null);
+
+      const disabledAdaptiveOutput = seedAdaptiveGate({ adaptiveDynamicsEnabled: false }, -50)
+        .process(-50, 0.1);
+      assert.strictEqual(disabledAdaptiveOutput.dynamicsSpreadDb, null);
+
+      const enabledAdaptiveOutput = seedAdaptiveGate({}, -50).process(-50, 0.1);
+      assert.strictEqual(enabledAdaptiveOutput.dynamicsSpreadDb, 0);
     });
 
     it('honors silence delta, fall tau, rise multiplier, and ceiling decay', () => {

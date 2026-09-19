@@ -53,11 +53,12 @@ function makeRecorderHarness({
   endpointSilenceMs = 3000,
   minChunkSamples = 0,
   minSpeechSamples = 0,
+  gateConfig = {},
 } = {}) {
   const recorderFrameDuration = frameMs / 1000;
   const recorderFrameSamples = frameMs * 16;
   const harness = {
-    gate: makeGate(),
+    gate: makeGate(gateConfig),
     endpoint: makeEndpoint(endpointSilenceMs),
     minChunkSamples,
     minSpeechSamples,
@@ -69,6 +70,7 @@ function makeRecorderHarness({
     emittedTotalMs: null,
     noteUtteranceEndedValues: [],
     sustainedContinuingMs: 0,
+    streakStartFloorDb: null,
     sustainedContinuingOnsetLatched: false,
     sawReanchorDuringUtterance: false,
 
@@ -86,15 +88,23 @@ function makeRecorderHarness({
 
       const adaptivePath = output.floorDb !== null;
       if (adaptivePath && output.evidence === 'continuing' && endpointWasIdle) {
+        if (this.sustainedContinuingMs === 0) {
+          this.streakStartFloorDb = this.gate.snapshot.floorDb;
+        }
         this.sustainedContinuingMs += recorderFrameDuration * 1000;
       } else if (!this.sustainedContinuingOnsetLatched) {
         this.sustainedContinuingMs = 0;
+        this.streakStartFloorDb = null;
       }
 
+      const floorStable = output.floorDb !== null
+        && this.streakStartFloorDb !== null
+        && Math.abs(output.floorDb - this.streakStartFloorDb) <= 2;
       if (adaptivePath
         && output.evidence === 'continuing'
         && endpointWasIdle
-        && this.sustainedContinuingMs >= VAD_SUSTAINED_CONTINUING_ONSET_S * 1000) {
+        && this.sustainedContinuingMs >= VAD_SUSTAINED_CONTINUING_ONSET_S * 1000
+        && floorStable) {
         this.sustainedContinuingOnsetLatched = true;
       }
       const endpointInOnsetLimb = endpointWasIdle || previousState === 'onsetPending';
@@ -105,6 +115,7 @@ function makeRecorderHarness({
           || output.evidence === 'silence')) {
         this.sustainedContinuingOnsetLatched = false;
         this.sustainedContinuingMs = 0;
+        this.streakStartFloorDb = null;
       }
       const latchedContinuingOnset = this.sustainedContinuingOnsetLatched
         && output.evidence === 'continuing'
@@ -128,6 +139,7 @@ function makeRecorderHarness({
         this.utteranceQuietestStrongDb = null;
         this.accumulatorSamples = this.endpoint.configuration.preRollSamples + recorderFrameSamples;
         this.sustainedContinuingMs = 0;
+        this.streakStartFloorDb = null;
         this.sustainedContinuingOnsetLatched = false;
       } else if (decision.type === 'continueUtterance'
         || decision.type === 'finalizeUtterance') {
@@ -158,10 +170,18 @@ function makeRecorderHarness({
           this.speechSamples = 0;
           this.sawReanchorDuringUtterance = false;
           this.sustainedContinuingMs = 0;
+          this.streakStartFloorDb = null;
           this.sustainedContinuingOnsetLatched = false;
         }
       }
-      return { output, decision, endpointEvidence, reanchorEvent, discarded };
+      return {
+        output,
+        decision,
+        endpointEvidence,
+        reanchorEvent,
+        discarded,
+        latchedContinuingOnset,
+      };
     },
   };
   return harness;
@@ -424,6 +444,7 @@ describe('adaptive VAD convergence', () => {
     const gate = makeGate();
     let firstStrongAtMs = null;
     let firstShapedNowAtMs = null;
+    let sawPreShapedContinuing = false;
 
     for (let i = 0; i < 40; i++) {
       const frameDb = i < 2 ? -58 : (i % 8 === 0 ? -58 : -45);
@@ -435,6 +456,9 @@ describe('adaptive VAD convergence', () => {
       if (gate.coldStartSpeechShapedNow && firstShapedNowAtMs === null) {
         firstShapedNowAtMs = elapsedMs;
       }
+      if (!gate.coldStartSpeechShapedNow && output.evidence === 'continuing') {
+        sawPreShapedContinuing = true;
+      }
       if (elapsedMs <= 400 && gate.coldStartSpeechShapedNow) {
         assert.strictEqual(output.evidence, 'strong');
         assert.strictEqual(output.isSpeech, true);
@@ -443,6 +467,7 @@ describe('adaptive VAD convergence', () => {
 
     assert.ok(firstShapedNowAtMs !== null && firstShapedNowAtMs < 400);
     assert.ok(firstStrongAtMs !== null && firstStrongAtMs <= 400);
+    assert.strictEqual(sawPreShapedContinuing, true);
     assert.strictEqual(gate.coldStartConverged, false);
   });
 
@@ -635,7 +660,7 @@ describe('adaptive VAD convergence', () => {
     const harness = makeRecorderHarness();
 
     for (let i = 0; i < 400; i++) harness.drive(-65);
-    for (let i = 0; i < 30; i++) harness.drive(-21);
+    for (let i = 0; i < 30; i++) harness.drive(i % 8 === 0 ? -35 : -21);
 
     let finalized = false;
     for (let i = 0; i < 600; i++) {
@@ -659,7 +684,9 @@ describe('adaptive VAD convergence', () => {
     let sawReanchor = false;
 
     prefillAmbient(harness, 400, -65);
-    for (let i = 0; i < 220; i++) harness.drive(quietestStrongDb);
+    for (let i = 0; i < 220; i++) {
+      harness.drive(i % 8 === 0 ? quietestStrongDb - 14 : quietestStrongDb);
+    }
 
     // Ambiguous evidence keeps the active utterance alive, but cannot move the
     // floor or trigger a stale re-anchor while the endpoint is non-idle.
@@ -685,7 +712,7 @@ describe('adaptive VAD convergence', () => {
     assert.strictEqual(harness.chunkCount, 1);
     assert.strictEqual(harness.endpoint.state, 'idle');
     assert.strictEqual(harness.sawReanchorDuringUtterance, false);
-    assert.strictEqual(harness.noteUtteranceEndedValues.at(-1), quietestStrongDb);
+    assert.strictEqual(harness.noteUtteranceEndedValues.at(-1), -49);
   });
 
   it('R2: emits a continuing-only fallback onset without a mid-utterance re-anchor', () => {
@@ -782,7 +809,9 @@ describe('adaptive VAD convergence', () => {
     });
 
     prefillAmbient(harness, 400, -65);
-    for (let i = 0; i < 220; i++) harness.drive(quietestStrongDb);
+    for (let i = 0; i < 220; i++) {
+      harness.drive(i % 8 === 0 ? quietestStrongDb - 14 : quietestStrongDb);
+    }
     let finalized = null;
     for (let i = 0; i < 600; i++) {
       const frame = harness.drive(-80);
@@ -854,7 +883,7 @@ describe('adaptive VAD convergence', () => {
     let initialFloor = null;
 
     for (let i = 0; i < monologueMs / frameDurationMs; i++) {
-      const frame = harness.drive(i % 8 === 0 ? -52 : -40);
+      const frame = harness.drive(i % 8 === 0 ? -54 : -40);
       if (i >= 40) assert.strictEqual(frame.output.evidence, 'strong');
       assert.notStrictEqual(frame.decision.type, 'finalizeUtterance');
       initialFloor ??= harness.gate.snapshot.floorDb;
@@ -879,23 +908,29 @@ describe('adaptive VAD convergence', () => {
     assert.strictEqual(harness.chunkCount, 1);
     assert.strictEqual(harness.endpoint.state, 'idle');
 
-    for (let i = 0; i < 6; i++) {
-      const frame = harness.drive(-40);
-      assert.notStrictEqual(frame.decision.type, 'startUtterance');
+    let resumeOnsetMs = null;
+    for (let i = 0; i < 50; i++) {
+      const frame = harness.drive(i % 8 === 0 ? -54 : -40);
+      if (frame.decision.type === 'startUtterance') {
+        resumeOnsetMs = (i + 1) * frameDurationMs;
+        break;
+      }
     }
-    assert.strictEqual(harness.drive(-40).decision.type, 'startUtterance');
+    assert.ok(resumeOnsetMs !== null && resumeOnsetMs >= 300 && resumeOnsetMs <= 500);
     assert.strictEqual(harness.endpoint.state, 'speechActive');
   });
 
   it('post-endpoint floor does not eat speech — resumed speech re-onsets', () => {
     const harness = makeRecorderHarness();
     const quietestStrongDb = -35;
-    const ceilingFloor = quietestStrongDb
+    const ceilingFloor = -49
       - makeVadGateConfig({ mode: 'adaptive' }).adaptiveDeltaDb
       - VAD_SPEECH_CEILING_MARGIN_DB;
 
     prefillAmbient(harness, 400, -65);
-    for (let i = 0; i < 100; i++) harness.drive(quietestStrongDb);
+    for (let i = 0; i < 100; i++) {
+      harness.drive(i % 8 === 0 ? quietestStrongDb - 14 : quietestStrongDb);
+    }
     assert.strictEqual(harness.endpoint.state, 'speechActive');
 
     for (let i = 0; i < 30; i++) harness.drive(-80);
@@ -917,7 +952,7 @@ describe('adaptive VAD convergence', () => {
     assert.strictEqual(sawAmbiguousEndPending, true);
     assert.strictEqual(emitted, true);
     assert.strictEqual(harness.chunkCount, 1);
-    assert.strictEqual(harness.gate.speechCeilingDb, quietestStrongDb);
+    assert.strictEqual(harness.gate.speechCeilingDb, -49);
     assert.strictEqual(harness.endpoint.state, 'idle');
 
     for (let i = 0; i < 200; i++) {
@@ -928,7 +963,7 @@ describe('adaptive VAD convergence', () => {
 
     let onsetMs = null;
     for (let i = 0; i < 50; i++) {
-      const frame = harness.drive(quietestStrongDb);
+      const frame = harness.drive(i % 8 === 0 ? quietestStrongDb - 14 : quietestStrongDb);
       if (frame.decision.type === 'startUtterance') {
         onsetMs = (i + 1) * frameDurationMs;
         break;
@@ -957,6 +992,147 @@ describe('adaptive VAD convergence', () => {
 
     assert.strictEqual(usedSustainedFallback, true);
     assert.ok(onsetMs !== null && onsetMs <= 1500);
+    assert.strictEqual(harness.endpoint.state, 'speechActive');
+  });
+
+   it('f″: steady noise cannot funeral-latch while the floor chases at every rise speed', () => {
+    for (const multiplier of [0.5, 1.0, 4.0]) {
+      const harness = makeRecorderHarness({
+        gateConfig: {
+          adaptiveDynamicsEnabled: true,
+          adaptiveRiseSpeedMultiplier: multiplier,
+        },
+      });
+      prefillAmbient(harness, 300, -60);
+      for (let i = 0; i < 300; i++) {
+        harness.gate.process(-45, frameDuration);
+        harness.gate.takePendingReanchorEvent();
+        harness.gate.updateFloorTracking(-45, frameDuration, false);
+      }
+      harness.gate.floorDb = -60;
+      let sawContinuing = false;
+      let sawLatch = false;
+
+      for (let i = 0; i < 6000; i++) {
+        const frame = harness.drive(-45);
+        sawContinuing ||= frame.output.evidence === 'continuing';
+        sawLatch ||= frame.latchedContinuingOnset;
+        assert.strictEqual(frame.decision.type, 'none');
+        assert.strictEqual(harness.endpoint.state, 'idle');
+      }
+
+      assert.strictEqual(sawContinuing, true);
+      assert.strictEqual(sawLatch, false);
+      assert.strictEqual(harness.chunkCount, 0);
+      assert.ok(harness.reanchorEventCount <= 1);
+      assert.ok(harness.gate.snapshot.floorDb >= -48
+        && harness.gate.snapshot.floorDb <= -45);
+    }
+  });
+
+  it('quiet speech latches on a stable floor before its valleys arrive', () => {
+    const harness = makeRecorderHarness({ endpointSilenceMs: 700 });
+    prefillAmbient(harness, 300, -60);
+    let latchAtMs = null;
+
+    for (let i = 0; i < 110; i++) {
+      const frame = harness.drive(-52);
+      if (frame.latchedContinuingOnset && latchAtMs === null) {
+        latchAtMs = (i + 1) * frameDurationMs;
+      }
+    }
+
+    assert.ok(latchAtMs !== null && latchAtMs >= 1000 && latchAtMs <= 1010);
+    assert.strictEqual(harness.endpoint.state, 'speechActive');
+
+    for (let i = 0; i < 100; i++) {
+      harness.drive(i % 2 === 0 ? -52 : -60);
+    }
+    for (let i = 0; i < 100; i++) {
+      if (harness.drive(-80).decision.type === 'finalizeUtterance') break;
+    }
+
+    assert.strictEqual(harness.chunkCount, 1);
+    assert.strictEqual(harness.endpoint.state, 'idle');
+  });
+
+  it('whisper-band continuing evidence still latches when the floor is stable', () => {
+    const harness = makeRecorderHarness();
+    prefillAmbient(harness, 300, -60);
+    let sawLatch = false;
+
+    for (let i = 0; i < 110; i++) {
+      const frame = harness.drive(i % 2 === 0 ? -54 : -52);
+      sawLatch ||= frame.latchedContinuingOnset;
+      assert.strictEqual(frame.output.evidence, 'continuing');
+    }
+
+    assert.strictEqual(sawLatch, true);
+    assert.strictEqual(harness.endpoint.state, 'speechActive');
+  });
+
+  it('suppresses a continuing latch while a rising P10 drives the floor', () => {
+    const harness = makeRecorderHarness({
+      gateConfig: {
+        adaptiveDynamicsEnabled: true,
+        adaptiveDynamicsSpreadDb: 24,
+        adaptiveRiseSpeedMultiplier: 0.5,
+      },
+    });
+
+    for (let i = 0; i < 300; i++) {
+      const frameDb = -60 + (15 * i) / 299;
+      harness.gate.process(frameDb, frameDuration);
+      harness.gate.takePendingReanchorEvent();
+      harness.gate.updateFloorTracking(frameDb, frameDuration, false);
+    }
+    harness.gate.floorDb = -65;
+
+    const initialFloor = harness.gate.floorDb;
+    let sawLatch = false;
+    for (let i = 0; i < 120; i++) {
+      const frameDb = harness.gate.floorDb + 6;
+      const frame = harness.drive(frameDb);
+      sawLatch ||= frame.latchedContinuingOnset;
+      assert.strictEqual(frame.output.evidence, 'continuing');
+      assert.strictEqual(harness.endpoint.state, 'idle');
+    }
+
+    assert.strictEqual(sawLatch, false);
+    assert.ok(harness.gate.snapshot.floorDb - initialFloor > 2);
+  });
+
+  it('clears the floor snapshot when a continuing streak breaks', () => {
+    const harness = makeRecorderHarness({
+      gateConfig: {
+        adaptiveDynamicsEnabled: true,
+        adaptiveDynamicsSpreadDb: 24,
+      },
+    });
+
+    for (let i = 0; i < 300; i++) {
+      harness.gate.process(-60, frameDuration);
+      harness.gate.takePendingReanchorEvent();
+      harness.gate.updateFloorTracking(-60, frameDuration, false);
+    }
+    harness.gate.floorDb = -50;
+
+    for (let i = 0; i < 50; i++) {
+      const frame = harness.drive(-44);
+      assert.strictEqual(frame.output.evidence, 'continuing');
+      assert.strictEqual(frame.latchedContinuingOnset, false);
+    }
+    harness.drive(-80);
+    for (let i = 0; i < 300; i++) harness.drive(-80);
+
+    let sawLatch = false;
+    for (let i = 0; i < 110; i++) {
+      const frame = harness.drive(-72);
+      sawLatch ||= frame.latchedContinuingOnset;
+      assert.strictEqual(frame.output.evidence, 'continuing');
+    }
+
+    assert.strictEqual(sawLatch, true);
     assert.strictEqual(harness.endpoint.state, 'speechActive');
   });
 
@@ -1148,7 +1324,7 @@ describe('adaptive VAD convergence', () => {
 
     const gate = harness.gate;
     const ceilingFloor = quietestStrongDb - 10 - VAD_SPEECH_CEILING_MARGIN_DB;
-    gate.floorDb = -40;
+    gate.floorDb = -60;
     let reanchorEvent = false;
     for (let i = 0; i < 301; i++) {
       const frameDb = quietestStrongDb + 7;

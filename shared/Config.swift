@@ -230,6 +230,10 @@ struct SharedConfig {
         static let streamVadStaleFloorSecondsDefault: Double = 1.5
         static let streamVadFallTauSecondsKey = "streamVadFallTauSeconds"
         static let streamVadFallTauSecondsDefault: Double = 0.5
+        static let streamVadDynamicsEnabledKey = "streamVadDynamicsEnabled"
+        static let streamVadDynamicsEnabledDefault = true
+        static let streamVadDynamicsSpreadDbKey = "streamVadDynamicsSpreadDb"
+        static let streamVadDynamicsSpreadDbDefault: Double = 12.0
         static let streamVadOnsetMsKey = "streamVadOnsetMs"
         static let streamVadOnsetMsDefault: Int = 70
         static let streamVadEndEvidenceMsKey = "streamVadEndEvidenceMs"
@@ -677,6 +681,26 @@ struct SharedConfig {
             forKey: Defaults.streamVadFallTauSecondsKey
         ) as? NSNumber)?.doubleValue ?? Defaults.streamVadFallTauSecondsDefault
         return value.isFinite ? min(max(value, 0.2), 2.0) : Defaults.streamVadFallTauSecondsDefault
+    }
+
+    /// Reads the adaptive floor dynamics kill switch from the App Group.
+    static func streamVadDynamicsEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadDynamicsEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadDynamicsEnabledKey) as? Bool)
+            ?? Defaults.streamVadDynamicsEnabledDefault
+    }
+
+    /// Reads the adaptive floor dynamics spread (dB) from the App Group.
+    static func streamVadDynamicsSpreadDb() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadDynamicsSpreadDbDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadDynamicsSpreadDbKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadDynamicsSpreadDbDefault
+        return value.isFinite ? min(max(value, 6.0), 24.0) : Defaults.streamVadDynamicsSpreadDbDefault
     }
 
     /// Reads the endpoint onset confirmation window (ms) from the App Group.

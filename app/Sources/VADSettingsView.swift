@@ -37,7 +37,7 @@ struct VADSettingsView: View {
     }
 
     private var formWithEndpointTimingHandlers: some View {
-        formWithFloorDynamicsHandlers
+        formWithFloorDynamicsSpreadHandler
             .onChange(of: settings.streamVadOnsetMs) { _, _ in
                 rebuildTesterGate()
             }
@@ -51,6 +51,13 @@ struct VADSettingsView: View {
                 rebuildTesterGate()
             }
             .onChange(of: settings.streamVadPreRollMs) { _, _ in
+                rebuildTesterGate()
+            }
+    }
+
+    private var formWithFloorDynamicsSpreadHandler: some View {
+        formWithFloorDynamicsHandlers
+            .onChange(of: settings.streamVadDynamicsSpreadDb) { _, _ in
                 rebuildTesterGate()
             }
     }
@@ -379,7 +386,9 @@ struct VADSettingsView: View {
             adaptiveRiseSpeedMultiplier: settings.streamVadAdaptationSpeed,
             adaptiveSilenceDeltaDb: settings.streamVadAdaptiveSilenceDeltaDb,
             adaptiveStaleFloorSeconds: settings.streamVadStaleFloorSeconds,
-            adaptiveFallTauSeconds: settings.streamVadFallTauSeconds
+            adaptiveFallTauSeconds: settings.streamVadFallTauSeconds,
+            adaptiveDynamicsEnabled: SharedConfig.streamVadDynamicsEnabled(),
+            adaptiveDynamicsSpreadDb: settings.streamVadDynamicsSpreadDb
         ))
     }
 
@@ -428,6 +437,7 @@ struct VADSettingsView: View {
     @ViewBuilder
     private var floorDynamicsRows: some View {
         adaptationSpeedRow
+        dynamicsSpreadRow
         adaptiveSilenceDeltaRow
         staleFloorRow
         fallTauRow
@@ -436,6 +446,7 @@ struct VADSettingsView: View {
     private var floorDynamicsFooter: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Floor dynamics control how adaptive mode follows changing room noise. 0.5× matches the previous steady feel.")
+            Text("If detection misbehaves, turn off Dynamics to restore simple loudness-based detection.")
             Button("Reset to Defaults", role: .destructive) {
                 settings.resetVadFloorDynamicsDefaults()
             }
@@ -640,6 +651,21 @@ struct VADSettingsView: View {
             }
             Slider(value: $settings.streamVadAdaptationSpeed, in: 0.5...4.0, step: 0.5)
             Text("How fast the floor follows the room getting louder")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var dynamicsSpreadRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Dynamics Spread")
+                Spacer()
+                Text("\(settings.streamVadDynamicsSpreadDb, specifier: "%.1f") dB")
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: $settings.streamVadDynamicsSpreadDb, in: 6...24, step: 0.5)
+            Text("How much rise-and-fall counts as speech. Steady noise stays ambient.")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }

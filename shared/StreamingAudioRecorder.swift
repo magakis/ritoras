@@ -132,6 +132,7 @@ private final class VADContext: @unchecked Sendable {
     private var bufferHighWaterSamples = 0
     private var utteranceQuietestStrongDb: Double?
     private var sustainedContinuingMs = 0.0
+    private var streakStartFloorDb: Double?
     private var sustainedContinuingOnsetLatched = false
 
     init(
@@ -187,6 +188,7 @@ private final class VADContext: @unchecked Sendable {
         utteranceQuietestStrongDb = nil
         sawReanchorDuringUtterance = false
         sustainedContinuingMs = 0
+        streakStartFloorDb = nil
         sustainedContinuingOnsetLatched = false
     }
 
@@ -282,6 +284,9 @@ private final class VADContext: @unchecked Sendable {
             let evidence = StreamingEndpointEvidence(rawValue: out.evidence.rawValue) ?? .silence
             let adaptivePath = out.floorDb != nil
             if adaptivePath && out.evidence == .continuing && endpointWasIdle {
+                if sustainedContinuingMs == 0 {
+                    streakStartFloorDb = gate.snapshot.floorDb
+                }
                 sustainedContinuingMs += frameDuration * 1000.0
             } else if !sustainedContinuingOnsetLatched {
                 let lostStreakMs = sustainedContinuingMs
@@ -290,12 +295,21 @@ private final class VADContext: @unchecked Sendable {
                                             payload: ["streakMs": lostStreakMs])
                 }
                 sustainedContinuingMs = 0
+                streakStartFloorDb = nil
             }
 
+            let floorStable: Bool
+            if let currentFloorDb = out.floorDb,
+               let streakStartFloorDb {
+                floorStable = abs(currentFloorDb - streakStartFloorDb) <= 2.0
+            } else {
+                floorStable = false
+            }
             if adaptivePath &&
                out.evidence == .continuing &&
                endpointWasIdle &&
-               sustainedContinuingMs >= sustainedContinuingOnsetSeconds * 1000.0 {
+               sustainedContinuingMs >= sustainedContinuingOnsetSeconds * 1000.0 &&
+               floorStable {
                 sustainedContinuingOnsetLatched = true
             }
             let endpointInOnsetLimb = endpointWasIdle || previousState == .onsetPending
@@ -303,6 +317,7 @@ private final class VADContext: @unchecked Sendable {
                (!adaptivePath || !endpointInOnsetLimb || out.evidence == .ambiguous || out.evidence == .silence) {
                 sustainedContinuingOnsetLatched = false
                 sustainedContinuingMs = 0
+                streakStartFloorDb = nil
             }
             let latchedContinuingOnset = sustainedContinuingOnsetLatched &&
                                          out.evidence == .continuing &&
@@ -325,6 +340,7 @@ private final class VADContext: @unchecked Sendable {
             case .startUtterance:
                 utteranceQuietestStrongDb = nil
                 sustainedContinuingMs = 0
+                streakStartFloorDb = nil
                 sustainedContinuingOnsetLatched = false
                 accumulator.removeAll(keepingCapacity: true)
                 preRollBuffer.append(to: &accumulator)
@@ -469,6 +485,7 @@ private final class VADContext: @unchecked Sendable {
         gate.noteUtteranceEnded(quietestStrongDb: utteranceQuietestStrongDb)
         utteranceQuietestStrongDb = nil
         sustainedContinuingMs = 0
+        streakStartFloorDb = nil
         sustainedContinuingOnsetLatched = false
         return VADEmission(chunkId: id, samples: snapshot)
     }
@@ -479,6 +496,7 @@ private final class VADContext: @unchecked Sendable {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         sustainedContinuingMs = 0
+        streakStartFloorDb = nil
         sustainedContinuingOnsetLatched = false
         _ = endpoint.forceFinalize(kind: .stop)
         guard !accumulator.isEmpty else { return nil }
@@ -680,7 +698,9 @@ actor StreamingAudioRecorder {
             adaptiveRiseSpeedMultiplier: SharedConfig.streamVadAdaptationSpeed(),
             adaptiveSilenceDeltaDb: SharedConfig.streamVadAdaptiveSilenceDeltaDb(),
             adaptiveStaleFloorSeconds: SharedConfig.streamVadStaleFloorSeconds(),
-            adaptiveFallTauSeconds: SharedConfig.streamVadFallTauSeconds()
+            adaptiveFallTauSeconds: SharedConfig.streamVadFallTauSeconds(),
+            adaptiveDynamicsEnabled: SharedConfig.streamVadDynamicsEnabled(),
+            adaptiveDynamicsSpreadDb: SharedConfig.streamVadDynamicsSpreadDb()
         )
         self.vadGateConfig = vadGateConfig
         vad = VADContext(
