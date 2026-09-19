@@ -6,79 +6,109 @@ struct VADSettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
+        formWithTesterRebuildHandlers
+        .navigationTitle("Streaming VAD")
+        .onDisappear {
+            stopTester()
+        }
+        .onChange(of: scenePhase) { phase in
+            handleScenePhase(phase)
+        }
+    }
+
+    private var formWithTesterRebuildHandlers: some View {
+        formWithProfileHandlers
+    }
+
+    private var formWithProfileHandlers: some View {
+        formWithEndpointTimingHandlers
+            .onChange(of: settings.streamVadSensitivityProfile) { _, _ in
+                rebuildTesterGate()
+            }
+            .onChange(of: settings.streamVadPauseProfile) { _, _ in
+                rebuildTesterGate()
+            }
+            .onChange(of: settings.streamVadSpeechRms) { _, _ in
+                rebuildTesterGate()
+            }
+            .onChange(of: settings.audioMeasurementModeEnabled) { _, _ in
+                rebuildTesterGate()
+            }
+    }
+
+    private var formWithEndpointTimingHandlers: some View {
+        formWithFloorDynamicsHandlers
+            .onChange(of: settings.streamVadOnsetMs) { _, _ in
+                rebuildTesterGate()
+            }
+            .onChange(of: settings.streamVadEndEvidenceMs) { _, _ in
+                rebuildTesterGate()
+            }
+            .onChange(of: settings.streamVadResumeMs) { _, _ in
+                rebuildTesterGate()
+            }
+            .onChange(of: settings.streamVadAmbiguousRescueMs) { _, _ in
+                rebuildTesterGate()
+            }
+            .onChange(of: settings.streamVadPreRollMs) { _, _ in
+                rebuildTesterGate()
+            }
+    }
+
+    private var formWithFloorDynamicsHandlers: some View {
+        formWithCoreHandlers
+            .onChange(of: settings.streamVadAdaptationSpeed) { _, _ in
+                rebuildTesterGate()
+            }
+            .onChange(of: settings.streamVadAdaptiveSilenceDeltaDb) { _, _ in
+                rebuildTesterGate()
+            }
+            .onChange(of: settings.streamVadStaleFloorSeconds) { _, _ in
+                rebuildTesterGate()
+            }
+            .onChange(of: settings.streamVadFallTauSeconds) { _, _ in
+                rebuildTesterGate()
+            }
+    }
+
+    private var formWithCoreHandlers: some View {
+        formContent
+            .onChange(of: settings.streamVadMode) { _, _ in
+                rebuildTesterGate()
+            }
+            .onChange(of: settings.streamVadCalibrationMs) { _, _ in
+                rebuildTesterGate()
+            }
+            .onChange(of: settings.streamVadCalibratedOffsetDb) { _, _ in
+                rebuildTesterGate()
+            }
+            .onChange(of: settings.streamVadAdaptiveDeltaDb) { _, _ in
+                rebuildTesterGate()
+            }
+    }
+
+    private var formContent: some View {
         Form {
             testerSection
             controlsSection
             resetSection
         }
-        .navigationTitle("Streaming VAD")
-        .onDisappear {
+    }
+
+    private func stopTester() {
+        Task {
+            await tester.stop()
+        }
+    }
+
+    private func handleScenePhase(_ phase: ScenePhase) {
+        if phase == .background {
+            stopTester()
+        }
+        if phase == .active {
             Task {
-                await tester.stop()
+                await tester.recheckPermission()
             }
-        }
-        .onChange(of: scenePhase) { phase in
-            if phase == .background {
-                Task {
-                    await tester.stop()
-                }
-            }
-            if phase == .active {
-                Task {
-                    await tester.recheckPermission()
-                }
-            }
-        }
-        .onChange(of: settings.streamVadMode) { _, _ in
-            rebuildTesterGate()
-        }
-        .onChange(of: settings.streamVadCalibrationMs) { _, _ in
-            rebuildTesterGate()
-        }
-        .onChange(of: settings.streamVadCalibratedOffsetDb) { _, _ in
-            rebuildTesterGate()
-        }
-        .onChange(of: settings.streamVadAdaptiveDeltaDb) { _, _ in
-            rebuildTesterGate()
-        }
-        .onChange(of: settings.streamVadAdaptationSpeed) { _, _ in
-            rebuildTesterGate()
-        }
-        .onChange(of: settings.streamVadAdaptiveSilenceDeltaDb) { _, _ in
-            rebuildTesterGate()
-        }
-        .onChange(of: settings.streamVadStaleFloorSeconds) { _, _ in
-            rebuildTesterGate()
-        }
-        .onChange(of: settings.streamVadFallTauSeconds) { _, _ in
-            rebuildTesterGate()
-        }
-        .onChange(of: settings.streamVadOnsetMs) { _, _ in
-            rebuildTesterGate()
-        }
-        .onChange(of: settings.streamVadEndEvidenceMs) { _, _ in
-            rebuildTesterGate()
-        }
-        .onChange(of: settings.streamVadResumeMs) { _, _ in
-            rebuildTesterGate()
-        }
-        .onChange(of: settings.streamVadAmbiguousRescueMs) { _, _ in
-            rebuildTesterGate()
-        }
-        .onChange(of: settings.streamVadPreRollMs) { _, _ in
-            rebuildTesterGate()
-        }
-        .onChange(of: settings.streamVadSensitivityProfile) { _, _ in
-            rebuildTesterGate()
-        }
-        .onChange(of: settings.streamVadPauseProfile) { _, _ in
-            rebuildTesterGate()
-        }
-        .onChange(of: settings.streamVadSpeechRms) { _, _ in
-            rebuildTesterGate()
-        }
-        .onChange(of: settings.audioMeasurementModeEnabled) { _, _ in
-            rebuildTesterGate()
         }
     }
 
@@ -122,81 +152,118 @@ struct VADSettingsView: View {
 
     private var meterRow: some View {
         VStack(alignment: .leading, spacing: 4) {
-            GeometryReader { geo in
-                let width = geo.size.width
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(Color(.systemGray5))
+            meterBar
+            levelReadings
+            thresholdReadings
+            fallbackStatus
+            monitoringPrompt
+        }
+    }
 
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(tester.isSpeech ? Color.green : Color.red)
-                        .frame(width: CGFloat(min(tester.currentRms / meterFullScale, 1.0)) * width)
+    private var meterBar: some View {
+        GeometryReader { geo in
+            meterBarContent(width: geo.size.width)
+        }
+        .frame(height: 20)
+    }
 
-                    if let floorDb = tester.floorDb {
-                        Rectangle()
-                            .fill(Color.gray)
-                            .frame(width: 1)
-                            .offset(x: CGFloat(min(
-                                AudioMath.rmsFromDb(Float(floorDb)) / meterFullScale,
-                                1.0
-                            )) * width)
-                    }
+    private func meterBarContent(width: CGFloat) -> some View {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color(.systemGray5))
+            currentLevelBar(width: width)
+            floorMarker(width: width)
+            thresholdMarker(width: width)
+            peakMarker(width: width)
+            calibrationOverlay
+        }
+    }
 
-                    if !tester.calibrating {
-                        Rectangle()
-                            .fill(Color.orange)
-                            .frame(width: 2)
-                            .offset(x: CGFloat(min(
-                                AudioMath.rmsFromDb(Float(tester.thresholdDb)) / meterFullScale,
-                                1.0
-                            )) * width)
-                    }
+    private func currentLevelBar(width: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 4)
+            .fill(tester.isSpeech ? Color.green : Color.red)
+            .frame(width: CGFloat(min(tester.currentRms / meterFullScale, 1.0)) * width)
+    }
 
-                    Rectangle()
-                        .fill(Color.blue)
-                        .frame(width: 2)
-                        .offset(x: CGFloat(min(tester.peakRms / meterFullScale, 1.0)) * width)
+    @ViewBuilder
+    private func floorMarker(width: CGFloat) -> some View {
+        if let floorDb = tester.floorDb {
+            Rectangle()
+                .fill(Color.gray)
+                .frame(width: 1)
+                .offset(x: meterOffset(db: floorDb, width: width))
+        }
+    }
 
-                    if tester.calibrating {
-                        Text("Measuring… (\(Int(tester.calibrationElapsedMs.rounded())) / \(settings.streamVadCalibrationMs) ms)")
-                            .font(.caption2)
-                            .foregroundColor(.primary)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 4))
-                    }
-                }
-            }
-            .frame(height: 20)
+    @ViewBuilder
+    private func thresholdMarker(width: CGFloat) -> some View {
+        if !tester.calibrating {
+            Rectangle()
+                .fill(Color.orange)
+                .frame(width: 2)
+                .offset(x: meterOffset(db: tester.thresholdDb, width: width))
+        }
+    }
 
-            HStack {
-                Text("now \(String(format: "%.4f", tester.currentRms))")
-                Spacer()
-                Text("peak \(String(format: "%.4f", tester.peakRms))")
-                Spacer()
-                Text(String(format: "onset %.1f dB", tester.thresholdDb))
-            }
-            .font(.caption)
-            .foregroundColor(.secondary)
+    private func peakMarker(width: CGFloat) -> some View {
+        Rectangle()
+            .fill(Color.blue)
+            .frame(width: 2)
+            .offset(x: CGFloat(min(tester.peakRms / meterFullScale, 1.0)) * width)
+    }
 
-            HStack {
-                Text(String(format: "continue %.1f dB", tester.continuationThresholdDb))
-                Spacer()
-                Text(String(format: "silence %.1f dB", tester.silenceThresholdDb))
-            }
-            .font(.caption)
-            .foregroundColor(.secondary)
+    @ViewBuilder
+    private var calibrationOverlay: some View {
+        if tester.calibrating {
+            Text("Measuring… (\(Int(tester.calibrationElapsedMs.rounded())) / \(settings.streamVadCalibrationMs) ms)")
+                .font(.caption2)
+                .foregroundColor(.primary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 4))
+        }
+    }
 
-            if tester.usedFallback {
-                Text("adaptive fallback")
-                    .font(.caption)
-                    .foregroundColor(.orange)
-            }
+    private func meterOffset(db: Double, width: CGFloat) -> CGFloat {
+        CGFloat(min(AudioMath.rmsFromDb(Float(db)) / meterFullScale, 1.0)) * width
+    }
 
-            if tester.isMonitoring && tester.currentRms < 0.001 {
-                Text("Speak into the microphone to see levels.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-            }
+    private var levelReadings: some View {
+        HStack {
+            Text("now \(String(format: "%.4f", tester.currentRms))")
+            Spacer()
+            Text("peak \(String(format: "%.4f", tester.peakRms))")
+            Spacer()
+            Text(String(format: "onset %.1f dB", tester.thresholdDb))
+        }
+        .font(.caption)
+        .foregroundColor(.secondary)
+    }
+
+    private var thresholdReadings: some View {
+        HStack {
+            Text(String(format: "continue %.1f dB", tester.continuationThresholdDb))
+            Spacer()
+            Text(String(format: "silence %.1f dB", tester.silenceThresholdDb))
+        }
+        .font(.caption)
+        .foregroundColor(.secondary)
+    }
+
+    @ViewBuilder
+    private var fallbackStatus: some View {
+        if tester.usedFallback {
+            Text("adaptive fallback")
+                .font(.caption)
+                .foregroundColor(.orange)
+        }
+    }
+
+    @ViewBuilder
+    private var monitoringPrompt: some View {
+        if tester.isMonitoring && tester.currentRms < 0.001 {
+            Text("Speak into the microphone to see levels.")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
     }
 
@@ -205,33 +272,46 @@ struct VADSettingsView: View {
     @ViewBuilder
     private var controlsSection: some View {
         normalSection
+        advancedDisclosure
+    }
 
+    private var advancedDisclosure: some View {
         DisclosureGroup("Advanced") {
             modeSection
-
-            Section {
-                switch settings.streamVadMode {
-                case .staticMode:
-                    speechRmsRow
-                case .calibrated:
-                    calibrationMsRow
-                    calibratedOffsetRow
-                case .adaptive:
-                    adaptiveDeltaRow
-                }
-                minSpeechDurationRow
-                minChunkDurationRow
-            } footer: {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Changing the Normal sensitivity profile resets the Advanced Sensitivity Δ.")
-                    Text("Changes apply live to this tester and on the next recording.")
-                }
-            }
-
+            advancedModeSection
             endpointTimingSection
             floorDynamicsSection
-
             signalPathSection
+        }
+    }
+
+    private var advancedModeSection: some View {
+        Section {
+            modeSpecificRows
+            minSpeechDurationRow
+            minChunkDurationRow
+        } footer: {
+            advancedModeFooter
+        }
+    }
+
+    @ViewBuilder
+    private var modeSpecificRows: some View {
+        switch settings.streamVadMode {
+        case .staticMode:
+            speechRmsRow
+        case .calibrated:
+            calibrationMsRow
+            calibratedOffsetRow
+        case .adaptive:
+            adaptiveDeltaRow
+        }
+    }
+
+    private var advancedModeFooter: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Changing the Normal sensitivity profile resets the Advanced Sensitivity Δ.")
+            Text("Changes apply live to this tester and on the next recording.")
         }
     }
 
@@ -305,20 +385,29 @@ struct VADSettingsView: View {
 
     private var endpointTimingSection: some View {
         Section {
-            silenceDurationRow
-            onsetConfirmationRow
-            endEvidenceRow
-            resumeGraceRow
-            ambiguousRescueRow
-            preRollRow
+            endpointTimingRows
         } header: {
             Text("Endpoint timing")
         } footer: {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Endpoint timing applies to every mode; floor dynamics only to adaptive.")
-                Button("Reset to Defaults", role: .destructive) {
-                    settings.resetVadEndpointTimingDefaults()
-                }
+            endpointTimingFooter
+        }
+    }
+
+    @ViewBuilder
+    private var endpointTimingRows: some View {
+        silenceDurationRow
+        onsetConfirmationRow
+        endEvidenceRow
+        resumeGraceRow
+        ambiguousRescueRow
+        preRollRow
+    }
+
+    private var endpointTimingFooter: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Endpoint timing applies to every mode; floor dynamics only to adaptive.")
+            Button("Reset to Defaults", role: .destructive) {
+                settings.resetVadEndpointTimingDefaults()
             }
         }
     }
@@ -327,19 +416,28 @@ struct VADSettingsView: View {
     private var floorDynamicsSection: some View {
         if settings.streamVadMode == .adaptive {
             Section {
-                adaptationSpeedRow
-                adaptiveSilenceDeltaRow
-                staleFloorRow
-                fallTauRow
+                floorDynamicsRows
             } header: {
                 Text("Floor dynamics")
             } footer: {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Floor dynamics control how adaptive mode follows changing room noise. 0.5× matches the previous steady feel.")
-                    Button("Reset to Defaults", role: .destructive) {
-                        settings.resetVadFloorDynamicsDefaults()
-                    }
-                }
+                floorDynamicsFooter
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var floorDynamicsRows: some View {
+        adaptationSpeedRow
+        adaptiveSilenceDeltaRow
+        staleFloorRow
+        fallTauRow
+    }
+
+    private var floorDynamicsFooter: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Floor dynamics control how adaptive mode follows changing room noise. 0.5× matches the previous steady feel.")
+            Button("Reset to Defaults", role: .destructive) {
+                settings.resetVadFloorDynamicsDefaults()
             }
         }
     }
