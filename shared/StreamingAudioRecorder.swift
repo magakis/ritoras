@@ -345,13 +345,26 @@ private final class VADContext: @unchecked Sendable {
                     return nil
                 }
                 if requiresPostReanchorSpeech {
-                    FileLogger.shared.info(.audio, "VAD: ambient-only utterance discarded")
-                    accumulator.removeAll(keepingCapacity: true)
-                    speechSamples = 0
-                    silenceSamples = 0
                     requiresPostReanchorSpeech = false
-                    bufferHighWaterSamples = 0
-                    return nil
+                    let speechClearsFloor = utteranceQuietestStrongDb.map {
+                        gate.speechClearsCurrentFloor($0)
+                    } ?? false
+                    if !speechClearsFloor {
+                        FileLogger.shared.info(
+                            .audio,
+                            "VAD: re-anchored utterance discarded - no speech above floor",
+                            payload: [
+                                "quietestStrongDb": utteranceQuietestStrongDb ?? NSNull(),
+                                "floorDb": gate.snapshot.floorDb ?? NSNull()
+                            ]
+                        )
+                        accumulator.removeAll(keepingCapacity: true)
+                        speechSamples = 0
+                        silenceSamples = 0
+                        bufferHighWaterSamples = 0
+                        return nil
+                    }
+                    FileLogger.shared.debug(.audio, "VAD: kept re-anchored utterance - speech clears floor")
                 }
                 let silenceMs = Double(decisionSilenceSamples) / 16.0
                 let totalMs = Double(accumulator.count) / 16.0

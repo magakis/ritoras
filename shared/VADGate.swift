@@ -159,6 +159,13 @@ final class VADThresholdGate: @unchecked Sendable {
         resetAdaptiveRollingWindow()
     }
 
+    func speechClearsCurrentFloor(_ quietestStrongDb: Double) -> Bool {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+        guard let floorDb = floorDb else { return false }
+        return quietestStrongDb >= floorDb + config.adaptiveDeltaDb + Self.speechCeilingMarginDb
+    }
+
     private func processStatic(frameDb: Double) -> VADGateOutput {
         let levels = classify(
             frameDb: frameDb,

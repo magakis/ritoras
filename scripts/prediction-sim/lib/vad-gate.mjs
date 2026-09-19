@@ -119,6 +119,13 @@ export class VADThresholdGate {
     this.resetAdaptiveRollingWindow();
   }
 
+  speechClearsCurrentFloor(quietestStrongDb) {
+    if (this.floorDb === null) return false;
+    return quietestStrongDb >= this.floorDb
+      + this.config.adaptiveDeltaDb
+      + VAD_SPEECH_CEILING_MARGIN_DB;
+  }
+
   processStatic(frameDb) {
     const levels = this.classify(
       frameDb,

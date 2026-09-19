@@ -33,16 +33,26 @@ function driveFrame(gate, endpoint, frameDb) {
   return { output, decision, previousState, reanchorEvent };
 }
 
-function makeRecorderHarness({ frameMs = frameDurationMs } = {}) {
+function makeRecorderHarness({
+  frameMs = frameDurationMs,
+  minChunkSamples = 0,
+  minSpeechSamples = 0,
+} = {}) {
   const recorderFrameDuration = frameMs / 1000;
   const recorderFrameSamples = frameMs * 16;
   const harness = {
     gate: makeGate(),
     endpoint: makeEndpoint(),
+    minChunkSamples,
+    minSpeechSamples,
     chunkCount: 0,
     reanchorEventCount: 0,
     requiresPostReanchorSpeech: false,
     utteranceQuietestStrongDb: null,
+    accumulatorSamples: 0,
+    speechSamples: 0,
+    speechClearFloorCheckCount: 0,
+    noteUtteranceEndedValues: [],
     sustainedContinuingMs: 0,
     sustainedContinuingOnsetLatched: false,
 
@@ -91,6 +101,10 @@ function makeRecorderHarness({ frameMs = frameDurationMs } = {}) {
         && latchedContinuingOnset
         ? 'strong'
         : output.evidence;
+      if (output.retroactiveSpeechMs > 0) {
+        this.speechSamples += output.retroactiveSpeechMs * 16;
+      }
+      if (output.isSpeech) this.speechSamples += recorderFrameSamples;
       const decision = this.endpoint.process(endpointEvidence, recorderFrameSamples);
       this.gate.updateFloorTracking(
         frameDb,
@@ -100,8 +114,12 @@ function makeRecorderHarness({ frameMs = frameDurationMs } = {}) {
 
       if (decision.type === 'startUtterance') {
         this.utteranceQuietestStrongDb = null;
+        this.accumulatorSamples = this.endpoint.configuration.preRollSamples + recorderFrameSamples;
         this.sustainedContinuingMs = 0;
         this.sustainedContinuingOnsetLatched = false;
+      } else if (decision.type === 'continueUtterance'
+        || decision.type === 'finalizeUtterance') {
+        this.accumulatorSamples += recorderFrameSamples;
       }
       if (adaptivePath && output.evidence === 'strong' && this.endpoint.state !== 'idle') {
         this.utteranceQuietestStrongDb = Math.min(
@@ -112,13 +130,42 @@ function makeRecorderHarness({ frameMs = frameDurationMs } = {}) {
 
       let discarded = false;
       if (decision.type === 'finalizeUtterance') {
-        if (this.requiresPostReanchorSpeech) {
+        if (this.accumulatorSamples < this.minChunkSamples
+          || this.speechSamples < this.minSpeechSamples) {
           this.requiresPostReanchorSpeech = false;
+          this.accumulatorSamples = 0;
+          this.speechSamples = 0;
           discarded = true;
+        } else if (this.requiresPostReanchorSpeech) {
+          this.requiresPostReanchorSpeech = false;
+          let speechClearsFloor = false;
+          if (this.utteranceQuietestStrongDb !== null) {
+            this.speechClearFloorCheckCount += 1;
+            speechClearsFloor = this.gate.speechClearsCurrentFloor(
+              this.utteranceQuietestStrongDb,
+            );
+          }
+          if (!speechClearsFloor) {
+            this.accumulatorSamples = 0;
+            this.speechSamples = 0;
+            discarded = true;
+          } else {
+            this.chunkCount += 1;
+            this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
+            this.gate.noteUtteranceEnded(this.utteranceQuietestStrongDb);
+            this.utteranceQuietestStrongDb = null;
+            this.accumulatorSamples = 0;
+            this.speechSamples = 0;
+            this.sustainedContinuingMs = 0;
+            this.sustainedContinuingOnsetLatched = false;
+          }
         } else {
           this.chunkCount += 1;
+          this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
           this.gate.noteUtteranceEnded(this.utteranceQuietestStrongDb);
           this.utteranceQuietestStrongDb = null;
+          this.accumulatorSamples = 0;
+          this.speechSamples = 0;
           this.sustainedContinuingMs = 0;
           this.sustainedContinuingOnsetLatched = false;
         }
@@ -279,7 +326,8 @@ describe('adaptive VAD convergence', () => {
     let finalized = false;
     let discarded = false;
 
-    for (let i = 0; i < 700; i++) {
+    // Finalization depends on the 3.0 s stale timer, endpoint silence, and refinement window.
+    for (let i = 0; i < 900; i++) {
       const frame = harness.drive(-65);
       if (frame.decision.type === 'finalizeUtterance') {
         finalized = true;
@@ -293,6 +341,8 @@ describe('adaptive VAD convergence', () => {
     assert.strictEqual(discarded, true);
     assert.strictEqual(harness.chunkCount, 0);
     assert.strictEqual(harness.endpoint.state, 'idle');
+    assert.strictEqual(harness.requiresPostReanchorSpeech, false);
+    assert.strictEqual(harness.accumulatorSamples, 0);
   });
 
   it('keeps an utterance when real speech follows ambient re-anchor', () => {
@@ -313,6 +363,139 @@ describe('adaptive VAD convergence', () => {
     assert.strictEqual(harness.reanchorEventCount, 1);
     assert.strictEqual(finalized, true);
     assert.strictEqual(harness.chunkCount, 1);
+    assert.strictEqual(harness.endpoint.state, 'idle');
+  });
+
+  it('noisy pause after real speech does not discard the utterance', () => {
+    const harness = makeRecorderHarness();
+    const quietestStrongDb = -35;
+    let sawReanchor = false;
+
+    for (let i = 0; i < 220; i++) harness.drive(quietestStrongDb);
+
+    // The floor is still near the cold-start floor here. Three seconds of
+    // ambiguous-band ambient triggers the stale re-anchor while the utterance
+    // is active, then the pause continues with shorter ambiguous bursts.
+    for (let i = 0; i < 320; i++) {
+      const floorDb = harness.gate.snapshot.floorDb;
+      const frameDb = floorDb + (i % 10 < 2 ? 4 : 6);
+      const frame = harness.drive(frameDb);
+      if (frame.reanchorEvent) {
+        sawReanchor = true;
+        break;
+      }
+    }
+
+    let finalized = null;
+    let sawAmbiguousEndPending = false;
+    for (let i = 0; i < 600; i++) {
+      // Keep each ambiguous burst below the 320-ms bar-rescue threshold;
+      // silence stretches accumulate the endpoint's three-second timer.
+      const frameDb = i % 50 < 20
+        ? harness.gate.snapshot.floorDb + 4
+        : -80;
+      const frame = harness.drive(frameDb);
+      if (harness.endpoint.state === 'endPending' && frame.output.evidence === 'ambiguous') {
+        sawAmbiguousEndPending = true;
+      }
+      if (frame.decision.type === 'finalizeUtterance') {
+        finalized = frame;
+        break;
+      }
+    }
+
+    assert.strictEqual(sawReanchor, true);
+    assert.strictEqual(sawAmbiguousEndPending, true);
+    assert.ok(finalized !== null);
+    assert.strictEqual(finalized.discarded, false);
+    assert.strictEqual(harness.chunkCount, 1);
+    assert.strictEqual(harness.endpoint.state, 'idle');
+    assert.strictEqual(harness.requiresPostReanchorSpeech, false);
+    assert.strictEqual(harness.noteUtteranceEndedValues.at(-1), quietestStrongDb);
+  });
+
+  it('flagged fallback-onset utterance with no strong frames discards without consulting the floor check', () => {
+    const harness = makeRecorderHarness();
+    let sawFallbackOnset = false;
+    let sawReanchor = false;
+    let finalized = null;
+
+    for (let i = 0; i < 900; i++) {
+      const frameDb = sawReanchor
+        ? -80
+        : harness.gate.snapshot.floorDb + 7;
+      const frame = harness.drive(frameDb);
+      assert.notStrictEqual(frame.output.evidence, 'strong');
+      if (frame.output.evidence === 'continuing' && frame.endpointEvidence === 'strong') {
+        sawFallbackOnset = true;
+      }
+      if (frame.reanchorEvent) sawReanchor = true;
+      if (frame.decision.type === 'finalizeUtterance') {
+        finalized = frame;
+        break;
+      }
+    }
+
+    assert.strictEqual(sawFallbackOnset, true);
+    assert.strictEqual(sawReanchor, true);
+    assert.ok(finalized !== null);
+    assert.strictEqual(finalized.discarded, true);
+    assert.strictEqual(harness.chunkCount, 0);
+    assert.strictEqual(harness.utteranceQuietestStrongDb, null);
+    assert.strictEqual(harness.speechClearFloorCheckCount, 0);
+    assert.strictEqual(harness.requiresPostReanchorSpeech, false);
+    assert.strictEqual(harness.endpoint.state, 'idle');
+  });
+
+  it('uses the inclusive speech-clears-floor boundary', () => {
+    const gate = makeGate();
+    const config = makeVadGateConfig({ mode: 'adaptive' });
+    const floorDb = -50;
+    gate.floorDb = floorDb;
+    const boundaryDb = floorDb + config.adaptiveDeltaDb + VAD_SPEECH_CEILING_MARGIN_DB;
+
+    // Residual speech below 12 dB SNR is not trusted; retaining the exact
+    // boundary lets a valid utterance self-heal the speech ceiling.
+    assert.strictEqual(gate.speechClearsCurrentFloor(boundaryDb), true);
+    assert.strictEqual(gate.speechClearsCurrentFloor(boundaryDb - 1), false);
+  });
+
+  it('kept utterances still respect the min-chunk/min-speech gates', () => {
+    const quietestStrongDb = -35;
+    const harness = makeRecorderHarness({
+      minChunkSamples: 1,
+      minSpeechSamples: Number.MAX_SAFE_INTEGER,
+    });
+
+    for (let i = 0; i < 220; i++) harness.drive(quietestStrongDb);
+
+    let sawReanchor = false;
+    for (let i = 0; i < 320; i++) {
+      const floorDb = harness.gate.snapshot.floorDb;
+      const frameDb = floorDb + (i % 10 < 2 ? 4 : 6);
+      const frame = harness.drive(frameDb);
+      if (frame.reanchorEvent) {
+        sawReanchor = true;
+        break;
+      }
+    }
+    assert.strictEqual(sawReanchor, true);
+    assert.strictEqual(harness.gate.speechClearsCurrentFloor(quietestStrongDb), true);
+
+    let finalized = null;
+    for (let i = 0; i < 600; i++) {
+      const frame = harness.drive(-80);
+      if (frame.decision.type === 'finalizeUtterance') {
+        finalized = frame;
+        break;
+      }
+    }
+
+    assert.ok(finalized !== null);
+    assert.strictEqual(finalized.discarded, true);
+    assert.strictEqual(harness.chunkCount, 0);
+    assert.strictEqual(harness.speechClearFloorCheckCount, 0);
+    assert.strictEqual(harness.accumulatorSamples, 0);
     assert.strictEqual(harness.endpoint.state, 'idle');
   });
 
