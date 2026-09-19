@@ -270,7 +270,7 @@ describe('VADThresholdGate', () => {
 
     it('normalizes adaptive bands and the advanced VAD bounds at construction', () => {
       assert.strictEqual(config().adaptiveDynamicsEnabled, true);
-      assert.strictEqual(config().adaptiveDynamicsSpreadDb, 12);
+      assert.strictEqual(config().adaptiveDynamicsSpreadDb, 9);
 
       const wideSilenceBand = seedAdaptiveGate({
         adaptiveDeltaDb: 10,
@@ -337,16 +337,16 @@ describe('VADThresholdGate', () => {
     });
 
     it('uses the inclusive dynamics spread boundary for strong evidence', () => {
-      const belowBoundary = seedAdaptiveGate({}, -61.9);
+      const belowBoundary = seedAdaptiveGate({}, -58.9);
       belowBoundary.floorDb = -70;
       const belowOutput = belowBoundary.process(-50, 0.1);
-      assert.ok(Math.abs(belowOutput.dynamicsSpreadDb - 11.9) < 0.001);
+      assert.ok(Math.abs(belowOutput.dynamicsSpreadDb - 8.9) < 0.001);
       assert.strictEqual(belowOutput.evidence, 'continuing');
 
-      const aboveBoundary = seedAdaptiveGate({}, -62.1);
+      const aboveBoundary = seedAdaptiveGate({}, -59.1);
       aboveBoundary.floorDb = -70;
       const aboveOutput = aboveBoundary.process(-50, 0.1);
-      assert.ok(Math.abs(aboveOutput.dynamicsSpreadDb - 12.1) < 0.001);
+      assert.ok(Math.abs(aboveOutput.dynamicsSpreadDb - 9.1) < 0.001);
       assert.strictEqual(aboveOutput.evidence, 'strong');
     });
 
@@ -365,16 +365,16 @@ describe('VADThresholdGate', () => {
           mode: 'adaptive',
           adaptiveDynamicsSpreadDb: spreadDb,
         }));
-        for (let i = 0; i < 10; i++) gate.process(-62, 0.03);
+        for (let i = 0; i < 10; i++) gate.process(-59, 0.03);
         const output = gate.process(-50, 0.03);
         return { gate, output };
       }
 
-      const belowThreshold = probe(11.9);
+      const belowThreshold = probe(8.9);
       assert.strictEqual(belowThreshold.gate.coldStartSpeechShapedNow, true);
       assert.strictEqual(belowThreshold.output.evidence, 'strong');
 
-      const aboveThreshold = probe(12.1);
+      const aboveThreshold = probe(9.1);
       assert.strictEqual(aboveThreshold.gate.coldStartSpeechShapedNow, false);
       assert.strictEqual(aboveThreshold.output.evidence, 'continuing');
 

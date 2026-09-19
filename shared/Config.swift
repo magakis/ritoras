@@ -233,7 +233,7 @@ struct SharedConfig {
         static let streamVadDynamicsEnabledKey = "streamVadDynamicsEnabled"
         static let streamVadDynamicsEnabledDefault = true
         static let streamVadDynamicsSpreadDbKey = "streamVadDynamicsSpreadDb"
-        static let streamVadDynamicsSpreadDbDefault: Double = 12.0
+        static let streamVadDynamicsSpreadDbDefault: Double = 9.0
         static let streamVadOnsetMsKey = "streamVadOnsetMs"
         static let streamVadOnsetMsDefault: Int = 70
         static let streamVadEndEvidenceMsKey = "streamVadEndEvidenceMs"

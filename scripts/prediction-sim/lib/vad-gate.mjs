@@ -60,7 +60,7 @@ export function makeVadGateConfig(partial = {}) {
     adaptiveStaleFloorSeconds: 3.0,
     adaptiveFallTauSeconds: 0.5,
     adaptiveDynamicsEnabled: true,
-    adaptiveDynamicsSpreadDb: 12.0,
+    adaptiveDynamicsSpreadDb: 9.0,
     ...(partial ?? {}),
   };
 }

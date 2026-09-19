@@ -301,7 +301,10 @@ private final class VADContext: @unchecked Sendable {
             let floorStable: Bool
             if let currentFloorDb = out.floorDb,
                let streakStartFloorDb {
-                floorStable = abs(currentFloorDb - streakStartFloorDb) <= 2.0
+                // Steady-noise chase rises monotonically and is suppressed; loud-room
+                // wobble is bidirectional with tauFall pulling down, so net-up stays
+                // under the bound and the latch is restored.
+                floorStable = (currentFloorDb - streakStartFloorDb) <= 2.0
             } else {
                 floorStable = false
             }
