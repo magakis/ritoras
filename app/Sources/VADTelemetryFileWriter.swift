@@ -73,6 +73,7 @@ final class VADTelemetryFileWriter: @unchecked Sendable, VADTelemetrySink, VADTe
             pendingBytes += batch.data.count
             eventFlushRequested = true
             lock.unlock()
+            return
         }
     }
 
