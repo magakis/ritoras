@@ -188,6 +188,24 @@ final class VADThresholdGate: @unchecked Sendable {
         return lastOutput
     }
 
+    /// Returns the normalized parameters used by the gate, without exposing
+    /// mutable threshold state.
+    var effectiveParameters: [String: Any] {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+        return [
+            "mode": behaviorMode.rawValue,
+            "strongDeltaDb": effectiveAdaptiveDeltaDb,
+            "continuationDeltaDb": effectiveAdaptiveContinuationDeltaDb,
+            "silenceDeltaDb": effectiveSilenceDeltaDb,
+            "dynamicsSpreadDb": effectiveDynamicsSpreadDb,
+            "dynamicsEnabled": config.adaptiveDynamicsEnabled,
+            "staleFloorSeconds": effectiveStaleFloorSeconds,
+            "fallTauSeconds": effectiveFallTauSeconds,
+            "riseMultiplier": effectiveRiseSpeedMultiplier
+        ]
+    }
+
     func takePendingReanchorEvent() -> Bool {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }

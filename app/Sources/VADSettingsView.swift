@@ -289,6 +289,7 @@ struct VADSettingsView: View {
             endpointTimingSection
             floorDynamicsSection
             signalPathSection
+            diagnosticsSection
         }
     }
 
@@ -460,6 +461,28 @@ struct VADSettingsView: View {
             Text("Signal Path")
         } footer: {
             Text("Off by default. Strips iOS audio processing (AGC); this can sound worse in wind or crowds and changes the absolute level scale.")
+        }
+    }
+
+    private var diagnosticsSection: some View {
+        Section {
+            Toggle("VAD Telemetry", isOn: $settings.streamVadTelemetryEnabled)
+            Text("Records per-frame VAD decisions to a file next to the session audio, for offline replay and tuning.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            if let url = RecordingStore.shared.newestStreamTelemetryURL() {
+                ShareLink(item: url) {
+                    Label("Share Latest Telemetry", systemImage: "square.and.arrow.up")
+                }
+            } else {
+                Text("No telemetry file yet")
+                    .foregroundColor(.secondary)
+            }
+        } header: {
+            Text("Diagnostics")
+        } footer: {
+            Text("Changes take effect next session.")
         }
     }
 

@@ -52,6 +52,32 @@ final class RecordingStore {
         directoryURL?.appendingPathComponent("\(jobId.uuidString).stream.wav")
     }
 
+    /// Returns the expected per-frame VAD telemetry file URL for the given job
+    /// ID, or nil if the directory is unavailable.
+    func streamTelemetryURL(for jobId: UUID) -> URL? {
+        directoryURL?.appendingPathComponent("\(jobId.uuidString)-vad.jsonl")
+    }
+
+    /// Returns the newest retained streaming VAD telemetry file, if any.
+    func newestStreamTelemetryURL() -> URL? {
+        guard let dir = directoryURL,
+              let entries = try? FileManager.default.contentsOfDirectory(
+                at: dir,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+              ) else { return nil }
+
+        let telemetryFiles = entries.filter { $0.lastPathComponent.hasSuffix("-vad.jsonl") }
+        func modificationDate(for url: URL) -> Date {
+            guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey]),
+                  let date = values.contentModificationDate else { return .distantPast }
+            return date
+        }
+        return telemetryFiles.max {
+            modificationDate(for: $0) < modificationDate(for: $1)
+        }
+    }
+
     /// Deletes the WAV stream file for the given job ID. No-op if the file
     /// does not exist or the directory is unavailable.
     func deleteStreamWav(for jobId: UUID) {

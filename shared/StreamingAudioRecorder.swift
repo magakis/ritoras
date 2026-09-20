@@ -38,6 +38,75 @@ struct EmissionSummary: Sendable {
     let speechMs: Double
 }
 
+/// Receives per-frame and lifecycle observations from the streaming VAD.
+protocol VADTelemetrySink: AnyObject, Sendable {
+    func frame(_ record: VADTelemetryFrame)
+    func event(_ record: VADTelemetryEvent)
+}
+
+/// Optional file-flush seam used by sinks that buffer observations in memory.
+protocol VADTelemetryFlushable: AnyObject, Sendable {
+    func flushIfNeeded()
+    func flush()
+}
+
+struct VADTelemetryFrame: @unchecked Sendable {
+    let seq: UInt64
+    let frameDuration: Double
+    let frameDb: Double
+    let evidence: String
+    let isSpeech: Bool
+    let floorDb: Double?
+    let strongThresholdDb: Double
+    let continuationThresholdDb: Double
+    let silenceThresholdDb: Double
+    let dynamicsSpreadDb: Double?
+    let endpointPreviousState: String
+    let endpointState: String
+    let endpointDecision: String
+    let decisionSilenceSamples: Int
+    let utteranceDurationSamples: Int
+    let latchStreakMs: Double
+    let latchLatched: Bool
+}
+
+enum VADTelemetryEventKind: String, Sendable {
+    case sessionStart = "session_start"
+    case startUtterance = "start_utterance"
+    case emit
+    case discard
+    case stopFlush = "stop_flush"
+    case sessionEnd = "session_end"
+}
+
+struct VADTelemetryEvent: @unchecked Sendable {
+    let kind: VADTelemetryEventKind
+    let chunkId: UInt32?
+    let samples: Int?
+    let reason: String?
+    let speechMs: Double?
+    let totalMs: Double?
+    let config: [String: Any]?
+
+    init(
+        kind: VADTelemetryEventKind,
+        chunkId: UInt32? = nil,
+        samples: Int? = nil,
+        reason: String? = nil,
+        speechMs: Double? = nil,
+        totalMs: Double? = nil,
+        config: [String: Any]? = nil
+    ) {
+        self.kind = kind
+        self.chunkId = chunkId
+        self.samples = samples
+        self.reason = reason
+        self.speechMs = speechMs
+        self.totalMs = totalMs
+        self.config = config
+    }
+}
+
 struct StreamingVADFrameState: Sendable {
     let endpointState: String
     let evidence: String
@@ -134,6 +203,8 @@ private final class VADContext: @unchecked Sendable {
     private var sustainedContinuingMs = 0.0
     private var streakStartFloorDb: Double?
     private var sustainedContinuingOnsetLatched = false
+    private var telemetrySequence: UInt64 = 0
+    private var telemetrySink: VADTelemetrySink?
 
     init(
         gateConfig: VADGateConfig,
@@ -172,6 +243,36 @@ private final class VADContext: @unchecked Sendable {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         onCalibrationChange = handler
+    }
+
+    func setTelemetrySink(_ sink: VADTelemetrySink?) {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+        telemetrySink = sink
+        telemetrySequence = 0
+        guard let sink else { return }
+
+        var config = gate.effectiveParameters
+        config["endpointMachineEnabled"] = endpointMachineEnabled
+        config["endpointOnsetMs"] = Double(endpoint.configuration.onsetSamples) / 16.0
+        config["endpointEndEvidenceMs"] = Double(endpoint.configuration.endEvidenceSamples) / 16.0
+        config["endpointSilenceMs"] = Double(endpoint.configuration.endpointSilenceSamples) / 16.0
+        config["endpointResumeMs"] = Double(endpoint.configuration.resumeSamples) / 16.0
+        config["endpointAmbiguousRescueMs"] = Double(endpoint.configuration.ambiguousRescueSamples) / 16.0
+        config["endpointPreRollMs"] = Double(endpoint.configuration.preRollSamples) / 16.0
+        config["silenceMs"] = Double(silenceThresholdSamples) / 16.0
+        config["minSpeechMs"] = Double(minSpeechSamples) / 16.0
+        config["minChunkMs"] = Double(minChunkSamples) / 16.0
+        config["maxNoiseSec"] = Double(maxNoiseSamples) / 16000.0
+        config["analysisHpfEnabled"] = analysisHpf != nil
+        config["analysisHpfCutoffHz"] = SharedConfig.Defaults.streamVadHpfCutoffHzDefault
+        sink.event(VADTelemetryEvent(kind: .sessionStart, config: config))
+    }
+
+    func endTelemetrySession() {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+        telemetrySink?.event(VADTelemetryEvent(kind: .sessionEnd))
     }
 
     func resetAnalysisPath() {
@@ -227,6 +328,50 @@ private final class VADContext: @unchecked Sendable {
         return summary
     }
 
+    private func telemetryDecisionLabel(_ decision: StreamingEndpointDecision) -> String {
+        switch decision {
+        case .none:
+            return "none"
+        case .startUtterance:
+            return "start_utterance"
+        case .continueUtterance:
+            return "continue_utterance"
+        case .finalizeUtterance(let kind):
+            return "finalize_\(kind.rawValue)"
+        }
+    }
+
+    private func recordTelemetryFrame(
+        output: VADGateOutput,
+        frameDuration: Double,
+        previousEndpointState: StreamingEndpointState,
+        decision: StreamingEndpointDecision,
+        decisionSilenceSamples: Int
+    ) {
+        guard let sink = telemetrySink else { return }
+        let record = VADTelemetryFrame(
+            seq: telemetrySequence,
+            frameDuration: frameDuration,
+            frameDb: lastFrameDb,
+            evidence: output.evidence.rawValue,
+            isSpeech: output.isSpeech,
+            floorDb: output.floorDb,
+            strongThresholdDb: output.thresholdDb,
+            continuationThresholdDb: output.continuationThresholdDb,
+            silenceThresholdDb: output.silenceThresholdDb,
+            dynamicsSpreadDb: output.dynamicsSpreadDb,
+            endpointPreviousState: previousEndpointState.rawValue,
+            endpointState: endpoint.state.rawValue,
+            endpointDecision: telemetryDecisionLabel(decision),
+            decisionSilenceSamples: decisionSilenceSamples,
+            utteranceDurationSamples: endpoint.utteranceDurationSamples,
+            latchStreakMs: sustainedContinuingMs,
+            latchLatched: sustainedContinuingOnsetLatched
+        )
+        telemetrySequence &+= 1
+        sink.frame(record)
+    }
+
     /// Process one audio frame. Returns a `VADEmission` if a silence endpoint
     /// is detected, otherwise `nil`.
     func process(frame: [Float], frameLength: Int) -> VADEmission? {
@@ -241,6 +386,10 @@ private final class VADContext: @unchecked Sendable {
         let frameDuration = Double(frameLength) / 16000.0
         let out = gate.process(frameDb: frameDb, frameDuration: frameDuration)
         let reanchorEvent = gate.takePendingReanchorEvent()
+        let previousEndpointState = endpoint.state
+        var telemetryDecision: StreamingEndpointDecision = .none
+        var telemetryDecisionSilenceSamples = endpoint.accumulatedSilenceSamples
+        var telemetryFrameRecorded = false
 
         if out.usedFallback && !didLogFallback {
             didLogFallback = true
@@ -275,7 +424,7 @@ private final class VADContext: @unchecked Sendable {
 
         let decision: StreamingEndpointDecision
         if endpointMachineEnabled {
-            let previousState = endpoint.state
+            let previousState = previousEndpointState
             let endpointWasIdle = previousState == .idle
             if reanchorEvent,
                previousState == .speechActive || previousState == .endPending {
@@ -329,7 +478,9 @@ private final class VADContext: @unchecked Sendable {
                 ? StreamingEndpointEvidence.strong
                 : evidence
             decision = endpoint.process(evidence: endpointEvidence, durationSamples: frameLength)
+            telemetryDecision = decision
             let decisionSilenceSamples = endpoint.accumulatedSilenceSamples
+            telemetryDecisionSilenceSamples = decisionSilenceSamples
             if previousState != endpoint.state {
                 FileLogger.shared.debug(.audio, "VAD state \(previousState.rawValue) → \(endpoint.state.rawValue)")
             }
@@ -359,12 +510,32 @@ private final class VADContext: @unchecked Sendable {
                 utteranceQuietestStrongDb = min(utteranceQuietestStrongDb ?? frameDb, frameDb)
             }
 
+            recordTelemetryFrame(
+                output: out,
+                frameDuration: frameDuration,
+                previousEndpointState: previousEndpointState,
+                decision: telemetryDecision,
+                decisionSilenceSamples: telemetryDecisionSilenceSamples
+            )
+            telemetryFrameRecorded = true
+            if case .startUtterance = decision {
+                telemetrySink?.event(VADTelemetryEvent(
+                    kind: .startUtterance,
+                    samples: accumulator.count
+                ))
+            }
+
             if case .finalizeUtterance(let kind) = decision {
                 guard accumulator.count >= minChunkSamples,
                       speechSamples >= minSpeechSamples else {
                     FileLogger.shared.info(.audio, "VAD: finalize discarded - below minimum speech or chunk duration",
                                            payload: ["sampleCount": accumulator.count,
-                                                     "speechSamples": speechSamples])
+                                                      "speechSamples": speechSamples])
+                    telemetrySink?.event(VADTelemetryEvent(
+                        kind: .discard,
+                        samples: accumulator.count,
+                        reason: "below_minimums"
+                    ))
                     accumulator.removeAll(keepingCapacity: true)
                     speechSamples = 0
                     silenceSamples = 0
@@ -416,6 +587,14 @@ private final class VADContext: @unchecked Sendable {
                                                  "totalMs": totalMs,
                                                  "speechMs": speechMs,
                                                  "sampleCount": accumulator.count])
+                recordTelemetryFrame(
+                    output: out,
+                    frameDuration: frameDuration,
+                    previousEndpointState: previousEndpointState,
+                    decision: .none,
+                    decisionSilenceSamples: silenceSamples
+                )
+                telemetryFrameRecorded = true
                 return emit(reason: "pause",
                             silenceMs: silenceMs,
                             totalMs: totalMs,
@@ -425,11 +604,27 @@ private final class VADContext: @unchecked Sendable {
             // Noise guard: less than 0.1 s of speech within the max-noise
             // window is discarded so ambient noise never ships.
             if speechSamples < noiseGuardSpeechSamples && accumulator.count > maxNoiseSamples {
+                telemetrySink?.event(VADTelemetryEvent(
+                    kind: .discard,
+                    samples: accumulator.count,
+                    reason: "noise_guard"
+                ))
                 accumulator = []
                 silenceSamples = 0
                 speechSamples = 0
                 FileLogger.shared.debug(.audio, "VAD: noise guard discard")
             }
+        }
+
+        if !telemetryFrameRecorded {
+            telemetryDecisionSilenceSamples = silenceSamples
+            recordTelemetryFrame(
+                output: out,
+                frameDuration: frameDuration,
+                previousEndpointState: previousEndpointState,
+                decision: telemetryDecision,
+                decisionSilenceSamples: telemetryDecisionSilenceSamples
+            )
         }
 
         diagnosticElapsed += frameDuration
@@ -490,6 +685,14 @@ private final class VADContext: @unchecked Sendable {
         sustainedContinuingMs = 0
         streakStartFloorDb = nil
         sustainedContinuingOnsetLatched = false
+        telemetrySink?.event(VADTelemetryEvent(
+            kind: .emit,
+            chunkId: id,
+            samples: snapshot.count,
+            reason: reason,
+            speechMs: speechMs,
+            totalMs: totalMs
+        ))
         return VADEmission(chunkId: id, samples: snapshot)
     }
 
@@ -502,6 +705,23 @@ private final class VADContext: @unchecked Sendable {
         streakStartFloorDb = nil
         sustainedContinuingOnsetLatched = false
         _ = endpoint.forceFinalize(kind: .stop)
+        let sampleCount = accumulator.count
+        let trailingSpeechMs = Double(speechSamples) / 16.0
+        let flushReason: String
+        if accumulator.isEmpty {
+            flushReason = "empty"
+        } else if speechSamples < minSpeechSamples {
+            flushReason = "below_minimums"
+        } else {
+            flushReason = "flush"
+        }
+        telemetrySink?.event(VADTelemetryEvent(
+            kind: .stopFlush,
+            samples: sampleCount,
+            reason: flushReason,
+            speechMs: trailingSpeechMs,
+            totalMs: Double(sampleCount) / 16.0
+        ))
         guard !accumulator.isEmpty else { return nil }
         guard speechSamples >= minSpeechSamples else {
             FileLogger.shared.debug(.audio, "VAD: flush discarded trailing noise",
@@ -683,6 +903,7 @@ actor StreamingAudioRecorder {
     /// VAD state machine; accessed only via `process()`/`flush()` which lock internally.
     private let vad: VADContext
     private let vadGateConfig: VADGateConfig
+    private var telemetryFlushable: VADTelemetryFlushable?
 
     // MARK: - Initialization
 
@@ -730,11 +951,13 @@ actor StreamingAudioRecorder {
     ///   (starting at 0); the second is float32 PCM samples at 16 kHz mono.
     /// - Parameter onVADState: Called on vadQueue after each processed audio
     ///   frame with the current VAD and endpoint state.
+    /// - Parameter telemetry: Optional per-frame VAD telemetry sink. Telemetry
+    ///   callbacks run on vadQueue and are disabled when this is `nil`.
     /// - Throws: `AudioRecorder.AudioRecorderError.permissionDenied` or `.permissionNotRequested`
     ///   if mic access is unavailable; `AudioRecorder.AudioRecorderError.invalidSessionConfiguration`
     ///   if session setup fails; `StreamingRecorderError.engineStartFailed` if
     ///   the audio engine cannot start.
-    func start(fileURL: URL? = nil, onVADCalibration: ((Bool) -> Void)? = nil, onChunk: @escaping ChunkHandler, onVADState: ((StreamingVADFrameState) -> Void)? = nil) async throws {
+    func start(fileURL: URL? = nil, onVADCalibration: ((Bool) -> Void)? = nil, onChunk: @escaping ChunkHandler, onVADState: ((StreamingVADFrameState) -> Void)? = nil, telemetry: VADTelemetrySink? = nil) async throws {
         guard !isRecording else {
             throw StreamingRecorderError.alreadyStreaming
         }
@@ -761,6 +984,8 @@ actor StreamingAudioRecorder {
 
         self.onChunk = onChunk
         self.onVADState = onVADState
+        self.telemetryFlushable = telemetry as? VADTelemetryFlushable
+        vad.setTelemetrySink(telemetry)
 
         // 3. Build the 16 kHz mono target format (converter output)
         guard let targetFormat = AVAudioFormat(
@@ -807,6 +1032,7 @@ actor StreamingAudioRecorder {
         let vad = self.vad
         vad.setCalibrationChangeHandler(onVADCalibration)
         let vadQueue = self.vadQueue
+        let telemetryFlushable = self.telemetryFlushable
         let converterHolder = self.converterHolder
         let diskWriter = self.diskWriter
         let stoppedFlag = self.stoppedFlag
@@ -854,6 +1080,7 @@ actor StreamingAudioRecorder {
                     vad: vad,
                     handler: handler,
                     stateHandler: stateHandler,
+                    telemetryFlushable: telemetryFlushable,
                     diskWriter: diskWriter,
                     stoppedFlag: stoppedFlag,
                     accounting: accounting
@@ -879,6 +1106,10 @@ actor StreamingAudioRecorder {
             self.onVADState = nil
             AudioSession.deactivate()
             throw StreamingRecorderError.engineStartFailed(error)
+        }
+
+        vadQueue.sync {
+            telemetryFlushable?.flush()
         }
 
         isRecording = true
@@ -932,6 +1163,7 @@ actor StreamingAudioRecorder {
         vad: VADContext,
         handler: ChunkHandler,
         stateHandler: ((StreamingVADFrameState) -> Void)?,
+        telemetryFlushable: VADTelemetryFlushable?,
         diskWriter: DiskWriterHolder,
         stoppedFlag: StoppedFlag,
         accounting: ConverterAccounting
@@ -1084,6 +1316,7 @@ actor StreamingAudioRecorder {
         // VAD processing (locks internally via os_unfair_lock)
         // frameLength = post-conversion (16 kHz) — VAD tunables are in 16 kHz samples
         let emission = vad.process(frame: drained, frameLength: drained.count)
+        telemetryFlushable?.flushIfNeeded()
 
         if let stateHandler = stateHandler {
             let emissionSummary = vad.takePendingEmissionSummary()
@@ -1138,10 +1371,13 @@ actor StreamingAudioRecorder {
         let stateHandler = self.onVADState
         let stoppedFlag = self.stoppedFlag
         let accounting = self.accounting
+        let telemetryFlushable = self.telemetryFlushable
         let emission: VADEmission? = await withCheckedContinuation { continuation in
             vadQueue.async {
                 stoppedFlag.set(true)
                 let result = vad.flush()
+                vad.endTelemetrySession()
+                telemetryFlushable?.flush()
                 if let stateHandler = stateHandler {
                     let emissionSummary = vad.takePendingEmissionSummary()
                     stateHandler(vad.frameState(emissionSummary: emissionSummary))
@@ -1170,6 +1406,8 @@ actor StreamingAudioRecorder {
             handler(emission.chunkId, emission.samples)
         }
 
+        vad.setTelemetrySink(nil)
+        telemetryFlushable = nil
         onChunk = nil
         onVADState = nil
 

@@ -148,6 +148,7 @@ final class DictationViewModel: ObservableObject {
     private var streamRecorder: StreamingAudioRecorder?
     private var streamClient: WhisperStreamClient?
     private var chunkAudioStore: ChunkAudioStore?
+    private var vadTelemetryWriter: VADTelemetryFileWriter?
     private var lastVADPublishTime: Date?
     private var lastPublishedVADState: StreamingVADFrameState?
 
@@ -351,6 +352,7 @@ final class DictationViewModel: ObservableObject {
         firstChunkSentAt = nil
         firstPartialReceivedAt = nil
         chunksSentThisSession = 0
+        vadTelemetryWriter = nil
         phase = .connecting
         FileLogger.shared.info(.transcription, "dictation connecting", payload: [
             "id": id.uuidString
@@ -453,6 +455,14 @@ final class DictationViewModel: ObservableObject {
                 vadCalibrating = (SharedConfig.streamVadMode() == .calibrated)
 
                 let wavURL = RecordingStore.shared.streamWavURL(for: id)
+                let telemetryWriter: VADTelemetryFileWriter?
+                if SharedConfig.streamVadTelemetryEnabled(),
+                   let telemetryURL = RecordingStore.shared.streamTelemetryURL(for: id) {
+                    telemetryWriter = VADTelemetryFileWriter(url: telemetryURL)
+                } else {
+                    telemetryWriter = nil
+                }
+                vadTelemetryWriter = telemetryWriter
                 try await recorder.start(
                     fileURL: wavURL,
                     onVADCalibration: { calibrating in
@@ -506,7 +516,8 @@ final class DictationViewModel: ObservableObject {
                                     totalMs: state.lastEmissionTotalMs)
                             }
                         }
-                    }
+                    },
+                    telemetry: telemetryWriter
                 )
                 FileLogger.shared.info(.audio, "Stream: recorder started")
                 recordingStartTime = Date()
@@ -529,6 +540,7 @@ final class DictationViewModel: ObservableObject {
                 receiveTask = nil
                 streamClient = nil
                 streamRecorder = nil
+                vadTelemetryWriter = nil
                 vadCalibrating = false
                 vadState = nil
                 lastVADPublishTime = nil
@@ -877,6 +889,7 @@ final class DictationViewModel: ObservableObject {
             await sessionRecorder?.stop()
 
             guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
+            vadTelemetryWriter = nil
             vadState = nil
             lastVADPublishTime = nil
             lastPublishedVADState = nil
@@ -1512,6 +1525,7 @@ final class DictationViewModel: ObservableObject {
         chunkSendQueue.clearAll()
         await sessionRecorder?.stop()
         guard activeID == id else { return }
+        vadTelemetryWriter = nil
         vadState = nil
         lastVADPublishTime = nil
         lastPublishedVADState = nil

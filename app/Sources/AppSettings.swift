@@ -34,6 +34,7 @@ class AppSettings: ObservableObject {
     @Published var streamVadMinSpeechMs: Int = SharedConfig.Defaults.streamVadMinSpeechMsDefault
     @Published var streamVadMinChunkMs: Int = SharedConfig.Defaults.streamVadMinChunkMsDefault
     @Published var audioMeasurementModeEnabled: Bool = SharedConfig.Defaults.audioMeasurementModeEnabledDefault
+    @Published var streamVadTelemetryEnabled: Bool = SharedConfig.Defaults.streamVadTelemetryEnabledDefault
 
     private var appGroupDefaults: UserDefaults?
     private var cancellables = Set<AnyCancellable>()
@@ -74,6 +75,7 @@ class AppSettings: ObservableObject {
         streamVadMinSpeechMs = SharedConfig.streamVadMinSpeechMs()
         streamVadMinChunkMs = SharedConfig.streamVadMinChunkMs()
         audioMeasurementModeEnabled = SharedConfig.audioMeasurementModeEnabled()
+        streamVadTelemetryEnabled = SharedConfig.streamVadTelemetryEnabled()
         streamVadAdaptiveDeltaOverridePresent = SharedConfig.streamVadAdaptiveDeltaDbOverridePresent()
         streamVadSilenceOverridePresent = SharedConfig.streamVadSilenceMsOverridePresent()
 
@@ -240,6 +242,11 @@ class AppSettings: ObservableObject {
                                    payload: ["value": newValue])
             self?.saveAudioMeasurementModeEnabled(newValue)
         }.store(in: &cancellables)
+        $streamVadTelemetryEnabled.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadTelemetryEnabled",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadTelemetryEnabled(newValue)
+        }.store(in: &cancellables)
     }
 
     /// Synchronous write to App Group — backs the explicit Save button.
@@ -285,6 +292,7 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(streamVadMinSpeechMs, forKey: SharedConfig.Defaults.streamVadMinSpeechMsKey)
         appGroupDefaults?.set(streamVadMinChunkMs, forKey: SharedConfig.Defaults.streamVadMinChunkMsKey)
         appGroupDefaults?.set(audioMeasurementModeEnabled, forKey: SharedConfig.Defaults.audioMeasurementModeEnabledKey)
+        appGroupDefaults?.set(streamVadTelemetryEnabled, forKey: SharedConfig.Defaults.streamVadTelemetryEnabledKey)
         postSettingsChanged()
     }
 
@@ -437,6 +445,11 @@ class AppSettings: ObservableObject {
         postSettingsChanged()
     }
 
+    private func saveStreamVadTelemetryEnabled(_ enabled: Bool) {
+        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.streamVadTelemetryEnabledKey)
+        postSettingsChanged()
+    }
+
     private func postSettingsChanged() {
         DarwinNotifier.post(SharedConfig.Defaults.darwinSettingsChangedNotificationName)
     }
@@ -491,6 +504,7 @@ class AppSettings: ObservableObject {
         streamVadSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
         streamVadMinSpeechMs = SharedConfig.Defaults.streamVadMinSpeechMsDefault
         streamVadMinChunkMs = SharedConfig.Defaults.streamVadMinChunkMsDefault
+        streamVadTelemetryEnabled = SharedConfig.Defaults.streamVadTelemetryEnabledDefault
         resetVadEndpointTimingDefaults()
         resetVadFloorDynamicsDefaults()
     }

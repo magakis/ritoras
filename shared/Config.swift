@@ -207,6 +207,8 @@ struct SharedConfig {
 
         static let audioMeasurementModeEnabledKey = "audioMeasurementModeEnabled"
         static let audioMeasurementModeEnabledDefault = false
+        static let streamVadTelemetryEnabledKey = "streamVadTelemetryEnabled"
+        static let streamVadTelemetryEnabledDefault = false
 
         // MARK: - Streaming / VAD Tunables
 
@@ -850,6 +852,17 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.audioMeasurementModeEnabledKey) as? Bool)
             ?? Defaults.audioMeasurementModeEnabledDefault
+    }
+
+    /// Reads the streaming VAD telemetry kill switch from the App Group.
+    /// Returns the default (`false`) when the App Group is unavailable or the
+    /// key is unset.
+    static func streamVadTelemetryEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadTelemetryEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadTelemetryEnabledKey) as? Bool)
+            ?? Defaults.streamVadTelemetryEnabledDefault
     }
 
     /// Reads the streaming VAD silence threshold (ms) from the App Group.
