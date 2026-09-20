@@ -8,6 +8,9 @@ import {
   VAD_ADAPTIVE_FALL_TAU_SECONDS_MIN,
   VAD_ADAPTIVE_DYNAMICS_SPREAD_DB_MAX,
   VAD_ADAPTIVE_DYNAMICS_SPREAD_DB_MIN,
+  VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB,
+  VAD_ADAPTIVE_FLAT_SPREAD_DB_MAX,
+  VAD_ADAPTIVE_FLAT_SPREAD_DB_MIN,
   VAD_ADAPTIVE_RISE_MULTIPLIER_MAX,
   VAD_ADAPTIVE_RISE_MULTIPLIER_MIN,
   VAD_ADAPTIVE_SILENCE_DELTA_DB_MAX,
@@ -28,6 +31,14 @@ function seedAdaptiveGate(partial = {}, seedDb = -50) {
   }));
   for (let i = 0; i < 10; i++) gate.process(seedDb, 0.1);
   return gate;
+}
+
+function endingRiseProbe(seedDb, plateauDb, peakDb) {
+  const gate = seedAdaptiveGate({}, seedDb);
+  gate.floorDb = -70;
+  for (let i = 0; i < 4; i++) gate.process(plateauDb, 0.1);
+  const output = gate.process(peakDb, 0.1);
+  return { gate, output };
 }
 
 describe('VADThresholdGate', () => {
@@ -251,6 +262,95 @@ describe('VADThresholdGate', () => {
       assert.strictEqual(strongGate.snapshot.floorDb, -70);
     });
 
+    it('applies ending-rise arithmetic at the elevated rate and doubles timing at half speed', () => {
+      const normalRate = seedAdaptiveGate({}, -63);
+      normalRate.floorDb = -70;
+      normalRate.process(-63, 0.1);
+      normalRate.updateFloorTracking(-63, 7 / 12, false, true);
+      assert.ok(Math.abs(normalRate.snapshot.floorDb - -63) < 0.001);
+
+      const halfRate = seedAdaptiveGate({ adaptiveRiseSpeedMultiplier: 0.5 }, -63);
+      halfRate.floorDb = -70;
+      halfRate.process(-63, 0.1);
+      halfRate.updateFloorTracking(-63, 7 / 6, false, true);
+      assert.ok(Math.abs(halfRate.snapshot.floorDb - -63) < 0.001);
+    });
+
+    it('joint-gates ending-rise on wind dispersion after the short-spread gate', () => {
+      const blocked = endingRiseProbe(-57, -54, -50);
+      assert.ok(Math.abs(blocked.output.dynamicsSpreadDb - 7) < 0.001);
+      assert.ok(Math.abs(blocked.output.shortSpreadDb - 4) < 0.001);
+      assert.strictEqual(
+        VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB,
+        6,
+      );
+      blocked.gate.updateFloorTracking(-50, 0.1, false, true);
+      assert.strictEqual(blocked.gate.snapshot.floorDb, -70);
+
+      const allowed = endingRiseProbe(-55, -53, -50);
+      assert.ok(Math.abs(allowed.output.dynamicsSpreadDb - 5) < 0.001);
+      assert.ok(Math.abs(allowed.output.shortSpreadDb - 3) < 0.001);
+      allowed.gate.updateFloorTracking(-50, 0.1, false, true);
+      assert.ok(Math.abs(allowed.gate.snapshot.floorDb - -68.8) < 0.001);
+    });
+
+    it('uses rise-or-hold during ending-rise when rolling P10 is below the floor', () => {
+      const gate = seedAdaptiveGate({}, -62);
+      gate.floorDb = -60;
+      gate.process(-61, 0.1);
+      gate.updateFloorTracking(-61, 0.5, false, true);
+      assert.strictEqual(gate.snapshot.floorDb, -60);
+    });
+
+    it('bypasses the speech ceiling only for ending-rise and enforces it for idle rise', () => {
+      const endingGate = seedAdaptiveGate({}, -63);
+      endingGate.floorDb = -70;
+      endingGate.speechCeilingDb = -60;
+      for (let i = 0; i < 6; i++) {
+        endingGate.process(-63, 0.1);
+        endingGate.updateFloorTracking(-63, 0.1, false, true);
+      }
+      assert.ok(Math.abs(endingGate.snapshot.floorDb - -63) < 0.001);
+
+      const idleGate = seedAdaptiveGate({}, -63);
+      idleGate.floorDb = -70;
+      idleGate.speechCeilingDb = -60;
+      idleGate.process(-63, 0.1);
+      idleGate.updateFloorTracking(-63, 0.1, true, false);
+      assert.ok(idleGate.snapshot.floorDb < -68.8);
+      assert.ok(idleGate.snapshot.floorDb <= idleGate.speechCeilingDb
+        - idleGate.effectiveAdaptiveDeltaDb - 2 + 0.000001);
+    });
+
+    it('keeps non-ending flat continuing evidence frozen while speech is active', () => {
+      const gate = seedAdaptiveGate({}, -63);
+      gate.floorDb = -70;
+      gate.process(-63, 0.1);
+      gate.updateFloorTracking(-63, 0.5, false, false);
+      assert.strictEqual(gate.snapshot.floorDb, -70);
+    });
+
+    it('does not apply ending-rise to strong evidence', () => {
+      const gate = seedAdaptiveGate({}, -63);
+      gate.floorDb = -70;
+      let output;
+      for (let i = 0; i < 6; i++) output = gate.process(-50, 0.1);
+      assert.strictEqual(output.evidence, 'strong');
+      assert.strictEqual(output.shortSpreadDb, 0);
+      gate.updateFloorTracking(-50, 0.5, false, true);
+      assert.strictEqual(gate.snapshot.floorDb, -70);
+    });
+
+    it('does not apply ending-rise when dynamics are disabled', () => {
+      const gate = seedAdaptiveGate({ adaptiveDynamicsEnabled: false }, -63);
+      gate.floorDb = -70;
+      const output = gate.process(-63, 0.1);
+      assert.strictEqual(output.evidence, 'continuing');
+      assert.strictEqual(output.shortSpreadDb, null);
+      gate.updateFloorTracking(-63, 0.5, false, true);
+      assert.strictEqual(gate.snapshot.floorDb, -70);
+    });
+
     it('uses the fast fall tau and capped upward movement while idle', () => {
       const fallGate = seedAdaptiveGate({ adaptiveDeltaDb: 20 }, -60);
       fallGate.floorDb = -50;
@@ -271,6 +371,7 @@ describe('VADThresholdGate', () => {
     it('normalizes adaptive bands and the advanced VAD bounds at construction', () => {
       assert.strictEqual(config().adaptiveDynamicsEnabled, true);
       assert.strictEqual(config().adaptiveDynamicsSpreadDb, 9);
+      assert.strictEqual(config().adaptiveFlatSpreadDb, 5);
 
       const wideSilenceBand = seedAdaptiveGate({
         adaptiveDeltaDb: 10,
@@ -318,6 +419,11 @@ describe('VADThresholdGate', () => {
       assert.strictEqual(dynamicsLower.effectiveDynamicsSpreadDb, VAD_ADAPTIVE_DYNAMICS_SPREAD_DB_MIN);
       const dynamicsUpper = seedAdaptiveGate({ adaptiveDynamicsSpreadDb: 99 });
       assert.strictEqual(dynamicsUpper.effectiveDynamicsSpreadDb, VAD_ADAPTIVE_DYNAMICS_SPREAD_DB_MAX);
+
+      const flatLower = seedAdaptiveGate({ adaptiveFlatSpreadDb: 0 });
+      assert.strictEqual(flatLower.effectiveFlatSpreadDb, VAD_ADAPTIVE_FLAT_SPREAD_DB_MIN);
+      const flatUpper = seedAdaptiveGate({ adaptiveFlatSpreadDb: 99 });
+      assert.strictEqual(flatUpper.effectiveFlatSpreadDb, VAD_ADAPTIVE_FLAT_SPREAD_DB_MAX);
     });
 
     it('gates flat strong levels while allowing modulated strong evidence', () => {
@@ -327,6 +433,7 @@ describe('VADThresholdGate', () => {
       assert.strictEqual(flatOutput.evidence, 'continuing');
       assert.strictEqual(flatOutput.isSpeech, true);
       assert.strictEqual(flatGate.snapshot.evidence, 'continuing');
+      assert.ok(flatOutput.shortSpreadDb < 0.001);
 
       const modulatedGate = seedAdaptiveGate({}, -58);
       modulatedGate.floorDb = -70;
@@ -334,6 +441,7 @@ describe('VADThresholdGate', () => {
       assert.strictEqual(modulatedOutput.evidence, 'strong');
       assert.strictEqual(modulatedOutput.isSpeech, true);
       assert.ok(Math.abs(modulatedOutput.dynamicsSpreadDb - 13) < 0.001);
+      assert.ok(modulatedOutput.shortSpreadDb >= 13);
     });
 
     it('uses the inclusive dynamics spread boundary for strong evidence', () => {
@@ -357,6 +465,7 @@ describe('VADThresholdGate', () => {
       assert.strictEqual(output.evidence, 'strong');
       assert.strictEqual(output.isSpeech, true);
       assert.strictEqual(output.dynamicsSpreadDb, null);
+      assert.strictEqual(output.shortSpreadDb, null);
     });
 
     it('uses the spread setting as the cold-start shaped threshold', () => {
@@ -392,17 +501,21 @@ describe('VADThresholdGate', () => {
     it('reports dynamics spread only for enabled adaptive frames', () => {
       const staticOutput = new VADThresholdGate(config({ mode: 'static' })).process(-20, 0.1);
       assert.strictEqual(staticOutput.dynamicsSpreadDb, null);
+      assert.strictEqual(staticOutput.shortSpreadDb, null);
 
       const calibratedOutput = new VADThresholdGate(config({ mode: 'calibrated' }))
         .process(-50, 0.1);
       assert.strictEqual(calibratedOutput.dynamicsSpreadDb, null);
+      assert.strictEqual(calibratedOutput.shortSpreadDb, null);
 
       const disabledAdaptiveOutput = seedAdaptiveGate({ adaptiveDynamicsEnabled: false }, -50)
         .process(-50, 0.1);
       assert.strictEqual(disabledAdaptiveOutput.dynamicsSpreadDb, null);
+      assert.strictEqual(disabledAdaptiveOutput.shortSpreadDb, null);
 
       const enabledAdaptiveOutput = seedAdaptiveGate({}, -50).process(-50, 0.1);
       assert.strictEqual(enabledAdaptiveOutput.dynamicsSpreadDb, 0);
+      assert.strictEqual(enabledAdaptiveOutput.shortSpreadDb, 0);
     });
 
     it('honors silence delta, fall tau, rise multiplier, and ceiling decay', () => {

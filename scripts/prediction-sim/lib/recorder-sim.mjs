@@ -1,5 +1,6 @@
 import {
   makeVadGateConfig,
+  VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB,
   VAD_SUSTAINED_CONTINUING_ONSET_S,
   VADThresholdGate,
 } from './vad-gate.mjs';
@@ -34,6 +35,7 @@ function makeSessionConfig(harness) {
     continuationDeltaDb: gate.effectiveAdaptiveContinuationDeltaDb,
     silenceDeltaDb: gate.effectiveSilenceDeltaDb,
     dynamicsSpreadDb: gate.effectiveDynamicsSpreadDb,
+    flatSpreadDb: gate.effectiveFlatSpreadDb,
     dynamicsEnabled: gate.config.adaptiveDynamicsEnabled,
     staleFloorSeconds: gate.effectiveStaleFloorSeconds,
     fallTauSeconds: gate.effectiveFallTauSeconds,
@@ -174,10 +176,18 @@ export function makeRecorderHarness({
       const latchedContinuingOnset = this.sustainedContinuingOnsetLatched
         && output.evidence === 'continuing'
         && endpointInOnsetLimb;
-      const endpointEvidence = adaptivePath
+      let endpointEvidence = adaptivePath
         && latchedContinuingOnset
         ? 'strong'
         : output.evidence;
+      if (previousState === 'endPending'
+        && output.shortSpreadDb !== null
+        && output.dynamicsSpreadDb !== null
+        && output.shortSpreadDb < this.gate.effectiveFlatSpreadDb
+        && output.dynamicsSpreadDb < VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB
+        && (endpointEvidence === 'continuing' || endpointEvidence === 'ambiguous')) {
+        endpointEvidence = 'silence';
+      }
       if (output.retroactiveSpeechMs > 0) {
         this.speechSamples += output.retroactiveSpeechMs * 16;
       }
@@ -193,6 +203,7 @@ export function makeRecorderHarness({
           frameDb,
           frameDuration,
           previousState === 'idle' && this.endpoint.state === 'idle',
+          previousState === 'endPending' || this.endpoint.state === 'endPending',
         );
 
         if (decision.type === 'startUtterance') {

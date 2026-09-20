@@ -170,6 +170,7 @@ private final class SampleRingBuffer {
 private final class VADContext: @unchecked Sendable {
     // MARK: Configuration (constants)
     let gate: VADThresholdGate
+    let effectiveFlatSpreadDb: Double
     let silenceThresholdSamples: Int
     let minSpeechSamples: Int
     let minChunkSamples: Int
@@ -217,7 +218,10 @@ private final class VADContext: @unchecked Sendable {
         analysisHpfEnabled: Bool,
         analysisHpfCutoffHz: Double
     ) {
-        self.gate = VADThresholdGate(config: gateConfig)
+        let gate = VADThresholdGate(config: gateConfig)
+        self.gate = gate
+        self.effectiveFlatSpreadDb = (gate.effectiveParameters["flatSpreadDb"] as? Double)
+            ?? SharedConfig.Defaults.streamVadFlatSpreadDbDefault
         self.silenceThresholdSamples = silenceThresholdSamples
         self.minSpeechSamples = minSpeechSamples
         self.minChunkSamples = minChunkSamples
@@ -474,9 +478,17 @@ private final class VADContext: @unchecked Sendable {
             let latchedContinuingOnset = sustainedContinuingOnsetLatched &&
                                          out.evidence == .continuing &&
                                          endpointInOnsetLimb
-            let endpointEvidence = adaptivePath && latchedContinuingOnset
+            var endpointEvidence = adaptivePath && latchedContinuingOnset
                 ? StreamingEndpointEvidence.strong
                 : evidence
+            if previousState == .endPending,
+               let shortSpreadDb = out.shortSpreadDb,
+               let dynamicsSpreadDb = out.dynamicsSpreadDb,
+               shortSpreadDb < effectiveFlatSpreadDb,
+               dynamicsSpreadDb < VADThresholdGate.adaptiveEndPendingWindDispersionDb,
+               endpointEvidence == .continuing || endpointEvidence == .ambiguous {
+                endpointEvidence = .silence
+            }
             decision = endpoint.process(evidence: endpointEvidence, durationSamples: frameLength)
             telemetryDecision = decision
             let decisionSilenceSamples = endpoint.accumulatedSilenceSamples
@@ -487,7 +499,8 @@ private final class VADContext: @unchecked Sendable {
             gate.updateFloorTracking(
                 frameDb: frameDb,
                 duration: frameDuration,
-                machineIsIdle: previousState == .idle && endpoint.state == .idle
+                machineIsIdle: previousState == .idle && endpoint.state == .idle,
+                machineIsEnding: previousState == .endPending || endpoint.state == .endPending
             )
 
             switch decision {
@@ -924,7 +937,8 @@ actor StreamingAudioRecorder {
             adaptiveStaleFloorSeconds: SharedConfig.streamVadStaleFloorSeconds(),
             adaptiveFallTauSeconds: SharedConfig.streamVadFallTauSeconds(),
             adaptiveDynamicsEnabled: SharedConfig.streamVadDynamicsEnabled(),
-            adaptiveDynamicsSpreadDb: SharedConfig.streamVadDynamicsSpreadDb()
+            adaptiveDynamicsSpreadDb: SharedConfig.streamVadDynamicsSpreadDb(),
+            adaptiveFlatSpreadDb: SharedConfig.streamVadFlatSpreadDb()
         )
         self.vadGateConfig = vadGateConfig
         vad = VADContext(

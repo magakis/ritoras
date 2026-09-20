@@ -60,6 +60,9 @@ struct VADSettingsView: View {
             .onChange(of: settings.streamVadDynamicsSpreadDb) { _, _ in
                 rebuildTesterGate()
             }
+            .onChange(of: settings.streamVadFlatSpreadDb) { _, _ in
+                rebuildTesterGate()
+            }
     }
 
     private var formWithFloorDynamicsHandlers: some View {
@@ -389,7 +392,8 @@ struct VADSettingsView: View {
             adaptiveStaleFloorSeconds: settings.streamVadStaleFloorSeconds,
             adaptiveFallTauSeconds: settings.streamVadFallTauSeconds,
             adaptiveDynamicsEnabled: SharedConfig.streamVadDynamicsEnabled(),
-            adaptiveDynamicsSpreadDb: settings.streamVadDynamicsSpreadDb
+            adaptiveDynamicsSpreadDb: settings.streamVadDynamicsSpreadDb,
+            adaptiveFlatSpreadDb: settings.streamVadFlatSpreadDb
         ))
     }
 
@@ -439,6 +443,7 @@ struct VADSettingsView: View {
     private var floorDynamicsRows: some View {
         adaptationSpeedRow
         dynamicsSpreadRow
+        flatSpreadRow
         adaptiveSilenceDeltaRow
         staleFloorRow
         fallTauRow
@@ -689,6 +694,21 @@ struct VADSettingsView: View {
             }
             Slider(value: $settings.streamVadDynamicsSpreadDb, in: 6...24, step: 0.5)
             Text("How much rise-and-fall counts as speech. Steady noise stays ambient.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var flatSpreadRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Flat Spread")
+                Spacer()
+                Text("\(settings.streamVadFlatSpreadDb, specifier: "%.1f") dB")
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: $settings.streamVadFlatSpreadDb, in: 3...8, step: 0.5)
+            Text("How flat audio must be to count as wind — flatter gusts close utterances instead of keeping them open.")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }

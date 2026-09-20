@@ -24,6 +24,7 @@ class AppSettings: ObservableObject {
     @Published var streamVadStaleFloorSeconds: Double = SharedConfig.Defaults.streamVadStaleFloorSecondsDefault
     @Published var streamVadFallTauSeconds: Double = SharedConfig.Defaults.streamVadFallTauSecondsDefault
     @Published var streamVadDynamicsSpreadDb: Double = SharedConfig.Defaults.streamVadDynamicsSpreadDbDefault
+    @Published var streamVadFlatSpreadDb: Double = SharedConfig.Defaults.streamVadFlatSpreadDbDefault
     @Published var streamVadOnsetMs: Int = SharedConfig.Defaults.streamVadOnsetMsDefault
     @Published var streamVadEndEvidenceMs: Int = SharedConfig.Defaults.streamVadEndEvidenceMsDefault
     @Published var streamVadResumeMs: Int = SharedConfig.Defaults.streamVadResumeMsDefault
@@ -65,6 +66,7 @@ class AppSettings: ObservableObject {
         streamVadStaleFloorSeconds = SharedConfig.streamVadStaleFloorSeconds()
         streamVadFallTauSeconds = SharedConfig.streamVadFallTauSeconds()
         streamVadDynamicsSpreadDb = SharedConfig.streamVadDynamicsSpreadDb()
+        streamVadFlatSpreadDb = SharedConfig.streamVadFlatSpreadDb()
         streamVadOnsetMs = SharedConfig.streamVadOnsetMs()
         streamVadEndEvidenceMs = SharedConfig.streamVadEndEvidenceMs()
         streamVadResumeMs = SharedConfig.streamVadResumeMs()
@@ -190,6 +192,11 @@ class AppSettings: ObservableObject {
                                    payload: ["value": newValue])
             self?.saveStreamVadDynamicsSpreadDb(newValue)
         }.store(in: &cancellables)
+        $streamVadFlatSpreadDb.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadFlatSpreadDb",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadFlatSpreadDb(newValue)
+        }.store(in: &cancellables)
         $streamVadOnsetMs.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving streamVadOnsetMs",
                                    payload: ["value": newValue])
@@ -279,6 +286,7 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(streamVadStaleFloorSeconds, forKey: SharedConfig.Defaults.streamVadStaleFloorSecondsKey)
         appGroupDefaults?.set(streamVadFallTauSeconds, forKey: SharedConfig.Defaults.streamVadFallTauSecondsKey)
         appGroupDefaults?.set(streamVadDynamicsSpreadDb, forKey: SharedConfig.Defaults.streamVadDynamicsSpreadDbKey)
+        appGroupDefaults?.set(streamVadFlatSpreadDb, forKey: SharedConfig.Defaults.streamVadFlatSpreadDbKey)
         appGroupDefaults?.set(streamVadOnsetMs, forKey: SharedConfig.Defaults.streamVadOnsetMsKey)
         appGroupDefaults?.set(streamVadEndEvidenceMs, forKey: SharedConfig.Defaults.streamVadEndEvidenceMsKey)
         appGroupDefaults?.set(streamVadResumeMs, forKey: SharedConfig.Defaults.streamVadResumeMsKey)
@@ -394,6 +402,11 @@ class AppSettings: ObservableObject {
         postSettingsChanged()
     }
 
+    private func saveStreamVadFlatSpreadDb(_ value: Double) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadFlatSpreadDbKey)
+        postSettingsChanged()
+    }
+
     private func saveStreamVadOnsetMs(_ value: Int) {
         appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadOnsetMsKey)
         postSettingsChanged()
@@ -487,6 +500,7 @@ class AppSettings: ObservableObject {
         streamVadStaleFloorSeconds = SharedConfig.Defaults.streamVadStaleFloorSecondsDefault
         streamVadFallTauSeconds = SharedConfig.Defaults.streamVadFallTauSecondsDefault
         streamVadDynamicsSpreadDb = SharedConfig.Defaults.streamVadDynamicsSpreadDbDefault
+        streamVadFlatSpreadDb = SharedConfig.Defaults.streamVadFlatSpreadDbDefault
     }
 
     func resetVadToDefaults() {

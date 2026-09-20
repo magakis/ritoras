@@ -20,6 +20,7 @@ final class AudioLevelTesterViewModel: ObservableObject {
     private let monitor = AudioLevelMonitor()
     private var gate: VADThresholdGate?
     private var endpoint: StreamingEndpoint?
+    private var effectiveFlatSpreadDb = SharedConfig.Defaults.streamVadFlatSpreadDbDefault
     private var endpointMachineEnabled = true
     private var sessionToken = 0
 
@@ -73,11 +74,21 @@ final class AudioLevelTesterViewModel: ObservableObject {
                     if self.endpointMachineEnabled {
                         let durationSamples = max(0, Int((frameDuration * 16000.0).rounded()))
                         let evidence = StreamingEndpointEvidence(rawValue: output.evidence.rawValue) ?? .silence
-                        _ = endpoint.process(evidence: evidence, durationSamples: durationSamples)
+                        var endpointEvidence = evidence
+                        if previousState == .endPending,
+                           let shortSpreadDb = output.shortSpreadDb,
+                           let dynamicsSpreadDb = output.dynamicsSpreadDb,
+                           shortSpreadDb < self.effectiveFlatSpreadDb,
+                           dynamicsSpreadDb < VADThresholdGate.adaptiveEndPendingWindDispersionDb,
+                           endpointEvidence == .continuing || endpointEvidence == .ambiguous {
+                            endpointEvidence = .silence
+                        }
+                        _ = endpoint.process(evidence: endpointEvidence, durationSamples: durationSamples)
                         gate.updateFloorTracking(
                             frameDb: frameDb,
                             duration: frameDuration,
-                            machineIsIdle: previousState == .idle && endpoint.state == .idle
+                            machineIsIdle: previousState == .idle && endpoint.state == .idle,
+                            machineIsEnding: previousState == .endPending || endpoint.state == .endPending
                         )
                     } else {
                         gate.updateFloorTracking(
@@ -166,12 +177,16 @@ final class AudioLevelTesterViewModel: ObservableObject {
             adaptiveStaleFloorSeconds: SharedConfig.streamVadStaleFloorSeconds(),
             adaptiveFallTauSeconds: SharedConfig.streamVadFallTauSeconds(),
             adaptiveDynamicsEnabled: SharedConfig.streamVadDynamicsEnabled(),
-            adaptiveDynamicsSpreadDb: SharedConfig.streamVadDynamicsSpreadDb()
+            adaptiveDynamicsSpreadDb: SharedConfig.streamVadDynamicsSpreadDb(),
+            adaptiveFlatSpreadDb: SharedConfig.streamVadFlatSpreadDb()
         ))
     }
 
     func rebuildGate(using config: VADGateConfig) {
-        gate = VADThresholdGate(config: config)
+        let newGate = VADThresholdGate(config: config)
+        gate = newGate
+        effectiveFlatSpreadDb = (newGate.effectiveParameters["flatSpreadDb"] as? Double)
+            ?? SharedConfig.Defaults.streamVadFlatSpreadDbDefault
         endpoint = StreamingEndpoint(configuration: StreamingEndpointConfiguration(
             onsetSamples: Int(Double(SharedConfig.streamVadOnsetMs()) * 16.0),
             endEvidenceSamples: Int(Double(SharedConfig.streamVadEndEvidenceMs()) * 16.0),

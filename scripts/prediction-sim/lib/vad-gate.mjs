@@ -32,6 +32,9 @@ export const VAD_ADAPTIVE_FALL_TAU_SECONDS_MIN = 0.2;
 export const VAD_ADAPTIVE_FALL_TAU_SECONDS_MAX = 2.0;
 export const VAD_ADAPTIVE_DYNAMICS_SPREAD_DB_MIN = 6.0;
 export const VAD_ADAPTIVE_DYNAMICS_SPREAD_DB_MAX = 24.0;
+export const VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB = 6.0;
+export const VAD_ADAPTIVE_FLAT_SPREAD_DB_MIN = 3.0;
+export const VAD_ADAPTIVE_FLAT_SPREAD_DB_MAX = 8.0;
 const CALIBRATION_COMPLETION_EPSILON_S = 1e-9;
 
 function clamp(value, lower, upper) {
@@ -61,6 +64,7 @@ export function makeVadGateConfig(partial = {}) {
     adaptiveFallTauSeconds: 0.5,
     adaptiveDynamicsEnabled: true,
     adaptiveDynamicsSpreadDb: 9.0,
+    adaptiveFlatSpreadDb: 5.0,
     ...(partial ?? {}),
   };
 }
@@ -102,6 +106,11 @@ export class VADThresholdGate {
       this.config.adaptiveDynamicsSpreadDb,
       VAD_ADAPTIVE_DYNAMICS_SPREAD_DB_MIN,
       VAD_ADAPTIVE_DYNAMICS_SPREAD_DB_MAX,
+    );
+    this.effectiveFlatSpreadDb = clamp(
+      this.config.adaptiveFlatSpreadDb,
+      VAD_ADAPTIVE_FLAT_SPREAD_DB_MIN,
+      VAD_ADAPTIVE_FLAT_SPREAD_DB_MAX,
     );
     this.behaviorMode = this.config.mode;
     this.calibrationFinished = false;
@@ -146,6 +155,7 @@ export class VADThresholdGate {
       retroactiveSpeechMs: 0,
       trailingSilenceMs: null,
       dynamicsSpreadDb: null,
+      shortSpreadDb: null,
     };
   }
 
@@ -289,6 +299,10 @@ export class VADThresholdGate {
     const rollingPercentile = this.adaptiveRollingPercentile();
     const windowMax = this.adaptiveRollingMaxDb(VAD_ADAPTIVE_COLD_START_DISPERSION_WINDOW_S);
     const dispersionDb = (windowMax ?? frameDb) - (rollingPercentile ?? frameDb);
+    const shortSpreadDb = this.config.adaptiveDynamicsEnabled
+      ? (windowMax ?? frameDb)
+        - (this.adaptiveRollingMinDb(VAD_ADAPTIVE_COLD_START_DISPERSION_WINDOW_S) ?? frameDb)
+      : null;
     this.adaptiveRollingPercentileCache = rollingPercentile;
     if (!this.adaptiveRefinementComplete) {
       return this.processAdaptiveRefinement(
@@ -296,6 +310,7 @@ export class VADThresholdGate {
         frameDuration,
         rollingPercentile,
         dispersionDb,
+        shortSpreadDb,
       );
     }
 
@@ -310,6 +325,7 @@ export class VADThresholdGate {
         frameDuration,
         rollingPercentile,
         dispersionDb,
+        shortSpreadDb,
       );
     }
 
@@ -371,10 +387,11 @@ export class VADThresholdGate {
       retroactiveSpeechMs,
       trailingSilenceMs,
       dynamicsSpreadDb: this.config.adaptiveDynamicsEnabled ? dispersionDb : null,
+      shortSpreadDb,
     });
   }
 
-  processAdaptiveRefinement(frameDb, frameDuration, rollingPercentile, dispersionDb) {
+  processAdaptiveRefinement(frameDb, frameDuration, rollingPercentile, dispersionDb, shortSpreadDb) {
     this.adaptiveRefinementElapsed += Math.max(0, frameDuration);
     if (this.floorDb === null) {
       this.floorDb = VAD_FLOOR_MIN_DB;
@@ -431,6 +448,7 @@ export class VADThresholdGate {
       retroactiveSpeechMs,
       trailingSilenceMs,
       dynamicsSpreadDb: this.config.adaptiveDynamicsEnabled ? dispersionDb : null,
+      shortSpreadDb,
     });
   }
 
@@ -443,7 +461,7 @@ export class VADThresholdGate {
     return evidence;
   }
 
-  updateFloorTracking(frameDb, duration, machineIsIdle = true) {
+  updateFloorTracking(frameDb, duration, machineIsIdle = true, machineIsEnding = false) {
     this.lastKnownMachineIsIdle = machineIsIdle;
     if (this.behaviorMode !== 'adaptive') return;
     if (this.floorDb === null) return;
@@ -481,6 +499,25 @@ export class VADThresholdGate {
       this.speechCeilingDb = clampBound > VAD_FLOOR_MAX_DB - this.effectiveAdaptiveDeltaDb
         ? null
         : decayedCeilingDb;
+    }
+    if (machineIsEnding
+      && this.lastOutput.shortSpreadDb !== null
+      && this.lastOutput.dynamicsSpreadDb !== null
+      && this.lastOutput.shortSpreadDb < this.effectiveFlatSpreadDb
+      && this.lastOutput.dynamicsSpreadDb < VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB
+      && this.lastOutput.evidence !== 'strong') {
+      const target = Math.max(this.adaptiveRollingPercentileCache ?? frameDb, frameDb);
+      const risenFloor = Math.max(
+        this.floorDb,
+        Math.min(
+          target,
+          this.floorDb + VAD_ELEVATED_RISE_DB_PER_SECOND
+            * this.effectiveRiseSpeedMultiplier * duration,
+        ),
+      );
+      this.floorDb = this.clampFloor(risenFloor);
+      this.refreshAdaptiveOutput();
+      return;
     }
     if (riseCap === 0 && this.adaptiveRollingPercentileAtLeast(this.floorDb)) return;
     const target = this.adaptiveRollingPercentileCache;
@@ -534,6 +571,7 @@ export class VADThresholdGate {
       retroactiveSpeechMs: 0,
       trailingSilenceMs: null,
       dynamicsSpreadDb: null,
+      shortSpreadDb: null,
     };
   }
 
@@ -611,6 +649,20 @@ export class VADThresholdGate {
     return maximum;
   }
 
+  adaptiveRollingMinDb(coverSeconds) {
+    if (this.adaptiveRollingCount === 0) return null;
+    let minimum = Infinity;
+    let coveredSeconds = 0;
+    for (let offset = 0; offset < this.adaptiveRollingCount; offset++) {
+      const index = (this.adaptiveRollingWriteIndex - 1 - offset
+        + VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY) % VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY;
+      minimum = Math.min(minimum, this.adaptiveRollingDbs[index]);
+      coveredSeconds += this.adaptiveRollingDurations[index];
+      if (coveredSeconds > coverSeconds) break;
+    }
+    return minimum;
+  }
+
   adaptiveRollingPercentileAtLeast(floorDb) {
     if (this.adaptiveRollingCount === 0) return false;
 
@@ -661,6 +713,7 @@ export class VADThresholdGate {
       floorDb: this.floorDb,
       usedFallback: this.usedFallback,
       dynamicsSpreadDb: this.lastOutput.dynamicsSpreadDb,
+      shortSpreadDb: this.lastOutput.shortSpreadDb,
     };
   }
 
@@ -717,6 +770,7 @@ export class VADThresholdGate {
     retroactiveSpeechMs,
     trailingSilenceMs,
     dynamicsSpreadDb = null,
+    shortSpreadDb = null,
   }) {
     this.lastOutput = {
       isSpeech,
@@ -730,6 +784,7 @@ export class VADThresholdGate {
       retroactiveSpeechMs,
       trailingSilenceMs,
       dynamicsSpreadDb,
+      shortSpreadDb,
     };
     return { ...this.lastOutput };
   }

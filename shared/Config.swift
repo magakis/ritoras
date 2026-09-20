@@ -236,6 +236,8 @@ struct SharedConfig {
         static let streamVadDynamicsEnabledDefault = true
         static let streamVadDynamicsSpreadDbKey = "streamVadDynamicsSpreadDb"
         static let streamVadDynamicsSpreadDbDefault: Double = 9.0
+        static let streamVadFlatSpreadDbKey = "streamVadFlatSpreadDb"
+        static let streamVadFlatSpreadDbDefault: Double = 5.0
         static let streamVadOnsetMsKey = "streamVadOnsetMs"
         static let streamVadOnsetMsDefault: Int = 70
         static let streamVadEndEvidenceMsKey = "streamVadEndEvidenceMs"
@@ -703,6 +705,17 @@ struct SharedConfig {
             forKey: Defaults.streamVadDynamicsSpreadDbKey
         ) as? NSNumber)?.doubleValue ?? Defaults.streamVadDynamicsSpreadDbDefault
         return value.isFinite ? min(max(value, 6.0), 24.0) : Defaults.streamVadDynamicsSpreadDbDefault
+    }
+
+    /// Reads the adaptive flat spread threshold (dB) from the App Group.
+    static func streamVadFlatSpreadDb() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadFlatSpreadDbDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadFlatSpreadDbKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadFlatSpreadDbDefault
+        return value.isFinite ? min(max(value, 3.0), 8.0) : Defaults.streamVadFlatSpreadDbDefault
     }
 
     /// Reads the endpoint onset confirmation window (ms) from the App Group.

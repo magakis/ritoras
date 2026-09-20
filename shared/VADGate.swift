@@ -30,6 +30,7 @@ struct VADGateConfig {
     let adaptiveFallTauSeconds: Double
     let adaptiveDynamicsEnabled: Bool
     let adaptiveDynamicsSpreadDb: Double
+    let adaptiveFlatSpreadDb: Double
 }
 
 struct VADGateOutput {
@@ -44,6 +45,7 @@ struct VADGateOutput {
     let retroactiveSpeechMs: Double
     let trailingSilenceMs: Double?
     let dynamicsSpreadDb: Double?
+    let shortSpreadDb: Double?
 }
 
 final class VADThresholdGate: @unchecked Sendable {
@@ -53,6 +55,7 @@ final class VADThresholdGate: @unchecked Sendable {
     }
 
     // Fixed algorithm constants. They are intentionally not user-facing settings.
+    static let adaptiveEndPendingWindDispersionDb = 6.0
     private static let staticContinuationOffsetDb = 4.0
     private static let staticSilenceOffsetDb = 6.0
     private static let elevatedRiseDbPerSecond = 12.0
@@ -78,6 +81,7 @@ final class VADThresholdGate: @unchecked Sendable {
     private let effectiveStaleFloorSeconds: Double
     private let effectiveFallTauSeconds: Double
     private let effectiveDynamicsSpreadDb: Double
+    private let effectiveFlatSpreadDb: Double
     private var behaviorMode: VADMode
     private var calibrationFinished = false
     private var calibrationElapsed = 0.0
@@ -126,6 +130,7 @@ final class VADThresholdGate: @unchecked Sendable {
             / effectiveRiseSpeedMultiplier
         let effectiveFallTauSeconds = clamp(config.adaptiveFallTauSeconds, 0.2, 2.0)
         let effectiveDynamicsSpreadDb = clamp(config.adaptiveDynamicsSpreadDb, 6.0, 24.0)
+        let effectiveFlatSpreadDb = clamp(config.adaptiveFlatSpreadDb, 3.0, 8.0)
         let initialFloorDb: Double? = config.mode == .adaptive ? Self.floorMinDb : nil
         let initialThresholdDb = config.mode == .adaptive
             ? Self.floorMinDb + effectiveAdaptiveDeltaDb
@@ -138,6 +143,7 @@ final class VADThresholdGate: @unchecked Sendable {
         self.effectiveStaleFloorSeconds = effectiveStaleFloorSeconds
         self.effectiveFallTauSeconds = effectiveFallTauSeconds
         self.effectiveDynamicsSpreadDb = effectiveDynamicsSpreadDb
+        self.effectiveFlatSpreadDb = effectiveFlatSpreadDb
         self.behaviorMode = config.mode
         self.adaptiveRefinementComplete = config.mode != .adaptive
         self.floorDb = initialFloorDb
@@ -158,7 +164,8 @@ final class VADThresholdGate: @unchecked Sendable {
             usedFallback: false,
             retroactiveSpeechMs: 0,
             trailingSilenceMs: nil,
-            dynamicsSpreadDb: nil
+            dynamicsSpreadDb: nil,
+            shortSpreadDb: nil
         )
         calibrationFrames.reserveCapacity(36)
         adaptiveRollingDbs = Array(repeating: 0, count: Self.adaptiveRollingWindowCapacity)
@@ -199,6 +206,7 @@ final class VADThresholdGate: @unchecked Sendable {
             "continuationDeltaDb": effectiveAdaptiveContinuationDeltaDb,
             "silenceDeltaDb": effectiveSilenceDeltaDb,
             "dynamicsSpreadDb": effectiveDynamicsSpreadDb,
+            "flatSpreadDb": effectiveFlatSpreadDb,
             "dynamicsEnabled": config.adaptiveDynamicsEnabled,
             "staleFloorSeconds": effectiveStaleFloorSeconds,
             "fallTauSeconds": effectiveFallTauSeconds,
@@ -345,13 +353,21 @@ final class VADThresholdGate: @unchecked Sendable {
         let rollingPercentile = adaptiveRollingPercentile()
         let windowMax = adaptiveRollingMaxDb(coverSeconds: Self.adaptiveColdStartDispersionWindowSeconds)
         let dispersionDb = (windowMax ?? frameDb) - (rollingPercentile ?? frameDb)
+        let shortSpreadDb: Double?
+        if config.adaptiveDynamicsEnabled {
+            let windowMin = adaptiveRollingMinDb(coverSeconds: Self.adaptiveColdStartDispersionWindowSeconds)
+            shortSpreadDb = (windowMax ?? frameDb) - (windowMin ?? frameDb)
+        } else {
+            shortSpreadDb = nil
+        }
         adaptiveRollingPercentileCache = rollingPercentile
         if !adaptiveRefinementComplete {
             return processAdaptiveRefinement(
                 frameDb: frameDb,
                 frameDuration: frameDuration,
                 rollingPercentile: rollingPercentile,
-                dispersionDb: dispersionDb
+                dispersionDb: dispersionDb,
+                shortSpreadDb: shortSpreadDb
             )
         }
 
@@ -365,7 +381,8 @@ final class VADThresholdGate: @unchecked Sendable {
                 frameDb: frameDb,
                 frameDuration: frameDuration,
                 rollingPercentile: rollingPercentile,
-                dispersionDb: dispersionDb
+                dispersionDb: dispersionDb,
+                shortSpreadDb: shortSpreadDb
             )
         }
 
@@ -428,7 +445,8 @@ final class VADThresholdGate: @unchecked Sendable {
             calibrating: false,
             retroactiveSpeechMs: retroactiveSpeechMs,
             trailingSilenceMs: trailingSilenceMs,
-            dynamicsSpreadDb: config.adaptiveDynamicsEnabled ? dispersionDb : nil
+            dynamicsSpreadDb: config.adaptiveDynamicsEnabled ? dispersionDb : nil,
+            shortSpreadDb: shortSpreadDb
         )
     }
 
@@ -436,7 +454,8 @@ final class VADThresholdGate: @unchecked Sendable {
         frameDb: Double,
         frameDuration: Double,
         rollingPercentile: Double?,
-        dispersionDb: Double
+        dispersionDb: Double,
+        shortSpreadDb: Double?
     ) -> VADGateOutput {
         adaptiveRefinementElapsed += max(0, frameDuration)
         if floorDb == nil {
@@ -497,7 +516,8 @@ final class VADThresholdGate: @unchecked Sendable {
             calibrating: false,
             retroactiveSpeechMs: retroactiveSpeechMs,
             trailingSilenceMs: trailingSilenceMs,
-            dynamicsSpreadDb: config.adaptiveDynamicsEnabled ? dispersionDb : nil
+            dynamicsSpreadDb: config.adaptiveDynamicsEnabled ? dispersionDb : nil,
+            shortSpreadDb: shortSpreadDb
         )
     }
 
@@ -516,7 +536,8 @@ final class VADThresholdGate: @unchecked Sendable {
     func updateFloorTracking(
         frameDb: Double,
         duration: Double,
-        machineIsIdle: Bool = true
+        machineIsIdle: Bool = true,
+        machineIsEnding: Bool = false
     ) {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
@@ -544,6 +565,25 @@ final class VADThresholdGate: @unchecked Sendable {
             self.speechCeilingDb = clampBound > Self.floorMaxDb - effectiveAdaptiveDeltaDb
                 ? nil
                 : decayedCeilingDb
+        }
+        if machineIsEnding,
+           let shortSpreadDb = lastOutput.shortSpreadDb,
+           let dynamicsSpreadDb = lastOutput.dynamicsSpreadDb,
+           shortSpreadDb < effectiveFlatSpreadDb,
+           dynamicsSpreadDb < Self.adaptiveEndPendingWindDispersionDb,
+           lastOutput.evidence != .strong,
+           let floorDb {
+            let target = max(adaptiveRollingPercentileCache ?? frameDb, frameDb)
+            let risenFloor = max(
+                floorDb,
+                min(
+                    target,
+                    floorDb + Self.elevatedRiseDbPerSecond * effectiveRiseSpeedMultiplier * duration
+                )
+            )
+            self.floorDb = clampFloor(risenFloor)
+            refreshAdaptiveOutput()
+            return
         }
         if riseCap == 0,
            let floorDb,
@@ -604,7 +644,8 @@ final class VADThresholdGate: @unchecked Sendable {
             usedFallback: false,
             retroactiveSpeechMs: 0,
             trailingSilenceMs: nil,
-            dynamicsSpreadDb: nil
+            dynamicsSpreadDb: nil,
+            shortSpreadDb: nil
         )
     }
 
@@ -683,6 +724,20 @@ final class VADThresholdGate: @unchecked Sendable {
         return maximum
     }
 
+    private func adaptiveRollingMinDb(coverSeconds: Double) -> Double? {
+        guard adaptiveRollingCount > 0 else { return nil }
+        var minimum = Double.infinity
+        var coveredSeconds = 0.0
+        for offset in 0..<adaptiveRollingCount {
+            let index = (adaptiveRollingWriteIndex - 1 - offset + Self.adaptiveRollingWindowCapacity)
+                % Self.adaptiveRollingWindowCapacity
+            minimum = min(minimum, adaptiveRollingDbs[index])
+            coveredSeconds += adaptiveRollingDurations[index]
+            if coveredSeconds > coverSeconds { break }
+        }
+        return minimum
+    }
+
     private func adaptiveRollingPercentileAtLeast(_ floorDb: Double) -> Bool {
         guard adaptiveRollingCount > 0 else { return false }
 
@@ -740,7 +795,8 @@ final class VADThresholdGate: @unchecked Sendable {
             usedFallback: usedFallback,
             retroactiveSpeechMs: lastOutput.retroactiveSpeechMs,
             trailingSilenceMs: lastOutput.trailingSilenceMs,
-            dynamicsSpreadDb: lastOutput.dynamicsSpreadDb
+            dynamicsSpreadDb: lastOutput.dynamicsSpreadDb,
+            shortSpreadDb: lastOutput.shortSpreadDb
         )
     }
 
@@ -802,7 +858,8 @@ final class VADThresholdGate: @unchecked Sendable {
         calibrating: Bool,
         retroactiveSpeechMs: Double,
         trailingSilenceMs: Double?,
-        dynamicsSpreadDb: Double? = nil
+        dynamicsSpreadDb: Double? = nil,
+        shortSpreadDb: Double? = nil
     ) -> VADGateOutput {
         let output = VADGateOutput(
             isSpeech: isSpeech,
@@ -815,7 +872,8 @@ final class VADThresholdGate: @unchecked Sendable {
             usedFallback: usedFallback,
             retroactiveSpeechMs: retroactiveSpeechMs,
             trailingSilenceMs: trailingSilenceMs,
-            dynamicsSpreadDb: dynamicsSpreadDb
+            dynamicsSpreadDb: dynamicsSpreadDb,
+            shortSpreadDb: shortSpreadDb
         )
         lastOutput = output
         return output

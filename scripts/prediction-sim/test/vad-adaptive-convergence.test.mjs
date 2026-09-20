@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   makeVadGateConfig,
+  VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB,
   VAD_SPEECH_CEILING_MARGIN_DB,
   VADThresholdGate,
 } from '../lib/vad-gate.mjs';
@@ -25,6 +26,15 @@ function makeEndpoint(endpointSilenceMs = 3000) {
 
 function prefillAmbient(harness, frames = 300, frameDb = -80) {
   for (let i = 0; i < frames; i++) harness.drive(frameDb);
+}
+
+function endPendingMappingProbe(seedDb) {
+  const harness = makeRecorderHarness();
+  for (let i = 0; i < 10; i++) harness.gate.process(seedDb, 0.1);
+  harness.gate.floorDb = -70;
+  harness.endpoint.state = 'endPending';
+  for (let i = 0; i < 4; i++) harness.gate.process(-53, 0.1);
+  return harness.drive(-50);
 }
 
 function driveFrame(gate, endpoint, frameDb) {
@@ -658,7 +668,7 @@ describe('adaptive VAD convergence', () => {
     // floor or trigger a stale re-anchor while the endpoint is non-idle.
     for (let i = 0; i < 320; i++) {
       const floorDb = harness.gate.snapshot.floorDb;
-      const frameDb = floorDb + (i % 10 < 2 ? 4 : 6);
+      const frameDb = floorDb + (i % 2 === 0 ? 3 : 9);
       const frame = harness.drive(frameDb);
       sawReanchor ||= frame.reanchorEvent;
     }
@@ -905,9 +915,10 @@ describe('adaptive VAD convergence', () => {
     let sawAmbiguousEndPending = false;
     let emitted = false;
     for (let i = 0; i < 500; i++) {
-      const frame = harness.drive(i % 10 === 9 ? -75 : -80);
+      const frame = harness.drive(i % 10 === 9 ? -72 : -78);
       if (harness.endpoint.state === 'endPending' && frame.output.evidence === 'ambiguous') {
         sawAmbiguousEndPending = true;
+        assert.ok(frame.output.shortSpreadDb >= 5);
       }
       if (frame.decision.type === 'finalizeUtterance') {
         emitted = true;
@@ -936,6 +947,266 @@ describe('adaptive VAD convergence', () => {
       }
     }
     assert.ok(onsetMs !== null && onsetMs <= 500);
+  });
+
+  it('joint-gates end-pending mapping at 6 dB of long-window dispersion', () => {
+    const below = endPendingMappingProbe(-55.9);
+    assert.ok(Math.abs(below.output.dynamicsSpreadDb - 5.9) < 0.001);
+    assert.ok(Math.abs(below.output.shortSpreadDb - 3) < 0.001);
+    assert.ok(below.output.shortSpreadDb < makeVadGateConfig().adaptiveFlatSpreadDb);
+    assert.ok(below.output.dynamicsSpreadDb < VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB);
+    assert.strictEqual(below.endpointEvidence, 'silence');
+
+    const above = endPendingMappingProbe(-56.1);
+    assert.ok(Math.abs(above.output.dynamicsSpreadDb - 6.1) < 0.001);
+    assert.ok(above.output.shortSpreadDb < makeVadGateConfig().adaptiveFlatSpreadDb);
+    assert.strictEqual(above.endpointEvidence, 'continuing');
+  });
+
+  it('W3: flat gust cycling closes end-pending without resurrection and raises the floor', () => {
+    const endpointSilenceMs = 3000;
+    const harness = makeRecorderHarness({ endpointSilenceMs });
+    prefillAmbient(harness, 300, -60);
+    for (let i = 0; i < 30; i++) harness.drive(-45);
+    assert.strictEqual(harness.endpoint.state, 'speechActive');
+
+    const initialFloor = harness.gate.snapshot.floorDb;
+    const gustDb = initialFloor + 7.4;
+    const lullDb = initialFloor + 2.5;
+    for (let i = 0; i < 400; i++) {
+      harness.drive(i % 2 === 0 ? gustDb : lullDb);
+    }
+    assert.strictEqual(harness.endpoint.state, 'speechActive');
+
+    let enteredEndPending = false;
+    for (let i = 0; i < 20; i++) {
+      const frame = harness.drive(lullDb);
+      enteredEndPending ||= harness.endpoint.state === 'endPending';
+      assert.notStrictEqual(frame.decision.type, 'finalizeUtterance');
+    }
+    assert.strictEqual(enteredEndPending, true);
+
+    let finalizedAfterMs = null;
+    let sawFlatGust = false;
+    let maximumFlatGustDispersion = -Infinity;
+    let resurrected = false;
+    let highestFloor = initialFloor;
+    for (let i = 0; i < 400; i++) {
+      const frame = harness.drive(i % 2 === 0 ? gustDb : lullDb);
+      highestFloor = Math.max(highestFloor, harness.gate.snapshot.floorDb);
+      if (frame.output.shortSpreadDb < harness.gate.effectiveFlatSpreadDb) {
+        sawFlatGust = true;
+        maximumFlatGustDispersion = Math.max(
+          maximumFlatGustDispersion,
+          frame.output.dynamicsSpreadDb,
+        );
+      }
+      resurrected ||= harness.endpoint.state === 'speechActive';
+      if (frame.decision.type === 'finalizeUtterance') {
+        finalizedAfterMs = (i + 1) * frameDurationMs;
+        break;
+      }
+    }
+
+    assert.strictEqual(resurrected, false);
+    assert.strictEqual(sawFlatGust, true);
+    assert.ok(maximumFlatGustDispersion < 5.5);
+    assert.deepStrictEqual(
+      [5.5, 6, 6.5].map(threshold => maximumFlatGustDispersion < threshold),
+      [true, true, true],
+    );
+    assert.ok(highestFloor > initialFloor + 1);
+    assert.ok(highestFloor <= gustDb + 0.001);
+    assert.ok(finalizedAfterMs !== null && finalizedAfterMs <= endpointSilenceMs + frameDurationMs);
+    assert.strictEqual(harness.chunkCount, 1);
+    assert.strictEqual(harness.endpoint.state, 'idle');
+  });
+
+  it('W3 negative: short square-wave gusts with dy 8+ preserve the pause', () => {
+    const harness = makeRecorderHarness({ endpointSilenceMs: 1000 });
+    prefillAmbient(harness, 300, -60);
+    for (let i = 0; i < 30; i++) harness.drive(-45);
+    const floorDb = harness.gate.snapshot.floorDb;
+    const gustDb = floorDb + 10.5;
+    const lullDb = floorDb + 1.5;
+    for (let i = 0; i < 400; i++) {
+      harness.drive(i % 2 === 0 ? gustDb : lullDb);
+    }
+    for (let i = 0; i < 20; i++) harness.drive(lullDb);
+    assert.strictEqual(harness.endpoint.state, 'endPending');
+
+    let sawDynamicGust = false;
+    let finalized = false;
+    for (let i = 0; i < 200; i++) {
+      const frame = harness.drive(i % 2 === 0 ? gustDb : lullDb);
+      if (frame.output.dynamicsSpreadDb >= 8) {
+        sawDynamicGust = true;
+        assert.strictEqual(frame.endpointEvidence, frame.output.evidence);
+      }
+      if (frame.decision.type === 'finalizeUtterance') {
+        finalized = true;
+        break;
+      }
+    }
+
+    assert.strictEqual(sawDynamicGust, true);
+    assert.strictEqual(finalized, true);
+    assert.strictEqual(harness.chunkCount, 1);
+    assert.strictEqual(harness.endpoint.state, 'idle');
+  });
+
+  it('W2: a 1.3-second thinking pause survives a dynamic speech attack', () => {
+    const harness = makeRecorderHarness({ endpointSilenceMs: 2000 });
+    prefillAmbient(harness, 300, -60);
+    for (let i = 0; i < 30; i++) harness.drive(-45);
+    assert.strictEqual(harness.endpoint.state, 'speechActive');
+
+    const floorBeforePause = harness.gate.snapshot.floorDb;
+    let enteredEndPending = false;
+    for (let i = 0; i < 130; i++) {
+      const frame = harness.drive(-80);
+      enteredEndPending ||= harness.endpoint.state === 'endPending';
+      assert.notStrictEqual(frame.decision.type, 'finalizeUtterance');
+    }
+    assert.strictEqual(enteredEndPending, true);
+    assert.strictEqual(harness.chunkCount, 0);
+
+    let sawDynamicAttack = false;
+    let resumed = false;
+    for (let i = 0; i < 40; i++) {
+      const frame = harness.drive(i % 2 === 0
+        ? floorBeforePause + 7
+        : floorBeforePause + 13);
+      sawDynamicAttack ||= frame.output.dynamicsSpreadDb
+        >= VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB;
+      if (harness.endpoint.state === 'speechActive') {
+        resumed = true;
+        break;
+      }
+    }
+
+    assert.strictEqual(sawDynamicAttack, true);
+    assert.strictEqual(resumed, true);
+    assert.strictEqual(harness.chunkCount, 0);
+    assert.strictEqual(harness.endpoint.state, 'speechActive');
+  });
+
+  it('W1: flat continuing speech does not raise the floor while active', () => {
+    const harness = makeRecorderHarness();
+    prefillAmbient(harness, 300, -60);
+    for (let i = 0; i < 30; i++) harness.drive(-45);
+    assert.strictEqual(harness.endpoint.state, 'speechActive');
+
+    const stableFloor = harness.gate.snapshot.floorDb;
+    for (let i = 0; i < 120; i++) {
+      const frame = harness.drive(stableFloor + 7);
+      assert.strictEqual(frame.output.evidence, 'continuing');
+      assert.strictEqual(harness.endpoint.state, 'speechActive');
+      assert.strictEqual(harness.gate.snapshot.floorDb, stableFloor);
+    }
+  });
+
+  it('W6: whisper spread just below flat closes, just above resumes', () => {
+    const below = makeRecorderHarness({ endpointSilenceMs: 1000 });
+    prefillAmbient(below, 300, -60);
+    for (let i = 0; i < 30; i++) below.drive(-45);
+    const belowFloor = below.gate.snapshot.floorDb;
+    const belowHighDb = belowFloor + 5.9;
+    const belowLowDb = belowFloor + 2.5;
+
+    let sawEndPending = false;
+    let sawBelowBoundary = false;
+    let sawMappedContinuing = false;
+    let finalized = false;
+    for (let i = 0; i < 200; i++) {
+      const frame = below.drive(i % 2 === 0 ? belowHighDb : belowLowDb);
+      sawEndPending ||= below.endpoint.state === 'endPending';
+      if (frame.output.shortSpreadDb < below.gate.effectiveFlatSpreadDb) {
+        sawBelowBoundary = true;
+      }
+      if (frame.output.evidence === 'continuing' || frame.output.evidence === 'ambiguous') {
+        sawMappedContinuing ||= frame.endpointEvidence === 'silence';
+      }
+      finalized ||= frame.decision.type === 'finalizeUtterance';
+      if (finalized) break;
+    }
+
+    assert.strictEqual(sawEndPending, true);
+    assert.strictEqual(sawBelowBoundary, true);
+    assert.strictEqual(sawMappedContinuing, true);
+    assert.strictEqual(finalized, true);
+    assert.strictEqual(below.chunkCount, 1);
+    assert.strictEqual(below.endpoint.state, 'idle');
+
+    const above = makeRecorderHarness({
+      endpointSilenceMs: 1000,
+      endpointConfig: { resumeMs: 600 },
+    });
+    prefillAmbient(above, 300, -60);
+    for (let i = 0; i < 30; i++) above.drive(-45);
+    const aboveFloor = above.gate.snapshot.floorDb;
+    const aboveHighDb = aboveFloor + 10.5;
+    const aboveLowDb = aboveFloor + 2.5;
+    for (let i = 0; i < 400; i++) {
+      above.drive(i % 2 === 0 ? aboveHighDb : aboveLowDb);
+    }
+    for (let i = 0; i < 20; i++) above.drive(aboveLowDb);
+    assert.strictEqual(above.endpoint.state, 'endPending');
+
+    let sawAboveBoundary = false;
+    let sawAbovePreserved = false;
+    let resumed = false;
+    for (let i = 0; i < 100; i++) {
+      const frame = above.drive(aboveHighDb);
+      sawAboveBoundary ||= frame.output.shortSpreadDb >= above.gate.effectiveFlatSpreadDb;
+      sawAbovePreserved ||= frame.output.shortSpreadDb < above.gate.effectiveFlatSpreadDb
+        && frame.output.dynamicsSpreadDb >= VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB
+        && frame.endpointEvidence === frame.output.evidence;
+      if (above.endpoint.state === 'speechActive') {
+        resumed = true;
+        break;
+      }
+    }
+
+    assert.strictEqual(sawAboveBoundary, true);
+    assert.strictEqual(sawAbovePreserved, true);
+    assert.ok(above.gate.snapshot.dynamicsSpreadDb === null
+      || above.gate.snapshot.dynamicsSpreadDb >= VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB);
+    assert.strictEqual(resumed, true);
+    assert.strictEqual(above.chunkCount, 0);
+    assert.strictEqual(above.endpoint.state, 'speechActive');
+  });
+
+  it('adaptive dynamics kill-switch preserves pre-change end-pending rescue semantics', () => {
+    const harness = makeRecorderHarness({
+      endpointSilenceMs: 1000,
+      gateConfig: { adaptiveDynamicsEnabled: false },
+    });
+    for (let i = 0; i < 300; i++) {
+      harness.gate.process(-60, frameDuration);
+      harness.gate.takePendingReanchorEvent();
+      harness.gate.updateFloorTracking(-60, frameDuration, true);
+    }
+    for (let i = 0; i < 30; i++) harness.drive(-45);
+    for (let i = 0; i < 20; i++) harness.drive(-80);
+    assert.strictEqual(harness.endpoint.state, 'endPending');
+
+    const floorBeforeRescue = harness.gate.snapshot.floorDb;
+    let rescued = false;
+    for (let i = 0; i < 40; i++) {
+      const frame = harness.drive(harness.gate.snapshot.floorDb + 4);
+      assert.strictEqual(frame.output.shortSpreadDb, null);
+      assert.strictEqual(frame.output.dynamicsSpreadDb, null);
+      assert.strictEqual(frame.endpointEvidence, frame.output.evidence);
+      if (harness.endpoint.state === 'speechActive') {
+        rescued = true;
+        break;
+      }
+    }
+
+    assert.strictEqual(rescued, true);
+    assert.strictEqual(harness.chunkCount, 0);
+    assert.ok(harness.gate.snapshot.floorDb <= floorBeforeRescue + 1e-9);
   });
 
   it('uniform quiet speech re-onsets despite stale re-anchor via the sustained continuing fallback', () => {
