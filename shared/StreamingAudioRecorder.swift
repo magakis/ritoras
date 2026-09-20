@@ -1407,7 +1407,7 @@ actor StreamingAudioRecorder {
         }
 
         vad.setTelemetrySink(nil)
-        telemetryFlushable = nil
+        self.telemetryFlushable = nil
         onChunk = nil
         onVADState = nil
 
