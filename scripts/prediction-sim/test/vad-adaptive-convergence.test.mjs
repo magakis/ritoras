@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import {
   makeVadGateConfig,
   VAD_SPEECH_CEILING_MARGIN_DB,
-  VAD_SUSTAINED_CONTINUING_ONSET_S,
   VADThresholdGate,
 } from '../lib/vad-gate.mjs';
 import { StreamingEndpoint } from '../lib/streaming-endpoint.mjs';
+import { makeRecorderHarness } from '../lib/recorder-sim.mjs';
 
 const frameDurationMs = 10;
 const frameDuration = frameDurationMs / 1000;
@@ -46,145 +46,6 @@ function driveIdleFrame(gate, endpoint, frameDb, trackingDuration = frameDuratio
   const decision = endpoint.process(output.evidence, frameSamples);
   gate.updateFloorTracking(frameDb, trackingDuration, true);
   return { output, decision, reanchorEvent };
-}
-
-function makeRecorderHarness({
-  frameMs = frameDurationMs,
-  endpointSilenceMs = 3000,
-  minChunkSamples = 0,
-  minSpeechSamples = 0,
-  gateConfig = {},
-} = {}) {
-  const recorderFrameDuration = frameMs / 1000;
-  const recorderFrameSamples = frameMs * 16;
-  const harness = {
-    gate: makeGate(gateConfig),
-    endpoint: makeEndpoint(endpointSilenceMs),
-    minChunkSamples,
-    minSpeechSamples,
-    chunkCount: 0,
-    reanchorEventCount: 0,
-    utteranceQuietestStrongDb: null,
-    accumulatorSamples: 0,
-    speechSamples: 0,
-    emittedTotalMs: null,
-    noteUtteranceEndedValues: [],
-    sustainedContinuingMs: 0,
-    streakStartFloorDb: null,
-    sustainedContinuingOnsetLatched: false,
-    sawReanchorDuringUtterance: false,
-
-    drive(frameDb) {
-      const output = this.gate.process(frameDb, recorderFrameDuration);
-      const reanchorEvent = this.gate.takePendingReanchorEvent();
-      const previousState = this.endpoint.state;
-      const endpointWasIdle = previousState === 'idle';
-      if (reanchorEvent) this.reanchorEventCount += 1;
-
-      if (reanchorEvent
-        && (previousState === 'speechActive' || previousState === 'endPending')) {
-        this.sawReanchorDuringUtterance = true;
-      }
-
-      const adaptivePath = output.floorDb !== null;
-      if (adaptivePath && output.evidence === 'continuing' && endpointWasIdle) {
-        if (this.sustainedContinuingMs === 0) {
-          this.streakStartFloorDb = this.gate.snapshot.floorDb;
-        }
-        this.sustainedContinuingMs += recorderFrameDuration * 1000;
-      } else if (!this.sustainedContinuingOnsetLatched) {
-        this.sustainedContinuingMs = 0;
-        this.streakStartFloorDb = null;
-      }
-
-      const floorStable = output.floorDb !== null
-        && this.streakStartFloorDb !== null
-        && (output.floorDb - this.streakStartFloorDb) <= 2;
-      if (adaptivePath
-        && output.evidence === 'continuing'
-        && endpointWasIdle
-        && this.sustainedContinuingMs >= VAD_SUSTAINED_CONTINUING_ONSET_S * 1000
-        && floorStable) {
-        this.sustainedContinuingOnsetLatched = true;
-      }
-      const endpointInOnsetLimb = endpointWasIdle || previousState === 'onsetPending';
-      if (this.sustainedContinuingOnsetLatched
-        && (!adaptivePath
-          || !endpointInOnsetLimb
-          || output.evidence === 'ambiguous'
-          || output.evidence === 'silence')) {
-        this.sustainedContinuingOnsetLatched = false;
-        this.sustainedContinuingMs = 0;
-        this.streakStartFloorDb = null;
-      }
-      const latchedContinuingOnset = this.sustainedContinuingOnsetLatched
-        && output.evidence === 'continuing'
-        && endpointInOnsetLimb;
-      const endpointEvidence = adaptivePath
-        && latchedContinuingOnset
-        ? 'strong'
-        : output.evidence;
-      if (output.retroactiveSpeechMs > 0) {
-        this.speechSamples += output.retroactiveSpeechMs * 16;
-      }
-      if (output.isSpeech) this.speechSamples += recorderFrameSamples;
-      const decision = this.endpoint.process(endpointEvidence, recorderFrameSamples);
-      this.gate.updateFloorTracking(
-        frameDb,
-        recorderFrameDuration,
-        previousState === 'idle' && this.endpoint.state === 'idle',
-      );
-
-      if (decision.type === 'startUtterance') {
-        this.utteranceQuietestStrongDb = null;
-        this.accumulatorSamples = this.endpoint.configuration.preRollSamples + recorderFrameSamples;
-        this.sustainedContinuingMs = 0;
-        this.streakStartFloorDb = null;
-        this.sustainedContinuingOnsetLatched = false;
-      } else if (decision.type === 'continueUtterance'
-        || decision.type === 'finalizeUtterance') {
-        this.accumulatorSamples += recorderFrameSamples;
-      }
-      if (adaptivePath && output.evidence === 'strong' && this.endpoint.state !== 'idle') {
-        this.utteranceQuietestStrongDb = Math.min(
-          this.utteranceQuietestStrongDb ?? frameDb,
-          frameDb,
-        );
-      }
-
-      let discarded = false;
-      if (decision.type === 'finalizeUtterance') {
-        this.emittedTotalMs = this.accumulatorSamples / 16;
-        if (this.accumulatorSamples < this.minChunkSamples
-          || this.speechSamples < this.minSpeechSamples) {
-          this.accumulatorSamples = 0;
-          this.speechSamples = 0;
-          this.sawReanchorDuringUtterance = false;
-          discarded = true;
-        } else {
-          this.chunkCount += 1;
-          this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
-          this.gate.noteUtteranceEnded(this.utteranceQuietestStrongDb);
-          this.utteranceQuietestStrongDb = null;
-          this.accumulatorSamples = 0;
-          this.speechSamples = 0;
-          this.sawReanchorDuringUtterance = false;
-          this.sustainedContinuingMs = 0;
-          this.streakStartFloorDb = null;
-          this.sustainedContinuingOnsetLatched = false;
-        }
-      }
-      return {
-        output,
-        decision,
-        endpointEvidence,
-        reanchorEvent,
-        discarded,
-        latchedContinuingOnset,
-      };
-    },
-  };
-  return harness;
 }
 
 describe('adaptive VAD convergence', () => {
