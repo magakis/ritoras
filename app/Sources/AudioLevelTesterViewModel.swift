@@ -5,6 +5,7 @@ import UIKit
 @MainActor
 final class AudioLevelTesterViewModel: ObservableObject {
     @Published private(set) var currentRms: Float = 0
+    @Published private(set) var currentAnalysisDb: Double? = nil
     @Published private(set) var peakRms: Float = 0
     @Published private(set) var thresholdDb: Double = Double(AudioMath.dbFromRms(SharedConfig.streamVadSpeechRms()))
     @Published private(set) var continuationThresholdDb: Double = Double(AudioMath.dbFromRms(SharedConfig.streamVadSpeechRms())) - 4.0
@@ -52,6 +53,7 @@ final class AudioLevelTesterViewModel: ObservableObject {
 
         // Reset levels for a fresh monitoring session
         currentRms = 0
+        currentAnalysisDb = nil
         peakRms = 0
         rebuildGate()
 
@@ -62,7 +64,7 @@ final class AudioLevelTesterViewModel: ObservableObject {
         let token = sessionToken
 
         do {
-            try await monitor.start { [weak self] smoothed, peak, frameDuration in
+            try await monitor.start { [weak self] smoothed, peak, frameDuration, analysisRms in
                 Task { @MainActor [weak self] in
                     guard let self,
                           self.sessionToken == token,
@@ -70,6 +72,7 @@ final class AudioLevelTesterViewModel: ObservableObject {
                           let endpoint = self.endpoint else { return }
                     let frameDb = Double(AudioMath.dbFromRms(smoothed))
                     let output = gate.process(frameDb: frameDb, frameDuration: frameDuration)
+                    let analysisDb = analysisRms.map { Double(AudioMath.dbFromRms($0)) }
                     let previousState = endpoint.state
                     if self.endpointMachineEnabled {
                         let durationSamples = max(0, Int((frameDuration * 16000.0).rounded()))
@@ -99,6 +102,7 @@ final class AudioLevelTesterViewModel: ObservableObject {
                     }
                     let effectiveOutput = gate.snapshot
                     self.currentRms = smoothed
+                    self.currentAnalysisDb = analysisDb
                     self.peakRms = peak
                     self.thresholdDb = effectiveOutput.thresholdDb
                     self.continuationThresholdDb = effectiveOutput.continuationThresholdDb
@@ -147,6 +151,7 @@ final class AudioLevelTesterViewModel: ObservableObject {
 
         isMonitoring = false
         currentRms = 0
+        currentAnalysisDb = nil
         peakRms = 0
         thresholdDb = Double(AudioMath.dbFromRms(SharedConfig.streamVadSpeechRms()))
         continuationThresholdDb = 0

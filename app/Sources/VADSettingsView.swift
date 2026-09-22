@@ -163,6 +163,7 @@ struct VADSettingsView: View {
     private var meterRow: some View {
         VStack(alignment: .leading, spacing: 4) {
             meterBar
+            analysisLevelReadings
             levelReadings
             thresholdReadings
             fallbackStatus
@@ -247,6 +248,19 @@ struct VADSettingsView: View {
         }
         .font(.caption)
         .foregroundColor(.secondary)
+    }
+
+    @ViewBuilder
+    private var analysisLevelReadings: some View {
+        if let analysisDb = tester.currentAnalysisDb {
+            HStack {
+                Text(String(format: "raw %.1f dB", AudioMath.dbFromRms(tester.currentRms)))
+                Spacer()
+                Text(String(format: "analysis %.1f dB", analysisDb))
+            }
+            .font(.caption)
+            .foregroundColor(.secondary)
+        }
     }
 
     private var thresholdReadings: some View {

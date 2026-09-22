@@ -78,14 +78,22 @@ private final class LevelState: @unchecked Sendable {
     var isInvalidated = false
 }
 
+// MARK: - Analysis Filter State (queue-serial access only)
+
+/// Holds the session's analysis filter. Accessed only from the serial
+/// processing queue — no lock is needed.
+private final class AnalysisFilterState: @unchecked Sendable {
+    var filter: VADHighPassFilter?
+}
+
 // MARK: - Audio Level Monitor
 
-/// Captures microphone audio via `AVAudioEngine` and publishes per-frame RMS
-/// levels for a live meter display.
+/// Captures microphone audio via `AVAudioEngine` and publishes per-frame raw,
+/// analysis, and peak RMS levels for a live meter display.
 ///
-/// RMS is computed on the **same 16 kHz mono float32 converted signal** that
-/// ``StreamingAudioRecorder`` uses, so the reading exactly matches the VAD's
-/// `speechRms` threshold.
+/// Raw RMS is computed on the **same 16 kHz mono float32 converted signal** that
+/// ``StreamingAudioRecorder`` uses. When enabled, analysis RMS additionally
+/// uses the VAD's high-pass-filtered signal.
 ///
 /// This file lives in the container app target only (`app/Sources/`). The
 /// keyboard extension does not compile it.
@@ -95,7 +103,7 @@ private final class LevelState: @unchecked Sendable {
 /// minimal — it reads the buffer, copies samples, and dispatches all heavy
 /// work (conversion, RMS, smoothing, peak-hold) to a dedicated serial queue.
 actor AudioLevelMonitor {
-    public typealias LevelCallback = @Sendable (Float, Float, Double) -> Void
+    public typealias LevelCallback = @Sendable (Float, Float, Double, Float?) -> Void
 
     // MARK: - Private Properties
 
@@ -115,10 +123,10 @@ actor AudioLevelMonitor {
 
     // MARK: - Start
 
-    /// Begins capturing mic audio and publishing raw + peak RMS levels.
+    /// Begins capturing mic audio and publishing raw + analysis + peak RMS levels.
     ///
     /// - Parameter onLevel: Called on the serial processing queue for each
-    ///   audio frame with `(rawRMS, peakRMS, frameDuration)`.
+    ///   audio frame with `(rawRMS, peakRMS, frameDuration, analysisRMS)`.
     /// - Throws: ``AudioLevelMonitorError`` if mic permission is unavailable,
     ///   session configuration fails, or the engine cannot start.
     func start(onLevel: @escaping LevelCallback) async throws {
@@ -173,6 +181,14 @@ actor AudioLevelMonitor {
         converterCache.reset()
         levelState.isInvalidated = false
         levelState.peak = 0
+
+        let analysisFilterState = AnalysisFilterState()
+        let analysisHpfEnabled = SharedConfig.streamVadAnalysisHpfEnabled()
+        queue.sync {
+            analysisFilterState.filter = analysisHpfEnabled
+                ? VADHighPassFilter(cutoffHz: SharedConfig.Defaults.streamVadHpfCutoffHzDefault)
+                : nil
+        }
 
         // Capture references for the closure (no actor self capture)
         let queue = self.queue
@@ -266,13 +282,16 @@ actor AudioLevelMonitor {
 
                 // RMS computation (mirrors lines 554-559)
                 let rms = AudioMath.dcCorrectedRMS(outputPtr)
+                let analysisRms = analysisFilterState.filter.map { filter in
+                    AudioMath.dcCorrectedRMS(filter.process(Array(outputPtr)))
+                }
                 let frameDuration = Double(convertedLength) / 16000.0
 
                 // Peak hold: chase raw RMS up, decay 2% per frame
                 levelState.peak = max(levelState.peak, rms)
                 levelState.peak *= 0.98
 
-                handler(rms, levelState.peak, frameDuration)
+                handler(rms, levelState.peak, frameDuration, analysisRms)
             }
         }
 
