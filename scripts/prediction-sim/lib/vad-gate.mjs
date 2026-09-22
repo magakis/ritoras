@@ -35,6 +35,8 @@ export const VAD_ADAPTIVE_DYNAMICS_SPREAD_DB_MAX = 24.0;
 export const VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB = 6.0;
 export const VAD_ADAPTIVE_FLAT_SPREAD_DB_MIN = 3.0;
 export const VAD_ADAPTIVE_FLAT_SPREAD_DB_MAX = 8.0;
+export const VAD_ADAPTIVE_IMPLAUSIBLE_SPEECH_S = 8.0;
+export const CALIBRATION_LEADING_TRIM_DB = 12.0;
 const CALIBRATION_COMPLETION_EPSILON_S = 1e-9;
 
 function clamp(value, lower, upper) {
@@ -177,6 +179,10 @@ export class VADThresholdGate {
 
   get snapshot() {
     return { ...this.lastOutput };
+  }
+
+  get secondsSinceSilenceEvidence() {
+    return this.elapsedSinceSilenceEvidence;
   }
 
   takePendingReanchorEvent() {
@@ -339,9 +345,16 @@ export class VADThresholdGate {
       this.elapsedSinceSilenceEvidence = 0;
     } else {
       this.elapsedSinceSilenceEvidence += Math.max(0, frameDuration);
-      if (this.elapsedSinceSilenceEvidence + CALIBRATION_COMPLETION_EPSILON_S
-        >= this.effectiveStaleFloorSeconds
-        && this.lastKnownMachineIsIdle) {
+      const elapsedSinceSilenceEvidence = this.elapsedSinceSilenceEvidence
+        + CALIBRATION_COMPLETION_EPSILON_S;
+      const viaIdle = this.lastKnownMachineIsIdle
+        && elapsedSinceSilenceEvidence >= this.effectiveStaleFloorSeconds;
+      const flatSignal = dispersionDb < this.effectiveFlatSpreadDb
+        && (shortSpreadDb === null || shortSpreadDb < this.effectiveFlatSpreadDb);
+      const viaStuckRun = !this.lastKnownMachineIsIdle
+        && elapsedSinceSilenceEvidence >= VAD_ADAPTIVE_IMPLAUSIBLE_SPEECH_S
+        && flatSignal;
+      if (viaIdle || viaStuckRun) {
         const target = rollingPercentile;
         if (target !== null) {
           this.elapsedSinceSilenceEvidence = 0;
@@ -737,9 +750,20 @@ export class VADThresholdGate {
   }
 
   calibrationQ1() {
-    const sortedDbs = this.calibrationFrames.map(frame => frame.db).sort((a, b) => a - b);
-    const index = Math.floor(CALIBRATION_QUARTILE * (sortedDbs.length - 1));
-    return sortedDbs[index];
+    const dbs = this.calibrationFrames.map(frame => frame.db);
+    const sortedDbs = [...dbs].sort((a, b) => a - b);
+    const medianDb = this.percentile(sortedDbs, 0.5);
+    let leadingTrimCount = 0;
+    while (leadingTrimCount < dbs.length
+      && dbs[leadingTrimCount] < medianDb - CALIBRATION_LEADING_TRIM_DB) {
+      leadingTrimCount += 1;
+    }
+    const q1Dbs = dbs.length - leadingTrimCount >= 3
+      ? dbs.slice(leadingTrimCount)
+      : dbs;
+    const sortedQ1Dbs = [...q1Dbs].sort((a, b) => a - b);
+    const index = Math.floor(CALIBRATION_QUARTILE * (sortedQ1Dbs.length - 1));
+    return sortedQ1Dbs[index];
   }
 
   calibrationThresholdDb() {

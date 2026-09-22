@@ -56,6 +56,8 @@ final class VADThresholdGate: @unchecked Sendable {
 
     // Fixed algorithm constants. They are intentionally not user-facing settings.
     static let adaptiveEndPendingWindDispersionDb = 6.0
+    static let adaptiveImplausibleSpeechSeconds = 8.0
+    static let calibrationLeadingTrimDb = 12.0
     private static let staticContinuationOffsetDb = 4.0
     private static let staticSilenceOffsetDb = 6.0
     private static let elevatedRiseDbPerSecond = 12.0
@@ -193,6 +195,12 @@ final class VADThresholdGate: @unchecked Sendable {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         return lastOutput
+    }
+
+    var secondsSinceSilenceEvidence: Double {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+        return elapsedSinceSilenceEvidence
     }
 
     /// Returns the normalized parameters used by the gate, without exposing
@@ -397,9 +405,17 @@ final class VADThresholdGate: @unchecked Sendable {
             elapsedSinceSilenceEvidence = 0
         } else {
             elapsedSinceSilenceEvidence += max(0, frameDuration)
-            if elapsedSinceSilenceEvidence + Self.calibrationCompletionEpsilon >= effectiveStaleFloorSeconds,
-               lastKnownMachineIsIdle,
-               let target = rollingPercentile {
+            let elapsedSinceSilenceEvidenceWithEpsilon = elapsedSinceSilenceEvidence
+                + Self.calibrationCompletionEpsilon
+            let viaIdle = lastKnownMachineIsIdle
+                && elapsedSinceSilenceEvidenceWithEpsilon >= effectiveStaleFloorSeconds
+            let flatSignal = dispersionDb < effectiveFlatSpreadDb
+                && (shortSpreadDb.map { $0 < effectiveFlatSpreadDb } ?? true)
+            let viaStuckRun = !lastKnownMachineIsIdle
+                && elapsedSinceSilenceEvidenceWithEpsilon >= Self.adaptiveImplausibleSpeechSeconds
+                && flatSignal
+            if viaIdle || viaStuckRun, let target = rollingPercentile {
+                let elapsedBeforeReset = elapsedSinceSilenceEvidence
                 elapsedSinceSilenceEvidence = 0
                 let reanchoredFloor: Double
                 if let speechCeilingDb {
@@ -414,6 +430,13 @@ final class VADThresholdGate: @unchecked Sendable {
                 if reanchoredFloor <= maximumReanchorFloor {
                     let floorMoved = abs(reanchoredFloor - currentFloor) > Self.adaptiveFloorMovementEpsilonDb
                     floorDb = reanchoredFloor
+                    if viaStuckRun && floorMoved {
+                        FileLogger.shared.warn(
+                            .audio,
+                            "VAD: stuck floor re-anchored after implausible speech run",
+                            payload: ["floorDb": reanchoredFloor, "runSeconds": elapsedBeforeReset]
+                        )
+                    }
                     if floorMoved && !hasRefusedReanchorSinceLastAcceptance {
                         pendingReanchorEvent = true
                     }
@@ -820,14 +843,24 @@ final class VADThresholdGate: @unchecked Sendable {
     }
 
     private func calibrationQ1() -> Double {
-        var sortedDbs: [Double] = []
-        sortedDbs.reserveCapacity(calibrationFrames.count)
+        var dbs: [Double] = []
+        dbs.reserveCapacity(calibrationFrames.count)
         for frame in calibrationFrames {
-            sortedDbs.append(frame.db)
+            dbs.append(frame.db)
         }
-        sortedDbs.sort()
-        let index = Int(Self.calibrationQuartile * Double(sortedDbs.count - 1))
-        return sortedDbs[index]
+        let sortedDbs = dbs.sorted()
+        let medianDb = percentile(sortedDbs, percentile: 0.5)
+        var leadingTrimCount = 0
+        while leadingTrimCount < dbs.count,
+              dbs[leadingTrimCount] < medianDb - Self.calibrationLeadingTrimDb {
+            leadingTrimCount += 1
+        }
+        let q1Dbs = dbs.count - leadingTrimCount >= 3
+            ? Array(dbs.dropFirst(leadingTrimCount))
+            : dbs
+        let sortedQ1Dbs = q1Dbs.sorted()
+        let index = Int(Self.calibrationQuartile * Double(sortedQ1Dbs.count - 1))
+        return sortedQ1Dbs[index]
     }
 
     private func calibrationThresholdDb() -> Double {

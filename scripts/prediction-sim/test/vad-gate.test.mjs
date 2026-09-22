@@ -126,7 +126,7 @@ describe('VADThresholdGate', () => {
       assert.strictEqual(second.trailingSilenceMs, null);
     });
 
-    it('rejects a contaminated window and falls back to adaptive tracking', () => {
+    it('trims a leading transient before accepting a formerly contaminated window', () => {
       const gate = new VADThresholdGate(config({
         mode: 'calibrated',
         calibrationMs: 600,
@@ -138,33 +138,47 @@ describe('VADThresholdGate', () => {
       }
 
       const output = gate.process(-70, 0.5);
-      assert.strictEqual(output.usedFallback, true);
+      // expectations updated for calibration leading-transient trim (F2)
+      assert.strictEqual(output.usedFallback, false);
       assert.strictEqual(output.isSpeech, false);
-      assert.strictEqual(output.floorDb, -60);
-      assert.ok(Math.abs(output.retroactiveSpeechMs - 400) < 0.001);
+      assert.strictEqual(output.floorDb, null);
+      assert.strictEqual(output.retroactiveSpeechMs, 0);
+      assert.strictEqual(output.trailingSilenceMs, 600);
       gate.process(-70, 0.5);
       gate.updateFloorTracking(-70, 0.5);
-      const expectedFloor = -60 + (1 - Math.exp(-1)) * (-10);
-      assert.ok(Math.abs(gate.snapshot.floorDb - expectedFloor) < 0.001);
+      assert.strictEqual(gate.snapshot.floorDb, null);
     });
 
-    it('accepts exactly the quiet-count quality boundary and rejects one fewer', () => {
+    it('accepts exactly the quiet-count boundary, rejects one fewer, independent of leading trim', () => {
       const accepted = new VADThresholdGate(config({
         mode: 'calibrated',
         calibrationMs: 1200,
       }));
-      for (const frameDb of [-50, -50, -50, -50, ...Array(8).fill(-30)]) {
+      const acceptedFrames = [
+        -30,
+        ...Array(3).fill(-50),
+        -45,
+        ...Array(7).fill(-30),
+      ];
+      for (const frameDb of acceptedFrames) {
         accepted.process(frameDb, 0.1);
       }
+      // Both medians are -30, the first frame prevents trim, Q1 is -50, and the -44 quiet band counts 4/12 == minimum 4.
       assert.strictEqual(accepted.process(-30, 0.1).usedFallback, false);
 
       const rejected = new VADThresholdGate(config({
         mode: 'calibrated',
         calibrationMs: 1200,
       }));
-      for (const frameDb of [-50, -50, -50, ...Array(9).fill(-30)]) {
+      const rejectedFrames = [
+        -30,
+        ...Array(3).fill(-50),
+        ...Array(8).fill(-30),
+      ];
+      for (const frameDb of rejectedFrames) {
         rejected.process(frameDb, 0.1);
       }
+      // The same Q1 and no trim give 3/12 quiet frames, one below minimum 4, so fallback is required.
       assert.strictEqual(rejected.process(-30, 0.1).usedFallback, true);
     });
 

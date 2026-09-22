@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   makeVadGateConfig,
   VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB,
+  VAD_ADAPTIVE_IMPLAUSIBLE_SPEECH_S,
   VAD_SPEECH_CEILING_MARGIN_DB,
   VADThresholdGate,
 } from '../lib/vad-gate.mjs';
@@ -574,6 +575,138 @@ describe('adaptive VAD convergence', () => {
     gate.process(-65, frameDuration);
     assert.strictEqual(gate.takePendingReanchorEvent(), true);
     assert.strictEqual(gate.snapshot.floorDb, -65);
+  });
+
+  it('T1: re-anchors a flat stuck run after the implausible-speech threshold', () => {
+    const gate = makeGate();
+    gate.floorDb = -70;
+    gate.adaptiveRefinementComplete = true;
+
+    for (let i = 0; i < 799; i++) {
+      gate.process(-65, 0.01);
+      assert.strictEqual(gate.takePendingReanchorEvent(), false);
+      gate.updateFloorTracking(-65, 0.01, false);
+    }
+
+    assert.ok(gate.secondsSinceSilenceEvidence >= 7.98);
+    assert.ok(gate.secondsSinceSilenceEvidence < VAD_ADAPTIVE_IMPLAUSIBLE_SPEECH_S);
+
+    const output = gate.process(-65, 0.01);
+    assert.strictEqual(gate.takePendingReanchorEvent(), true);
+    assert.strictEqual(gate.snapshot.floorDb, -65);
+    assert.strictEqual(output.evidence, 'silence');
+    assert.strictEqual(gate.secondsSinceSilenceEvidence, 0);
+    gate.updateFloorTracking(-65, 0.01, false);
+  });
+
+  it('T2: modulated non-idle input never passes the stuck-run flatness gate', () => {
+    const gate = makeGate();
+    gate.floorDb = -70;
+    gate.adaptiveRefinementComplete = true;
+    let reanchorEventCount = 0;
+
+    for (let i = 0; i < 2000; i++) {
+      gate.process(i % 8 === 0 ? -35 : -21, 0.01);
+      if (gate.takePendingReanchorEvent()) reanchorEventCount += 1;
+      gate.updateFloorTracking(i % 8 === 0 ? -35 : -21, 0.01, false);
+    }
+
+    assert.strictEqual(reanchorEventCount, 0);
+    assert.strictEqual(gate.snapshot.floorDb, -70);
+  });
+
+  it('T3: the dynamics kill-switch still permits the dispersion-only stuck path', () => {
+    const gate = makeGate({ adaptiveDynamicsEnabled: false });
+    gate.floorDb = -70;
+    gate.adaptiveRefinementComplete = true;
+
+    let output = null;
+    let reanchorEvent = false;
+    for (let i = 0; i < 800; i++) {
+      output = gate.process(-65, 0.01);
+      reanchorEvent ||= gate.takePendingReanchorEvent();
+      gate.updateFloorTracking(-65, 0.01, false);
+    }
+
+    assert.strictEqual(reanchorEvent, true);
+    assert.strictEqual(output.shortSpreadDb, null);
+    assert.strictEqual(gate.snapshot.floorDb, -65);
+    assert.strictEqual(output.evidence, 'silence');
+  });
+
+  it('T4: a stuck-run re-anchor still respects the speech ceiling', () => {
+    const gate = makeGate();
+    gate.floorDb = -70;
+    gate.adaptiveRefinementComplete = true;
+    gate.speechCeilingDb = -55;
+
+    let output = null;
+    let reanchorEvent = false;
+    for (let i = 0; i < 800; i++) {
+      output = gate.process(-65, 0.01);
+      reanchorEvent ||= gate.takePendingReanchorEvent();
+      gate.updateFloorTracking(-65, 0.01, false);
+    }
+
+    assert.strictEqual(reanchorEvent, true);
+    assert.strictEqual(output.evidence, 'silence');
+    assert.ok(Math.abs(gate.snapshot.floorDb - (
+      gate.speechCeilingDb
+      - gate.effectiveAdaptiveDeltaDb
+      - VAD_SPEECH_CEILING_MARGIN_DB
+    )) < 0.001);
+    assert.notStrictEqual(gate.snapshot.floorDb, -65);
+  });
+
+  it('T5a: calibration trim changes the outcome for a deep leading transient', () => {
+    const gate = makeGate({
+      mode: 'calibrated',
+      calibrationMs: 4300,
+      calibratedOffsetDb: 10,
+    });
+    // Trim regression: pre-trim Q1 index 10 is -95, so quiet <= -89 is 12 < 14 and fallback seeds -80; temporal trim calibrates at -35.
+    const calibrationFrames = [
+      ...Array(12).fill(-95),
+      -54,
+      ...Array(30).fill(-45),
+    ];
+    let output = null;
+    for (const frameDb of calibrationFrames) output = gate.process(frameDb, 0.1);
+
+    assert.strictEqual(output.usedFallback, false);
+    assert.strictEqual(output.thresholdDb, -35);
+  });
+
+  it('T5b: fallback seeds from the trimmed ambient band after a leading transient', () => {
+    const gate = makeGate({
+      mode: 'calibrated',
+      calibrationMs: 4300,
+      calibratedOffsetDb: 10,
+    });
+    // Median -45, trim threshold -57, trim 1 frame, Q1 -54, quiet 13/43 < 14.
+    const calibrationFrames = [
+      -95,
+      ...Array(12).fill(-54),
+      ...Array(30).fill(-45),
+    ];
+
+    for (const frameDb of calibrationFrames) gate.process(frameDb, 0.1);
+
+    assert.strictEqual(gate.usedFallback, true);
+    assert.ok(Math.abs(gate.floorDb - -54) < 0.001);
+    assert.ok(gate.floorDb > -70);
+  });
+
+  it('T6: the calibration trim guard falls back to all frames at the floor minimum', () => {
+    const gate = makeGate({
+      mode: 'calibrated',
+      calibrationMs: 200,
+    });
+
+    for (let i = 0; i < 2; i++) gate.process(-95, 0.1);
+
+    assert.strictEqual(gate.usedFallback, true);
+    assert.strictEqual(gate.floorDb, -80);
   });
 
   it('normalizes stale base time before applying the rise multiplier', () => {
@@ -1216,7 +1349,8 @@ describe('adaptive VAD convergence', () => {
     let usedSustainedFallback = false;
 
     prefillAmbient(harness, 30, -80);
-    for (let i = 0; i < 150; i++) {
+    // Keep this below the 8-second implausible-speech stuck-run threshold.
+    for (let i = 0; i < 70; i++) {
       const frame = harness.drive(-73);
       if (frame.endpointEvidence === 'strong' && frame.output.evidence === 'continuing') {
         usedSustainedFallback = true;

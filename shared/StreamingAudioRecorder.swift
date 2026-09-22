@@ -650,6 +650,7 @@ private final class VADContext: @unchecked Sendable {
                 "onsetDb": snapshot.thresholdDb,
                 "continueDb": snapshot.continuationThresholdDb,
                 "silenceDb": snapshot.silenceThresholdDb,
+                "noSilenceS": gate.secondsSinceSilenceEvidence,
                 "silenceMs": Double(endpoint.accumulatedSilenceSamples) / 16.0,
                 "resumeMs": Double(endpoint.resumeEvidenceSamples) / 16.0,
                 "bufferHighWaterSamples": bufferHighWaterSamples
