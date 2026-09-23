@@ -5,6 +5,7 @@ import Foundation
 enum WhisperError: Error, LocalizedError {
     case invalidURL
     case noResponse
+    case unauthorized
     case httpError(Int, String)
     case decodingError(String)
     case timeout
@@ -22,6 +23,8 @@ enum WhisperError: Error, LocalizedError {
             return "Invalid server URL. Check your server address in Settings."
         case .noResponse:
             return "No response received from the server."
+        case .unauthorized:
+            return "Server rejected the API key (HTTP 401). Check the API key in Settings."
         case .httpError(let code, let body):
             return "Server returned HTTP \(code): \(body)"
         case .decodingError(let detail):
@@ -102,6 +105,14 @@ struct JobStatusResponse: Decodable {
 
 enum WhisperClient {
 
+    /// Attaches `Authorization: Bearer <key>` when a non-empty API key is
+    /// configured. Empty key → no header (permissive servers tolerate absence).
+    static func applyAuth(to request: inout URLRequest) {
+        let key = SharedConfig.load().apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+    }
+
     /// Resets the active URLSession, forcing new requests to use a fresh
     /// connection. Safe to call from any thread — forwards to the lock-guarded
     /// SessionHolder. This is the public entry point for NetworkChangeMonitor.
@@ -165,6 +176,8 @@ enum WhisperClient {
                     correlationId: correlationId
                 )
                 return text
+            } catch WhisperError.unauthorized {
+                throw WhisperError.unauthorized
             } catch {
                 failedServers.append(server)
                 continue
@@ -270,6 +283,7 @@ enum WhisperClient {
         if let url = URL(string: "\(base)/health") {
             var request = URLRequest(url: url)
             request.httpMethod = "GET"
+            applyAuth(to: &request)
             request.timeoutInterval = timeout
 
             if let (_, response) = try? await session.data(for: request),
@@ -284,6 +298,7 @@ enum WhisperClient {
         if let url = URL(string: "\(base)/") {
             var request = URLRequest(url: url)
             request.httpMethod = "GET"
+            applyAuth(to: &request)
             request.timeoutInterval = timeout
 
             if let (_, response) = try? await session.data(for: request),
@@ -305,6 +320,7 @@ enum WhisperClient {
         guard !base.isEmpty, let url = URL(string: "\(base)/warmup") else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        applyAuth(to: &request)
         request.timeoutInterval = timeout
         let session = SessionHolder.shared.get()
         do {
@@ -388,6 +404,7 @@ enum WhisperClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        applyAuth(to: &request)
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.setValue(jobId.uuidString.lowercased(), forHTTPHeaderField: "Idempotency-Key")
         if let id = correlationId {
@@ -441,6 +458,8 @@ enum WhisperClient {
             }
         case 404:
             throw WhisperError.asyncUnsupported
+        case 401:
+            throw WhisperError.unauthorized
         default:
             let bodyString = String(data: data, encoding: .utf8) ?? "(empty response)"
             throw WhisperError.httpError(httpResponse.statusCode, bodyString)
@@ -466,6 +485,7 @@ enum WhisperClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
+        applyAuth(to: &request)
         request.timeoutInterval = SharedConfig.AsyncTranscription.pollRequestTimeout
         if let id = correlationId {
             request.setValue(id.uuidString, forHTTPHeaderField: "X-Correlation-ID")
@@ -512,6 +532,8 @@ enum WhisperClient {
             }
         case 404:
             throw WhisperError.jobFailed("job evicted")
+        case 401:
+            throw WhisperError.unauthorized
         default:
             let bodyString = String(data: data, encoding: .utf8) ?? "(empty response)"
             throw WhisperError.httpError(httpResponse.statusCode, bodyString)
@@ -688,6 +710,8 @@ enum WhisperClient {
                 stuckWarned = false
             } catch WhisperError.jobFailed(let message) {
                 throw WhisperError.jobFailed(message)
+            } catch WhisperError.unauthorized {
+                throw WhisperError.unauthorized
             } catch WhisperError.timeout {
                 // B.8 — Exponential backoff on poll timeout
                 consecutivePollFailures += 1
@@ -879,6 +903,7 @@ enum WhisperClient {
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        applyAuth(to: &request)
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         // Floor timeout at totalDeadline so legacy servers (no /transcriptions)
         // get a long enough leash for one sync attempt.
@@ -945,6 +970,9 @@ enum WhisperClient {
         if let id = correlationId { respPayload["id"] = id.uuidString }
         FileLogger.shared.debug(.transcription, "HTTP response", payload: respPayload)
 
+        if httpResponse.statusCode == 401 {
+            throw WhisperError.unauthorized
+        }
         guard httpResponse.statusCode == 200 else {
             let bodyString = String(data: data, encoding: .utf8) ?? "(empty response)"
             throw WhisperError.httpError(httpResponse.statusCode, bodyString)

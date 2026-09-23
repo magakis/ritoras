@@ -6,6 +6,7 @@ class AppSettings: ObservableObject {
 
     @Published var servers: [String] = []
     @Published var timeoutSeconds: TimeInterval = SharedConfig.Defaults.timeoutSeconds
+    @Published var whisperApiKey: String = ""
     @Published var autoCapitalizationEnabled: Bool = true
     @Published var autocorrectOnSpaceEnabled: Bool = true
     @Published var dictationMode: SharedConfig.DictationMode = .batch
@@ -49,6 +50,7 @@ class AppSettings: ObservableObject {
         let config = SharedConfig.load()
         servers = config.servers
         timeoutSeconds = config.timeoutSeconds
+        whisperApiKey = config.apiKey
         autoCapitalizationEnabled = SharedConfig.autoCapitalizationEnabled()
         autocorrectOnSpaceEnabled = SharedConfig.autocorrectOnSpaceEnabled()
         dictationMode = SharedConfig.dictationMode()
@@ -90,6 +92,11 @@ class AppSettings: ObservableObject {
             FileLogger.shared.info(.settings, "saving timeoutSeconds",
                                    payload: ["value": newValue])
             self?.saveTimeoutSeconds(newValue)
+        }.store(in: &cancellables)
+        $whisperApiKey.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving whisperApiKey",
+                                   payload: ["length": newValue.count])
+            self?.saveWhisperApiKey(newValue)
         }.store(in: &cancellables)
         $autoCapitalizationEnabled.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving autoCapitalizationEnabled",
@@ -266,6 +273,7 @@ class AppSettings: ObservableObject {
             appGroupDefaults?.set(data, forKey: "servers")
         }
         appGroupDefaults?.set(timeoutSeconds, forKey: "timeoutSeconds")
+        appGroupDefaults?.set(whisperApiKey, forKey: SharedConfig.Defaults.whisperApiKeyKey)
         appGroupDefaults?.set(autoCapitalizationEnabled, forKey: SharedConfig.Defaults.autoCapitalizationEnabledKey)
         appGroupDefaults?.set(autocorrectOnSpaceEnabled, forKey: SharedConfig.Defaults.autocorrectOnSpaceEnabledKey)
         appGroupDefaults?.set(dictationMode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
@@ -313,6 +321,11 @@ class AppSettings: ObservableObject {
 
     private func saveTimeoutSeconds(_ seconds: TimeInterval) {
         appGroupDefaults?.set(seconds, forKey: "timeoutSeconds")
+        postSettingsChanged()
+    }
+
+    private func saveWhisperApiKey(_ key: String) {
+        appGroupDefaults?.set(key, forKey: SharedConfig.Defaults.whisperApiKeyKey)
         postSettingsChanged()
     }
 
@@ -470,6 +483,7 @@ class AppSettings: ObservableObject {
     func resetToDefaults() {
         servers = [SharedConfig.Defaults.baseUrl]
         timeoutSeconds = SharedConfig.Defaults.timeoutSeconds
+        whisperApiKey = ""
         autoCapitalizationEnabled = SharedConfig.Defaults.autoCapitalizationEnabledDefault
         autocorrectOnSpaceEnabled = SharedConfig.Defaults.autocorrectOnSpaceEnabledDefault
         dictationMode = .batch

@@ -195,6 +195,7 @@ struct SharedConfig {
 
         // MARK: - Auto-Capitalization
 
+        static let whisperApiKeyKey = "whisperApiKey"
         static let autoCapitalizationEnabledKey = "autoCapitalizationEnabled"
         static let autoCapitalizationEnabledDefault = true
 
@@ -502,6 +503,7 @@ struct SharedConfig {
     let servers: [String]
     let timeoutSeconds: TimeInterval
 
+    let apiKey: String
     static func load() -> SharedConfig {
         if let suiteDefaults = UserDefaults(suiteName: Defaults.appGroupId) {
             let servers: [String]
@@ -515,12 +517,14 @@ struct SharedConfig {
 
             return SharedConfig(
                 servers: servers,
-                timeoutSeconds: suiteDefaults.object(forKey: "timeoutSeconds") as? TimeInterval ?? Defaults.timeoutSeconds
+                timeoutSeconds: suiteDefaults.object(forKey: "timeoutSeconds") as? TimeInterval ?? Defaults.timeoutSeconds,
+                apiKey: suiteDefaults.string(forKey: Defaults.whisperApiKeyKey) ?? ""
             )
         }
         return SharedConfig(
             servers: [Defaults.baseUrl],
-            timeoutSeconds: Defaults.timeoutSeconds
+            timeoutSeconds: Defaults.timeoutSeconds,
+            apiKey: ""
         )
     }
 

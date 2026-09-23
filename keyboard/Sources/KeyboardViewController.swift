@@ -1676,6 +1676,7 @@ class KeyboardViewController: UIInputViewController {
 
         currentPollTask?.cancel()
         var request = URLRequest(url: url)
+        WhisperClient.applyAuth(to: &request)
         request.timeoutInterval = SharedConfig.AsyncTranscription.pollRequestTimeout
         let task = SessionHolder.shared.get().dataTask(with: request) { [weak self] data, response, error in
             guard let self = self else { return }
@@ -1688,6 +1689,16 @@ class KeyboardViewController: UIInputViewController {
                     FileLogger.shared.debug(.network, "poll job: 404, retrying next cycle",
                                             payload: ["statusCode": statusCode,
                                                       "jobId": id.uuidString.lowercased()])
+                    return
+                }
+
+                if statusCode == 401 {
+                    self.stopDictationTransports()
+                    FileLogger.shared.error(.network, "poll job: server rejected API key",
+                                            payload: ["jobId": id.uuidString.lowercased()])
+                    self.pendingRequestId = nil
+                    self.dictationTargetDocId = nil
+                    self.state = .error("Server rejected the API key. Update it in the Ritoras app.")
                     return
                 }
 

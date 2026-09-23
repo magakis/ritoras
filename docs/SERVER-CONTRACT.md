@@ -60,8 +60,24 @@ Content-Type: audio/mp4\r\n
 The field name is **`audio`**, not `file`. The optional `language` field is a
 client-provided value; how the deployment interprets it is deployment-specific.
 
-Ritoras sends no `Authorization` header. That describes the client request,
-not whether a particular deployment requires or supports authentication.
+### Authentication
+
+When a non-empty API key is configured, Ritoras sends it as
+`Authorization: Bearer <key>`. The scheme is case-insensitive, and the header
+contains the scheme and key as two whitespace-separated parts. The same key is
+used for every configured server. Set the key in Settings → API Key.
+
+The server applies this authentication to all HTTP endpoints, including
+`/transcribe`, `/transcriptions`, `/jobs/{job_id}`, `/dictation_result`,
+`/dictation_result/latest`, `/warmup`, `/health`, and any other route. A missing
+or invalid key receives HTTP 401 with
+`{"detail": "Invalid or missing API key"}` and `WWW-Authenticate: Bearer`.
+Ritoras treats HTTP 401 as terminal, surfaces it as an API-key error, and does
+not retry it.
+
+When no key is configured, Ritoras omits the `Authorization` header. This works
+with servers configured not to enforce authentication; enforcement and key
+validity are deployment-specific.
 
 ### Response
 
@@ -104,6 +120,10 @@ The background connection loop:
 2. Waits with an increasing backoff between failed rounds, starting at 1 second
    and doubling up to an 8-second cap.
 3. Continues trying for the duration of the dictation session.
+
+The WebSocket `/stream` upgrade request sends the same Bearer authorization
+header. A rejected handshake is closed with code `1008` and reason
+`Invalid or missing API key`.
 
 Audio chunks produced while disconnected are held in a FIFO queue. Nothing is
 dropped because the WebSocket is not connected. A late successful connection is
@@ -225,6 +245,11 @@ later retry. The user-facing failure messages are:
 The client sends a keepalive PING every **25 seconds**. The WebSocket connection
 attempt timeout is `streamWsConnectTimeout`, **8.0 seconds**.
 
+HTTP 401 responses are non-retryable. The app surfaces them as
+`WhisperError.unauthorized` with an API-key error; the keyboard's job-poll path
+shows a prompt terminal API-key error rather than treating the response as a
+timeout.
+
 ---
 
 ## 9. Deployment-specific behavior
@@ -236,7 +261,8 @@ made by the Ritoras client contract:
 - server-side VAD, segmentation, silence trimming, and other preprocessing;
 - cross-chunk context behavior;
 - supported languages and the interpretation of the optional `language` field;
-- authentication requirements and authorization policy;
+- whether authentication enforcement is enabled and which key value is valid
+  (the header format is specified in §3);
 - accepted batch audio formats and server-side audio decoding;
 - normalization, punctuation, substitutions, casing, and other result
   post-processing;

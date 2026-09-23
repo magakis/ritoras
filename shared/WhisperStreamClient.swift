@@ -77,7 +77,9 @@ actor WhisperStreamClient {
     /// - Throws: `WhisperError.networkError` if the transport reports
     ///   a connection failure.
     func connect() async throws {
-        let newTask = session.webSocketTask(with: url)
+        var request = URLRequest(url: url)
+        WhisperClient.applyAuth(to: &request)
+        let newTask = session.webSocketTask(with: request)
         task = newTask
         newTask.resume()
 

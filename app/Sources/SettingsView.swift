@@ -108,6 +108,11 @@ struct SettingsView: View {
                     settings.servers.append("")
                 }
             }
+
+            TextField("API Key (optional)", text: $settings.whisperApiKey)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled(true)
+                .keyboardType(.asciiCapable)
         } header: {
             HStack {
                 Text("Whisper Servers")
@@ -125,7 +130,7 @@ struct SettingsView: View {
                 .foregroundColor(.blue)
             }
         } footer: {
-            Text("Servers are tried in the order shown. Drag the grip on the right to reorder at any time. Tap Edit to add, change, or delete a server. Tap a server's test icon to check whether it's reachable.")
+            Text("Servers are tried in the order shown. Drag the grip on the right to reorder at any time. Tap Edit to add, change, or delete a server. Tap a server's test icon to check whether it's reachable. The API key is sent as a Bearer token with every request to the servers above; leave it empty for servers that don't require authentication.")
         }
         .environment(\.editMode, .constant(.active))
     }
