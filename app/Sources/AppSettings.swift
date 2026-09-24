@@ -16,12 +16,16 @@ class AppSettings: ObservableObject {
 
     @Published var streamVadMode: VADMode = .staticMode
     @Published var streamVadSensitivityProfile: VADSensitivityProfile = SharedConfig.Defaults.streamVadSensitivityProfileDefault
+    @Published var streamVadPauseProfile: VADPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
+    @Published var streamVadSilenceMs: Int = SharedConfig.Defaults.streamVadSilenceMsDefault
     @Published var streamVadAdaptationSpeed: Double = SharedConfig.Defaults.streamVadAdaptationSpeedDefault
     @Published var streamVadSpeechRms: Float = SharedConfig.Defaults.streamVadSpeechRmsDefault
     @Published var streamVadTelemetryEnabled: Bool = SharedConfig.Defaults.streamVadTelemetryEnabledDefault
 
     private var appGroupDefaults: UserDefaults?
     private var cancellables = Set<AnyCancellable>()
+    private var streamVadSilenceOverridePresent = false
+    private var updatingDerivedVadValue = false
 
     private init() {
         appGroupDefaults = UserDefaults(suiteName: SharedConfig.Defaults.appGroupId)
@@ -39,6 +43,9 @@ class AppSettings: ObservableObject {
         keyboardLanguage = SharedConfig.keyboardLanguage()
         streamVadMode = SharedConfig.streamVadMode()
         streamVadSensitivityProfile = SharedConfig.streamVadSensitivityProfile()
+        streamVadPauseProfile = SharedConfig.streamVadPauseProfile()
+        streamVadSilenceMs = SharedConfig.streamVadSilenceMs()
+        streamVadSilenceOverridePresent = SharedConfig.streamVadSilenceMsOverridePresent()
         streamVadAdaptationSpeed = SharedConfig.streamVadAdaptationSpeed()
         streamVadSpeechRms = SharedConfig.streamVadSpeechRms()
         streamVadTelemetryEnabled = SharedConfig.streamVadTelemetryEnabled()
@@ -98,6 +105,25 @@ class AppSettings: ObservableObject {
                                    payload: ["value": newValue.rawValue])
             self?.saveStreamVadSensitivityProfile(newValue)
         }.store(in: &cancellables)
+        $streamVadPauseProfile.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadPauseProfile",
+                                   payload: ["value": newValue.rawValue])
+            guard let self else { return }
+            self.streamVadSilenceOverridePresent = false
+            self.appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
+            self.appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
+            self.saveStreamVadPauseProfile(newValue)
+            self.updatingDerivedVadValue = true
+            self.streamVadSilenceMs = VADProfileResolver.pauseDurationMs(for: newValue)
+            self.updatingDerivedVadValue = false
+        }.store(in: &cancellables)
+        $streamVadSilenceMs.dropFirst().sink { [weak self] newValue in
+            guard let self, !self.updatingDerivedVadValue else { return }
+            FileLogger.shared.info(.settings, "saving streamVadSilenceMs",
+                                   payload: ["value": newValue])
+            self.streamVadSilenceOverridePresent = true
+            self.saveStreamVadSilenceMs(newValue)
+        }.store(in: &cancellables)
         $streamVadAdaptationSpeed.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving streamVadAdaptationSpeed",
                                    payload: ["value": newValue])
@@ -134,6 +160,11 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(keyboardLanguage.rawValue, forKey: SharedConfig.Defaults.keyboardLanguageKey)
         appGroupDefaults?.set(streamVadMode.rawValue, forKey: SharedConfig.Defaults.streamVadModeKey)
         appGroupDefaults?.set(streamVadSensitivityProfile.rawValue, forKey: SharedConfig.Defaults.streamVadSensitivityProfileKey)
+        appGroupDefaults?.set(streamVadPauseProfile.rawValue, forKey: SharedConfig.Defaults.streamVadPauseProfileKey)
+        if streamVadSilenceOverridePresent {
+            appGroupDefaults?.set(streamVadSilenceMs, forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
+            appGroupDefaults?.set(true, forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
+        }
         appGroupDefaults?.set(streamVadAdaptationSpeed, forKey: SharedConfig.Defaults.streamVadAdaptationSpeedKey)
         appGroupDefaults?.set(streamVadSpeechRms, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
         appGroupDefaults?.set(streamVadTelemetryEnabled, forKey: SharedConfig.Defaults.streamVadTelemetryEnabledKey)
@@ -197,6 +228,17 @@ class AppSettings: ObservableObject {
         postSettingsChanged()
     }
 
+    private func saveStreamVadPauseProfile(_ profile: VADPauseProfile) {
+        appGroupDefaults?.set(profile.rawValue, forKey: SharedConfig.Defaults.streamVadPauseProfileKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamVadSilenceMs(_ value: Int) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
+        appGroupDefaults?.set(true, forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
+        postSettingsChanged()
+    }
+
     private func saveStreamVadAdaptationSpeed(_ value: Double) {
         appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadAdaptationSpeedKey)
         postSettingsChanged()
@@ -218,13 +260,10 @@ class AppSettings: ObservableObject {
 
     private func migrateRetiredVadKeys() {
         let retiredKeys = [
-            SharedConfig.Defaults.streamVadPauseProfileKey,
             SharedConfig.Defaults.streamVadCalibrationMsKey,
             SharedConfig.Defaults.streamVadCalibratedOffsetDbKey,
             SharedConfig.Defaults.streamVadAdaptiveDeltaDbKey,
             SharedConfig.Defaults.streamVadAdaptiveDeltaDbOverrideKey,
-            SharedConfig.Defaults.streamVadSilenceMsKey,
-            SharedConfig.Defaults.streamVadSilenceMsOverrideKey,
             SharedConfig.Defaults.streamVadOnsetMsKey,
             SharedConfig.Defaults.streamVadEndEvidenceMsKey,
             SharedConfig.Defaults.streamVadResumeMsKey,
@@ -255,6 +294,29 @@ class AppSettings: ObservableObject {
         hapticsEnabled = SharedConfig.Defaults.hapticsEnabledDefault
         keyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
         streamVadMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .staticMode
+        streamVadPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
+        streamVadSilenceOverridePresent = false
+        updatingDerivedVadValue = true
+        streamVadSilenceMs = SharedConfig.Defaults.streamVadSilenceMsDefault
+        updatingDerivedVadValue = false
+        appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
+        appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
         streamVadSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
+    }
+
+    func resetVadSettingsToDefaults() {
+        streamVadSilenceOverridePresent = false
+        appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
+        appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
+        streamVadSensitivityProfile = SharedConfig.Defaults.streamVadSensitivityProfileDefault
+        streamVadPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
+        streamVadMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .staticMode
+        streamVadAdaptationSpeed = SharedConfig.Defaults.streamVadAdaptationSpeedDefault
+        streamVadSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
+        streamVadTelemetryEnabled = SharedConfig.Defaults.streamVadTelemetryEnabledDefault
+        updatingDerivedVadValue = true
+        streamVadSilenceMs = SharedConfig.Defaults.streamVadSilenceMsDefault
+        updatingDerivedVadValue = false
+        postSettingsChanged()
     }
 }

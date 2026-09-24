@@ -6,6 +6,7 @@ struct VADSettingsView: View {
     @StateObject private var tester = AudioLevelTesterViewModel()
     @State private var isCopyingDigest = false
     @State private var digestCopied = false
+    @State private var isShowingResetConfirmation = false
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -39,6 +40,15 @@ struct VADSettingsView: View {
         Form {
             testerSection
             controlsSection
+            resetSection
+        }
+        .alert("Reset VAD Settings?", isPresented: $isShowingResetConfirmation) {
+            Button("Reset to Defaults", role: .destructive) {
+                settings.resetVadSettingsToDefaults()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("VAD settings will be restored to their defaults.")
         }
     }
 
@@ -257,10 +267,43 @@ struct VADSettingsView: View {
                 Text("Quiet Voice").tag(VADSensitivityProfile.quietVoice)
                 Text("Noisy Environment").tag(VADSensitivityProfile.noisyEnvironment)
             }
+            Picker("Pause", selection: $settings.streamVadPauseProfile) {
+                Text("Fast").tag(VADPauseProfile.fast)
+                Text("Balanced").tag(VADPauseProfile.balanced)
+                Text("Long").tag(VADPauseProfile.long)
+            }
+            silenceDurationRow
         } header: {
             Text("Normal")
         } footer: {
-            Text("Sensitivity adjusts voice detection for your environment.")
+            Text("Sensitivity adjusts voice detection for your environment. Pause closes after 450 ms, 700 ms, or 1100 ms of silence. 700 ms is the default; 450 ms is the minimum.")
+        }
+    }
+
+    private var silenceDurationRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Silence Duration")
+                Spacer()
+                Text("\(settings.streamVadSilenceMs) ms")
+                    .foregroundColor(.secondary)
+            }
+            Slider(
+                value: Binding(
+                    get: { Double(settings.streamVadSilenceMs) },
+                    set: { settings.streamVadSilenceMs = Int($0) }
+                ),
+                in: 450...5000,
+                step: 100
+            )
+        }
+    }
+
+    private var resetSection: some View {
+        Section {
+            Button("Reset VAD Settings to Defaults", role: .destructive) {
+                isShowingResetConfirmation = true
+            }
         }
     }
 
