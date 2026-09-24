@@ -294,7 +294,7 @@ struct VADSettingsView: View {
                     set: { settings.streamVadSilenceMs = Int($0) }
                 ),
                 in: 450...5000,
-                step: 100
+                step: 50
             )
         }
     }
