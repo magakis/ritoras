@@ -355,7 +355,7 @@ enum VADTelemetryDigest {
             index % stride == 0 ? point : nil
         }
         let didTruncate = truncated || selected.count < points.count
-        let values = selected.map { point in
+        var values = selected.map { point in
             let floor = point.floorDb.map { fixed($0, digits: 1) } ?? "n/a"
             let speech = point.isSpeech ? "S" : "-"
             return "\(timelineTime(point.time)):\(fixed(point.frameDb, digits: 1)):\(floor):\(speech)"

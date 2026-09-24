@@ -278,7 +278,7 @@ struct VADSettingsView: View {
     private var diagnosticsSection: some View {
         let telemetryURLs = RecordingStore.shared.streamTelemetryURLs()
 
-        Section {
+        return Section {
             Toggle("VAD Telemetry", isOn: $settings.streamVadTelemetryEnabled)
             Text("Records per-frame VAD decisions to a file next to the session audio, for offline replay and tuning.")
                 .font(.caption)
