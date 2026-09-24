@@ -79,6 +79,7 @@ enum VADTelemetryEventKind: String, Sendable {
     case stopFlush = "stop_flush"
     case sessionEnd = "session_end"
     case outcome
+    case chunkReceived = "chunk_received"
 }
 
 struct VADTelemetryEvent: @unchecked Sendable {
@@ -89,6 +90,11 @@ struct VADTelemetryEvent: @unchecked Sendable {
     let speechMs: Double?
     let totalMs: Double?
     let config: [String: Any]?
+    let startMs: Double?
+    let endMs: Double?
+    let endpointState: String?
+    let latencyMs: Double?
+    let chars: Int?
 
     init(
         kind: VADTelemetryEventKind,
@@ -97,7 +103,12 @@ struct VADTelemetryEvent: @unchecked Sendable {
         reason: String? = nil,
         speechMs: Double? = nil,
         totalMs: Double? = nil,
-        config: [String: Any]? = nil
+        config: [String: Any]? = nil,
+        startMs: Double? = nil,
+        endMs: Double? = nil,
+        endpointState: String? = nil,
+        latencyMs: Double? = nil,
+        chars: Int? = nil
     ) {
         self.kind = kind
         self.chunkId = chunkId
@@ -106,6 +117,11 @@ struct VADTelemetryEvent: @unchecked Sendable {
         self.speechMs = speechMs
         self.totalMs = totalMs
         self.config = config
+        self.startMs = startMs
+        self.endMs = endMs
+        self.endpointState = endpointState
+        self.latencyMs = latencyMs
+        self.chars = chars
     }
 }
 
@@ -204,6 +220,7 @@ private final class VADContext: @unchecked Sendable {
     var silenceSamples: Int = 0
     var speechSamples: Int = 0
     var chunkId: UInt32 = 0
+    private var sessionElapsedSamples = 0
     var onCalibrationChange: ((Bool) -> Void)?
     private var wasCalibrating: Bool
     private var didLogFallback = false
@@ -270,6 +287,7 @@ private final class VADContext: @unchecked Sendable {
         defer { os_unfair_lock_unlock(&unfairLock) }
         telemetrySink = sink
         telemetrySequence = 0
+        sessionElapsedSamples = 0
         headBuffer = SampleRingBuffer(capacity: sessionHeadBufferSamples)
         headSlices.removeAll(keepingCapacity: true)
         guard let sink else { return }
@@ -403,6 +421,7 @@ private final class VADContext: @unchecked Sendable {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
 
+        sessionElapsedSamples += frameLength
         let analysisFrame = analysisHpf?.process(frame) ?? frame
         let rms = AudioMath.dcCorrectedRMS(analysisFrame)
         let frameDb = Double(AudioMath.dbFromRms(rms))
@@ -764,6 +783,9 @@ private final class VADContext: @unchecked Sendable {
     ) -> VADEmission {
         let snapshot = accumulator
         let id = chunkId
+        let endpointState = endpoint.state.rawValue
+        let endMs = Double(sessionElapsedSamples) / 16.0
+        let startMs = endMs - totalMs
         chunkId &+= 1
         pendingEmissionSummary = EmissionSummary(
             chunkId: id,
@@ -792,7 +814,10 @@ private final class VADContext: @unchecked Sendable {
             samples: snapshot.count,
             reason: reason,
             speechMs: speechMs,
-            totalMs: totalMs
+            totalMs: totalMs,
+            startMs: startMs,
+            endMs: endMs,
+            endpointState: endpointState
         ))
         return VADEmission(chunkId: id, samples: snapshot)
     }
@@ -809,6 +834,8 @@ private final class VADContext: @unchecked Sendable {
         _ = endpoint.forceFinalize(kind: .stop)
         let sampleCount = accumulator.count
         let trailingSpeechMs = Double(speechSamples) / 16.0
+        let endMs = Double(sessionElapsedSamples) / 16.0
+        let endpointState = endpoint.state.rawValue
         let flushReason: String
         if accumulator.isEmpty {
             flushReason = "empty"
@@ -822,7 +849,9 @@ private final class VADContext: @unchecked Sendable {
             samples: sampleCount,
             reason: flushReason,
             speechMs: trailingSpeechMs,
-            totalMs: Double(sampleCount) / 16.0
+            totalMs: Double(sampleCount) / 16.0,
+            endMs: endMs,
+            endpointState: endpointState
         ))
         guard !accumulator.isEmpty else { return nil }
         guard speechSamples >= minSpeechSamples else {

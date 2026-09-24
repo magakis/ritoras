@@ -144,6 +144,7 @@ final class DictationViewModel: ObservableObject {
     private var firstChunkSentAt: Date?
     private var firstPartialReceivedAt: Date?
     private var chunksSentThisSession = 0
+    private var chunkSentAt: [UInt32: Date] = [:]
 
     private var streamRecorder: StreamingAudioRecorder?
     private var streamClient: WhisperStreamClient?
@@ -352,6 +353,7 @@ final class DictationViewModel: ObservableObject {
         firstChunkSentAt = nil
         firstPartialReceivedAt = nil
         chunksSentThisSession = 0
+        chunkSentAt.removeAll()
         vadTelemetryWriter = nil
         phase = .connecting
         FileLogger.shared.info(.transcription, "dictation connecting", payload: [
@@ -688,6 +690,14 @@ final class DictationViewModel: ObservableObject {
             }, onChunkResult: { [weak self] chunkId, responseText in
                 Task { @MainActor [weak self] in
                     guard let self, self.activeID == sessionID else { return }
+                    let latencyMs = self.chunkSentAt[chunkId].map {
+                        Date().timeIntervalSince($0) * 1000
+                    }
+                    self.vadTelemetryWriter?.event(VADTelemetryEvent(
+                        kind: .chunkReceived,
+                        chunkId: chunkId,
+                        latencyMs: latencyMs,
+                        chars: responseText.count))
                     self.mergeChunkReview(id: chunkId, update: .responseText(responseText))
                 }
             })
@@ -1044,6 +1054,7 @@ final class DictationViewModel: ObservableObject {
             streamClient = nil
             streamRecorder = nil
             vadTelemetryWriter = nil
+            chunkSentAt.removeAll()
 
             FileLogger.shared.info(.network, "Stream: stop summary", payload: [
                 "id": id.uuidString,
@@ -1426,7 +1437,9 @@ final class DictationViewModel: ObservableObject {
                     chunksSentThisSession += 1
                     Task { @MainActor [weak self] in
                         guard let self, self.activeID == sessionID else { return }
-                        self.mergeChunkReview(id: chunkId, update: .sentAt(Date()))
+                        let sentAt = Date()
+                        self.chunkSentAt[chunkId] = sentAt
+                        self.mergeChunkReview(id: chunkId, update: .sentAt(sentAt))
                     }
                     if firstChunkSentAt == nil {
                         let sentAt = Date()
@@ -1555,6 +1568,7 @@ final class DictationViewModel: ObservableObject {
         if let currentId = activeID {
             RecordingStore.shared.deleteStreamWav(for: currentId)
         }
+        chunkSentAt.removeAll()
         clearChunkReviews()
         if case .done = phase {
             FileLogger.shared.info(.transcription, "cancel: preserving .done from racing task, skipping cancelled publish")

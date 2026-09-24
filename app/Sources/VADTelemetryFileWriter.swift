@@ -192,6 +192,21 @@ final class VADTelemetryFileWriter: @unchecked Sendable, VADTelemetrySink, VADTe
         if let config = record.config {
             object["c"] = config
         }
+        if let startMs = record.startMs {
+            object["s0"] = startMs
+        }
+        if let endMs = record.endMs {
+            object["s1"] = endMs
+        }
+        if let endpointState = record.endpointState {
+            object["es"] = endpointState
+        }
+        if let latencyMs = record.latencyMs {
+            object["lat"] = latencyMs
+        }
+        if let chars = record.chars {
+            object["ch"] = chars
+        }
         return serialize(object)
     }
 
