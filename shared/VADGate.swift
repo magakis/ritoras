@@ -41,6 +41,7 @@ struct VADGateOutput {
     let continuationThresholdDb: Double
     let silenceThresholdDb: Double
     let floorDb: Double?
+    let floorConverged: Bool
     let calibrating: Bool
     let usedFallback: Bool
     let retroactiveSpeechMs: Double
@@ -57,6 +58,10 @@ final class VADThresholdGate: @unchecked Sendable {
 
     // Fixed algorithm constants. They are intentionally not user-facing settings.
     static let adaptiveEndPendingWindDispersionDb = 6.0
+    // Telemetry puts normal/quiet dictation floors around -35…-55 dB and genuinely
+    // loud ambient floors around -24…-34 dB. Real speech crests 10–20 dB above
+    // its p10 and can pass the strict loud rule while bounded noise wobble cannot.
+    static let loudFloorRegimeDb = -35.0
     static let adaptiveImplausibleSpeechSeconds = 8.0
     static let calibrationLeadingTrimDb = 12.0
     private static let staticContinuationOffsetDb = 4.0
@@ -77,15 +82,15 @@ final class VADThresholdGate: @unchecked Sendable {
     private static let calibrationCompletionEpsilon = 1e-9
 
     private let config: VADGateConfig
-    private let effectiveAdaptiveDeltaDb: Double
+    let effectiveAdaptiveDeltaDb: Double
     private let effectiveAdaptiveContinuationDeltaDb: Double
-    private let effectiveAbsoluteSpeechFloorDb: Double
+    let effectiveAbsoluteSpeechFloorDb: Double
     private let effectiveSilenceDeltaDb: Double
     private let effectiveRiseSpeedMultiplier: Double
     private let effectiveStaleFloorSeconds: Double
     private let effectiveFallTauSeconds: Double
-    private let effectiveDynamicsSpreadDb: Double
-    private let effectiveFlatSpreadDb: Double
+    let effectiveDynamicsSpreadDb: Double
+    let effectiveFlatSpreadDb: Double
     private var behaviorMode: VADMode
     private var calibrationFinished = false
     private var calibrationElapsed = 0.0
@@ -166,6 +171,7 @@ final class VADThresholdGate: @unchecked Sendable {
                 ? Self.floorMinDb + effectiveSilenceDeltaDb
                 : initialThresholdDb - Self.staticSilenceOffsetDb,
             floorDb: initialFloorDb,
+            floorConverged: false,
             calibrating: config.mode == .calibrated,
             usedFallback: false,
             retroactiveSpeechMs: 0,
@@ -472,6 +478,7 @@ final class VADThresholdGate: @unchecked Sendable {
             continuationThresholdDb: levels.continuationThresholdDb,
             silenceThresholdDb: levels.silenceThresholdDb,
             floorDb: floorDb,
+            floorConverged: coldStartConverged,
             calibrating: false,
             retroactiveSpeechMs: retroactiveSpeechMs,
             trailingSilenceMs: trailingSilenceMs,
@@ -560,6 +567,7 @@ final class VADThresholdGate: @unchecked Sendable {
             continuationThresholdDb: levels.continuationThresholdDb,
             silenceThresholdDb: levels.silenceThresholdDb,
             floorDb: currentFloor,
+            floorConverged: coldStartConverged,
             calibrating: false,
             retroactiveSpeechMs: retroactiveSpeechMs,
             trailingSilenceMs: trailingSilenceMs,
@@ -687,6 +695,7 @@ final class VADThresholdGate: @unchecked Sendable {
             silenceThresholdDb: resetAdaptiveThresholds?.silence
                 ?? thresholdDb - Self.staticSilenceOffsetDb,
             floorDb: floorDb,
+            floorConverged: false,
             calibrating: config.mode == .calibrated,
             usedFallback: false,
             retroactiveSpeechMs: 0,
@@ -839,6 +848,7 @@ final class VADThresholdGate: @unchecked Sendable {
             continuationThresholdDb: thresholds.continuation,
             silenceThresholdDb: thresholds.silence,
             floorDb: floorDb,
+            floorConverged: coldStartConverged,
             calibrating: lastOutput.calibrating,
             usedFallback: usedFallback,
             retroactiveSpeechMs: lastOutput.retroactiveSpeechMs,
@@ -923,6 +933,7 @@ final class VADThresholdGate: @unchecked Sendable {
         continuationThresholdDb: Double,
         silenceThresholdDb: Double,
         floorDb: Double?,
+        floorConverged: Bool = false,
         calibrating: Bool,
         retroactiveSpeechMs: Double,
         trailingSilenceMs: Double?,
@@ -936,6 +947,7 @@ final class VADThresholdGate: @unchecked Sendable {
             continuationThresholdDb: continuationThresholdDb,
             silenceThresholdDb: silenceThresholdDb,
             floorDb: floorDb,
+            floorConverged: floorConverged,
             calibrating: calibrating,
             usedFallback: usedFallback,
             retroactiveSpeechMs: retroactiveSpeechMs,

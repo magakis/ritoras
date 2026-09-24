@@ -20,6 +20,7 @@ export const QUIET_BAND_DB = 6.0;
 export const VAD_ADAPTIVE_ROLLING_PERCENTILE = 0.1;
 export const VAD_ADAPTIVE_FLOOR_MOVEMENT_EPSILON_DB = 1e-6;
 export const VAD_ABSOLUTE_SPEECH_FLOOR_DB = -50;
+export const VAD_LOUD_FLOOR_REGIME_DB = -35;
 export const VAD_ADAPTIVE_RISE_MULTIPLIER_MIN = 0.5;
 export const VAD_ADAPTIVE_RISE_MULTIPLIER_MAX = 4.0;
 export const VAD_ADAPTIVE_STRONG_DELTA_DB_MIN = 3.0;
@@ -165,6 +166,7 @@ export class VADThresholdGate {
         ? VAD_FLOOR_MIN_DB + this.effectiveSilenceDeltaDb
         : this.thresholdDb - VAD_STATIC_SILENCE_OFFSET_DB,
       floorDb: this.floorDb,
+      floorConverged: false,
       calibrating: this.config.mode === 'calibrated',
       usedFallback: false,
       retroactiveSpeechMs: 0,
@@ -413,6 +415,7 @@ export class VADThresholdGate {
       isSpeech: evidence === 'strong' || evidence === 'continuing',
       thresholdDb: levels.strongThresholdDb,
       floorDb: this.floorDb,
+      floorConverged: this.coldStartConverged,
       calibrating: false,
       retroactiveSpeechMs,
       trailingSilenceMs,
@@ -483,6 +486,7 @@ export class VADThresholdGate {
       continuationThresholdDb: levels.continuationThresholdDb,
       silenceThresholdDb: levels.silenceThresholdDb,
       floorDb: currentFloor,
+      floorConverged: this.coldStartConverged,
       calibrating: false,
       retroactiveSpeechMs,
       trailingSilenceMs,
@@ -605,6 +609,7 @@ export class VADThresholdGate {
       silenceThresholdDb: resetAdaptiveThresholds?.silenceThresholdDb
         ?? this.thresholdDb - VAD_STATIC_SILENCE_OFFSET_DB,
       floorDb: this.floorDb,
+      floorConverged: false,
       calibrating: this.config.mode === 'calibrated',
       usedFallback: false,
       retroactiveSpeechMs: 0,
@@ -751,6 +756,7 @@ export class VADThresholdGate {
       continuationThresholdDb: thresholds.continuationThresholdDb,
       silenceThresholdDb: thresholds.silenceThresholdDb,
       floorDb: this.floorDb,
+      floorConverged: this.coldStartConverged,
       usedFallback: this.usedFallback,
       dynamicsSpreadDb: this.lastOutput.dynamicsSpreadDb,
       shortSpreadDb: this.lastOutput.shortSpreadDb,
@@ -831,6 +837,7 @@ export class VADThresholdGate {
     continuationThresholdDb,
     silenceThresholdDb,
     floorDb,
+    floorConverged = false,
     calibrating,
     retroactiveSpeechMs,
     trailingSilenceMs,
@@ -844,6 +851,7 @@ export class VADThresholdGate {
       continuationThresholdDb,
       silenceThresholdDb,
       floorDb,
+      floorConverged,
       calibrating,
       usedFallback: this.usedFallback,
       retroactiveSpeechMs,

@@ -1,6 +1,7 @@
 import {
   makeVadGateConfig,
   VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB,
+  VAD_LOUD_FLOOR_REGIME_DB,
   VAD_SUSTAINED_CONTINUING_ONSET_S,
   VADThresholdGate,
 } from './vad-gate.mjs';
@@ -103,6 +104,7 @@ export function makeRecorderHarness({
     noteUtteranceEndedValues: [],
     sustainedContinuingMs: 0,
     streakStartFloorDb: null,
+    streakPeakDb: null,
     sustainedContinuingOnsetLatched: false,
     sawReanchorDuringUtterance: false,
     sessionConfig: null,
@@ -131,6 +133,7 @@ export function makeRecorderHarness({
         ll: this.sustainedContinuingOnsetLatched,
       };
       copyOptional(record, 'fl', output.floorDb);
+      record.fc = output.floorConverged;
       copyOptional(record, 'dy', output.dynamicsSpreadDb);
       this.frameSequence += 1;
       if (typeof onFrame === 'function') onFrame(record);
@@ -161,21 +164,36 @@ export function makeRecorderHarness({
       if (adaptivePath && output.evidence === 'continuing' && endpointWasIdle) {
         if (this.sustainedContinuingMs === 0) {
           this.streakStartFloorDb = this.gate.snapshot.floorDb;
+          this.streakPeakDb = frameDb;
+        } else {
+          this.streakPeakDb = Math.max(this.streakPeakDb ?? frameDb, frameDb);
         }
         this.sustainedContinuingMs += frameDuration * 1000;
       } else if (!this.sustainedContinuingOnsetLatched) {
         this.sustainedContinuingMs = 0;
         this.streakStartFloorDb = null;
+        this.streakPeakDb = null;
       }
 
-      const floorStable = output.floorDb !== null
+      const quietRegimeEvidence = output.floorDb !== null
+        && output.floorDb < VAD_LOUD_FLOOR_REGIME_DB
+        && ((output.dynamicsSpreadDb ?? 0) >= this.gate.effectiveFlatSpreadDb
+          || frameDb >= output.continuationThresholdDb + 3);
+      const quietRegimeFloorStable = output.floorDb !== null
         && this.streakStartFloorDb !== null
-        && (output.floorDb - this.streakStartFloorDb) <= 2;
+        && output.floorDb - this.streakStartFloorDb <= 2;
+      const loudRegimeEvidence = output.floorDb !== null
+        && (this.streakPeakDb ?? -Infinity)
+          >= output.floorDb + this.gate.effectiveAdaptiveDeltaDb;
       if (adaptivePath
+        && output.floorConverged
         && output.evidence === 'continuing'
         && endpointWasIdle
-        && this.sustainedContinuingMs >= VAD_SUSTAINED_CONTINUING_ONSET_S * 1000
-        && floorStable) {
+        && ((quietRegimeEvidence
+          && quietRegimeFloorStable
+          && this.sustainedContinuingMs >= VAD_SUSTAINED_CONTINUING_ONSET_S * 1000)
+          || (loudRegimeEvidence
+            && this.sustainedContinuingMs >= 1.5 * VAD_SUSTAINED_CONTINUING_ONSET_S * 1000))) {
         this.sustainedContinuingOnsetLatched = true;
       }
       const endpointInOnsetLimb = endpointWasIdle || previousState === 'onsetPending';
@@ -187,6 +205,7 @@ export function makeRecorderHarness({
         this.sustainedContinuingOnsetLatched = false;
         this.sustainedContinuingMs = 0;
         this.streakStartFloorDb = null;
+        this.streakPeakDb = null;
       }
       const latchedContinuingOnset = this.sustainedContinuingOnsetLatched
         && output.evidence === 'continuing'
@@ -232,6 +251,7 @@ export function makeRecorderHarness({
           }
           this.sustainedContinuingMs = 0;
           this.streakStartFloorDb = null;
+          this.streakPeakDb = null;
           this.sustainedContinuingOnsetLatched = false;
           this.silenceSamples = 0;
         } else if (decision.type === 'continueUtterance'
@@ -334,6 +354,7 @@ export function makeRecorderHarness({
           this.sawReanchorDuringUtterance = false;
           this.sustainedContinuingMs = 0;
           this.streakStartFloorDb = null;
+          this.streakPeakDb = null;
           this.sustainedContinuingOnsetLatched = false;
         }
       }
@@ -394,6 +415,7 @@ export function makeRecorderHarness({
       this.utteranceQuietestStrongDb = null;
       this.sustainedContinuingMs = 0;
       this.streakStartFloorDb = null;
+      this.streakPeakDb = null;
       this.sustainedContinuingOnsetLatched = false;
       return { type: 'finalizeUtterance', kind: 'stop' };
     },

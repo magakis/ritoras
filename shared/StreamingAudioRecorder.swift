@@ -57,6 +57,7 @@ struct VADTelemetryFrame: @unchecked Sendable {
     let evidence: String
     let isSpeech: Bool
     let floorDb: Double?
+    let floorConverged: Bool
     let strongThresholdDb: Double
     let continuationThresholdDb: Double
     let silenceThresholdDb: Double
@@ -206,6 +207,7 @@ private final class VADContext: @unchecked Sendable {
     private var utteranceQuietestStrongDb: Double?
     private var sustainedContinuingMs = 0.0
     private var streakStartFloorDb: Double?
+    private var streakPeakDb: Double?
     private var sustainedContinuingOnsetLatched = false
     private var telemetrySequence: UInt64 = 0
     private var telemetrySink: VADTelemetrySink?
@@ -302,6 +304,7 @@ private final class VADContext: @unchecked Sendable {
         sawReanchorDuringUtterance = false
         sustainedContinuingMs = 0
         streakStartFloorDb = nil
+        streakPeakDb = nil
         sustainedContinuingOnsetLatched = false
     }
 
@@ -368,6 +371,7 @@ private final class VADContext: @unchecked Sendable {
             evidence: output.evidence.rawValue,
             isSpeech: output.isSpeech,
             floorDb: output.floorDb,
+            floorConverged: output.floorConverged,
             strongThresholdDb: output.thresholdDb,
             continuationThresholdDb: output.continuationThresholdDb,
             silenceThresholdDb: output.silenceThresholdDb,
@@ -451,6 +455,9 @@ private final class VADContext: @unchecked Sendable {
             if adaptivePath && out.evidence == .continuing && endpointWasIdle {
                 if sustainedContinuingMs == 0 {
                     streakStartFloorDb = gate.snapshot.floorDb
+                    streakPeakDb = frameDb
+                } else {
+                    streakPeakDb = max(streakPeakDb ?? frameDb, frameDb)
                 }
                 sustainedContinuingMs += frameDuration * 1000.0
             } else if !sustainedContinuingOnsetLatched {
@@ -461,23 +468,33 @@ private final class VADContext: @unchecked Sendable {
                 }
                 sustainedContinuingMs = 0
                 streakStartFloorDb = nil
+                streakPeakDb = nil
             }
 
-            let floorStable: Bool
+            let quietRegimeEvidence = out.floorDb.map {
+                $0 < VADThresholdGate.loudFloorRegimeDb
+            } == true
+                && ((out.dynamicsSpreadDb ?? 0) >= gate.effectiveFlatSpreadDb
+                    || frameDb >= out.continuationThresholdDb + 3.0)
+            let quietRegimeFloorStable: Bool
             if let currentFloorDb = out.floorDb,
                let streakStartFloorDb {
-                // Steady-noise chase rises monotonically and is suppressed; loud-room
-                // wobble is bidirectional with tauFall pulling down, so net-up stays
-                // under the bound and the latch is restored.
-                floorStable = (currentFloorDb - streakStartFloorDb) <= 2.0
+                quietRegimeFloorStable = (currentFloorDb - streakStartFloorDb) <= 2.0
             } else {
-                floorStable = false
+                quietRegimeFloorStable = false
             }
+            let loudRegimeEvidence = out.floorDb.map {
+                (streakPeakDb ?? -Double.infinity) >= $0 + gate.effectiveAdaptiveDeltaDb
+            } == true
             if adaptivePath &&
+               out.floorConverged &&
                out.evidence == .continuing &&
                endpointWasIdle &&
-               sustainedContinuingMs >= sustainedContinuingOnsetSeconds * 1000.0 &&
-               floorStable {
+                ((quietRegimeEvidence
+                    && quietRegimeFloorStable
+                    && sustainedContinuingMs >= sustainedContinuingOnsetSeconds * 1000.0)
+                    || (loudRegimeEvidence
+                        && sustainedContinuingMs >= 1.5 * sustainedContinuingOnsetSeconds * 1000.0)) {
                 sustainedContinuingOnsetLatched = true
             }
             let endpointInOnsetLimb = endpointWasIdle || previousState == .onsetPending
@@ -486,6 +503,7 @@ private final class VADContext: @unchecked Sendable {
                 sustainedContinuingOnsetLatched = false
                 sustainedContinuingMs = 0
                 streakStartFloorDb = nil
+                streakPeakDb = nil
             }
             let latchedContinuingOnset = sustainedContinuingOnsetLatched &&
                                          out.evidence == .continuing &&
@@ -520,6 +538,7 @@ private final class VADContext: @unchecked Sendable {
                 utteranceQuietestStrongDb = nil
                 sustainedContinuingMs = 0
                 streakStartFloorDb = nil
+                streakPeakDb = nil
                 sustainedContinuingOnsetLatched = false
                 accumulator.removeAll(keepingCapacity: true)
                 if let head = headBuffer {
@@ -717,6 +736,7 @@ private final class VADContext: @unchecked Sendable {
         utteranceQuietestStrongDb = nil
         sustainedContinuingMs = 0
         streakStartFloorDb = nil
+        streakPeakDb = nil
         sustainedContinuingOnsetLatched = false
         telemetrySink?.event(VADTelemetryEvent(
             kind: .emit,
@@ -736,6 +756,7 @@ private final class VADContext: @unchecked Sendable {
         defer { os_unfair_lock_unlock(&unfairLock) }
         sustainedContinuingMs = 0
         streakStartFloorDb = nil
+        streakPeakDb = nil
         sustainedContinuingOnsetLatched = false
         _ = endpoint.forceFinalize(kind: .stop)
         let sampleCount = accumulator.count

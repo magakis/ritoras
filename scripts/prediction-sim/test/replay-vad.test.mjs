@@ -139,8 +139,43 @@ describe('VAD replay', () => {
       ...session.config,
       silenceDeltaDb: 5,
     }, { labels, compare: false });
-    assert.notDeepEqual(continuation.metrics, base.metrics);
-    assert.notDeepEqual(silence.metrics, base.metrics);
+    // Loud-regime wind cannot latch through continuing evidence; strong frames still initiate.
+    assert.deepEqual(continuation.metrics, base.metrics);
+    // Strong frames dominate endpoint initiation, so this windy fixture ignores silence-delta changes.
+    assert.deepEqual(silence.metrics, base.metrics);
+
+    const quietBase = {
+      config: session.config,
+      frames: [
+        ...Array.from({ length: 100 }, (_, q) => ({ t: 'f', q, dt: 0.01, db: -40 })),
+        ...Array.from({ length: 100 }, (_, index) => ({ t: 'f', q: index + 100, dt: 0.01, db: -80 })),
+      ],
+      events: [],
+    };
+    const quietWind = {
+      ...quietBase,
+      frames: [
+        ...quietBase.frames.slice(0, 100),
+        ...Array.from({ length: 130 }, (_, index) => ({
+          t: 'f',
+          q: index + 100,
+          dt: 0.01,
+          db: index % 2 === 0 ? -33 : -34,
+        })),
+        ...Array.from({ length: 100 }, (_, index) => ({
+          t: 'f',
+          q: index + 230,
+          dt: 0.01,
+          db: -80,
+        })),
+      ],
+    };
+    const quietBaseReplay = replaySession(quietBase, quietBase.config, { compare: false });
+    const quietWindReplay = replaySession(quietWind, quietWind.config, { compare: false });
+    assert.ok(quietWindReplay.floorStats.max < -35);
+    assert.ok(quietWindReplay.frames.slice(100, 230).every(frame => frame.e === 'continuing'));
+    assert.ok(quietWindReplay.metrics.utteranceCount > quietBaseReplay.metrics.utteranceCount);
+    assert.ok(quietWindReplay.metrics.chunkCount > quietBaseReplay.metrics.chunkCount);
 
     const speechOnly = {
       ...session,

@@ -1631,13 +1631,17 @@ describe('adaptive VAD convergence', () => {
   });
 
   it('fallback onset completes with small frames', () => {
-    const harness = makeRecorderHarness();
+    const harness = makeRecorderHarness({
+      gateConfig: { adaptiveContinuationDeltaDb: 4 },
+    });
     let onsetMs = null;
     let usedSustainedFallback = false;
 
     prefillAmbient(harness, 300, -50);
     for (let i = 0; i < 200; i++) {
-      const frameDb = harness.gate.snapshot.continuationThresholdDb + 0.1;
+      // Slight modulation stays within the continuation band while modeling voiced speech.
+      const frameDb = harness.gate.snapshot.continuationThresholdDb
+        + 3 + (i % 2 === 0 ? -2 : 2);
       const frame = harness.drive(frameDb);
       assert.strictEqual(frame.output.evidence, 'continuing');
       if (frame.endpointEvidence === 'strong') usedSustainedFallback = true;
