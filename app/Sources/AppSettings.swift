@@ -14,8 +14,10 @@ class AppSettings: ObservableObject {
     @Published var hapticsEnabled: Bool = SharedConfig.Defaults.hapticsEnabledDefault
     @Published var keyboardLanguage: KeyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
 
+    @Published var streamVadMode: VADMode = .staticMode
     @Published var streamVadSensitivityProfile: VADSensitivityProfile = SharedConfig.Defaults.streamVadSensitivityProfileDefault
     @Published var streamVadAdaptationSpeed: Double = SharedConfig.Defaults.streamVadAdaptationSpeedDefault
+    @Published var streamVadSpeechRms: Float = SharedConfig.Defaults.streamVadSpeechRmsDefault
     @Published var streamVadTelemetryEnabled: Bool = SharedConfig.Defaults.streamVadTelemetryEnabledDefault
 
     private var appGroupDefaults: UserDefaults?
@@ -35,8 +37,10 @@ class AppSettings: ObservableObject {
         verboseLogging = SharedConfig.verboseLoggingEnabled()
         hapticsEnabled = SharedConfig.hapticsEnabled()
         keyboardLanguage = SharedConfig.keyboardLanguage()
+        streamVadMode = SharedConfig.streamVadMode()
         streamVadSensitivityProfile = SharedConfig.streamVadSensitivityProfile()
         streamVadAdaptationSpeed = SharedConfig.streamVadAdaptationSpeed()
+        streamVadSpeechRms = SharedConfig.streamVadSpeechRms()
         streamVadTelemetryEnabled = SharedConfig.streamVadTelemetryEnabled()
 
         $servers.dropFirst().sink { [weak self] newValue in
@@ -84,6 +88,11 @@ class AppSettings: ObservableObject {
                                    payload: ["value": newValue.rawValue])
             self?.saveKeyboardLanguage(newValue)
         }.store(in: &cancellables)
+        $streamVadMode.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadMode",
+                                   payload: ["value": newValue.rawValue])
+            self?.saveStreamVadMode(newValue)
+        }.store(in: &cancellables)
         $streamVadSensitivityProfile.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving streamVadSensitivityProfile",
                                    payload: ["value": newValue.rawValue])
@@ -93,6 +102,11 @@ class AppSettings: ObservableObject {
             FileLogger.shared.info(.settings, "saving streamVadAdaptationSpeed",
                                    payload: ["value": newValue])
             self?.saveStreamVadAdaptationSpeed(newValue)
+        }.store(in: &cancellables)
+        $streamVadSpeechRms.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streamVadSpeechRms",
+                                   payload: ["value": newValue])
+            self?.saveStreamVadSpeechRms(newValue)
         }.store(in: &cancellables)
         $streamVadTelemetryEnabled.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving streamVadTelemetryEnabled",
@@ -118,8 +132,10 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(verboseLogging, forKey: SharedConfig.Defaults.verboseLoggingKey)
         appGroupDefaults?.set(hapticsEnabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
         appGroupDefaults?.set(keyboardLanguage.rawValue, forKey: SharedConfig.Defaults.keyboardLanguageKey)
+        appGroupDefaults?.set(streamVadMode.rawValue, forKey: SharedConfig.Defaults.streamVadModeKey)
         appGroupDefaults?.set(streamVadSensitivityProfile.rawValue, forKey: SharedConfig.Defaults.streamVadSensitivityProfileKey)
         appGroupDefaults?.set(streamVadAdaptationSpeed, forKey: SharedConfig.Defaults.streamVadAdaptationSpeedKey)
+        appGroupDefaults?.set(streamVadSpeechRms, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
         appGroupDefaults?.set(streamVadTelemetryEnabled, forKey: SharedConfig.Defaults.streamVadTelemetryEnabledKey)
         postSettingsChanged()
     }
@@ -171,6 +187,11 @@ class AppSettings: ObservableObject {
         postSettingsChanged()
     }
 
+    private func saveStreamVadMode(_ mode: VADMode) {
+        appGroupDefaults?.set(mode.rawValue, forKey: SharedConfig.Defaults.streamVadModeKey)
+        postSettingsChanged()
+    }
+
     private func saveStreamVadSensitivityProfile(_ profile: VADSensitivityProfile) {
         appGroupDefaults?.set(profile.rawValue, forKey: SharedConfig.Defaults.streamVadSensitivityProfileKey)
         postSettingsChanged()
@@ -178,6 +199,11 @@ class AppSettings: ObservableObject {
 
     private func saveStreamVadAdaptationSpeed(_ value: Double) {
         appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadAdaptationSpeedKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamVadSpeechRms(_ value: Float) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
         postSettingsChanged()
     }
 
@@ -193,14 +219,12 @@ class AppSettings: ObservableObject {
     private func migrateRetiredVadKeys() {
         let retiredKeys = [
             SharedConfig.Defaults.streamVadPauseProfileKey,
-            SharedConfig.Defaults.streamVadModeKey,
             SharedConfig.Defaults.streamVadCalibrationMsKey,
             SharedConfig.Defaults.streamVadCalibratedOffsetDbKey,
             SharedConfig.Defaults.streamVadAdaptiveDeltaDbKey,
             SharedConfig.Defaults.streamVadAdaptiveDeltaDbOverrideKey,
             SharedConfig.Defaults.streamVadSilenceMsKey,
             SharedConfig.Defaults.streamVadSilenceMsOverrideKey,
-            SharedConfig.Defaults.streamVadSpeechRmsKey,
             SharedConfig.Defaults.streamVadOnsetMsKey,
             SharedConfig.Defaults.streamVadEndEvidenceMsKey,
             SharedConfig.Defaults.streamVadResumeMsKey,
@@ -230,5 +254,7 @@ class AppSettings: ObservableObject {
         verboseLogging = SharedConfig.Defaults.verboseLoggingDefault
         hapticsEnabled = SharedConfig.Defaults.hapticsEnabledDefault
         keyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
+        streamVadMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .staticMode
+        streamVadSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
     }
 }

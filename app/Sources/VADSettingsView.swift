@@ -21,6 +21,12 @@ struct VADSettingsView: View {
 
     private var formWithTesterRebuildHandlers: some View {
         formContent
+            .onChange(of: settings.streamVadMode) { _, _ in
+                rebuildTesterGate()
+            }
+            .onChange(of: settings.streamVadSpeechRms) { _, _ in
+                rebuildTesterGate()
+            }
             .onChange(of: settings.streamVadSensitivityProfile) { _, _ in
                 rebuildTesterGate()
             }
@@ -227,6 +233,7 @@ struct VADSettingsView: View {
     @ViewBuilder
     private var controlsSection: some View {
         normalSection
+        modeSection
         advancedDisclosure
     }
 
@@ -254,6 +261,61 @@ struct VADSettingsView: View {
             Text("Normal")
         } footer: {
             Text("Sensitivity adjusts voice detection for your environment.")
+        }
+    }
+
+    private var modeSection: some View {
+        Section {
+            Picker("Detection", selection: $settings.streamVadMode) {
+                ForEach(VADMode.allCases, id: \.self) { mode in
+                    switch mode {
+                    case .staticMode:
+                        Text("Static").tag(mode)
+                    case .calibrated:
+                        Text("Calibrated").tag(mode)
+                    case .adaptive:
+                        Text("Adaptive").tag(mode)
+                    }
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if settings.streamVadMode == .staticMode {
+                speechRmsRow
+            }
+        } header: {
+            Text("Mode")
+        } footer: {
+            modeHelpText
+        }
+    }
+
+    private var modeHelpText: some View {
+        switch settings.streamVadMode {
+        case .staticMode:
+            Text("One fixed level bar. Retune it when your environment changes.")
+        case .calibrated:
+            Text("Start talking whenever you like — the measurement ignores speech and needs no quiet period. It reads the quiet quarter of the first moments of each dictation. Raise Δ if chunks fire on noise; if you talk through the whole window it switches to adaptive tracking automatically.")
+        case .adaptive:
+            Text("Seeds the noise floor from the quietest tenth of the first second, then tracks it continuously. Δ is how far above the floor speech must be — lower it for whispering (try 6–8). Best hands-off choice across environments.")
+        }
+    }
+
+    private var speechRmsRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Speech RMS Threshold")
+                Spacer()
+                TextField("0.025", value: $settings.streamVadSpeechRms, format: .number.precision(.fractionLength(3...4)))
+                    .keyboardType(.decimalPad)
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 84)
+            }
+            Text("lower = more sensitive")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Slider(value: $settings.streamVadSpeechRms, in: 0.005...0.10, step: 0.001)
         }
     }
 
