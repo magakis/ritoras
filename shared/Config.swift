@@ -229,6 +229,8 @@ struct SharedConfig {
         static let streamVadAdaptationSpeedDefault: Double = 1.0
         static let streamVadAdaptiveSilenceDeltaDbKey = "streamVadAdaptiveSilenceDeltaDb"
         static let streamVadAdaptiveSilenceDeltaDbDefault: Double = 3.0
+        static let streamVadAbsoluteSpeechFloorDbKey = "streamVadAbsoluteSpeechFloorDb"
+        static let streamVadAbsoluteSpeechFloorDbDefault: Double = -50.0
         static let streamVadStaleFloorSecondsKey = "streamVadStaleFloorSeconds"
         static let streamVadStaleFloorSecondsDefault: Double = 1.5
         static let streamVadFallTauSecondsKey = "streamVadFallTauSeconds"
@@ -503,8 +505,8 @@ struct SharedConfig {
 
     let servers: [String]
     let timeoutSeconds: TimeInterval
-
     let apiKey: String
+
     static func load() -> SharedConfig {
         if let suiteDefaults = UserDefaults(suiteName: Defaults.appGroupId) {
             let servers: [String]
@@ -679,6 +681,17 @@ struct SharedConfig {
             forKey: Defaults.streamVadStaleFloorSecondsKey
         ) as? NSNumber)?.doubleValue ?? Defaults.streamVadStaleFloorSecondsDefault
         return value.isFinite ? min(max(value, 0.5), 5.0) : Defaults.streamVadStaleFloorSecondsDefault
+    }
+
+    /// Reads the absolute speech threshold floor (dB) for adaptive VAD.
+    static func streamVadAbsoluteSpeechFloorDb() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadAbsoluteSpeechFloorDbDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadAbsoluteSpeechFloorDbKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadAbsoluteSpeechFloorDbDefault
+        return value.isFinite ? min(max(value, -80.0), -30.0) : Defaults.streamVadAbsoluteSpeechFloorDbDefault
     }
 
     /// Reads the adaptive floor fall time constant (seconds) from the App Group.

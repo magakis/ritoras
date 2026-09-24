@@ -78,6 +78,19 @@ describe('adaptive VAD convergence', () => {
     assert.strictEqual(gate.snapshot.floorDb, -65);
   });
 
+  it('seeds a speech-shaped ambient percentile after the guarded grace window', () => {
+    const gate = makeGate();
+
+    for (let i = 0; i < 60; i++) {
+      gate.process(i % 4 === 0 ? -10 : -25, frameDuration);
+    }
+
+    assert.strictEqual(gate.coldStartSpeechShapedNow, true);
+    assert.strictEqual(gate.coldStartConverged, true);
+    assert.strictEqual(gate.adaptiveRefinementComplete, true);
+    assert.ok(Math.abs(gate.snapshot.floorDb - -25) <= 0.5);
+  });
+
   it('N1/N6: continuous speech stays one chunk until a real pause', () => {
     const harness = makeRecorderHarness({ endpointSilenceMs: 700 });
     const monologueMs = 60_000;
@@ -87,11 +100,13 @@ describe('adaptive VAD convergence', () => {
 
     for (let i = 0; i < monologueMs / frameDurationMs; i++) {
       const frame = harness.drive(i % 8 === 0 ? -35 : -21);
-      if (i >= 40) assert.strictEqual(frame.output.evidence, 'strong');
+      if (i >= 40) {
+        assert.strictEqual(frame.output.evidence, i % 8 === 0 ? 'silence' : 'strong');
+        initialFloor ??= harness.gate.snapshot.floorDb;
+        assert.ok(Math.abs(harness.gate.snapshot.floorDb - initialFloor) <= 1e-9);
+      }
       assert.notStrictEqual(frame.decision.type, 'finalizeUtterance');
       assert.strictEqual(frame.discarded, false);
-      initialFloor ??= harness.gate.snapshot.floorDb;
-      assert.ok(Math.abs(harness.gate.snapshot.floorDb - initialFloor) <= 1e-9);
       assert.ok(harness.accumulatorSamples >= previousAccumulatorSamples);
       previousAccumulatorSamples = harness.accumulatorSamples;
       if (frame.decision.type === 'startUtterance' && onsetMs === null) {
@@ -136,7 +151,10 @@ describe('adaptive VAD convergence', () => {
 
     for (let i = 0; i < 1000; i++) {
       const frameDb = i % 8 === 0 ? -35 : -21;
-      const { decision } = driveFrame(gate, endpoint, frameDb);
+      const { decision, output } = driveFrame(gate, endpoint, frameDb);
+      if (i >= 40) {
+        assert.strictEqual(output.evidence, i % 8 === 0 ? 'silence' : 'strong');
+      }
       assert.notStrictEqual(decision.type, 'finalizeUtterance');
     }
 
@@ -218,11 +236,14 @@ describe('adaptive VAD convergence', () => {
     for (let i = 0; i < 290; i++) {
       const frameDb = i % 8 === 0 ? -35 : -21;
       const { output, decision } = driveFrame(gate, endpoint, frameDb);
-      if (i >= 40) assert.strictEqual(output.evidence, 'strong');
+      if (i >= 40) {
+        assert.strictEqual(output.evidence, i % 8 === 0 ? 'silence' : 'strong');
+      }
       assert.notStrictEqual(decision.type, 'finalizeUtterance');
     }
 
-    assert.strictEqual(gate.snapshot.floorDb, -80);
+    assert.ok(Math.abs(gate.snapshot.floorDb - -35) <= 0.5);
+    assert.strictEqual(gate.coldStartConverged, true);
   });
 
   it('R3 (c/e): steady ambient converges from frame zero without opening', () => {
@@ -318,14 +339,14 @@ describe('adaptive VAD convergence', () => {
     assert.deepStrictEqual(harness.endpoint.forceFinalize('stop'), { type: 'none' });
   });
 
-  it('(b\' / veto): dispersion during grace passes strong speech before convergence', () => {
+  it('(b\' / veto): speech-shaped frames still seed the rolling percentile', () => {
     const gate = makeGate();
     let firstStrongAtMs = null;
     let firstShapedNowAtMs = null;
     let sawPreShapedContinuing = false;
 
     for (let i = 0; i < 40; i++) {
-      const frameDb = i < 2 ? -58 : (i % 8 === 0 ? -58 : -45);
+      const frameDb = i % 8 === 0 ? -35 : -25;
       const output = gate.process(frameDb, frameDuration);
       const elapsedMs = (i + 1) * frameDurationMs;
       if (output.evidence === 'strong' && firstStrongAtMs === null) {
@@ -346,7 +367,9 @@ describe('adaptive VAD convergence', () => {
     assert.ok(firstShapedNowAtMs !== null && firstShapedNowAtMs < 400);
     assert.ok(firstStrongAtMs !== null && firstStrongAtMs <= 400);
     assert.strictEqual(sawPreShapedContinuing, true);
-    assert.strictEqual(gate.coldStartConverged, false);
+    assert.strictEqual(gate.coldStartConverged, true);
+    assert.strictEqual(gate.adaptiveRefinementComplete, true);
+    assert.ok(Math.abs(gate.snapshot.floorDb - -35) <= 0.5);
   });
 
   it('(h): recalibrateFloor restarts cold start and reconverges', () => {
@@ -379,7 +402,7 @@ describe('adaptive VAD convergence', () => {
     assert.strictEqual(harness.reanchorEventCount, 0);
   });
 
-  it('(i-b): a grace-window slam emits one transient chunk then converges without wedging', () => {
+  it('(i-b): a grace-window slam stays below onset duration then converges', () => {
     const harness = makeRecorderHarness({
       endpointSilenceMs: 700,
       minSpeechSamples: 300 * 16,
@@ -397,8 +420,7 @@ describe('adaptive VAD convergence', () => {
     }
 
     assert.strictEqual(sawMinGateDiscard, false);
-    assert.strictEqual(harness.chunkCount, 1);
-    assert.ok(harness.emittedTotalMs >= 800 && harness.emittedTotalMs <= 1600);
+    assert.strictEqual(harness.chunkCount, 0);
     assert.ok(Math.abs(harness.gate.snapshot.floorDb - -60) <= 1);
     assert.strictEqual(harness.endpoint.state, 'idle');
     assert.strictEqual(reanchorAfterConvergence, 0);
@@ -525,28 +547,45 @@ describe('adaptive VAD convergence', () => {
     assert.strictEqual(harness.endpoint.state, 'speechActive');
   });
 
-  it('(iii): immediate modulated speech remains active through sustained cold-start dynamics', () => {
-    const harness = makeRecorderHarness();
+  it('(iii): immediate modulated speech remains active until the real pause', () => {
+    const harness = makeRecorderHarness({ endpointSilenceMs: 700 });
     let onsetMs = null;
     let sawShapedNow = false;
 
     for (let i = 0; i < 200; i++) {
-      const frameDb = i < 2 ? -58 : (i % 8 === 0 ? -58 : -45);
+      const frameDb = i % 8 === 0 ? -35 : -25;
       const frame = harness.drive(frameDb);
       sawShapedNow ||= harness.gate.coldStartSpeechShapedNow;
       if (frame.decision.type === 'startUtterance' && onsetMs === null) {
         onsetMs = (i + 1) * frameDurationMs;
       }
       assert.notStrictEqual(frame.decision.type, 'finalizeUtterance');
-      if (sawShapedNow) assert.strictEqual(harness.gate.coldStartSpeechShapedNow, true);
     }
 
     assert.ok(onsetMs !== null && onsetMs <= 200);
+    assert.strictEqual(sawShapedNow, true);
     assert.strictEqual(harness.endpoint.state, 'speechActive');
-    assert.strictEqual(harness.gate.snapshot.floorDb, -80);
+    assert.strictEqual(harness.gate.coldStartConverged, true);
+    assert.strictEqual(harness.gate.adaptiveRefinementComplete, true);
+    assert.ok(Math.abs(harness.gate.snapshot.floorDb - -35) <= 0.5);
+
+    let finalized = false;
+    for (let i = 0; i < 100; i++) {
+      if (harness.drive(-80).decision.type === 'finalizeUtterance') {
+        finalized = true;
+        break;
+      }
+    }
+    assert.strictEqual(finalized, true);
+    assert.strictEqual(harness.chunkCount, 1);
+    assert.ok(harness.emittedTotalMs >= 2000);
+
+    for (let i = 0; i < 10; i++) harness.drive(-80);
+    assert.strictEqual(harness.gate.coldStartConverged, true);
+    assert.strictEqual(harness.gate.adaptiveRefinementComplete, true);
   });
 
-  it('(iv): two close transients emit one chunk then converge without wedging', () => {
+  it('(iv): two close transients stay below onset duration then converge', () => {
     const harness = makeRecorderHarness({
       minSpeechSamples: 300 * 16,
       minChunkSamples: 300 * 16,
@@ -559,7 +598,7 @@ describe('adaptive VAD convergence', () => {
 
     assert.ok(Math.abs(harness.gate.snapshot.floorDb - -60) <= 1);
     assert.strictEqual(harness.endpoint.state, 'idle');
-    assert.strictEqual(harness.chunkCount, 1);
+    assert.strictEqual(harness.chunkCount, 0);
     assert.strictEqual(harness.reanchorEventCount, 0);
   });
 
@@ -835,7 +874,7 @@ describe('adaptive VAD convergence', () => {
     let sawFallbackOnset = false;
     let finalized = null;
 
-    prefillAmbient(harness);
+    prefillAmbient(harness, 300, -50);
 
     for (let i = 0; i < 200; i++) {
       const frameDb = harness.gate.snapshot.floorDb + 7;
@@ -881,7 +920,7 @@ describe('adaptive VAD convergence', () => {
     let ambientDb = null;
     let ambientFinalized = null;
 
-    prefillAmbient(harness);
+    prefillAmbient(harness, 300, -50);
     harness.gate.speechCeilingDb = -35;
 
     for (let i = 0; i < 200; i++) {
@@ -999,10 +1038,12 @@ describe('adaptive VAD convergence', () => {
 
     for (let i = 0; i < monologueMs / frameDurationMs; i++) {
       const frame = harness.drive(i % 8 === 0 ? -54 : -40);
-      if (i >= 40) assert.strictEqual(frame.output.evidence, 'strong');
+      if (i >= 40) {
+        assert.strictEqual(frame.output.evidence, i % 8 === 0 ? 'silence' : 'strong');
+        initialFloor ??= harness.gate.snapshot.floorDb;
+        assert.ok(Math.abs(harness.gate.snapshot.floorDb - initialFloor) <= 1e-9);
+      }
       assert.notStrictEqual(frame.decision.type, 'finalizeUtterance');
-      initialFloor ??= harness.gate.snapshot.floorDb;
-      assert.ok(Math.abs(harness.gate.snapshot.floorDb - initialFloor) <= 1e-9);
     }
 
     assert.strictEqual(harness.reanchorEventCount, 0);
@@ -1104,7 +1145,10 @@ describe('adaptive VAD convergence', () => {
 
   it('W3: flat gust cycling closes end-pending without resurrection and raises the floor', () => {
     const endpointSilenceMs = 3000;
-    const harness = makeRecorderHarness({ endpointSilenceMs });
+    const harness = makeRecorderHarness({
+      endpointSilenceMs,
+      gateConfig: { adaptiveAbsoluteSpeechFloorDb: -80 },
+    });
     prefillAmbient(harness, 300, -60);
     for (let i = 0; i < 30; i++) harness.drive(-45);
     assert.strictEqual(harness.endpoint.state, 'speechActive');
@@ -1232,8 +1276,8 @@ describe('adaptive VAD convergence', () => {
 
   it('W1: flat continuing speech does not raise the floor while active', () => {
     const harness = makeRecorderHarness();
-    prefillAmbient(harness, 300, -60);
-    for (let i = 0; i < 30; i++) harness.drive(-45);
+    prefillAmbient(harness, 300, -50);
+    for (let i = 0; i < 30; i++) harness.drive(-35);
     assert.strictEqual(harness.endpoint.state, 'speechActive');
 
     const stableFloor = harness.gate.snapshot.floorDb;
@@ -1354,10 +1398,10 @@ describe('adaptive VAD convergence', () => {
     let onsetMs = null;
     let usedSustainedFallback = false;
 
-    prefillAmbient(harness, 30, -80);
+    prefillAmbient(harness, 30, -50);
     // Keep this below the 8-second implausible-speech stuck-run threshold.
     for (let i = 0; i < 70; i++) {
-      const frame = harness.drive(-73);
+      const frame = harness.drive(-43);
       if (frame.endpointEvidence === 'strong' && frame.output.evidence === 'continuing') {
         usedSustainedFallback = true;
       }
@@ -1409,11 +1453,11 @@ describe('adaptive VAD convergence', () => {
 
   it('quiet speech latches on a stable floor before its valleys arrive', () => {
     const harness = makeRecorderHarness({ endpointSilenceMs: 700 });
-    prefillAmbient(harness, 300, -60);
+    prefillAmbient(harness, 300, -50);
     let latchAtMs = null;
 
     for (let i = 0; i < 110; i++) {
-      const frame = harness.drive(-52);
+      const frame = harness.drive(-42);
       if (frame.latchedContinuingOnset && latchAtMs === null) {
         latchAtMs = (i + 1) * frameDurationMs;
       }
@@ -1423,7 +1467,7 @@ describe('adaptive VAD convergence', () => {
     assert.strictEqual(harness.endpoint.state, 'speechActive');
 
     for (let i = 0; i < 100; i++) {
-      harness.drive(i % 2 === 0 ? -52 : -60);
+      harness.drive(i % 2 === 0 ? -42 : -50);
     }
     for (let i = 0; i < 100; i++) {
       if (harness.drive(-80).decision.type === 'finalizeUtterance') break;
@@ -1477,9 +1521,9 @@ describe('adaptive VAD convergence', () => {
 
   it('suppresses a continuing latch during a net-upward floor chase of at least 3 dB', () => {
     const harness = makeRecorderHarness();
-    prefillAmbient(harness, 300, -60);
-    const initialFloor = -60;
-    const finalFloor = -56;
+    prefillAmbient(harness, 300, -50);
+    const initialFloor = -50;
+    const finalFloor = -46;
     let sawLatch = false;
 
     for (let i = 0; i < 120; i++) {
@@ -1522,6 +1566,7 @@ describe('adaptive VAD convergence', () => {
         adaptiveDynamicsEnabled: true,
         adaptiveDynamicsSpreadDb: 24,
         adaptiveRiseSpeedMultiplier: 0.5,
+        adaptiveAbsoluteSpeechFloorDb: -80,
       },
     });
 
@@ -1532,6 +1577,9 @@ describe('adaptive VAD convergence', () => {
       harness.gate.updateFloorTracking(frameDb, frameDuration, false);
     }
     harness.gate.floorDb = -65;
+    // The synthetic busy prefill intentionally holds the gate non-idle for 3 s;
+    // clear its stale-time carryover so this fixture isolates the rising-P10 latch.
+    harness.gate.elapsedSinceSilenceEvidence = 0;
 
     const initialFloor = harness.gate.floorDb;
     let sawLatch = false;
@@ -1552,6 +1600,7 @@ describe('adaptive VAD convergence', () => {
       gateConfig: {
         adaptiveDynamicsEnabled: true,
         adaptiveDynamicsSpreadDb: 24,
+        adaptiveAbsoluteSpeechFloorDb: -80,
       },
     });
 
@@ -1586,7 +1635,7 @@ describe('adaptive VAD convergence', () => {
     let onsetMs = null;
     let usedSustainedFallback = false;
 
-    prefillAmbient(harness);
+    prefillAmbient(harness, 300, -50);
     for (let i = 0; i < 200; i++) {
       const frameDb = harness.gate.snapshot.continuationThresholdDb + 0.1;
       const frame = harness.drive(frameDb);
@@ -1609,11 +1658,11 @@ describe('adaptive VAD convergence', () => {
     let onsetMs = null;
     let usedSustainedFallback = false;
 
-    prefillAmbient(harness, 30, -80);
+    prefillAmbient(harness, 30, -50);
     for (let i = 0; i < 60; i++) {
       let frameDb;
       if (i < 10) {
-        frameDb = i % 5 === 0 ? -75 : -73;
+        frameDb = i % 5 === 0 ? -45 : -43;
       } else {
         const continuationThreshold = harness.gate.snapshot.continuationThresholdDb;
         frameDb = continuationThreshold + (i % 2 === 0 ? 0.05 : 0.2);

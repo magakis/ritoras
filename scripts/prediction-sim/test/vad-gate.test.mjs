@@ -356,7 +356,10 @@ describe('VADThresholdGate', () => {
     });
 
     it('does not apply ending-rise when dynamics are disabled', () => {
-      const gate = seedAdaptiveGate({ adaptiveDynamicsEnabled: false }, -63);
+      const gate = seedAdaptiveGate({
+        adaptiveDynamicsEnabled: false,
+        adaptiveAbsoluteSpeechFloorDb: -80,
+      }, -63);
       gate.floorDb = -70;
       const output = gate.process(-63, 0.1);
       assert.strictEqual(output.evidence, 'continuing');

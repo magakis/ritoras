@@ -952,6 +952,7 @@ actor StreamingAudioRecorder {
             calibratedOffsetDb: SharedConfig.streamVadCalibratedOffsetDb(),
             adaptiveDeltaDb: SharedConfig.streamVadAdaptiveDeltaDb(),
             adaptiveContinuationDeltaDb: SharedConfig.streamVadAdaptiveContinuationDeltaDb(),
+            adaptiveAbsoluteSpeechFloorDb: SharedConfig.streamVadAbsoluteSpeechFloorDb(),
             adaptiveRiseSpeedMultiplier: SharedConfig.streamVadAdaptationSpeed(),
             adaptiveSilenceDeltaDb: SharedConfig.streamVadAdaptiveSilenceDeltaDb(),
             adaptiveStaleFloorSeconds: SharedConfig.streamVadStaleFloorSeconds(),

@@ -144,7 +144,7 @@ function printDebugReport(label, scenario, sampleTimes = []) {
 }
 
 describe('adaptive VAD stuck-floor verification', () => {
-  it('recovers the suspected stuck floor through 65 seconds and 10 minutes', () => {
+  it('seeds the dispersive cold start promptly and remains stable long-term', () => {
     const sixtyFiveSeconds = runBugScenario(65);
     printDebugReport(
       'A: dispersive cold start then ambient recovery (65 s)',
@@ -152,46 +152,41 @@ describe('adaptive VAD stuck-floor verification', () => {
       [0.5, 1, 2, 5, 30, 65],
     );
 
-    const refinementFrames = sixtyFiveSeconds.timeline.filter(frame => frame.timeSeconds <= 2);
-    assert.ok(refinementFrames.every(frame => frame.e === 'strong' || frame.e === 'continuing'));
-    assert.ok(refinementFrames.some(frame => frame.e === 'strong'));
-    assert.strictEqual(sixtyFiveSeconds.harness.gate.coldStartConverged, false);
+    const firstSeedFrame = sixtyFiveSeconds.timeline.find(
+      frame => frame.fl !== -80 && frame.timeSeconds <= 1,
+    );
+    assert.ok(firstSeedFrame !== undefined);
+    assert.ok(firstSeedFrame.timeSeconds <= 1);
+    assert.strictEqual(sixtyFiveSeconds.harness.gate.coldStartConverged, true);
     assert.strictEqual(sixtyFiveSeconds.harness.gate.adaptiveRefinementComplete, true);
-    assert.ok(refinementFrames.every(frame => frame.fl === -80));
 
     const firstSilenceFrame = sixtyFiveSeconds.timeline.find(
-      frame => frame.timeSeconds > 2 && frame.e === 'silence',
+      frame => frame.timeSeconds > firstSeedFrame.timeSeconds && frame.e === 'silence',
     );
     assert.ok(firstSilenceFrame !== undefined);
-    // The timer accumulates only after refinement completes: 2 s refinement + 8 s implausible-speech worst case.
-    assert.ok(firstSilenceFrame.timeSeconds <= 11);
-    const preRecoveryFrames = sixtyFiveSeconds.timeline.filter(
-      frame => frame.timeSeconds > 2 && frame.timeSeconds < firstSilenceFrame.timeSeconds,
-    );
-    assert.ok(preRecoveryFrames.length > 0);
-    assert.ok(preRecoveryFrames.every(frame => frame.fl === -80));
-    assert.ok(preRecoveryFrames.every(frame => frame.e === 'strong' || frame.e === 'continuing'));
+    assert.ok(firstSilenceFrame.timeSeconds <= 8);
 
     const firstIdleAfterRecovery = sixtyFiveSeconds.timeline.find(
       frame => frame.timeSeconds >= firstSilenceFrame.timeSeconds && frame.es === 'idle',
     );
     assert.ok(firstIdleAfterRecovery !== undefined);
-    // The timer accumulates only after refinement completes: 2 s refinement + 8 s implausible-speech + endpoint silence.
-    assert.ok(firstIdleAfterRecovery.timeSeconds <= 14);
-    assert.strictEqual(sixtyFiveSeconds.harness.chunkCount, 1);
-    assert.ok(sixtyFiveSeconds.events.some(event => event.k === 'emit'));
+    assert.ok(firstIdleAfterRecovery.timeSeconds <= 12);
+    // The post-seed signal stays below strong onset; the old pinned floor
+    // incorrectly emitted this ambient-only session as speech.
+    assert.strictEqual(sixtyFiveSeconds.harness.chunkCount, 0);
+    assert.strictEqual(sixtyFiveSeconds.events.some(event => event.k === 'emit'), false);
     assert.ok(Math.abs(sixtyFiveSeconds.harness.gate.snapshot.floorDb - -54) <= 0.6);
     const finalFiveSeconds = sixtyFiveSeconds.timeline.filter(frame => frame.timeSeconds > 60);
     assert.ok(finalFiveSeconds.length > 0);
     assert.ok(finalFiveSeconds.every(frame => frame.e === 'silence' && frame.es === 'idle'));
-    assert.strictEqual(sixtyFiveSeconds.harness.reanchorEventCount, 1);
+    assert.strictEqual(sixtyFiveSeconds.harness.reanchorEventCount, 0);
 
     const tenMinutes = runBugScenario(600);
     printDebugReport('A: dispersive cold start then ambient recovery (10 min)', tenMinutes);
     assert.ok(Math.abs(tenMinutes.harness.gate.snapshot.floorDb - -54) <= 0.6);
     assert.strictEqual(tenMinutes.harness.endpoint.state, 'idle');
-    assert.strictEqual(tenMinutes.harness.chunkCount, 1);
-    assert.strictEqual(tenMinutes.harness.reanchorEventCount, 1);
+    assert.strictEqual(tenMinutes.harness.chunkCount, 0);
+    assert.strictEqual(tenMinutes.harness.reanchorEventCount, 0);
   });
 
   it('keeps the healthy ambient-to-whisper control path usable', () => {
