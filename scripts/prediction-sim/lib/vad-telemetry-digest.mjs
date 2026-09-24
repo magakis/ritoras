@@ -282,10 +282,19 @@ function render({ summaries, globalSettings, budget, exportedAt, timelineStride,
 
 function formatParameters(parameters) {
   if (parameters === null) return 'params=unknown';
+  const hasStaleFloorBreakdown = finiteNumber(parameters.staleFloorSeconds) !== null
+    && finiteNumber(parameters.staleFloorSecondsRaw) !== null
+    && finiteNumber(parameters.riseSpeedMultiplier) !== null;
   const values = Object.keys(parameters).sort(parameterKeyComesFirst).map(key => {
+    if (hasStaleFloorBreakdown && (key === 'staleFloorSecondsRaw' || key === 'riseSpeedMultiplier')) {
+      return null;
+    }
     const name = PARAMETER_NAMES[key] ?? key;
+    if (key === 'staleFloorSeconds' && hasStaleFloorBreakdown) {
+      return `staleFloor=eff=${fixed(parameters.staleFloorSeconds, 2)}s (raw=${fixed(parameters.staleFloorSecondsRaw, 1)}s ÷ ×${fixed(parameters.riseSpeedMultiplier, 1)})`;
+    }
     return `${name}=${parameterValue(parameters[key], key)}`;
-  });
+  }).filter(value => value !== null);
   return `params(${values.join(' ')})`;
 }
 

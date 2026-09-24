@@ -228,8 +228,10 @@ final class VADThresholdGate: @unchecked Sendable {
             "flatSpreadDb": effectiveFlatSpreadDb,
             "dynamicsEnabled": config.adaptiveDynamicsEnabled,
             "staleFloorSeconds": effectiveStaleFloorSeconds,
+            "staleFloorSecondsRaw": config.adaptiveStaleFloorSeconds,
             "fallTauSeconds": effectiveFallTauSeconds,
-            "riseMultiplier": effectiveRiseSpeedMultiplier
+            "riseMultiplier": effectiveRiseSpeedMultiplier,
+            "riseSpeedMultiplier": effectiveRiseSpeedMultiplier
         ]
     }
 

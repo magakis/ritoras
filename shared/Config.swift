@@ -673,6 +673,7 @@ struct SharedConfig {
     }
 
     /// Reads the adaptive stale-floor window (seconds) from the App Group.
+    /// VADGate divides the clamped value by the rise-speed multiplier for the effective stale window.
     static func streamVadStaleFloorSeconds() -> Double {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
             return Defaults.streamVadStaleFloorSecondsDefault

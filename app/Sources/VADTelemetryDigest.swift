@@ -304,10 +304,27 @@ enum VADTelemetryDigest {
 
     private static func formatParameters(_ parameters: [String: Any]?) -> String {
         guard let parameters else { return "params=unknown" }
+        let hasStaleFloorBreakdown = number(parameters["staleFloorSeconds"]) != nil
+            && number(parameters["staleFloorSecondsRaw"]) != nil
+            && number(parameters["riseSpeedMultiplier"]) != nil
         let values = parameters.keys.sorted(by: parameterKeyComesFirst).compactMap { key -> String? in
+            if hasStaleFloorBreakdown,
+               key == "staleFloorSecondsRaw" || key == "riseSpeedMultiplier" {
+                return nil
+            }
             guard let value = parameters[key] else { return nil }
-            let name = parameterNames[key] ?? key
-            let renderedValue = parameterValue(value, key: key)
+            let name: String
+            let renderedValue: String
+            if key == "staleFloorSeconds", hasStaleFloorBreakdown,
+               let effective = number(parameters["staleFloorSeconds"]),
+               let raw = number(parameters["staleFloorSecondsRaw"]),
+               let multiplier = number(parameters["riseSpeedMultiplier"]) {
+                name = "staleFloor"
+                renderedValue = "eff=\(fixed(effective, digits: 2))s (raw=\(fixed(raw, digits: 1))s ÷ ×\(fixed(multiplier, digits: 1)))"
+            } else {
+                name = parameterNames[key] ?? key
+                renderedValue = parameterValue(value, key: key)
+            }
             return "\(name)=\(renderedValue)"
         }
         return "params(\(values.joined(separator: " ")))"

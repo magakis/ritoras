@@ -75,6 +75,39 @@ describe('VAD telemetry digest', () => {
     assert.match(text, /telemetryEnabled=ON mode=adaptive pause=balanced/);
   });
 
+  it('renders effective and raw stale-floor values when the telemetry keys are present', () => {
+    const jobId = '13345678-1234-1234-1234-123456789abc';
+    const file = recordingFile(`${jobId}-vad.jsonl`, [
+      { t: 'meta', jobId, startedAt: '2026-09-23T13:58:02Z' },
+      {
+        t: 'ev',
+        k: 'session_start',
+        c: {
+          mode: 'adaptive',
+          staleFloorSeconds: 0.375,
+          staleFloorSecondsRaw: 1.5,
+          riseSpeedMultiplier: 4,
+        },
+      },
+    ]);
+
+    const text = digest([file]);
+    assert.match(text, /staleFloor=eff=0\.38s \(raw=1\.5s ÷ ×4\.0\)/);
+    assert.doesNotMatch(text, /staleFloorSecondsRaw|riseSpeedMultiplier=/);
+  });
+
+  it('keeps the single-value stale-floor rendering for legacy telemetry records', () => {
+    const jobId = '23345678-1234-1234-1234-123456789abc';
+    const file = recordingFile(`${jobId}-vad.jsonl`, [
+      { t: 'meta', jobId, startedAt: '2026-09-23T13:58:02Z' },
+      { t: 'ev', k: 'session_start', c: { mode: 'adaptive', staleFloorSeconds: 0.4 } },
+    ]);
+
+    const text = digest([file]);
+    assert.match(text, /staleFloorSeconds=0\.4s/);
+    assert.doesNotMatch(text, /staleFloor=eff=/);
+  });
+
   it('uses unknown outcome and params when events are absent and skips corrupt lines', () => {
     const jobId = '22345678-1234-1234-1234-123456789abc';
     const filePath = path.join(directory, `${jobId}-vad.jsonl`);
