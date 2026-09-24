@@ -149,10 +149,11 @@ private final class SampleRingBuffer {
         }
     }
 
-    func append(to destination: inout [Float]) {
-        guard count > 0 else { return }
-        let firstIndex = (writeIndex - count + capacity) % capacity
-        for offset in 0..<count {
+    func append(to destination: inout [Float], droppingFirst samplesToDrop: Int = 0) {
+        let remainingCount = max(0, count - samplesToDrop)
+        guard remainingCount > 0 else { return }
+        let firstIndex = (writeIndex - count + capacity + samplesToDrop) % capacity
+        for offset in 0..<remainingCount {
             destination.append(storage[(firstIndex + offset) % capacity])
         }
     }
@@ -161,6 +162,12 @@ private final class SampleRingBuffer {
         writeIndex = 0
         count = 0
     }
+}
+
+private struct SessionHeadSlice {
+    var sampleCount: Int
+    let frameDb: Double
+    let silenceThresholdDb: Double?
 }
 
 // MARK: - VAD Context (Thread-safe via internal lock)
@@ -193,6 +200,7 @@ private final class VADContext: @unchecked Sendable {
     var accumulator: [Float] = []
     let preRollBuffer: SampleRingBuffer
     var headBuffer: SampleRingBuffer?
+    private var headSlices: [SessionHeadSlice] = []
     var silenceSamples: Int = 0
     var speechSamples: Int = 0
     var chunkId: UInt32 = 0
@@ -263,6 +271,7 @@ private final class VADContext: @unchecked Sendable {
         telemetrySink = sink
         telemetrySequence = 0
         headBuffer = SampleRingBuffer(capacity: sessionHeadBufferSamples)
+        headSlices.removeAll(keepingCapacity: true)
         guard let sink else { return }
 
         var config = gate.effectiveParameters
@@ -394,10 +403,6 @@ private final class VADContext: @unchecked Sendable {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
 
-        // The legacy accumulator already captures from session start; the head is endpoint-machine-only.
-        if endpointMachineEnabled {
-            headBuffer?.append(contentsOf: frame)
-        }
         let analysisFrame = analysisHpf?.process(frame) ?? frame
         let rms = AudioMath.dcCorrectedRMS(analysisFrame)
         let frameDb = Double(AudioMath.dbFromRms(rms))
@@ -405,6 +410,9 @@ private final class VADContext: @unchecked Sendable {
         pendingEmissionSummary = nil
         let frameDuration = Double(frameLength) / 16000.0
         let out = gate.process(frameDb: frameDb, frameDuration: frameDuration)
+        if endpointMachineEnabled {
+            appendToSessionHead(frame, frameDb: frameDb, silenceThresholdDb: out.silenceThresholdDb)
+        }
         let reanchorEvent = gate.takePendingReanchorEvent()
         let previousEndpointState = endpoint.state
         var telemetryDecision: StreamingEndpointDecision = .none
@@ -542,9 +550,11 @@ private final class VADContext: @unchecked Sendable {
                 sustainedContinuingOnsetLatched = false
                 accumulator.removeAll(keepingCapacity: true)
                 if let head = headBuffer {
-                    head.append(to: &accumulator)
+                    let trimmedSamples = sessionHeadTrimSamples()
+                    head.append(to: &accumulator, droppingFirst: trimmedSamples)
                     FileLogger.shared.debug(.audio, "VAD: session head prepended",
-                                            payload: ["headSamples": head.count])
+                                            payload: ["headSamples": head.count,
+                                                      "trimmedSamples": trimmedSamples])
                 } else {
                     preRollBuffer.append(to: &accumulator)
                 }
@@ -699,6 +709,44 @@ private final class VADContext: @unchecked Sendable {
 
     private func appendToPreRoll(_ frame: [Float]) {
         preRollBuffer.append(contentsOf: frame)
+    }
+
+    private func appendToSessionHead(
+        _ frame: [Float],
+        frameDb: Double,
+        silenceThresholdDb: Double?
+    ) {
+        guard let headBuffer else { return }
+        headBuffer.append(contentsOf: frame)
+        headSlices.append(SessionHeadSlice(
+            sampleCount: frame.count,
+            frameDb: frameDb,
+            silenceThresholdDb: silenceThresholdDb
+        ))
+        var excessSamples = headSlices.reduce(0) { $0 + $1.sampleCount } - headBuffer.count
+        while excessSamples > 0, !headSlices.isEmpty {
+            if headSlices[0].sampleCount <= excessSamples {
+                excessSamples -= headSlices.removeFirst().sampleCount
+            } else {
+                headSlices[0].sampleCount -= excessSamples
+                excessSamples = 0
+            }
+        }
+    }
+
+    private func sessionHeadTrimSamples() -> Int {
+        let protectedSamples = 500 * 16
+        let maximumTrimSamples = max(0, (headBuffer?.count ?? 0) - protectedSamples)
+        var trimmedSamples = 0
+        for slice in headSlices {
+            guard trimmedSamples + slice.sampleCount <= maximumTrimSamples,
+                  let silenceThresholdDb = slice.silenceThresholdDb,
+                  slice.frameDb < silenceThresholdDb else {
+                break
+            }
+            trimmedSamples += slice.sampleCount
+        }
+        return trimmedSamples
     }
 
     private func appendLiveFrame(_ frame: [Float]) {

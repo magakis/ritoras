@@ -251,7 +251,7 @@ struct SharedConfig {
         static let streamVadAmbiguousRescueMsDefault: Int = 320
         static let streamVadPreRollMsKey = "streamVadPreRollMs"
         static let streamVadPreRollMsDefault: Int = 500
-        static let sessionHeadBufferMsDefault: Int = 6000
+        static let sessionHeadBufferMsDefault: Int = 2500
         static let streamVadSensitivityProfileKey = "streamVadSensitivityProfile"
         static let streamVadSensitivityProfileDefault: VADSensitivityProfile = .automatic
         static let streamVadPauseProfileKey = "streamVadPauseProfile"
