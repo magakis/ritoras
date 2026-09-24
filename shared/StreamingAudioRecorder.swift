@@ -181,6 +181,7 @@ private final class VADContext: @unchecked Sendable {
     let endpointMachineEnabled: Bool
     let endpoint: StreamingEndpoint
     let preRollSamples: Int
+    let sessionHeadBufferSamples: Int
     let analysisHpf: VADHighPassFilter?
 
     // MARK: Lock
@@ -189,6 +190,7 @@ private final class VADContext: @unchecked Sendable {
     // MARK: Mutable state
     var accumulator: [Float] = []
     let preRollBuffer: SampleRingBuffer
+    var headBuffer: SampleRingBuffer?
     var silenceSamples: Int = 0
     var speechSamples: Int = 0
     var chunkId: UInt32 = 0
@@ -241,6 +243,9 @@ private final class VADContext: @unchecked Sendable {
             : nil
         self.wasCalibrating = gateConfig.mode == .calibrated
         self.preRollBuffer = SampleRingBuffer(capacity: max(0, preRollSamples))
+        let sessionHeadBufferSamples = SharedConfig.Defaults.sessionHeadBufferMsDefault * 16
+        self.sessionHeadBufferSamples = sessionHeadBufferSamples
+        self.headBuffer = SampleRingBuffer(capacity: sessionHeadBufferSamples)
     }
 
     func setCalibrationChangeHandler(_ handler: ((Bool) -> Void)?) {
@@ -254,6 +259,7 @@ private final class VADContext: @unchecked Sendable {
         defer { os_unfair_lock_unlock(&unfairLock) }
         telemetrySink = sink
         telemetrySequence = 0
+        headBuffer = SampleRingBuffer(capacity: sessionHeadBufferSamples)
         guard let sink else { return }
 
         var config = gate.effectiveParameters
@@ -264,6 +270,7 @@ private final class VADContext: @unchecked Sendable {
         config["endpointResumeMs"] = Double(endpoint.configuration.resumeSamples) / 16.0
         config["endpointAmbiguousRescueMs"] = Double(endpoint.configuration.ambiguousRescueSamples) / 16.0
         config["endpointPreRollMs"] = Double(endpoint.configuration.preRollSamples) / 16.0
+        config["sessionHeadBufferMs"] = Double(sessionHeadBufferSamples) / 16.0
         config["silenceMs"] = Double(silenceThresholdSamples) / 16.0
         config["minSpeechMs"] = Double(minSpeechSamples) / 16.0
         config["minChunkMs"] = Double(minChunkSamples) / 16.0
@@ -382,6 +389,10 @@ private final class VADContext: @unchecked Sendable {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
 
+        // The legacy accumulator already captures from session start; the head is endpoint-machine-only.
+        if endpointMachineEnabled {
+            headBuffer?.append(contentsOf: frame)
+        }
         let analysisFrame = analysisHpf?.process(frame) ?? frame
         let rms = AudioMath.dcCorrectedRMS(analysisFrame)
         let frameDb = Double(AudioMath.dbFromRms(rms))
@@ -510,7 +521,13 @@ private final class VADContext: @unchecked Sendable {
                 streakStartFloorDb = nil
                 sustainedContinuingOnsetLatched = false
                 accumulator.removeAll(keepingCapacity: true)
-                preRollBuffer.append(to: &accumulator)
+                if let head = headBuffer {
+                    head.append(to: &accumulator)
+                    FileLogger.shared.debug(.audio, "VAD: session head prepended",
+                                            payload: ["headSamples": head.count])
+                } else {
+                    preRollBuffer.append(to: &accumulator)
+                }
                 preRollBuffer.removeAll()
                 appendLiveFrame(frame)
             case .continueUtterance, .finalizeUtterance:
@@ -689,6 +706,7 @@ private final class VADContext: @unchecked Sendable {
         )
         accumulator = []
         preRollBuffer.removeAll()
+        headBuffer = nil
         silenceSamples = 0
         speechSamples = 0
         endpoint.reset()
@@ -1143,6 +1161,7 @@ actor StreamingAudioRecorder {
             "minSpeechMs": SharedConfig.streamVadMinSpeechMs(),
             "minChunkMs": SharedConfig.streamVadMinChunkMs(),
             "maxNoiseSec": SharedConfig.streamVadMaxNoiseSec(),
+            "headBufferMs": SharedConfig.Defaults.sessionHeadBufferMsDefault,
             "analysisHpf": SharedConfig.streamVadAnalysisHpfEnabled(),
             "hpfCutoffHz": SharedConfig.Defaults.streamVadHpfCutoffHzDefault
         ]

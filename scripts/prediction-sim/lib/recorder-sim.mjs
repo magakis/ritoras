@@ -9,6 +9,7 @@ import { StreamingEndpoint } from './streaming-endpoint.mjs';
 const DEFAULT_FRAME_MS = 10;
 const DEFAULT_ENDPOINT_SILENCE_MS = 3000;
 const DEFAULT_MAX_NOISE_SAMPLES = 6 * 16000;
+const DEFAULT_HEAD_BUFFER_SAMPLES = 6000 * 16;
 
 function makeGate(partial = {}) {
   return new VADThresholdGate(makeVadGateConfig({
@@ -47,6 +48,7 @@ function makeSessionConfig(harness) {
     endpointResumeMs: endpoint.resumeSamples / 16,
     endpointAmbiguousRescueMs: endpoint.ambiguousRescueSamples / 16,
     endpointPreRollMs: endpoint.preRollSamples / 16,
+    sessionHeadBufferMs: harness.headBufferSamples / 16,
     silenceMs: harness.silenceThresholdSamples / 16,
     minSpeechMs: harness.minSpeechSamples / 16,
     minChunkMs: harness.minChunkSamples / 16,
@@ -67,6 +69,7 @@ export function makeRecorderHarness({
   endpointConfig = {},
   minChunkSamples = 0,
   minSpeechSamples = 0,
+  headBufferSamples = DEFAULT_HEAD_BUFFER_SAMPLES,
   maxNoiseSamples = DEFAULT_MAX_NOISE_SAMPLES,
   endpointMachineEnabled = true,
   gateConfig = {},
@@ -82,6 +85,7 @@ export function makeRecorderHarness({
     silenceThresholdSamples: endpoint.configuration.endpointSilenceSamples,
     minChunkSamples,
     minSpeechSamples,
+    headBufferSamples,
     maxNoiseSamples,
     chunkCount: 0,
     nextChunkId: 0,
@@ -89,6 +93,10 @@ export function makeRecorderHarness({
     reanchorEventCount: 0,
     utteranceQuietestStrongDb: null,
     accumulatorSamples: 0,
+    // Each harness models a fresh session; Swift re-arms headBuffer in setTelemetrySink at session begin.
+    headSamples: 0,
+    headLive: true,
+    headPrependedAtOnset: null,
     speechSamples: 0,
     silenceSamples: 0,
     emittedTotalMs: null,
@@ -131,6 +139,13 @@ export function makeRecorderHarness({
 
     drive(frameDb, frameDuration = recorderFrameDuration) {
       const frameSamples = Math.round(frameDuration * 16000);
+      // The legacy accumulator already captures from session start; the head is endpoint-machine-only.
+      if (this.endpointMachineEnabled && this.headLive) {
+        this.headSamples = Math.min(
+          this.headSamples + frameSamples,
+          this.headBufferSamples,
+        );
+      }
       const output = this.gate.process(frameDb, frameDuration);
       const reanchorEvent = this.gate.takePendingReanchorEvent();
       const previousState = this.endpoint.state;
@@ -208,7 +223,13 @@ export function makeRecorderHarness({
 
         if (decision.type === 'startUtterance') {
           this.utteranceQuietestStrongDb = null;
-          this.accumulatorSamples = this.endpoint.configuration.preRollSamples + frameSamples;
+          if (this.headLive) {
+            this.accumulatorSamples = this.headSamples + frameSamples;
+            this.headPrependedAtOnset = this.headSamples;
+          } else {
+            // The simplified pre-roll assumes its ring is full; unlike headSamples, it does not track fill.
+            this.accumulatorSamples = this.endpoint.configuration.preRollSamples + frameSamples;
+          }
           this.sustainedContinuingMs = 0;
           this.streakStartFloorDb = null;
           this.sustainedContinuingOnsetLatched = false;
@@ -304,6 +325,8 @@ export function makeRecorderHarness({
             sm: speechMs,
             tm: this.emittedTotalMs,
           });
+          this.headLive = false;
+          this.headSamples = 0;
           this.utteranceQuietestStrongDb = null;
           this.accumulatorSamples = 0;
           this.speechSamples = 0;
@@ -363,6 +386,8 @@ export function makeRecorderHarness({
         sm: speechMs,
         tm: sampleCount / 16,
       });
+      this.headLive = false;
+      this.headSamples = 0;
       this.accumulatorSamples = 0;
       this.speechSamples = 0;
       this.silenceSamples = 0;

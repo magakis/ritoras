@@ -122,8 +122,10 @@ describe('adaptive VAD convergence', () => {
     assert.strictEqual(finalized.discarded, false);
     assert.strictEqual(harness.chunkCount, 1);
     assert.ok(onsetMs !== null);
+    // The sim now credits actual head fill at first onset, not the old flat 500 ms pre-roll.
     assert.ok(Math.abs(
-      harness.emittedTotalMs - (500 + monologueMs - onsetMs + pauseMs),
+      harness.emittedTotalMs
+        - (harness.headPrependedAtOnset / 16 + (monologueMs - onsetMs) + pauseMs),
     ) <= 100);
   });
 
@@ -269,8 +271,12 @@ describe('adaptive VAD convergence', () => {
     assert.ok(onsetMs !== null && onsetMs <= 500);
     assert.strictEqual(finalized, true);
     assert.strictEqual(harness.chunkCount, 1);
+    // The sim now credits actual head fill at first onset, not the old flat 500 ms pre-roll.
     assert.ok(Math.abs(
-      harness.emittedTotalMs - (speechFrames * frameDurationMs + 500 + pauseMs),
+      harness.emittedTotalMs
+        - (harness.headPrependedAtOnset / 16
+          + (speechFrames * frameDurationMs - onsetMs)
+          + pauseMs),
     ) <= 300);
     assert.strictEqual(harness.endpoint.state, 'idle');
   });
