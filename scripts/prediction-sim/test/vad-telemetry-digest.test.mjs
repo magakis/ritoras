@@ -75,6 +75,53 @@ describe('VAD telemetry digest', () => {
     assert.match(text, /telemetryEnabled=ON mode=adaptive pause=balanced/);
   });
 
+  it('renders chunk timing and receive correlation from full telemetry events', () => {
+    const jobId = '14345678-1234-1234-1234-123456789abc';
+    const file = recordingFile(`${jobId}-vad.jsonl`, [
+      { t: 'meta', jobId, startedAt: '2026-09-23T13:58:02Z' },
+      ...Array.from({ length: 120 }, (_, index) => frame(index)),
+      { t: 'ev', k: 'emit', id: 1, n: 3200, r: 'stop', sm: 800, tm: 950, s0: 3100, s1: 4050, es: 'idle' },
+      { t: 'ev', k: 'emit', id: 0, n: 4000, r: 'endpoint', sm: 1100, tm: 1250, s0: 1200, s1: 2450, es: 'speechActive' },
+      { t: 'ev', k: 'chunk_received', id: 1, lat: 1990, ch: 18 },
+      { t: 'ev', k: 'chunk_received', id: 0, lat: 210, ch: 42 },
+    ]);
+
+    const text = digest([file]);
+    assert.match(text, /chunks=2 emitted speech=1\.9s\/2\.2s/);
+    assert.match(text, /chunk table mean 1\.10s; 10\.0\/min; recv 1\.1\/2/);
+    assert.match(text, / #0 1\.20->2\.45s dur=1\.25s sp=1\.10s endpoint=speechActive reason=endpoint recv=210ms 42ch/);
+    assert.match(text, / #1 3\.10->4\.05s dur=0\.95s sp=0\.80s endpoint=idle reason=stop recv=1990ms 18ch/);
+  });
+
+  it('renders n/a for omitted legacy chunk fields without changing the emitted count', () => {
+    const jobId = '15345678-1234-1234-1234-123456789abc';
+    const file = recordingFile(`${jobId}-vad.jsonl`, [
+      { t: 'meta', jobId, startedAt: '2026-09-23T13:58:02Z' },
+      { t: 'ev', k: 'emit', id: 0, n: 3200, r: 'legacy', sm: 100, tm: 200 },
+    ]);
+
+    const text = digest([file]);
+    assert.match(text, /chunks=1 emitted speech=0\.1s\/0\.2s/);
+    assert.match(text, /chunk table mean 0\.20s; n\/a\/min; recv n\/a\/0/);
+    assert.match(text, / #0 n\/a->n\/as dur=0\.20s sp=0\.10s endpoint=n\/a reason=legacy recv=—/);
+  });
+
+  it('caps chunk rows with even-stride selection and a truncation marker', () => {
+    const jobId = '16345678-1234-1234-1234-123456789abc';
+    const file = recordingFile(`${jobId}-vad.jsonl`, [
+      { t: 'meta', jobId, startedAt: '2026-09-23T13:58:02Z' },
+      ...Array.from({ length: 25 }, (_, id) => ({
+        t: 'ev', k: 'emit', id, r: 'endpoint', sm: 100, tm: 200, s0: id * 200, s1: id * 200 + 200,
+      })),
+    ]);
+
+    const text = digest([file]);
+    const chunkRows = text.split('\n').filter(line => /^ #\d+ /.test(line));
+    assert.match(text, /chunk table[^\n]*\n(?: #\d+ [^\n]*\n){7}…truncated/);
+    assert.equal(chunkRows.length, 7);
+    assert.match(text, /chunks=25 emitted speech=2\.5s\/5\.0s/);
+  });
+
   it('renders effective and raw stale-floor values when the telemetry keys are present', () => {
     const jobId = '13345678-1234-1234-1234-123456789abc';
     const file = recordingFile(`${jobId}-vad.jsonl`, [

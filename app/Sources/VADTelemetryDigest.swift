@@ -3,6 +3,7 @@ import CoreFoundation
 
 enum VADTelemetryDigest {
     static let defaultBudget = 96 * 1024
+    private static let maxChunkRows = 12
 
     struct RecordingSummary {
         struct TimelinePoint {
@@ -10,6 +11,19 @@ enum VADTelemetryDigest {
             let frameDb: Double
             let floorDb: Double?
             let isSpeech: Bool
+        }
+
+        struct ChunkRecord {
+            let id: Int?
+            let reason: String?
+            let startMs: Double?
+            let endMs: Double?
+            let durationMs: Double?
+            let speechMs: Double?
+            let endpointState: String?
+            let hasReceivedResponse: Bool
+            let recvLatencyMs: Double?
+            let recvChars: Double?
         }
 
         let jobId: String
@@ -23,6 +37,11 @@ enum VADTelemetryDigest {
         let chunkCount: Int
         let emittedSpeechSeconds: Double
         let emittedChunkSeconds: Double
+        let chunkRecords: [ChunkRecord]
+        let chunksPerMinute: Double?
+        let meanChunkMs: Double?
+        let meanRecvLatencyMs: Double?
+        let receivedChunkCount: Int
         let floorFirst: Double?
         let floorMinimum: Double?
         let floorMaximum: Double?
@@ -188,6 +207,38 @@ enum VADTelemetryDigest {
         let emittedChunkSeconds = emittedEvents.reduce(0.0) { total, event in
             total + (number(event["tm"]) ?? 0) / 1000.0
         }
+        var receivedById: [Int: [String: Any]] = [:]
+        for event in events where event["k"] as? String == "chunk_received" {
+            if let id = number(event["id"]).flatMap({ Int(exactly: $0) }) {
+                receivedById[id] = event
+            }
+        }
+        let chunkRecords = emittedEvents.map { event -> RecordingSummary.ChunkRecord in
+            let id = number(event["id"]).flatMap { Int(exactly: $0) }
+            let received = id.flatMap { receivedById[$0] }
+            return RecordingSummary.ChunkRecord(
+                id: id,
+                reason: event["r"] as? String,
+                startMs: number(event["s0"]),
+                endMs: number(event["s1"]),
+                durationMs: number(event["tm"]),
+                speechMs: number(event["sm"]),
+                endpointState: event["es"] as? String,
+                hasReceivedResponse: received != nil,
+                recvLatencyMs: number(received?["lat"]),
+                recvChars: number(received?["ch"])
+            )
+        }.sorted { ($0.id ?? Int.max) < ($1.id ?? Int.max) }
+        let meanChunkMs = chunkRecords.compactMap(\.durationMs).mean
+        let receivedLatencies = chunkRecords.compactMap(\.recvLatencyMs)
+        let meanRecvLatencyMs = receivedLatencies.mean
+        let receivedChunkCount = emittedEvents.reduce(0) { count, event in
+            guard let id = number(event["id"]).flatMap({ Int(exactly: $0) }),
+                  receivedById[id] != nil else {
+                return count
+            }
+            return count + 1
+        }
         let jobIdMatches = validJobId(jobId)
         guard jobIdMatches else { return nil }
 
@@ -203,6 +254,11 @@ enum VADTelemetryDigest {
             chunkCount: emittedEvents.count,
             emittedSpeechSeconds: emittedSpeechSeconds,
             emittedChunkSeconds: emittedChunkSeconds,
+            chunkRecords: chunkRecords,
+            chunksPerMinute: duration > 0 ? Double(emittedEvents.count) / (duration / 60.0) : nil,
+            meanChunkMs: meanChunkMs,
+            meanRecvLatencyMs: meanRecvLatencyMs,
+            receivedChunkCount: receivedChunkCount,
             floorFirst: floors.first,
             floorMinimum: floors.min(),
             floorMaximum: floors.max(),
@@ -219,6 +275,12 @@ enum VADTelemetryDigest {
         exportedAt: Date
     ) -> String {
         var stride = 1
+        var chunkStride = 1
+        while summaries.contains(where: {
+            ($0.chunkRecords.count + chunkStride - 1) / chunkStride > maxChunkRows
+        }) {
+            chunkStride *= 2
+        }
         var removedTimelines = Set<Int>()
         var text = render(
             summaries: summaries,
@@ -226,18 +288,24 @@ enum VADTelemetryDigest {
             budget: budget,
             exportedAt: exportedAt,
             timelineStride: stride,
+            chunkStride: chunkStride,
             removedTimelines: removedTimelines
         )
 
         while text.utf8.count > budget,
-              summaries.contains(where: { $0.timeline.count > 1 && $0.timeline.count / (stride * 2) > 0 }) {
+              summaries.contains(where: {
+                  ($0.timeline.count > 1 && $0.timeline.count / (stride * 2) > 0)
+                      || ($0.chunkRecords.count > 1 && $0.chunkRecords.count / (chunkStride * 2) > 0)
+              }) {
             stride *= 2
+            chunkStride *= 2
             text = render(
                 summaries: summaries,
                 globalSettings: globalSettings,
                 budget: budget,
                 exportedAt: exportedAt,
                 timelineStride: stride,
+                chunkStride: chunkStride,
                 removedTimelines: removedTimelines
             )
         }
@@ -251,6 +319,7 @@ enum VADTelemetryDigest {
                     budget: budget,
                     exportedAt: exportedAt,
                     timelineStride: stride,
+                    chunkStride: chunkStride,
                     removedTimelines: removedTimelines
                 )
                 if text.utf8.count <= budget { break }
@@ -265,6 +334,7 @@ enum VADTelemetryDigest {
         budget: Int,
         exportedAt: Date,
         timelineStride: Int,
+        chunkStride: Int,
         removedTimelines: Set<Int>
     ) -> String {
         let telemetryValue = globalSettings.first(where: { $0.0 == "telemetryEnabled" })?.1 ?? "ON"
@@ -284,6 +354,7 @@ enum VADTelemetryDigest {
             lines.append("== Recording \(ordinal)/\(summaries.count)\(newestLabel) ==")
             lines.append("job=\(summary.jobId) started=\(summary.startedAt) dur=\(fixed(summary.durationSeconds, digits: 1))s outcome=\(summary.outcome)")
             lines.append("chunks=\(summary.chunkCount) emitted speech=\(fixed(summary.emittedSpeechSeconds, digits: 1))s/\(fixed(summary.emittedChunkSeconds, digits: 1))s")
+            lines.append(formatChunks(summary, stride: chunkStride))
             lines.append(formatParameters(summary.parameters))
             lines.append("floorDb first/min/max/last=\(optionalFixed(summary.floorFirst))/\(optionalFixed(summary.floorMinimum))/\(optionalFixed(summary.floorMaximum))/\(optionalFixed(summary.floorLast))")
             let speechPercent = summary.speechPercent.map(String.init) ?? "n/a"
@@ -381,6 +452,34 @@ enum VADTelemetryDigest {
         return "timeline(250ms decimated): \(values.isEmpty ? "n/a" : values.joined(separator: " "))"
     }
 
+    private static func formatChunks(_ summary: RecordingSummary, stride: Int) -> String {
+        let mean = summary.meanChunkMs.map { "\(fixed($0 / 1000.0, digits: 2))s" } ?? "n/a"
+        let rate = summary.chunksPerMinute.map { "\(fixed($0, digits: 1))/min" } ?? "n/a/min"
+        let receiveLatency = summary.meanRecvLatencyMs.map { fixed($0 / 1000.0, digits: 1) } ?? "n/a"
+        let selected = summary.chunkRecords.enumerated().compactMap { index, chunk in
+            index % stride == 0 ? chunk : nil
+        }
+        var lines = ["chunk table mean \(mean); \(rate); recv \(receiveLatency)/\(summary.receivedChunkCount)"]
+        lines += selected.map { chunk in
+            let id = chunk.id.map(String.init) ?? "n/a"
+            let start = chunk.startMs.map { fixed($0 / 1000.0, digits: 2) } ?? "n/a"
+            let end = chunk.endMs.map { fixed($0 / 1000.0, digits: 2) } ?? "n/a"
+            let duration = chunk.durationMs.map { "\(fixed($0 / 1000.0, digits: 2))s" } ?? "n/a"
+            let speech = chunk.speechMs.map { "\(fixed($0 / 1000.0, digits: 2))s" } ?? "n/a"
+            let endpoint = chunk.endpointState ?? "n/a"
+            let receive: String
+            if chunk.hasReceivedResponse {
+                receive = "recv=\(chunk.recvLatencyMs.map { "\(compact($0))ms" } ?? "n/a") \(chunk.recvChars.map { "\(compact($0))ch" } ?? "n/a")"
+            } else {
+                receive = "recv=—"
+            }
+            let reason = chunk.reason.map { " reason=\($0)" } ?? " reason=n/a"
+            return " #\(id) \(start)->\(end)s dur=\(duration) sp=\(speech) endpoint=\(endpoint)\(reason) \(receive)"
+        }
+        if selected.count < summary.chunkRecords.count { lines.append("…truncated") }
+        return lines.joined(separator: "\n")
+    }
+
     private static func parseLines(_ text: String) -> [[String: Any]] {
         var records: [[String: Any]] = []
         text.enumerateLines { line, _ in
@@ -452,5 +551,11 @@ enum VADTelemetryDigest {
         while compacted.last == "0" { compacted.removeLast() }
         if compacted.last == "." { compacted += "0" }
         return compacted
+    }
+}
+
+private extension Array where Element == Double {
+    var mean: Double? {
+        isEmpty ? nil : reduce(0, +) / Double(count)
     }
 }

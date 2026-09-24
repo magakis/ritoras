@@ -4,6 +4,7 @@ import { parseSession } from '../bin/replay-vad.mjs';
 
 export const DEFAULT_BUDGET = 96 * 1024;
 const TIMELINE_INTERVAL_SECONDS = 0.25;
+const MAX_CHUNK_ROWS = 12;
 const JOB_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const PARAMETER_NAMES = Object.freeze({
@@ -117,6 +118,35 @@ export function summarizeRecording({ filename, records, session = null, modified
     (total, event) => total + (finiteNumber(event.tm) ?? 0) / 1000,
     0,
   );
+  const receivedById = new Map();
+  for (const event of events) {
+    if (event.k === 'chunk_received' && Number.isSafeInteger(event.id)) {
+      receivedById.set(event.id, event);
+    }
+  }
+  const chunkRecords = emittedEvents.map(event => {
+    const received = Number.isSafeInteger(event.id) ? receivedById.get(event.id) ?? null : null;
+    return {
+      id: Number.isSafeInteger(event.id) ? event.id : null,
+      reason: typeof event.r === 'string' ? event.r : null,
+      startMs: finiteNumber(event.s0),
+      endMs: finiteNumber(event.s1),
+      durationMs: finiteNumber(event.tm),
+      speechMs: finiteNumber(event.sm),
+      endpointState: typeof event.es === 'string' ? event.es : null,
+      hasReceivedResponse: received !== null,
+      recvLatencyMs: finiteNumber(received?.lat),
+      recvChars: finiteNumber(received?.ch),
+    };
+  }).sort((left, right) => (left.id ?? Number.MAX_SAFE_INTEGER) - (right.id ?? Number.MAX_SAFE_INTEGER));
+  const chunkDurations = chunkRecords.map(chunk => chunk.durationMs).filter(value => value !== null);
+  const receiveLatencies = chunkRecords.map(chunk => chunk.recvLatencyMs).filter(value => value !== null);
+  const receivedChunkCount = emittedEvents.reduce((count, event) => (
+    Number.isSafeInteger(event.id) && receivedById.has(event.id) ? count + 1 : count
+  ), 0);
+  const mean = values => values.length === 0
+    ? null
+    : values.reduce((total, value) => total + value, 0) / values.length;
   const floorsSorted = [...floors].sort((left, right) => left - right);
 
   return {
@@ -133,6 +163,11 @@ export function summarizeRecording({ filename, records, session = null, modified
     chunkCount: emittedEvents.length,
     emittedSpeechSeconds,
     emittedChunkSeconds,
+    chunkRecords,
+    chunksPerMinute: durationSeconds > 0 ? emittedEvents.length / (durationSeconds / 60) : null,
+    meanChunkMs: mean(chunkDurations),
+    meanRecvLatencyMs: mean(receiveLatencies),
+    receivedChunkCount,
     floorFirst: floors[0] ?? null,
     floorMinimum: floorsSorted[0] ?? null,
     floorMaximum: floorsSorted.at(-1) ?? null,
@@ -203,6 +238,10 @@ function parseTelemetryText(text) {
 
 function renderText({ summaries, globalSettings, budget, exportedAt }) {
   let timelineStride = 1;
+  let chunkStride = 1;
+  while (summaries.some(summary => Math.ceil(summary.chunkRecords.length / chunkStride) > MAX_CHUNK_ROWS)) {
+    chunkStride *= 2;
+  }
   const removedTimelines = new Set();
   let text = render({
     summaries,
@@ -210,19 +249,24 @@ function renderText({ summaries, globalSettings, budget, exportedAt }) {
     budget,
     exportedAt,
     timelineStride,
+    chunkStride,
     removedTimelines,
   });
 
   while (Buffer.byteLength(text, 'utf8') > budget
-    && summaries.some(summary => summary.timeline.length > 1
-      && Math.floor(summary.timeline.length / (timelineStride * 2)) > 0)) {
+    && summaries.some(summary => (summary.timeline.length > 1
+      && Math.floor(summary.timeline.length / (timelineStride * 2)) > 0)
+      || (summary.chunkRecords.length > 1
+      && Math.floor(summary.chunkRecords.length / (chunkStride * 2)) > 0))) {
     timelineStride *= 2;
+    chunkStride *= 2;
     text = render({
       summaries,
       globalSettings,
       budget,
       exportedAt,
       timelineStride,
+      chunkStride,
       removedTimelines,
     });
   }
@@ -237,6 +281,7 @@ function renderText({ summaries, globalSettings, budget, exportedAt }) {
         budget,
         exportedAt,
         timelineStride,
+        chunkStride,
         removedTimelines,
       });
       if (Buffer.byteLength(text, 'utf8') <= budget) break;
@@ -245,7 +290,7 @@ function renderText({ summaries, globalSettings, budget, exportedAt }) {
   return text;
 }
 
-function render({ summaries, globalSettings, budget, exportedAt, timelineStride, removedTimelines }) {
+function render({ summaries, globalSettings, budget, exportedAt, timelineStride, chunkStride, removedTimelines }) {
   const telemetryValue = globalSettings.find(([key]) => key === 'telemetryEnabled')?.[1] ?? 'ON';
   const budgetKilobytes = Math.ceil(budget / 1024);
   const lines = [
@@ -262,6 +307,7 @@ function render({ summaries, globalSettings, budget, exportedAt, timelineStride,
     lines.push(`== Recording ${index + 1}/${summaries.length}${newestLabel} ==`);
     lines.push(`job=${summary.jobId} started=${summary.startedAt} dur=${fixed(summary.durationSeconds, 1)}s outcome=${summary.outcome}`);
     lines.push(`chunks=${summary.chunkCount} emitted speech=${fixed(summary.emittedSpeechSeconds, 1)}s/${fixed(summary.emittedChunkSeconds, 1)}s`);
+    lines.push(formatChunks(summary, chunkStride));
     lines.push(formatParameters(summary.parameters));
     lines.push(`floorDb first/min/max/last=${optionalFixed(summary.floorFirst)}/${optionalFixed(summary.floorMinimum)}/${optionalFixed(summary.floorMaximum)}/${optionalFixed(summary.floorLast)}`);
     const speechPercent = summary.speechPercent === null ? 'n/a' : String(summary.speechPercent);
@@ -332,6 +378,28 @@ function formatTimeline(points, stride, truncated) {
   });
   if (didTruncate) values.push('…truncated');
   return `timeline(250ms decimated): ${values.length === 0 ? 'n/a' : values.join(' ')}`;
+}
+
+function formatChunks(summary, stride) {
+  const meanDuration = summary.meanChunkMs === null ? 'n/a' : `${fixed(summary.meanChunkMs / 1000, 2)}s`;
+  const rate = summary.chunksPerMinute === null ? 'n/a/min' : `${fixed(summary.chunksPerMinute, 1)}/min`;
+  const meanReceive = summary.meanRecvLatencyMs === null ? 'n/a' : fixed(summary.meanRecvLatencyMs / 1000, 1);
+  const selected = summary.chunkRecords.filter((_, index) => index % stride === 0);
+  const lines = [`chunk table mean ${meanDuration}; ${rate}; recv ${meanReceive}/${summary.receivedChunkCount}`];
+  for (const chunk of selected) {
+    const id = chunk.id === null ? 'n/a' : String(chunk.id);
+    const start = chunk.startMs === null ? 'n/a' : fixed(chunk.startMs / 1000, 2);
+    const end = chunk.endMs === null ? 'n/a' : fixed(chunk.endMs / 1000, 2);
+    const duration = chunk.durationMs === null ? 'n/a' : `${fixed(chunk.durationMs / 1000, 2)}s`;
+    const speech = chunk.speechMs === null ? 'n/a' : `${fixed(chunk.speechMs / 1000, 2)}s`;
+    const endpoint = chunk.endpointState ?? 'n/a';
+    const receive = chunk.hasReceivedResponse
+      ? `recv=${chunk.recvLatencyMs === null ? 'n/a' : `${compact(chunk.recvLatencyMs)}ms`} ${chunk.recvChars === null ? 'n/a' : `${compact(chunk.recvChars)}ch`}`
+      : 'recv=—';
+    lines.push(` #${id} ${start}->${end}s dur=${duration} sp=${speech} endpoint=${endpoint} reason=${chunk.reason ?? 'n/a'} ${receive}`);
+  }
+  if (selected.length < summary.chunkRecords.length) lines.push('…truncated');
+  return lines.join('\n');
 }
 
 function jobIdFromFilename(filename) {
