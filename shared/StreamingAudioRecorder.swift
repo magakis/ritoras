@@ -77,6 +77,7 @@ enum VADTelemetryEventKind: String, Sendable {
     case discard
     case stopFlush = "stop_flush"
     case sessionEnd = "session_end"
+    case outcome
 }
 
 struct VADTelemetryEvent: @unchecked Sendable {

@@ -458,7 +458,7 @@ final class DictationViewModel: ObservableObject {
                 let telemetryWriter: VADTelemetryFileWriter?
                 if SharedConfig.streamVadTelemetryEnabled(),
                    let telemetryURL = RecordingStore.shared.streamTelemetryURL(for: id) {
-                    telemetryWriter = VADTelemetryFileWriter(url: telemetryURL)
+                    telemetryWriter = VADTelemetryFileWriter(url: telemetryURL, jobId: id)
                 } else {
                     telemetryWriter = nil
                 }
@@ -534,6 +534,7 @@ final class DictationViewModel: ObservableObject {
             } catch {
                 FileLogger.shared.error(.transcription, "Stream start error",
                                         payload: ["error": error.localizedDescription])
+                vadTelemetryWriter?.recordOutcome("aborted")
                 chunkSendQueue.clearAll()
                 await streamClient?.disconnect()
                 receiveTask?.cancel()
@@ -812,12 +813,14 @@ final class DictationViewModel: ObservableObject {
                     RecordingStore.shared.delete(jobId: deleteJobId)
                     FileLogger.shared.debug(.audio, "audio deleted on success",
                                             payload: ["jobId": deleteJobId.uuidString])
+                    vadTelemetryWriter?.recordOutcome("success")
                     phase = .done(text)
                 } catch WhisperError.cancelled {
                     guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
                     // User cancelled — do not record as failure.
                     FileLogger.shared.debug(.app, "transcription cancelled",
                                             payload: ["jobId": id.uuidString])
+                    vadTelemetryWriter?.recordOutcome("cancelled")
                     phase = .cancelled
                 } catch {
                     guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
@@ -855,6 +858,7 @@ final class DictationViewModel: ObservableObject {
                             "audioPath": url.path
                         ])
                     }
+                    vadTelemetryWriter?.recordOutcome("upload-failed")
                     phase = .error(message)
                 }
 
@@ -889,7 +893,6 @@ final class DictationViewModel: ObservableObject {
             await sessionRecorder?.stop()
 
             guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
-            vadTelemetryWriter = nil
             vadState = nil
             lastVADPublishTime = nil
             lastPublishedVADState = nil
@@ -1006,11 +1009,13 @@ final class DictationViewModel: ObservableObject {
                         RecordingStore.shared.deleteStreamWav(for: id)
                         FileLogger.shared.debug(.audio, "stream wav deleted on success",
                                                 payload: ["jobId": id.uuidString])
+                        vadTelemetryWriter?.recordOutcome("success")
                         phase = .done(text)
                     }
                 } catch WhisperError.cancelled {
                     guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
                     // User cancelled — do not record as failure.
+                    vadTelemetryWriter?.recordOutcome("cancelled")
                     RecordingStore.shared.deleteStreamWav(for: id)
                     FileLogger.shared.debug(.app, "transcription cancelled, wav deleted",
                                             payload: ["jobId": id.uuidString])
@@ -1038,6 +1043,7 @@ final class DictationViewModel: ObservableObject {
             guard activeID == id else { endStopBackgroundTask(&backgroundTaskID); return }
             streamClient = nil
             streamRecorder = nil
+            vadTelemetryWriter = nil
 
             FileLogger.shared.info(.network, "Stream: stop summary", payload: [
                 "id": id.uuidString,
@@ -1461,6 +1467,8 @@ final class DictationViewModel: ObservableObject {
     private func handleStreamTerminalFailure(jobId: UUID, error: String) {
         guard activeID == jobId else { return }
 
+        vadTelemetryWriter?.recordOutcome("stream-failed")
+
         let wavURL = RecordingStore.shared.streamWavURL(for: jobId)
         let wavExists = wavURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
         let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
@@ -1525,7 +1533,6 @@ final class DictationViewModel: ObservableObject {
         chunkSendQueue.clearAll()
         await sessionRecorder?.stop()
         guard activeID == id else { return }
-        vadTelemetryWriter = nil
         vadState = nil
         lastVADPublishTime = nil
         lastPublishedVADState = nil
@@ -1554,9 +1561,13 @@ final class DictationViewModel: ObservableObject {
         } else if case .error = phase {
             FileLogger.shared.info(.transcription, "cancel: preserving .error from racing task, skipping cancelled publish")
         } else {
+            if phase != .cancelled {
+                vadTelemetryWriter?.recordOutcome("aborted")
+            }
             FileLogger.shared.info(.transcription, "cancel: publishing cancelled snapshot to keyboard")
             phase = .cancelled
         }
+        vadTelemetryWriter = nil
         activeID = nil
         // Retain the terminal .cancelled payload in the localhost /state holder
         // for terminalStateRetentionSeconds so a suspended/reappearing keyboard

@@ -1,7 +1,9 @@
 import Foundation
 
 final class VADTelemetryFileWriter: @unchecked Sendable, VADTelemetrySink, VADTelemetryFlushable {
-    private static let maxFiles = 5
+    // 20 one-minute recordings at ~50 frames/s × ~180 B (~7.5 KB/s)
+    // stay under ~10 MB; app-target Application Support only.
+    private static let maxFiles = 20
     private static let flushByteLimit = 64 * 1024
     private static let flushInterval: TimeInterval = 1.0
 
@@ -13,11 +15,28 @@ final class VADTelemetryFileWriter: @unchecked Sendable, VADTelemetrySink, VADTe
     private var eventFlushRequested = false
     private var lastFlushAt = Date()
 
-    init(url: URL) {
+    init(url: URL, jobId: UUID) {
         self.url = url
         try? fileManager.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true)
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        var metadata: [String: Any] = [
+            "t": "meta",
+            "jobId": jobId.uuidString,
+            "startedAt": formatter.string(from: Date())
+        ]
+        if let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+            metadata["appVersion"] = appVersion
+        }
+        if let line = serialize(metadata) {
+            pendingLines.append(line)
+            pendingBytes += line.utf8.count
+            flush(force: true)
+        }
         rotateFiles()
     }
 
@@ -36,6 +55,11 @@ final class VADTelemetryFileWriter: @unchecked Sendable, VADTelemetrySink, VADTe
         pendingLines.append(line)
         pendingBytes += line.utf8.count
         eventFlushRequested = true
+    }
+
+    func recordOutcome(_ outcome: String) {
+        event(VADTelemetryEvent(kind: .outcome, reason: outcome))
+        flush(force: true)
     }
 
     func flushIfNeeded() {

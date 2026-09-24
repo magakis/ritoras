@@ -58,14 +58,16 @@ final class RecordingStore {
         directoryURL?.appendingPathComponent("\(jobId.uuidString)-vad.jsonl")
     }
 
-    /// Returns the newest retained streaming VAD telemetry file, if any.
-    func newestStreamTelemetryURL() -> URL? {
-        guard let dir = directoryURL,
+    /// Returns retained streaming VAD telemetry files newest-first by modification
+    /// time.
+    func streamTelemetryURLs(limit: Int = 20) -> [URL] {
+        guard limit > 0,
+              let dir = directoryURL,
               let entries = try? FileManager.default.contentsOfDirectory(
                 at: dir,
                 includingPropertiesForKeys: [.contentModificationDateKey],
                 options: [.skipsHiddenFiles]
-              ) else { return nil }
+              ) else { return [] }
 
         let telemetryFiles = entries.filter { $0.lastPathComponent.hasSuffix("-vad.jsonl") }
         func modificationDate(for url: URL) -> Date {
@@ -73,9 +75,14 @@ final class RecordingStore {
                   let date = values.contentModificationDate else { return .distantPast }
             return date
         }
-        return telemetryFiles.max {
-            modificationDate(for: $0) < modificationDate(for: $1)
-        }
+        return telemetryFiles.sorted {
+            modificationDate(for: $0) > modificationDate(for: $1)
+        }.prefix(limit).map { $0 }
+    }
+
+    /// Returns the newest retained streaming VAD telemetry file, if any.
+    func newestStreamTelemetryURL() -> URL? {
+        streamTelemetryURLs(limit: 1).first
     }
 
     /// Deletes the WAV stream file for the given job ID. No-op if the file
