@@ -214,6 +214,7 @@ private final class VADContext: @unchecked Sendable {
 
     // MARK: Mutable state
     var accumulator: [Float] = []
+    private var chunkStartSessionSamples: Int?
     let preRollBuffer: SampleRingBuffer
     var headBuffer: SampleRingBuffer?
     private var headSlices: [SessionHeadSlice] = []
@@ -288,6 +289,7 @@ private final class VADContext: @unchecked Sendable {
         telemetrySink = sink
         telemetrySequence = 0
         sessionElapsedSamples = 0
+        chunkStartSessionSamples = nil
         headBuffer = SampleRingBuffer(capacity: sessionHeadBufferSamples)
         headSlices.removeAll(keepingCapacity: true)
         guard let sink else { return }
@@ -570,12 +572,14 @@ private final class VADContext: @unchecked Sendable {
                 accumulator.removeAll(keepingCapacity: true)
                 if let head = headBuffer {
                     let trimmedSamples = sessionHeadTrimSamples()
+                    chunkStartSessionSamples = sessionElapsedSamples - head.count + trimmedSamples
                     head.append(to: &accumulator, droppingFirst: trimmedSamples)
                     FileLogger.shared.debug(.audio, "VAD: session head prepended",
                                             payload: ["headSamples": head.count,
                                                       "trimmedSamples": trimmedSamples])
                 } else {
                     preRollBuffer.append(to: &accumulator)
+                    chunkStartSessionSamples = sessionElapsedSamples - frameLength - preRollBuffer.count
                 }
                 preRollBuffer.removeAll()
                 appendLiveFrame(frame)
@@ -616,6 +620,7 @@ private final class VADContext: @unchecked Sendable {
                         reason: "below_minimums"
                     ))
                     accumulator.removeAll(keepingCapacity: true)
+                    chunkStartSessionSamples = nil
                     speechSamples = 0
                     silenceSamples = 0
                     sawReanchorDuringUtterance = false
@@ -638,7 +643,8 @@ private final class VADContext: @unchecked Sendable {
                 return emit(reason: kind.rawValue,
                             silenceMs: silenceMs,
                             totalMs: totalMs,
-                            speechMs: speechMs)
+                            speechMs: speechMs,
+                            endpointState: previousEndpointState.rawValue)
             }
         } else {
             // Legacy kill-switch path: retain the former consecutive-silence
@@ -648,6 +654,9 @@ private final class VADContext: @unchecked Sendable {
                 duration: frameDuration,
                 machineIsIdle: accumulator.isEmpty
             )
+            if accumulator.isEmpty {
+                chunkStartSessionSamples = sessionElapsedSamples - frameLength
+            }
             accumulator.append(contentsOf: frame)
             bufferHighWaterSamples = max(bufferHighWaterSamples, accumulator.count)
             if out.isSpeech {
@@ -677,7 +686,8 @@ private final class VADContext: @unchecked Sendable {
                 return emit(reason: "pause",
                             silenceMs: silenceMs,
                             totalMs: totalMs,
-                            speechMs: speechMs)
+                            speechMs: speechMs,
+                            endpointState: previousEndpointState.rawValue)
             }
 
             // Noise guard: less than 0.1 s of speech within the max-noise
@@ -689,6 +699,7 @@ private final class VADContext: @unchecked Sendable {
                     reason: "noise_guard"
                 ))
                 accumulator = []
+                chunkStartSessionSamples = nil
                 silenceSamples = 0
                 speechSamples = 0
                 FileLogger.shared.debug(.audio, "VAD: noise guard discard")
@@ -779,13 +790,14 @@ private final class VADContext: @unchecked Sendable {
         reason: String,
         silenceMs: Double,
         totalMs: Double,
-        speechMs: Double
+        speechMs: Double,
+        endpointState: String
     ) -> VADEmission {
         let snapshot = accumulator
         let id = chunkId
-        let endpointState = endpoint.state.rawValue
-        let endMs = Double(sessionElapsedSamples) / 16.0
-        let startMs = endMs - totalMs
+        let startSamples = chunkStartSessionSamples ?? (sessionElapsedSamples - snapshot.count)
+        let startMs = Double(startSamples) / 16.0
+        let endMs = startMs + Double(snapshot.count) / 16.0
         chunkId &+= 1
         pendingEmissionSummary = EmissionSummary(
             chunkId: id,
@@ -795,6 +807,7 @@ private final class VADContext: @unchecked Sendable {
             speechMs: speechMs
         )
         accumulator = []
+        chunkStartSessionSamples = nil
         preRollBuffer.removeAll()
         headBuffer = nil
         silenceSamples = 0
@@ -831,11 +844,13 @@ private final class VADContext: @unchecked Sendable {
         streakStartFloorDb = nil
         streakPeakDb = nil
         sustainedContinuingOnsetLatched = false
+        let decisionTimeEndpointState = endpoint.state.rawValue
         _ = endpoint.forceFinalize(kind: .stop)
         let sampleCount = accumulator.count
         let trailingSpeechMs = Double(speechSamples) / 16.0
-        let endMs = Double(sessionElapsedSamples) / 16.0
-        let endpointState = endpoint.state.rawValue
+        let startSamples = chunkStartSessionSamples ?? (sessionElapsedSamples - sampleCount)
+        let startMs = Double(startSamples) / 16.0
+        let endMs = startMs + Double(sampleCount) / 16.0
         let flushReason: String
         if accumulator.isEmpty {
             flushReason = "empty"
@@ -850,8 +865,9 @@ private final class VADContext: @unchecked Sendable {
             reason: flushReason,
             speechMs: trailingSpeechMs,
             totalMs: Double(sampleCount) / 16.0,
+            startMs: sampleCount > 0 ? startMs : nil,
             endMs: endMs,
-            endpointState: endpointState
+            endpointState: decisionTimeEndpointState
         ))
         guard !accumulator.isEmpty else { return nil }
         guard speechSamples >= minSpeechSamples else {
@@ -859,6 +875,7 @@ private final class VADContext: @unchecked Sendable {
                                     payload: ["sampleCount": accumulator.count,
                                               "speechSamples": speechSamples])
             accumulator.removeAll(keepingCapacity: true)
+            chunkStartSessionSamples = nil
             preRollBuffer.removeAll()
             bufferHighWaterSamples = 0
             return nil
@@ -868,7 +885,8 @@ private final class VADContext: @unchecked Sendable {
         return emit(reason: "flush",
                     silenceMs: 0,
                     totalMs: Double(accumulator.count) / 16.0,
-                    speechMs: Double(speechSamples) / 16.0)
+                    speechMs: Double(speechSamples) / 16.0,
+                    endpointState: decisionTimeEndpointState)
     }
 }
 

@@ -111,6 +111,57 @@ function makeWav({ audioFormat, channels, sampleRate = 16000, samples }) {
 }
 
 describe('VAD replay', () => {
+  it('records emitted chunk span and the endpoint state at the emission decision', () => {
+    const events = [];
+    const harness = makeRecorderHarness({
+      gateConfig: { mode: 'static', staticRms: 0.025 },
+      endpointConfig: {
+        onsetMs: 70,
+        endEvidenceMs: 100,
+        endpointSilenceMs: 300,
+        resumeMs: 120,
+        ambiguousRescueMs: 320,
+        preRollMs: 100,
+      },
+      onEvent: event => events.push(event),
+    });
+    for (const db of [
+      ...Array(20).fill(-80),
+      ...Array(30).fill(-20),
+      ...Array(50).fill(-80),
+    ]) harness.drive(db);
+
+    const emitted = events.find(event => event.k === 'emit');
+    assert.ok(emitted !== undefined);
+    assert.equal(emitted.es, 'endPending');
+    assert.ok(Number.isFinite(emitted.s0));
+    assert.ok(Number.isFinite(emitted.s1));
+    assert.ok(emitted.s0 >= 0);
+    assert.ok(emitted.s1 > emitted.s0);
+    assert.ok(Math.abs(emitted.s1 - emitted.s0 - emitted.n / 16) < 1e-9);
+  });
+
+  it('records stop-flush span and pre-reset endpoint state on flush events', () => {
+    const events = [];
+    const harness = makeRecorderHarness({
+      gateConfig: { mode: 'static', staticRms: 0.025 },
+      endpointConfig: { onsetMs: 70, preRollMs: 100 },
+      onEvent: event => events.push(event),
+    });
+    for (const db of [...Array(20).fill(-80), ...Array(30).fill(-20)]) harness.drive(db);
+    harness.flush();
+
+    const stopFlush = events.find(event => event.k === 'stop_flush');
+    const emitted = events.find(event => event.k === 'emit');
+    assert.ok(stopFlush !== undefined);
+    assert.ok(emitted !== undefined);
+    assert.equal(stopFlush.es, 'speechActive');
+    assert.equal(emitted.es, 'speechActive');
+    assert.ok(Number.isFinite(stopFlush.s0));
+    assert.ok(Number.isFinite(stopFlush.s1));
+    assert.ok(Math.abs(stopFlush.s1 - stopFlush.s0 - stopFlush.n / 16) < 1e-9);
+  });
+
   it('round-trips recorder telemetry with zero divergence', () => {
     const source = collectSession([
       ...Array(20).fill(-80),

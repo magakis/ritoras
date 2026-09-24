@@ -94,6 +94,8 @@ export function makeRecorderHarness({
     reanchorEventCount: 0,
     utteranceQuietestStrongDb: null,
     accumulatorSamples: 0,
+    chunkStartSessionSamples: null,
+    sessionElapsedSamples: 0,
     // Each harness models a fresh session; Swift re-arms headBuffer in setTelemetrySink at session begin.
     headSamples: 0,
     headLive: true,
@@ -143,6 +145,7 @@ export function makeRecorderHarness({
 
     drive(frameDb, frameDuration = recorderFrameDuration) {
       const frameSamples = Math.round(frameDuration * 16000);
+      this.sessionElapsedSamples += frameSamples;
       const output = this.gate.process(frameDb, frameDuration);
       if (this.endpointMachineEnabled && this.headLive) {
         this.headSamples = Math.min(
@@ -261,9 +264,13 @@ export function makeRecorderHarness({
             const trimmedSamples = this.headTrimSamples();
             this.accumulatorSamples = this.headSamples - trimmedSamples + frameSamples;
             this.headPrependedAtOnset = this.headSamples - trimmedSamples;
+            this.chunkStartSessionSamples = this.sessionElapsedSamples
+              - this.headSamples + trimmedSamples;
           } else {
             // The simplified pre-roll assumes its ring is full; unlike headSamples, it does not track fill.
             this.accumulatorSamples = this.endpoint.configuration.preRollSamples + frameSamples;
+            this.chunkStartSessionSamples = this.sessionElapsedSamples
+              - frameSamples - this.endpoint.configuration.preRollSamples;
           }
           this.sustainedContinuingMs = 0;
           this.streakStartFloorDb = null;
@@ -286,6 +293,9 @@ export function makeRecorderHarness({
           frameDuration,
           this.accumulatorSamples === 0,
         );
+        if (this.accumulatorSamples === 0) {
+          this.chunkStartSessionSamples = this.sessionElapsedSamples - frameSamples;
+        }
         this.accumulatorSamples += frameSamples;
         if (output.isSpeech) {
           this.silenceSamples = 0;
@@ -306,6 +316,7 @@ export function makeRecorderHarness({
             r: 'noise_guard',
           });
           this.accumulatorSamples = 0;
+          this.chunkStartSessionSamples = null;
           this.speechSamples = 0;
           this.silenceSamples = 0;
         }
@@ -335,6 +346,7 @@ export function makeRecorderHarness({
         if (this.accumulatorSamples < this.minChunkSamples
           || this.speechSamples < this.minSpeechSamples) {
           this.accumulatorSamples = 0;
+          this.chunkStartSessionSamples = null;
           this.speechSamples = 0;
           this.silenceSamples = 0;
           this.sawReanchorDuringUtterance = false;
@@ -360,11 +372,15 @@ export function makeRecorderHarness({
             r: reason,
             sm: speechMs,
             tm: this.emittedTotalMs,
+            s0: this.chunkStartSessionSamples / 16,
+            s1: (this.chunkStartSessionSamples + totalSamples) / 16,
+            es: previousState,
           });
           this.headLive = false;
           this.headSamples = 0;
           this.utteranceQuietestStrongDb = null;
           this.accumulatorSamples = 0;
+          this.chunkStartSessionSamples = null;
           this.speechSamples = 0;
           this.silenceSamples = 0;
           this.sawReanchorDuringUtterance = false;
@@ -403,6 +419,10 @@ export function makeRecorderHarness({
     flush() {
       const sampleCount = this.accumulatorSamples;
       const speechMs = this.speechSamples / 16;
+      const decisionTimeEndpointState = this.endpoint.state;
+      const startMs = (this.chunkStartSessionSamples
+        ?? (this.sessionElapsedSamples - sampleCount)) / 16;
+      const endMs = startMs + sampleCount / 16;
       const reason = sampleCount === 0
         ? 'empty'
         : this.speechSamples < this.minSpeechSamples ? 'below_minimums' : 'flush';
@@ -414,10 +434,14 @@ export function makeRecorderHarness({
         r: reason,
         sm: speechMs,
         tm: sampleCount / 16,
+        ...(sampleCount > 0 ? { s0: startMs } : {}),
+        s1: endMs,
+        es: decisionTimeEndpointState,
       });
       if (sampleCount === 0) return { type: 'none' };
       if (this.speechSamples < this.minSpeechSamples) {
         this.accumulatorSamples = 0;
+        this.chunkStartSessionSamples = null;
         this.speechSamples = 0;
         this.silenceSamples = 0;
         return { type: 'none' };
@@ -436,10 +460,14 @@ export function makeRecorderHarness({
         r: 'flush',
         sm: speechMs,
         tm: sampleCount / 16,
+        s0: startMs,
+        s1: endMs,
+        es: decisionTimeEndpointState,
       });
       this.headLive = false;
       this.headSamples = 0;
       this.accumulatorSamples = 0;
+      this.chunkStartSessionSamples = null;
       this.speechSamples = 0;
       this.silenceSamples = 0;
       this.utteranceQuietestStrongDb = null;
