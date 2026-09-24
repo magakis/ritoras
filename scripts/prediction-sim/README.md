@@ -15,6 +15,7 @@ Pure-logic components only:
 - `Contractions` (apostrophe-less → contraction fast-path table)
 - `AutocorrectController` (threshold-gated decision logic)
 - `PredictionEngine` fusion (Apple boost + KenLM min-max normalization + two-tier threshold + absolute-floor gate)
+- VAD telemetry digest reduction (bounded summaries from retained JSONL recordings)
 
 ## What this does NOT cover
 

@@ -217,7 +217,7 @@ struct SharedConfig {
         static let streamVadSpeechRmsKey = "streamVadSpeechRms"
         static let streamVadSpeechRmsDefault: Float = 0.025
         static let streamVadModeKey = "streamVadMode"
-        static let streamVadModeDefault = "static"
+        static let streamVadModeDefault = "adaptive"
         static let streamVadCalibrationMsKey = "streamVadCalibrationMs"
         static let streamVadCalibrationMsDefault: Int = 1500
         static let streamVadCalibratedOffsetDbKey = "streamVadCalibratedOffsetDb"
