@@ -339,9 +339,12 @@ final class VADThresholdGate: @unchecked Sendable {
             // away speech that occurred during the first window.
             let seededFloor = clampFloor(q1)
             floorDb = seededFloor
-            thresholdDb = seededFloor + effectiveAdaptiveDeltaDb
+            // Diagnostic seed only: classification starts in processAdaptive(),
+            // which obtains all three thresholds from adaptiveThresholds(floor:).
+            thresholdDb = adaptiveThresholds(floor: seededFloor).strong
             adaptiveRefinementElapsed = 0
             adaptiveRefinementComplete = true
+            coldStartConverged = true
             behaviorMode = .adaptive
             usedFallback = true
         }

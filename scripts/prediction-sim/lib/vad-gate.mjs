@@ -287,9 +287,10 @@ export class VADThresholdGate {
     } else {
       const seededFloor = this.clampFloor(q1);
       this.floorDb = seededFloor;
-      this.thresholdDb = seededFloor + this.effectiveAdaptiveDeltaDb;
+      this.thresholdDb = this.adaptiveThresholds(seededFloor).strongThresholdDb;
       this.adaptiveRefinementElapsed = 0;
       this.adaptiveRefinementComplete = true;
+      this.coldStartConverged = true;
       this.behaviorMode = 'adaptive';
       this.usedFallback = true;
     }

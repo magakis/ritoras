@@ -105,7 +105,7 @@ describe('sustained continuing onset latch regime split', () => {
     assert.strictEqual(harness.endpoint.state, 'speechActive');
   });
 
-  it('does not latch a 1.2-second continuing streak on an unconverged fallback floor', () => {
+  it('latches continuing evidence after contaminated calibration seeds a converged floor', () => {
     const harness = makeRecorderHarness({
       gateConfig: {
         mode: 'calibrated',
@@ -116,18 +116,26 @@ describe('sustained continuing onset latch regime split', () => {
     for (let i = 0; i < 12; i++) {
       harness.drive(i < 3 ? -30 : -21);
     }
-    assert.strictEqual(harness.gate.coldStartConverged, false);
+    assert.strictEqual(harness.gate.coldStartConverged, true);
     assert.notStrictEqual(harness.gate.behaviorMode, 'calibrated');
     harness.gate.updateFloorTracking = () => {};
 
-    for (let i = 0; i < 120; i++) {
-      const frame = harness.drive(-24);
+    // The latch qualifies at 1.5 s (frame 150); that frame contributes 10 ms
+    // of the 70 ms onset window, so six more frames complete the onset.
+    for (let i = 0; i < 157; i++) {
+      const frame = harness.drive(-20);
       assert.strictEqual(frame.output.evidence, 'continuing');
-      assert.strictEqual(frame.output.floorConverged, false);
-      assert.strictEqual(frame.latchedContinuingOnset, false);
-      assert.strictEqual(frame.decision.type, 'none');
+      assert.strictEqual(frame.output.floorConverged, true);
+      if (i < 149) {
+        assert.strictEqual(frame.latchedContinuingOnset, false);
+      } else if (i < 156) {
+        assert.strictEqual(frame.latchedContinuingOnset, true);
+      } else {
+        assert.strictEqual(frame.latchedContinuingOnset, false);
+      }
     }
 
     assert.strictEqual(harness.chunkCount, 0);
+    assert.strictEqual(harness.endpoint.state, 'speechActive');
   });
 });

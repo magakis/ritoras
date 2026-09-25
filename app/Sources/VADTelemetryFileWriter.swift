@@ -158,7 +158,8 @@ final class VADTelemetryFileWriter: @unchecked Sendable, VADTelemetrySink, VADTe
             "ss": record.decisionSilenceSamples,
             "us": record.utteranceDurationSamples,
             "ls": record.latchStreakMs,
-            "ll": record.latchLatched
+            "ll": record.latchLatched,
+            "fc": record.floorConverged
         ]
         if let floorDb = record.floorDb {
             object["fl"] = floorDb
