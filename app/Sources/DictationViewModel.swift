@@ -145,6 +145,7 @@ final class DictationViewModel: ObservableObject {
     private var firstPartialReceivedAt: Date?
     private var chunksSentThisSession = 0
     private var chunkSentAt: [UInt32: Date] = [:]
+    private var chunkResultsReceived: Set<UInt32> = []
 
     private var streamRecorder: StreamingAudioRecorder?
     private var streamClient: WhisperStreamClient?
@@ -354,6 +355,7 @@ final class DictationViewModel: ObservableObject {
         firstPartialReceivedAt = nil
         chunksSentThisSession = 0
         chunkSentAt.removeAll()
+        chunkResultsReceived.removeAll()
         vadTelemetryWriter = nil
         phase = .connecting
         FileLogger.shared.info(.transcription, "dictation connecting", payload: [
@@ -688,8 +690,9 @@ final class DictationViewModel: ObservableObject {
                     self.transcriptionDeliveredThisSession = true
                 }
             }, onChunkResult: { [weak self] chunkId, responseText in
-                Task { @MainActor [weak self] in
+                await MainActor.run { [weak self] in
                     guard let self, self.activeID == sessionID else { return }
+                    guard self.chunkResultsReceived.insert(chunkId).inserted else { return }
                     let latencyMs = self.chunkSentAt[chunkId].map {
                         Date().timeIntervalSince($0) * 1000
                     }
