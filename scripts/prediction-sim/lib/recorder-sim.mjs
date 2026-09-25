@@ -262,7 +262,7 @@ export function makeRecorderHarness({
           this.utteranceQuietestStrongDb = null;
           if (this.headLive) {
             const trimmedSamples = this.headTrimSamples();
-            this.accumulatorSamples = this.headSamples - trimmedSamples + frameSamples;
+            this.accumulatorSamples = this.headSamples - trimmedSamples;
             this.headPrependedAtOnset = this.headSamples - trimmedSamples;
             this.chunkStartSessionSamples = this.sessionElapsedSamples
               - this.headSamples + trimmedSamples;

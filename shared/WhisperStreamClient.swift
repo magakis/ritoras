@@ -224,7 +224,7 @@ actor WhisperStreamClient {
     ///   Called from the receive loop's async context; the caller should
     ///   marshal to `MainActor` if UI updates are needed.
     /// - Parameter onChunkResult: Optional closure invoked with the server's
-    ///   chunk ID and transcription for each partial result that includes an ID.
+    ///   chunk ID and transcription for each partial or final result that includes an ID.
     /// - Returns: The final, normalized transcription.
     /// - Throws: `WhisperError.timeout` if `streamFinalTimeout` elapses
     ///   without receiving `final`.
@@ -232,7 +232,7 @@ actor WhisperStreamClient {
     /// - Throws: `WhisperError.networkError` on transport failure.
     func receiveMessages(
         onPartial: @escaping @Sendable (String) -> Void,
-        onChunkResult: (@Sendable (UInt32, String) -> Void)? = nil
+        onChunkResult: (@Sendable (UInt32, String) async -> Void)? = nil
     ) async throws -> String {
         guard let task = task else {
             throw WhisperError.networkError(URLError(.notConnectedToInternet))
@@ -263,7 +263,7 @@ actor WhisperStreamClient {
                                     let msg = try JSONDecoder().decode(
                                         StreamPartial.self, from: data)
                                     if let chunkId = msg.chunk_id {
-                                        onChunkResult?(chunkId, msg.transcription)
+                                        await onChunkResult?(chunkId, msg.transcription)
                                     } else {
                                         FileLogger.shared.debug(.network, "Received partial without chunk ID")
                                     }
@@ -280,6 +280,9 @@ actor WhisperStreamClient {
                                 case "final":
                                     let msg = try JSONDecoder().decode(
                                         StreamFinal.self, from: data)
+                                    if let chunkId = msg.chunk_id {
+                                        await onChunkResult?(chunkId, msg.transcription)
+                                    }
                                     FileLogger.shared.info(.network, "Received final",
                                                            payload: ["preview": String(msg.transcription.prefix(60)),
                                                                      "length": msg.transcription.count,

@@ -582,7 +582,11 @@ private final class VADContext: @unchecked Sendable {
                     chunkStartSessionSamples = sessionElapsedSamples - frameLength - preRollBuffer.count
                 }
                 preRollBuffer.removeAll()
-                appendLiveFrame(frame)
+                if headBuffer == nil {
+                    appendLiveFrame(frame)
+                } else {
+                    bufferHighWaterSamples = max(bufferHighWaterSamples, accumulator.count)
+                }
             case .continueUtterance, .finalizeUtterance:
                 appendLiveFrame(frame)
             case .none:

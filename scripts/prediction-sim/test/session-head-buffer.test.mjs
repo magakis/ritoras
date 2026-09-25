@@ -312,7 +312,12 @@ describe('session-start head buffer', () => {
     // The 370 ms head at onset is below the 500 ms guard, so nothing is trimmed.
     assert.ok(scenario.harness.headPrependedAtOnset < 500 * SAMPLES_PER_MS);
     assert.strictEqual(scenario.harness.headPrependedAtOnset, 370 * SAMPLES_PER_MS);
+    const start = eventsOf(scenario, 'start_utterance')[0];
+    assert.strictEqual(start.n, scenario.harness.headPrependedAtOnset);
     scenario.harness.flush();
 
+    const emitted = eventsOf(scenario, 'emit')[0];
+    assert.strictEqual(emitted.s1, scenario.harness.sessionElapsedSamples / 16);
+    assert.strictEqual(emitted.s1 - emitted.s0, emitted.n / SAMPLES_PER_MS);
   });
 });
