@@ -14,7 +14,7 @@ class AppSettings: ObservableObject {
     @Published var hapticsEnabled: Bool = SharedConfig.Defaults.hapticsEnabledDefault
     @Published var keyboardLanguage: KeyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
 
-    @Published var streamVadMode: VADMode = .staticMode
+    @Published var streamVadMode: VADMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .staticMode
     @Published var streamVadSensitivityProfile: VADSensitivityProfile = SharedConfig.Defaults.streamVadSensitivityProfileDefault
     @Published var streamVadPauseProfile: VADPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
     @Published var streamVadSilenceMs: Int = SharedConfig.Defaults.streamVadSilenceMsDefault

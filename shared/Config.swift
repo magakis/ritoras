@@ -505,8 +505,8 @@ struct SharedConfig {
 
     let servers: [String]
     let timeoutSeconds: TimeInterval
-    let apiKey: String
 
+    let apiKey: String
     static func load() -> SharedConfig {
         if let suiteDefaults = UserDefaults(suiteName: Defaults.appGroupId) {
             let servers: [String]

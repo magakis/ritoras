@@ -292,22 +292,48 @@ enum VADTelemetryDigest {
             removedTimelines: removedTimelines
         )
 
-        while text.utf8.count > budget,
-              summaries.contains(where: {
-                  ($0.timeline.count > 1 && $0.timeline.count / (stride * 2) > 0)
-                      || ($0.chunkRecords.count > 1 && $0.chunkRecords.count / (chunkStride * 2) > 0)
-              }) {
-            stride *= 2
-            chunkStride *= 2
-            text = render(
+        while text.utf8.count > budget {
+            let canReduceTimeline = summaries.contains {
+                $0.timeline.count > 1 && $0.timeline.count / (stride * 2) > 0
+            }
+            let canReduceChunks = summaries.contains {
+                $0.chunkRecords.count > 1 && $0.chunkRecords.count / (chunkStride * 2) > 0
+            }
+            guard canReduceTimeline || canReduceChunks else { break }
+
+            let timelineCandidate = canReduceTimeline ? render(
+                summaries: summaries,
+                globalSettings: globalSettings,
+                budget: budget,
+                exportedAt: exportedAt,
+                timelineStride: stride * 2,
+                chunkStride: chunkStride,
+                removedTimelines: removedTimelines
+            ) : nil
+            let chunkCandidate = canReduceChunks ? render(
                 summaries: summaries,
                 globalSettings: globalSettings,
                 budget: budget,
                 exportedAt: exportedAt,
                 timelineStride: stride,
-                chunkStride: chunkStride,
+                chunkStride: chunkStride * 2,
                 removedTimelines: removedTimelines
-            )
+            ) : nil
+            if let timelineCandidate, let chunkCandidate {
+                if timelineCandidate.utf8.count <= chunkCandidate.utf8.count {
+                    stride *= 2
+                    text = timelineCandidate
+                } else {
+                    chunkStride *= 2
+                    text = chunkCandidate
+                }
+            } else if let timelineCandidate {
+                stride *= 2
+                text = timelineCandidate
+            } else if let chunkCandidate {
+                chunkStride *= 2
+                text = chunkCandidate
+            }
         }
 
         if text.utf8.count > budget {

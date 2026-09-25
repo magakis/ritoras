@@ -253,22 +253,46 @@ function renderText({ summaries, globalSettings, budget, exportedAt }) {
     removedTimelines,
   });
 
-  while (Buffer.byteLength(text, 'utf8') > budget
-    && summaries.some(summary => (summary.timeline.length > 1
-      && Math.floor(summary.timeline.length / (timelineStride * 2)) > 0)
-      || (summary.chunkRecords.length > 1
-      && Math.floor(summary.chunkRecords.length / (chunkStride * 2)) > 0))) {
-    timelineStride *= 2;
-    chunkStride *= 2;
-    text = render({
+  while (Buffer.byteLength(text, 'utf8') > budget) {
+    const canReduceTimeline = summaries.some(summary => summary.timeline.length > 1
+      && Math.floor(summary.timeline.length / (timelineStride * 2)) > 0);
+    const canReduceChunks = summaries.some(summary => summary.chunkRecords.length > 1
+      && Math.floor(summary.chunkRecords.length / (chunkStride * 2)) > 0);
+    if (!canReduceTimeline && !canReduceChunks) break;
+
+    const timelineCandidate = canReduceTimeline ? render({
+      summaries,
+      globalSettings,
+      budget,
+      exportedAt,
+      timelineStride: timelineStride * 2,
+      chunkStride,
+      removedTimelines,
+    }) : null;
+    const chunkCandidate = canReduceChunks ? render({
       summaries,
       globalSettings,
       budget,
       exportedAt,
       timelineStride,
-      chunkStride,
+      chunkStride: chunkStride * 2,
       removedTimelines,
-    });
+    }) : null;
+    if (timelineCandidate !== null && chunkCandidate !== null) {
+      if (Buffer.byteLength(timelineCandidate, 'utf8') <= Buffer.byteLength(chunkCandidate, 'utf8')) {
+        timelineStride *= 2;
+        text = timelineCandidate;
+      } else {
+        chunkStride *= 2;
+        text = chunkCandidate;
+      }
+    } else if (timelineCandidate !== null) {
+      timelineStride *= 2;
+      text = timelineCandidate;
+    } else if (chunkCandidate !== null) {
+      chunkStride *= 2;
+      text = chunkCandidate;
+    }
   }
 
   if (Buffer.byteLength(text, 'utf8') > budget) {
