@@ -692,15 +692,16 @@ final class DictationViewModel: ObservableObject {
             }, onChunkResult: { [weak self] chunkId, responseText in
                 await MainActor.run { [weak self] in
                     guard let self, self.activeID == sessionID else { return }
-                    guard self.chunkResultsReceived.insert(chunkId).inserted else { return }
-                    let latencyMs = self.chunkSentAt[chunkId].map {
-                        Date().timeIntervalSince($0) * 1000
+                    if self.chunkResultsReceived.insert(chunkId).inserted {
+                        let latencyMs = self.chunkSentAt[chunkId].map {
+                            Date().timeIntervalSince($0) * 1000
+                        }
+                        self.vadTelemetryWriter?.event(VADTelemetryEvent(
+                            kind: .chunkReceived,
+                            chunkId: chunkId,
+                            latencyMs: latencyMs,
+                            chars: responseText.count))
                     }
-                    self.vadTelemetryWriter?.event(VADTelemetryEvent(
-                        kind: .chunkReceived,
-                        chunkId: chunkId,
-                        latencyMs: latencyMs,
-                        chars: responseText.count))
                     self.mergeChunkReview(id: chunkId, update: .responseText(responseText))
                 }
             })

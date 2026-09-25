@@ -213,6 +213,34 @@ describe('VAD telemetry digest', () => {
     assert.match(text, /job=62345678-1234-1234-1234-123456789abc/);
   });
 
+  it('decimates an oversized chunk table without decimating a long timeline', () => {
+    const jobId = '72345678-1234-1234-1234-123456789abc';
+    const file = recordingFile(`${jobId}-vad.jsonl`, [
+      { t: 'meta', jobId, startedAt: '2026-09-23T12:00:00Z' },
+      ...Array.from({ length: 60 }, (_, index) => frame(index, { q: index })),
+      ...Array.from({ length: 300 }, (_, id) => ({
+        t: 'ev',
+        k: 'emit',
+        id,
+        n: 3200,
+        r: `endpoint-${'x'.repeat(100)}`,
+        sm: 100,
+        tm: 200,
+        s0: id * 200,
+        s1: id * 200 + 200,
+      })),
+    ]);
+
+    const text = digest([file], { budget: 2048 });
+    const timelineLine = text.split('\n').find(line => line.startsWith('timeline(250ms decimated): '));
+    const timelinePoints = timelineLine?.slice('timeline(250ms decimated): '.length).split(' ') ?? [];
+    const chunkRows = text.split('\n').filter(line => /^ #\d+ /.test(line));
+
+    assert.ok(Buffer.byteLength(text, 'utf8') <= 2048);
+    assert.equal(timelinePoints.length, 24);
+    assert.equal(chunkRows.length, 5);
+  });
+
   it('skips files whose filename prefix is not a UUID', () => {
     const file = recordingFile('not-a-uuid-vad.jsonl', [
       { t: 'meta', jobId: '72345678-1234-1234-1234-123456789abc', startedAt: '2026-09-23T12:00:00Z' },
