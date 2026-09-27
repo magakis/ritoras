@@ -4,6 +4,9 @@ struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @State private var showOnboarding = false
     @State private var isEditingServers = false
+    @State private var isEditingAPIKey = false
+    @State private var apiKeyDraft: String = ""
+    @FocusState private var apiKeyFieldFocused: Bool
     @State private var testStatuses: [Int: TestStatus] = [:]
 
     enum TestStatus: Equatable {
@@ -34,6 +37,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             serverSection
+            apiKeySection
             dictationSection
             keyboardSection
             dictionarySection
@@ -109,10 +113,6 @@ struct SettingsView: View {
                 }
             }
 
-            TextField("API Key (optional)", text: $settings.whisperApiKey)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled(true)
-                .keyboardType(.asciiCapable)
         } header: {
             HStack {
                 Text("Whisper Servers")
@@ -130,9 +130,58 @@ struct SettingsView: View {
                 .foregroundColor(.blue)
             }
         } footer: {
-            Text("Servers are tried in the order shown. Drag the grip on the right to reorder at any time. Tap Edit to add, change, or delete a server. Tap a server's test icon to check whether it's reachable. The API key is sent as a Bearer token with every request to the servers above; leave it empty for servers that don't require authentication.")
+            Text("Servers are tried in the order shown. Drag the grip on the right to reorder at any time. Tap Edit to add, change, or delete a server. Tap a server's test icon to check whether it's reachable.")
         }
         .environment(\.editMode, .constant(.active))
+    }
+
+    // MARK: - API Key Section
+
+    private var apiKeySection: some View {
+        Section {
+            if isEditingAPIKey {
+                TextField("API Key", text: $apiKeyDraft)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled(true)
+                    .keyboardType(.asciiCapable)
+                    .submitLabel(.done)
+                    .focused($apiKeyFieldFocused)
+                    .onSubmit(commitAPIKey)
+            } else {
+                Button {
+                    apiKeyDraft = settings.whisperApiKey
+                    isEditingAPIKey = true
+                    apiKeyFieldFocused = true
+                } label: {
+                    Text(settings.whisperApiKey.isEmpty ? "Tap to set" : settings.whisperApiKey)
+                        .font(.body)
+                        .foregroundColor(settings.whisperApiKey.isEmpty ? .secondary : .primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+            }
+        } header: {
+            Text("API Key")
+        } footer: {
+            Text("Sent as a Bearer token with every Whisper request. Request the key from the developer — leave empty if your servers don't require auth.")
+        }
+        .onChange(of: apiKeyFieldFocused) { focused in
+            if !focused && isEditingAPIKey {
+                commitAPIKey()
+            }
+        }
+    }
+
+    private func commitAPIKey() {
+        let trimmed = apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed != settings.whisperApiKey {
+            settings.whisperApiKey = trimmed
+        }
+        isEditingAPIKey = false
+        apiKeyFieldFocused = false
     }
 
     // MARK: - Dictation Section
