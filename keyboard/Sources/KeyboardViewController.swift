@@ -410,17 +410,11 @@ class KeyboardViewController: UIInputViewController {
         // the extension. pendingRequestId survives in UserDefaults, so even a
         // fully relaunched keyboard process can recover the result.
         if let id = pendingRequestId {
-            let age = pendingRequestStart > 0 ? Date().timeIntervalSince1970 - pendingRequestStart : 0
-            if age > 300 {  // >5 min — the result is unrecoverable; abandon it
-                FileLogger.shared.debug(.keyboard, "viewDidAppear — pending dictation stale",
-                                        payload: ["age": age, "pendingRequestId": id.uuidString])
-                pendingRequestId = nil
-                dictationTargetDocId = nil
-                state = .idle
-            } else {
-                FileLogger.shared.info(.keyboard, "viewDidAppear — resuming pending dictation",
-                                       payload: ["pendingRequestId": id.uuidString, "age": age])
-                checkForPendingDictation()
+            FileLogger.shared.info(.keyboard, "viewDidAppear — resuming pending dictation",
+                                   payload: ["pendingRequestId": id.uuidString])
+            appearRefreshTask?.cancel()
+            appearRefreshTask = Task { @MainActor [weak self] in
+                await self?.reconcilePendingDictationOnReappear(id: id)
             }
         } else {
             // Check for a deferred result — a dictation completed while the keyboard
@@ -1125,7 +1119,47 @@ class KeyboardViewController: UIInputViewController {
 
     // MARK: - Pending Dictation (Recovery on Keyboard Reappear)
 
-    private func checkForPendingDictation() {
+    private func reconcilePendingDictationOnReappear(id: UUID) async {
+        guard pendingRequestId == id else { return }
+        switch await LocalhostClient.probeState() {
+        case .payload(let payload):
+            guard pendingRequestId == id else { return }
+            guard payload.id == id else {
+                pendingRequestId = nil
+                dictationTargetDocId = nil
+                stopDictationTransports()
+                state = .idle
+                return
+            }
+            if let revision = payload.revision {
+                lastSeenSnapshotRevision = max(lastSeenSnapshotRevision, revision)
+            }
+            applySnapshotPayload(payload, source: "localhost-reappear")
+            guard pendingRequestId == id else { return }
+            checkForPendingDictation(snapshotAlreadyReconciled: true)
+        case .noSession:
+            guard pendingRequestId == id else { return }
+            let snapshot = readSharedSnapshotForReappear(for: id)
+            if let snapshot,
+               snapshot.status == .completed || snapshot.status == .error || snapshot.status == .cancelled {
+                applySnapshotPayload(snapshot, source: "appgroup-reappear")
+                return
+            }
+            if snapshot == nil,
+               state == .idle || state == .openingApp {
+                checkForPendingDictation()
+                return
+            }
+            pendingRequestId = nil
+            dictationTargetDocId = nil
+            stopDictationTransports()
+            state = .idle
+        case .malformed, .unreachable:
+            checkForPendingDictation()
+        }
+    }
+
+    private func checkForPendingDictation(snapshotAlreadyReconciled: Bool = false) {
         guard let id = pendingRequestId else {
             state = .idle
             return
@@ -1137,7 +1171,9 @@ class KeyboardViewController: UIInputViewController {
         // defaulting to .waiting, which masks the recording phase. Uses the
         // reappear reader (revision-agnostic) because the appear refresh may
         // have already consumed the current revision.
-        if let payload = readSharedSnapshotForReappear(for: id) {
+        if snapshotAlreadyReconciled {
+            // The localhost response already reconciled the current request.
+        } else if let payload = readSharedSnapshotForReappear(for: id) {
             FileLogger.shared.info(.keyboard, "checkForPendingDictation snapshot",
                                    payload: ["status": payload.status.rawValue,
                                              "rev": payload.revision ?? 0])

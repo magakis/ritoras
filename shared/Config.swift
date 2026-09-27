@@ -171,8 +171,7 @@ struct SharedConfig {
         /// How long a terminal `.cancelled` payload stays in the localhost /state
         /// holder before the delayed clear (see DictationViewModel.cancel()).
         /// Must exceed the keyboard's catch-up window (seconds) so a suspended
-        /// keyboard can still fetch it on return, yet stay under the keyboard's
-        /// 300s stale-expiry so a stale payload is never served indefinitely.
+        /// keyboard can still fetch it on return.
         static let terminalStateRetentionSeconds: TimeInterval = 120
         /// Background-task lifetime keeping the localhost listener serving /state
         /// after cancel(). Unlike stop(), cancel() has no transcription to finish;
