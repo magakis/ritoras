@@ -67,6 +67,30 @@ describe('sustained continuing onset latch regime split', () => {
     assert.strictEqual(harness.chunkCount, 0);
   });
 
+  it('rejects the loud latch when its sustained streak has no dynamics witness', () => {
+    const harness = makeRecorderHarness({
+      gateConfig: {
+        loudRegimeEnabled: true,
+        loudDynamicsSpreadDb: 9,
+      },
+      recorderConfig: { loudLatchMs: 100 },
+    });
+    prefill(harness, -30);
+    harness.gate.floorDb = -30;
+    harness.gate.isLoudRegime = true;
+    for (let index = 0; index < 400; index += 1) harness.gate.process(-20, 0.01);
+    harness.gate.updateFloorTracking = () => {};
+
+    for (let index = 0; index < 120; index += 1) {
+      const frame = harness.drive(-20);
+      assert.strictEqual(frame.output.evidence, 'continuing');
+      assert.strictEqual(frame.latchedContinuingOnset, false);
+    }
+
+    assert.strictEqual(harness.latchMissingDynamicsWitnessCount, 1);
+    assert.strictEqual(harness.endpoint.state, 'idle');
+  });
+
   it('preserves quiet-room soft phrase-tail continuation with sufficient level margin', () => {
     const harness = makeRecorderHarness();
     prefill(harness, -52);

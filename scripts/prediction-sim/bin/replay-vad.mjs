@@ -15,8 +15,8 @@ import {
 import { VADHighPassFilter } from '../lib/vad-hpf.mjs';
 import { makeRecorderHarness } from '../lib/recorder-sim.mjs';
 
-export const DEFAULT_SESSION_CONFIG = Object.freeze({
-  mode: 'static',
+export const SHIPPING_SESSION_CONFIG = Object.freeze({
+  mode: 'adaptive',
   strongDeltaDb: 10,
   continuationDeltaDb: 6,
   silenceDeltaDb: 3,
@@ -39,6 +39,27 @@ export const DEFAULT_SESSION_CONFIG = Object.freeze({
   maxNoiseSec: 6,
   analysisHpfEnabled: false,
   analysisHpfCutoffHz: 100,
+  loudRegimeEnabled: false,
+  loudRegimeEnterDb: -34,
+  loudRegimeExitDb: -38,
+  loudRegimeEnterMs: 300,
+  loudRegimeExitMs: 1000,
+  loudStrongDeltaDb: 10,
+  loudContinuationDeltaDb: 6,
+  loudSilenceDeltaDb: 3,
+  loudDynamicsSpreadDb: 9,
+  loudRiseDbPerSec: 12,
+  loudLatchMs: 1500,
+  loudLatchAmbiguousEnabled: false,
+  loudFlatTerminateEnabled: false,
+  loudFlatSpreadDb: 5,
+  loudFlatTerminateSeconds: 2,
+  loudPreRollMs: 500,
+});
+
+export const DEFAULT_SESSION_CONFIG = Object.freeze({
+  ...SHIPPING_SESSION_CONFIG,
+  mode: 'static',
 });
 
 const CONFIG_KEYS = new Set(Object.keys(DEFAULT_SESSION_CONFIG));
@@ -75,6 +96,7 @@ export function parseArgs(argv = process.argv.slice(2)) {
     labels: [],
     fromWav: false,
     jsonPath: null,
+    labelsFile: null,
     help: false,
   };
   const positional = [];
@@ -115,24 +137,30 @@ export function parseArgs(argv = process.argv.slice(2)) {
       }
       continue;
     }
-    if (argument === '--labels' || argument === '--json') {
+    if (argument === '--labels' || argument === '--json' || argument === '--labels-file') {
       const value = argv[++index];
       if (value === undefined || value.startsWith('--')) {
         throw new Error(`${argument} requires a value`);
       }
       if (argument === '--labels') options.labels = parseLabels(value);
+      else if (argument === '--labels-file') options.labelsFile = value;
       else options.jsonPath = value;
       continue;
     }
     throw new Error(`unknown option: ${argument}`);
   }
 
-  if (positional.length > 0) options.sessionPath = positional[0];
-  if (positional.length > 1) options.wavPath = positional[1];
-  if (positional.length > 2) throw new Error('expected one JSONL path and one optional WAV path');
-  if (!options.help && options.sessionPath === null) throw new Error('missing session JSONL path');
-  if (options.fromWav && options.wavPath === null) {
-    throw new Error('--from-wav requires a session WAV path');
+  if (options.fromWav) {
+    const legacyOrder = positional[0]?.endsWith('.jsonl');
+    options.wavPath = positional[legacyOrder ? 1 : 0] ?? null;
+    options.sessionPath = positional[legacyOrder ? 0 : 1] ?? null;
+    if (positional.length > 2) throw new Error('expected WAV path and optional session JSONL path');
+    if (!options.wavPath) throw new Error('--from-wav requires a WAV path');
+  } else {
+    options.sessionPath = positional[0] ?? null;
+    options.wavPath = positional[1] ?? null;
+    if (positional.length > 2) throw new Error('expected one JSONL path and one optional WAV path');
+    if (!options.help && options.sessionPath === null) throw new Error('missing session JSONL path');
   }
   return options;
 }
@@ -220,6 +248,16 @@ export function normalizeConfig(rawConfig = {}) {
     adaptiveStaleFloorSeconds: asFiniteNumber(raw.staleFloorSeconds, 'staleFloorSeconds'),
     adaptiveFallTauSeconds: asFiniteNumber(raw.fallTauSeconds, 'fallTauSeconds'),
     adaptiveRiseSpeedMultiplier: asFiniteNumber(raw.riseMultiplier, 'riseMultiplier'),
+    loudRegimeEnabled: Boolean(raw.loudRegimeEnabled),
+    loudRegimeEnterDb: asFiniteNumber(raw.loudRegimeEnterDb, 'loudRegimeEnterDb'),
+    loudRegimeExitDb: asFiniteNumber(raw.loudRegimeExitDb, 'loudRegimeExitDb'),
+    loudRegimeEnterMs: asFiniteNumber(raw.loudRegimeEnterMs, 'loudRegimeEnterMs'),
+    loudRegimeExitMs: asFiniteNumber(raw.loudRegimeExitMs, 'loudRegimeExitMs'),
+    loudStrongDeltaDb: asFiniteNumber(raw.loudStrongDeltaDb, 'loudStrongDeltaDb'),
+    loudContinuationDeltaDb: asFiniteNumber(raw.loudContinuationDeltaDb, 'loudContinuationDeltaDb'),
+    loudSilenceDeltaDb: asFiniteNumber(raw.loudSilenceDeltaDb, 'loudSilenceDeltaDb'),
+    loudDynamicsSpreadDb: asFiniteNumber(raw.loudDynamicsSpreadDb, 'loudDynamicsSpreadDb'),
+    loudRiseDbPerSec: asFiniteNumber(raw.loudRiseDbPerSec, 'loudRiseDbPerSec'),
   });
   const gate = new VADThresholdGate(gateConfig);
   const endpointSilenceMs = asFiniteNumber(raw.silenceMs ?? raw.endpointSilenceMs, 'silenceMs');
@@ -258,8 +296,21 @@ export function normalizeConfig(rawConfig = {}) {
     minSpeechMs: minimum('minSpeechMs') / 16,
     minChunkMs: minimum('minChunkMs') / 16,
     maxNoiseSec: maxNoiseSamples / 16000,
+    loudPreRollMs: asFiniteNumber(raw.loudPreRollMs, 'loudPreRollMs'),
+    loudLatchMs: asFiniteNumber(raw.loudLatchMs, 'loudLatchMs'),
+    loudLatchAmbiguousEnabled: Boolean(raw.loudLatchAmbiguousEnabled),
+    loudFlatTerminateEnabled: Boolean(raw.loudFlatTerminateEnabled),
+    loudFlatSpreadDb: asFiniteNumber(raw.loudFlatSpreadDb, 'loudFlatSpreadDb'),
+    loudFlatTerminateSeconds: asFiniteNumber(raw.loudFlatTerminateSeconds, 'loudFlatTerminateSeconds'),
   };
-  return { config: normalized, endpoint, gateConfig, minSpeechSamples: minimum('minSpeechMs'), minChunkSamples: minimum('minChunkMs'), maxNoiseSamples };
+  return { config: normalized, endpoint, gateConfig, minSpeechSamples: minimum('minSpeechMs'), minChunkSamples: minimum('minChunkMs'), maxNoiseSamples, recorderConfig: {
+    loudPreRollMs: normalized.loudPreRollMs,
+    loudLatchMs: normalized.loudLatchMs,
+    loudLatchAmbiguousEnabled: normalized.loudLatchAmbiguousEnabled,
+    loudFlatTerminateEnabled: normalized.loudFlatTerminateEnabled,
+    loudFlatSpreadDb: normalized.loudFlatSpreadDb,
+    loudFlatTerminateSeconds: normalized.loudFlatTerminateSeconds,
+  } };
 }
 
 function harnessOptions(normalized) {
@@ -271,6 +322,7 @@ function harnessOptions(normalized) {
     minSpeechSamples: normalized.minSpeechSamples,
     minChunkSamples: normalized.minChunkSamples,
     maxNoiseSamples: normalized.maxNoiseSamples,
+    recorderConfig: normalized.recorderConfig,
   };
 }
 
@@ -550,7 +602,7 @@ export function replaySession(session, configInput = session.config, {
     harness.drive(asFiniteNumber(source.db, 'frame db'), duration);
     time = eventTime;
   }
-  if (session.events.some(event => event.k === 'stop_flush')) {
+  if (fromWav || session.events.some(event => event.k === 'stop_flush')) {
     eventTime = time;
     harness.flush();
   }
@@ -568,6 +620,8 @@ export function replaySession(session, configInput = session.config, {
     missedSpeechSeconds: labelMetrics.missedSpeechSeconds,
     chunkCount: emitted.length,
     meanOnsetLatencySeconds: labelMetrics.meanOnsetLatencySeconds,
+    terminatorActivationCount: generatedEvents.filter(event => event.k === 'loud_flat_terminate').length,
+    latchMissingDynamicsWitnessCount: harness.latchMissingDynamicsWitnessCount,
   };
   const divergence = compare && !fromWav
     ? compareTelemetry(session.frames, generatedFrames)
@@ -660,10 +714,12 @@ function printSweepTable(results) {
 function usage() {
   return [
     'Usage: node bin/replay-vad.mjs <session.jsonl> [session.wav] [options]',
+    '       node bin/replay-vad.mjs <audio.wav> --from-wav [options]',
     '',
     '  --set k=v                 Override one config value (repeatable)',
     '  --sweep k=v1,v2,...       Sweep one config key (repeatable, cartesian)',
     '  --labels "12.3-15.9,..."  True-speech intervals in seconds',
+    '  --labels-file path.txt     Read candidate speech intervals from a file',
     '  --from-wav                Recompute frame dB levels from the WAV',
     '  --json out.json           Write the full replay timeline',
   ].join('\n');
@@ -677,11 +733,17 @@ export function main(argv = process.argv.slice(2)) {
   }
   validateAssignments(options.set);
   for (const sweep of options.sweep) validateAssignments([sweep]);
-  const session = parseSession(fs.readFileSync(path.resolve(options.sessionPath), 'utf8'));
+  const session = options.sessionPath
+    ? parseSession(fs.readFileSync(path.resolve(options.sessionPath), 'utf8'))
+    : { frames: [], events: [], config: { ...SHIPPING_SESSION_CONFIG }, configIsTelemetry: false };
   const baseConfig = applyAssignments(rawConfigFromTelemetry(session.config), options.set);
   const wav = options.fromWav
     ? decodeWav(fs.readFileSync(path.resolve(options.wavPath)))
     : null;
+  if (options.labelsFile) {
+    const labelText = fs.readFileSync(path.resolve(options.labelsFile), 'utf8').trim();
+    options.labels = parseLabels(labelText);
+  }
   const configs = expandSweep(baseConfig, options.sweep);
   const results = configs.map(config => ({
     config,

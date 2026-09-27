@@ -606,7 +606,7 @@ describe('VADThresholdGate', () => {
       assert.strictEqual(highGate.snapshot.floorDb, -20);
     });
 
-    it('uses a lower continuation threshold than the onset threshold', () => {
+  it('uses a lower continuation threshold than the onset threshold', () => {
       const gate = seedAdaptiveGate({
         adaptiveDeltaDb: 10,
       }, -50);
@@ -667,5 +667,28 @@ describe('VADThresholdGate', () => {
       }
       assert.ok(Math.abs(coarse.snapshot.floorDb - fine.snapshot.floorDb) < 1e-9);
     });
+  });
+
+  it('enters and defers exit from loud regime using sustained floor and idle state', () => {
+    const gate = seedAdaptiveGate({
+      loudRegimeEnabled: true,
+      loudRegimeEnterDb: -34,
+      loudRegimeExitDb: -38,
+      loudRegimeEnterMs: 30,
+      loudRegimeExitMs: 20,
+      loudStrongDeltaDb: 8,
+    }, -30);
+    gate.floorDb = -30;
+    for (let index = 0; index < 3; index += 1) gate.updateFloorTracking(-30, 0.01, true);
+    assert.strictEqual(gate.isLoudRegime, true);
+    const output = gate.process(-21, 0.01);
+    assert.strictEqual(output.isLoudRegime, true);
+    assert.strictEqual(output.thresholdDb, -22);
+
+    gate.floorDb = -40;
+    gate.updateFloorTracking(-40, 0.02, false);
+    assert.strictEqual(gate.isLoudRegime, true);
+    gate.updateFloorTracking(-40, 0.02, true);
+    assert.strictEqual(gate.isLoudRegime, false);
   });
 });

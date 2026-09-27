@@ -8,6 +8,8 @@ import {
   dbFromSamples,
   expandSweep,
   parseSession,
+  parseArgs,
+  SHIPPING_SESSION_CONFIG,
   replaySession,
 } from '../bin/replay-vad.mjs';
 import { dbFromRms } from '../lib/vad-gate.mjs';
@@ -111,6 +113,19 @@ function makeWav({ audioFormat, channels, sampleRate = 16000, samples }) {
 }
 
 describe('VAD replay', () => {
+  it('accepts WAV-only invocation and pins shipping session defaults', () => {
+    const options = parseArgs(['audio.wav', '--from-wav', '--labels-file', 'speech.txt']);
+    assert.strictEqual(options.wavPath, 'audio.wav');
+    assert.strictEqual(options.sessionPath, null);
+    assert.strictEqual(options.labelsFile, 'speech.txt');
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.mode, 'adaptive');
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.endpointSilenceMs, 700);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.silenceMs, 700);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.maxNoiseSec, 6);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.minSpeechMs, 300);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.minChunkMs, 300);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.endpointPreRollMs, 500);
+  });
   it('records emitted chunk span and the endpoint state at the emission decision', () => {
     const events = [];
     const harness = makeRecorderHarness({

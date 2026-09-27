@@ -70,6 +70,16 @@ export function makeVadGateConfig(partial = {}) {
     adaptiveDynamicsEnabled: true,
     adaptiveDynamicsSpreadDb: 9.0,
     adaptiveFlatSpreadDb: 5.0,
+    loudRegimeEnabled: false,
+    loudRegimeEnterDb: -34,
+    loudRegimeExitDb: -38,
+    loudRegimeEnterMs: 300,
+    loudRegimeExitMs: 1000,
+    loudStrongDeltaDb: 10,
+    loudContinuationDeltaDb: 6,
+    loudSilenceDeltaDb: 3,
+    loudDynamicsSpreadDb: 9,
+    loudRiseDbPerSec: 12,
     ...(partial ?? {}),
   };
 }
@@ -152,6 +162,9 @@ export class VADThresholdGate {
     this.adaptiveRollingElapsed = 0;
     this.adaptiveRollingPercentileCache = null;
     this.lastKnownMachineIsIdle = true;
+    this.isLoudRegime = false;
+    this.loudEnterElapsed = 0;
+    this.loudExitElapsed = 0;
     this.lastOutput = {
       isSpeech: false,
       evidence: 'silence',
@@ -173,6 +186,7 @@ export class VADThresholdGate {
       trailingSilenceMs: null,
       dynamicsSpreadDb: null,
       shortSpreadDb: null,
+      isLoudRegime: false,
     };
   }
 
@@ -497,9 +511,13 @@ export class VADThresholdGate {
   }
 
   dynamicsGatedEvidence(evidence, dispersionDb) {
+    const spread = this.isLoudRegime
+      ? Math.max(0, this.config.loudDynamicsSpreadDb)
+      : this.effectiveDynamicsSpreadDb;
     if (this.config.adaptiveDynamicsEnabled
       && evidence === 'strong'
-      && dispersionDb < this.effectiveDynamicsSpreadDb) {
+      && spread > 0
+      && dispersionDb < spread) {
       return 'continuing';
     }
     return evidence;
@@ -507,6 +525,22 @@ export class VADThresholdGate {
 
   updateFloorTracking(frameDb, duration, machineIsIdle = true, machineIsEnding = false) {
     this.lastKnownMachineIsIdle = machineIsIdle;
+    if (this.config.loudRegimeEnabled && this.floorDb !== null) {
+      if (this.floorDb >= this.config.loudRegimeEnterDb) {
+        this.loudEnterElapsed += Math.max(0, duration);
+        this.loudExitElapsed = 0;
+        if (this.loudEnterElapsed * 1000 >= this.config.loudRegimeEnterMs) this.isLoudRegime = true;
+      } else if (this.floorDb <= this.config.loudRegimeExitDb) {
+        this.loudEnterElapsed = 0;
+        if (machineIsIdle) {
+          this.loudExitElapsed += Math.max(0, duration);
+          if (this.loudExitElapsed * 1000 >= this.config.loudRegimeExitMs) this.isLoudRegime = false;
+        } else this.loudExitElapsed = 0;
+      } else {
+        this.loudEnterElapsed = 0;
+        this.loudExitElapsed = 0;
+      }
+    }
     if (this.behaviorMode !== 'adaptive') return;
     if (this.floorDb === null) return;
     if (!this.adaptiveRefinementComplete) return;
@@ -517,13 +551,15 @@ export class VADThresholdGate {
         break;
       case 'continuing':
         riseCap = machineIsIdle
-          ? VAD_ELEVATED_RISE_DB_PER_SECOND * this.effectiveRiseSpeedMultiplier
+          ? (this.isLoudRegime ? this.config.loudRiseDbPerSec : VAD_ELEVATED_RISE_DB_PER_SECOND)
+            * this.effectiveRiseSpeedMultiplier
           : 0;
         break;
       case 'ambiguous':
       case 'silence':
         riseCap = machineIsIdle
-          ? VAD_ELEVATED_RISE_DB_PER_SECOND * this.effectiveRiseSpeedMultiplier
+          ? (this.isLoudRegime ? this.config.loudRiseDbPerSec : VAD_ELEVATED_RISE_DB_PER_SECOND)
+            * this.effectiveRiseSpeedMultiplier
           : 0;
         break;
       default:
@@ -761,10 +797,29 @@ export class VADThresholdGate {
       usedFallback: this.usedFallback,
       dynamicsSpreadDb: this.lastOutput.dynamicsSpreadDb,
       shortSpreadDb: this.lastOutput.shortSpreadDb,
+      isLoudRegime: this.isLoudRegime,
     };
   }
 
   adaptiveThresholds(floorDb) {
+    if (this.isLoudRegime) {
+      const strongDelta = Math.min(this.effectiveAdaptiveDeltaDb, this.config.loudStrongDeltaDb);
+      const continuationDelta = Math.min(
+        this.effectiveAdaptiveContinuationDeltaDb,
+        this.config.loudContinuationDeltaDb,
+      );
+      const silenceDelta = Math.min(this.effectiveSilenceDeltaDb, this.config.loudSilenceDeltaDb);
+      const strongThresholdDb = Math.max(floorDb + strongDelta, this.effectiveAbsoluteSpeechFloorDb);
+      const continuationThresholdDb = Math.min(
+        Math.max(floorDb + continuationDelta, this.effectiveAbsoluteSpeechFloorDb),
+        strongThresholdDb - 1,
+      );
+      return {
+        strongThresholdDb,
+        continuationThresholdDb,
+        silenceThresholdDb: Math.min(floorDb + silenceDelta, 5, continuationThresholdDb - 1),
+      };
+    }
     return {
       strongThresholdDb: Math.max(
         floorDb + this.effectiveAdaptiveDeltaDb,
@@ -844,6 +899,7 @@ export class VADThresholdGate {
     trailingSilenceMs,
     dynamicsSpreadDb = null,
     shortSpreadDb = null,
+    isLoudRegime = this.isLoudRegime,
   }) {
     this.lastOutput = {
       isSpeech,
@@ -859,6 +915,7 @@ export class VADThresholdGate {
       trailingSilenceMs,
       dynamicsSpreadDb,
       shortSpreadDb,
+      isLoudRegime,
     };
     return { ...this.lastOutput };
   }
