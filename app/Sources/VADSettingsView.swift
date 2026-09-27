@@ -267,16 +267,11 @@ struct VADSettingsView: View {
                 Text("Quiet Voice").tag(VADSensitivityProfile.quietVoice)
                 Text("Noisy Environment").tag(VADSensitivityProfile.noisyEnvironment)
             }
-            Picker("Pause", selection: $settings.streamVadPauseProfile) {
-                Text("Fast").tag(VADPauseProfile.fast)
-                Text("Balanced").tag(VADPauseProfile.balanced)
-                Text("Long").tag(VADPauseProfile.long)
-            }
             silenceDurationRow
         } header: {
             Text("Normal")
         } footer: {
-            Text("Sensitivity adjusts voice detection for your environment. Pause closes after 450 ms, 700 ms, or 1100 ms of silence. 700 ms is the default; 450 ms is the minimum.")
+            Text("Sensitivity adjusts voice detection for your environment. Silence duration controls how long the VAD listens in silence before closing the utterance. 700 ms is the default; 450 ms is the minimum.")
         }
     }
 
