@@ -6,6 +6,9 @@ struct VADSettingsView: View {
     @StateObject private var tester = AudioLevelTesterViewModel()
     @State private var isCopyingDigest = false
     @State private var digestCopied = false
+    @State private var isBuildingTelemetryZip = false
+    @State private var telemetryZipURL: URL?
+    @State private var telemetryZipError: String?
     @State private var isShowingResetConfirmation = false
     @Environment(\.scenePhase) private var scenePhase
 
@@ -420,8 +423,21 @@ struct VADSettingsView: View {
             }
 
             if !telemetryURLs.isEmpty {
-                ShareLink(items: telemetryURLs) {
-                    Label("Share Full Telemetry — Last 20 Recordings", systemImage: "square.and.arrow.up")
+                Button {
+                    Task { await buildAndShareTelemetryZip(from: telemetryURLs) }
+                } label: {
+                    if isBuildingTelemetryZip {
+                        Label("Building Zip…", systemImage: "square.and.arrow.up")
+                    } else {
+                        Label("Share Full Telemetry — Last 20 Recordings", systemImage: "square.and.arrow.up")
+                    }
+                }
+                .disabled(isBuildingTelemetryZip || telemetryURLs.isEmpty)
+
+                if let telemetryZipError {
+                    Text(telemetryZipError)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             }
         } header: {
@@ -429,6 +445,79 @@ struct VADSettingsView: View {
         } footer: {
             Text("Changes take effect next session. The telemetry ring retains up to 20 recordings.")
         }
+        .sheet(isPresented: Binding(
+            get: { telemetryZipURL != nil },
+            set: { isPresented in
+                if !isPresented { cleanupTelemetryZip() }
+            }
+        )) {
+            if let url = telemetryZipURL {
+                ActivityShareSheet(items: [url])
+            }
+        }
+    }
+
+    @MainActor
+    private func buildAndShareTelemetryZip(from files: [URL]) async {
+        guard !isBuildingTelemetryZip else { return }
+        isBuildingTelemetryZip = true
+        telemetryZipError = nil
+
+        do {
+            let zipURL = try await Task.detached(priority: .userInitiated) {
+                try Self.buildTelemetryZip(from: files)
+            }.value
+            telemetryZipURL = zipURL
+        } catch {
+            FileLogger.shared.log(.warn, .app, "telemetry zip build failed")
+            telemetryZipError = "Couldn't build the zip — try again."
+        }
+
+        isBuildingTelemetryZip = false
+    }
+
+    private static func buildTelemetryZip(from files: [URL]) throws -> URL {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let stamp = formatter.string(from: Date())
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+        let stagedDirectory = temporaryDirectory.appendingPathComponent("ritoras-vad-telemetry-\(stamp)", isDirectory: true)
+        let zipURL = temporaryDirectory.appendingPathComponent("ritoras-vad-telemetry-\(stamp).zip")
+        let fileManager = FileManager.default
+
+        try fileManager.createDirectory(at: stagedDirectory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: stagedDirectory) }
+
+        for file in files {
+            do {
+                try fileManager.copyItem(at: file, to: stagedDirectory.appendingPathComponent(file.lastPathComponent))
+            } catch {
+                FileLogger.shared.log(.warn, .app, "telemetry file skipped")
+            }
+        }
+
+        var coordinationError: NSError?
+        var zipError: Error?
+        NSFileCoordinator().coordinate(readingItemAt: stagedDirectory, options: .forUploading, error: &coordinationError) { zippedURL in
+            do {
+                try? fileManager.removeItem(at: zipURL)
+                try fileManager.copyItem(at: zippedURL, to: zipURL)
+            } catch {
+                zipError = error
+            }
+        }
+
+        if let zipError { throw zipError }
+        if let coordinationError { throw coordinationError }
+        return zipURL
+    }
+
+    @MainActor
+    private func cleanupTelemetryZip() {
+        if let telemetryZipURL {
+            try? FileManager.default.removeItem(at: telemetryZipURL)
+        }
+        telemetryZipURL = nil
     }
 
     @MainActor
