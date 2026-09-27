@@ -423,6 +423,12 @@ struct VADSettingsView: View {
                 Text("No telemetry file yet")
                     .foregroundColor(.secondary)
             }
+
+            if !telemetryURLs.isEmpty {
+                ShareLink(items: telemetryURLs) {
+                    Label("Share Full Telemetry — Last 20 Recordings", systemImage: "square.and.arrow.up")
+                }
+            }
         } header: {
             Text("Diagnostics")
         } footer: {
