@@ -46,6 +46,10 @@ enum VADTelemetryDigest {
         let floorMinimum: Double?
         let floorMaximum: Double?
         let floorLast: Double?
+        let loudRegimeSeconds: Double?
+        let loudThresholds: [String: Double]?
+        let flatTerminations: Int?
+        let loudLatchOnsets: Int?
         let timeline: [TimelinePoint]
         fileprivate let orderingDate: Date?
     }
@@ -67,7 +71,24 @@ enum VADTelemetryDigest {
         "silenceDeltaDb": "silenceDelta",
         "dynamicsSpreadDb": "dynamicsSpread",
         "flatSpreadDb": "flatSpread",
-        "riseMultiplier": "adaptationSpeed"
+        "riseMultiplier": "adaptationSpeed",
+        "loudRegimeEnabled": "loudRegime",
+        "loudRegimeEnterDb": "loudEnter",
+        "loudRegimeExitDb": "loudExit",
+        "loudRegimeEnterMs": "loudEnterMs",
+        "loudRegimeExitMs": "loudExitMs",
+        "loudStrongDeltaDb": "loudStrongDelta",
+        "loudContinuationDeltaDb": "loudContinuationDelta",
+        "loudSilenceDeltaDb": "loudSilenceDelta",
+        "loudRiseDbPerSec": "loudRise",
+        "loudDynamicsSpreadDb": "loudDynamicsSpread",
+        "loudLatchMs": "loudLatchMs",
+        "loudLatchWitnessDb": "loudLatchWitness",
+        "loudPreRollMs": "loudPreRoll",
+        "loudFlatTerminateEnabled": "loudFlatTerminate",
+        "loudFlatSpreadDb": "loudFlatSpread",
+        "loudFlatTerminateSeconds": "loudFlatSeconds",
+        "accumulatorSpillSamples": "accumulatorSpillSamples"
     ]
     private static let parameterOrder = [
         "endpointOnsetMs",
@@ -132,6 +153,16 @@ enum VADTelemetryDigest {
         let startedAt = parsedStartDate.map(formatUTC) ?? "unknown"
         let frames = records.filter { $0["t"] as? String == "f" }
         let events = records.filter { $0["t"] as? String == "ev" }
+        let hasLoudRegimeFrames = frames.contains { $0["lr"] != nil }
+        let loudRegimeSeconds = hasLoudRegimeFrames
+            ? frames.reduce(0.0) { total, frame in
+                guard frame["lr"] as? Bool == true,
+                      let frameDuration = number(frame["dt"]), frameDuration >= 0 else {
+                    return total
+                }
+                return total + frameDuration
+            }
+            : nil
 
         var duration = 0.0
         var foundFrameDuration = false
@@ -198,6 +229,27 @@ enum VADTelemetryDigest {
 
         let startEvent = events.first { $0["k"] as? String == "session_start" }
         let parameters = startEvent?["c"] as? [String: Any]
+        let loudThresholds: [String: Double]?
+        if hasLoudRegimeFrames,
+           let parameters,
+           let strong = number(parameters["loudStrongDeltaDb"]),
+           let continuation = number(parameters["loudContinuationDeltaDb"]),
+           let silence = number(parameters["loudSilenceDeltaDb"]) {
+            loudThresholds = ["strong": strong, "continuation": continuation, "silence": silence]
+        } else {
+            loudThresholds = nil
+        }
+        var latchWasObserved = false
+        var loudLatchOnsets = 0
+        for record in records {
+            if record["t"] as? String == "f" {
+                latchWasObserved = latchWasObserved || (record["ll"] as? Bool == true)
+            } else if record["t"] as? String == "ev",
+                      record["k"] as? String == "start_utterance" {
+                if latchWasObserved { loudLatchOnsets += 1 }
+                latchWasObserved = false
+            }
+        }
         let outcome = events.last(where: { $0["k"] as? String == "outcome" })?["r"] as? String
             ?? "unknown"
         let emittedEvents = events.filter { $0["k"] as? String == "emit" }
@@ -263,6 +315,12 @@ enum VADTelemetryDigest {
             floorMinimum: floors.min(),
             floorMaximum: floors.max(),
             floorLast: floors.last,
+            loudRegimeSeconds: loudRegimeSeconds,
+            loudThresholds: loudThresholds,
+            flatTerminations: hasLoudRegimeFrames
+                ? events.filter { $0["k"] as? String == "flat_terminate" }.count
+                : nil,
+            loudLatchOnsets: hasLoudRegimeFrames ? loudLatchOnsets : nil,
             timeline: timeline,
             orderingDate: parsedStartDate ?? modifiedAt
         )
@@ -382,6 +440,18 @@ enum VADTelemetryDigest {
             lines.append("chunks=\(summary.chunkCount) emitted speech=\(fixed(summary.emittedSpeechSeconds, digits: 1))s/\(fixed(summary.emittedChunkSeconds, digits: 1))s")
             lines.append(formatChunks(summary, stride: chunkStride))
             lines.append(formatParameters(summary.parameters))
+            if let loudRegimeSeconds = summary.loudRegimeSeconds {
+                lines.append("loudRegimeSeconds=\(fixed(loudRegimeSeconds, digits: 1))s")
+            }
+            if let loudThresholds = summary.loudThresholds {
+                lines.append("loudThresholds strong=\(fixed(loudThresholds["strong"] ?? 0, digits: 1))dB continuation=\(fixed(loudThresholds["continuation"] ?? 0, digits: 1))dB silence=\(fixed(loudThresholds["silence"] ?? 0, digits: 1))dB")
+            }
+            if let flatTerminations = summary.flatTerminations {
+                lines.append("flatTerminations=\(flatTerminations)")
+            }
+            if let loudLatchOnsets = summary.loudLatchOnsets {
+                lines.append("loudLatchOnsets=\(loudLatchOnsets)")
+            }
             lines.append("floorDb first/min/max/last=\(optionalFixed(summary.floorFirst))/\(optionalFixed(summary.floorMinimum))/\(optionalFixed(summary.floorMaximum))/\(optionalFixed(summary.floorLast))")
             let speechPercent = summary.speechPercent.map(String.init) ?? "n/a"
             let decisions = ["emit", "resume", "rescue"].map { key in

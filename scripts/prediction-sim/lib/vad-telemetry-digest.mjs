@@ -20,6 +20,23 @@ const PARAMETER_NAMES = Object.freeze({
   dynamicsSpreadDb: 'dynamicsSpread',
   flatSpreadDb: 'flatSpread',
   riseMultiplier: 'adaptationSpeed',
+  loudRegimeEnabled: 'loudRegime',
+  loudRegimeEnterDb: 'loudEnter',
+  loudRegimeExitDb: 'loudExit',
+  loudRegimeEnterMs: 'loudEnterMs',
+  loudRegimeExitMs: 'loudExitMs',
+  loudStrongDeltaDb: 'loudStrongDelta',
+  loudContinuationDeltaDb: 'loudContinuationDelta',
+  loudSilenceDeltaDb: 'loudSilenceDelta',
+  loudRiseDbPerSec: 'loudRise',
+  loudDynamicsSpreadDb: 'loudDynamicsSpread',
+  loudLatchMs: 'loudLatchMs',
+  loudLatchWitnessDb: 'loudLatchWitness',
+  loudPreRollMs: 'loudPreRoll',
+  loudFlatTerminateEnabled: 'loudFlatTerminate',
+  loudFlatSpreadDb: 'loudFlatSpread',
+  loudFlatTerminateSeconds: 'loudFlatSeconds',
+  accumulatorSpillSamples: 'accumulatorSpillSamples',
 });
 const PARAMETER_ORDER = [
   'endpointOnsetMs',
@@ -44,6 +61,14 @@ export function summarizeRecording({ filename, records, session = null, modified
   const parsedStartDate = parseDate(meta?.startedAt);
   const frames = session?.frames ?? records.filter(record => record.t === 'f');
   const events = session?.events ?? records.filter(record => record.t === 'ev');
+  const hasLoudRegimeFrames = frames.some(frame => Object.hasOwn(frame, 'lr'));
+  const loudRegimeSeconds = hasLoudRegimeFrames
+    ? frames.reduce((total, frame) => (
+      frame.lr === true && finiteNumber(frame.dt) !== null && frame.dt >= 0
+        ? total + frame.dt
+        : total
+    ), 0)
+    : undefined;
 
   let durationSeconds = 0;
   let foundFrameDuration = false;
@@ -108,6 +133,26 @@ export function summarizeRecording({ filename, records, session = null, modified
     && !Array.isArray(startEvent.c)
     ? startEvent.c
     : null;
+  const loudThresholds = hasLoudRegimeFrames
+    && finiteNumber(parameters?.loudStrongDeltaDb) !== null
+    && finiteNumber(parameters?.loudContinuationDeltaDb) !== null
+    && finiteNumber(parameters?.loudSilenceDeltaDb) !== null
+    ? {
+      strong: parameters.loudStrongDeltaDb,
+      continuation: parameters.loudContinuationDeltaDb,
+      silence: parameters.loudSilenceDeltaDb,
+    }
+    : undefined;
+  let latchWasObserved = false;
+  let loudLatchOnsets = 0;
+  for (const record of records) {
+    if (record.t === 'f') {
+      latchWasObserved ||= record.ll === true;
+    } else if (record.t === 'ev' && record.k === 'start_utterance') {
+      if (latchWasObserved) loudLatchOnsets += 1;
+      latchWasObserved = false;
+    }
+  }
   const outcomeEvent = events.findLast(event => event.k === 'outcome');
   const outcome = typeof outcomeEvent?.r === 'string' ? outcomeEvent.r : 'unknown';
   const emittedEvents = events.filter(event => event.k === 'emit');
@@ -173,6 +218,12 @@ export function summarizeRecording({ filename, records, session = null, modified
     floorMinimum: floorsSorted[0] ?? null,
     floorMaximum: floorsSorted.at(-1) ?? null,
     floorLast: floors.at(-1) ?? null,
+    ...(hasLoudRegimeFrames ? {
+      loudRegimeSeconds,
+      ...(loudThresholds ? { loudThresholds } : {}),
+      flatTerminations: events.filter(event => event.k === 'flat_terminate').length,
+      loudLatchOnsets,
+    } : {}),
     timeline,
     orderingDate: parsedStartDate ?? parseDate(modifiedAt),
   };
@@ -334,6 +385,18 @@ function render({ summaries, globalSettings, budget, exportedAt, timelineStride,
     lines.push(`chunks=${summary.chunkCount} emitted speech=${fixed(summary.emittedSpeechSeconds, 1)}s/${fixed(summary.emittedChunkSeconds, 1)}s`);
     lines.push(formatChunks(summary, chunkStride));
     lines.push(formatParameters(summary.parameters));
+    if (Object.hasOwn(summary, 'loudRegimeSeconds')) {
+      lines.push(`loudRegimeSeconds=${fixed(summary.loudRegimeSeconds, 1)}s`);
+    }
+    if (summary.loudThresholds) {
+      lines.push(`loudThresholds strong=${fixed(summary.loudThresholds.strong, 1)}dB continuation=${fixed(summary.loudThresholds.continuation, 1)}dB silence=${fixed(summary.loudThresholds.silence, 1)}dB`);
+    }
+    if (Object.hasOwn(summary, 'flatTerminations')) {
+      lines.push(`flatTerminations=${summary.flatTerminations}`);
+    }
+    if (Object.hasOwn(summary, 'loudLatchOnsets')) {
+      lines.push(`loudLatchOnsets=${summary.loudLatchOnsets}`);
+    }
     lines.push(`floorDb first/min/max/last=${optionalFixed(summary.floorFirst)}/${optionalFixed(summary.floorMinimum)}/${optionalFixed(summary.floorMaximum)}/${optionalFixed(summary.floorLast)}`);
     const speechPercent = summary.speechPercent === null ? 'n/a' : String(summary.speechPercent);
     const decisions = ['emit', 'resume', 'rescue', 'flatTerminate']

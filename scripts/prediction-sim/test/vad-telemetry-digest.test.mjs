@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { buildText } from '../lib/vad-telemetry-digest.mjs';
+import { buildText, summarizeRecording } from '../lib/vad-telemetry-digest.mjs';
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ritoras-vad-digest-'));
 const globalSettings = [
@@ -84,6 +84,70 @@ describe('VAD telemetry digest', () => {
     ]);
 
     assert.match(digest([file]), /decisions\{emit=0,resume=0,rescue=0,flatTerminate=1\}/);
+  });
+
+  it('summarizes loud-regime time, active thresholds, flat terminations, and latch onsets', () => {
+    const jobId = '84345678-1234-1234-1234-123456789abc';
+    const file = recordingFile(`${jobId}-vad.jsonl`, [
+      { t: 'meta', jobId, startedAt: '2026-09-23T13:58:02Z' },
+      {
+        t: 'ev',
+        k: 'session_start',
+        c: {
+          mode: 'adaptive',
+          loudRegimeEnterDb: -34,
+          loudRegimeExitDb: -38,
+          loudRegimeEnterMs: 300,
+          loudRegimeExitMs: 1000,
+          loudStrongDeltaDb: 7,
+          loudContinuationDeltaDb: 3,
+          loudSilenceDeltaDb: 2,
+          loudLatchMs: 400,
+          loudLatchWitnessDb: 3,
+          loudPreRollMs: 500,
+          loudFlatTerminateEnabled: true,
+          loudFlatSpreadDb: 2.5,
+          loudFlatTerminateSeconds: 3,
+          accumulatorSpillSamples: 1_048_576,
+        },
+      },
+      frame(0, { q: 0, dt: 0.1, lr: true, ll: true }),
+      { t: 'ev', k: 'start_utterance', n: 1600 },
+      frame(1, { q: 1, dt: 0.1, lr: true, ll: false }),
+      { t: 'ev', k: 'flat_terminate', n: 48_000, r: 'flat_spread' },
+    ]);
+
+    const text = digest([file]);
+    assert.match(text, /loudRegimeSeconds=0\.2s/);
+    assert.match(text, /loudThresholds strong=7\.0dB continuation=3\.0dB silence=2\.0dB/);
+    assert.match(text, /flatTerminations=1/);
+    assert.match(text, /loudLatchOnsets=1/);
+    assert.match(text, /loudEnter=-34\.0dB/);
+    assert.match(text, /loudExit=-38\.0dB/);
+    assert.match(text, /loudStrongDelta=7\.0dB/);
+    assert.match(text, /loudContinuationDelta=3\.0dB/);
+    assert.match(text, /loudSilenceDelta=2\.0dB/);
+    assert.match(text, /accumulatorSpillSamples=1048576/);
+  });
+
+  it('keeps pre-loud-regime telemetry summaries free of loud fields', () => {
+    const jobId = '85345678-1234-1234-1234-123456789abc';
+    const records = [
+      { t: 'meta', jobId, startedAt: '2026-09-23T13:58:02Z' },
+      { t: 'ev', k: 'session_start', c: { mode: 'adaptive' } },
+      frame(0, { q: 0 }),
+      { t: 'ev', k: 'emit', id: 0, r: 'endpoint', sm: 100, tm: 200 },
+    ];
+    const summary = summarizeRecording({
+      filename: `${jobId}-vad.jsonl`,
+      records,
+    });
+    const text = digest([recordingFile(`${jobId}-vad.jsonl`, records)]);
+
+    assert.equal(summary.chunkCount, 1);
+    assert.equal(Object.hasOwn(summary, 'loudRegimeSeconds'), false);
+    assert.equal(Object.hasOwn(summary, 'flatTerminations'), false);
+    assert.doesNotMatch(text, /loudRegimeSeconds|loudThresholds|flatTerminations|loudLatchOnsets/);
   });
 
   it('renders chunk timing and receive correlation from full telemetry events', () => {

@@ -353,6 +353,7 @@ private final class VADContext: @unchecked Sendable {
         config["loudFlatTerminateSeconds"] = loudFlatTerminateSeconds
         config["loudFlatStreakMs"] = loudFlatStreakMs
         config["loudFlatTerminatorActive"] = loudFlatTerminatorActive
+        config["accumulatorSpillSamples"] = accumulatorSpillSamples
         config["silenceMs"] = Double(silenceThresholdSamples) / 16.0
         config["minSpeechMs"] = Double(minSpeechSamples) / 16.0
         config["minChunkMs"] = Double(minChunkSamples) / 16.0
