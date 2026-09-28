@@ -216,6 +216,7 @@ private final class VADContext: @unchecked Sendable {
     let loudFlatTerminateSeconds: Double
     let loudFlatTerminateEnabled: Bool
     let sessionHeadBufferSamples: Int
+    let accumulatorSpillSamples: Int
     let analysisHpf: VADHighPassFilter?
 
     // MARK: Lock
@@ -223,6 +224,9 @@ private final class VADContext: @unchecked Sendable {
 
     // MARK: Mutable state
     var accumulator: [Float] = []
+    private var accumulatorSpillURL: URL?
+    private var accumulatorSpillHandle: FileHandle?
+    private var spilledSampleCount = 0
     private var chunkStartSessionSamples: Int?
     let preRollBuffer: SampleRingBuffer
     var headBuffer: SampleRingBuffer?
@@ -277,6 +281,7 @@ private final class VADContext: @unchecked Sendable {
         self.minSpeechSamples = minSpeechSamples
         self.minChunkSamples = minChunkSamples
         self.maxNoiseSamples = maxNoiseSamples
+        self.accumulatorSpillSamples = SharedConfig.streamVadAccumulatorSpillSamples()
         self.endpointMachineEnabled = endpointMachineEnabled
         let effectivePreRollSamples = max(0, preRollSamples)
         let effectiveLoudPreRollSamples = max(0, loudPreRollSamples)
@@ -304,6 +309,13 @@ private final class VADContext: @unchecked Sendable {
         let sessionHeadBufferSamples = SharedConfig.Defaults.sessionHeadBufferMsDefault * 16
         self.sessionHeadBufferSamples = sessionHeadBufferSamples
         self.headBuffer = SampleRingBuffer(capacity: sessionHeadBufferSamples)
+    }
+
+    deinit {
+        try? accumulatorSpillHandle?.close()
+        if let accumulatorSpillURL {
+            try? FileManager.default.removeItem(at: accumulatorSpillURL)
+        }
     }
 
     func setCalibrationChangeHandler(_ handler: ((Bool) -> Void)?) {
@@ -670,7 +682,7 @@ private final class VADContext: @unchecked Sendable {
                 streakPeakDb = nil
                 streakSawDynamics = false
                 sustainedContinuingOnsetLatched = false
-                accumulator.removeAll(keepingCapacity: true)
+                clearAccumulator()
                 if let head = headBuffer {
                     let trimmedSamples = sessionHeadTrimSamples()
                     chunkStartSessionSamples = sessionElapsedSamples - head.count + trimmedSamples
@@ -693,7 +705,7 @@ private final class VADContext: @unchecked Sendable {
                 if headBuffer == nil {
                     appendLiveFrame(frame)
                 } else {
-                    bufferHighWaterSamples = max(bufferHighWaterSamples, accumulator.count)
+                    bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
                 }
             case .continueUtterance, .finalizeUtterance:
                 appendLiveFrame(frame)
@@ -716,22 +728,22 @@ private final class VADContext: @unchecked Sendable {
             if case .startUtterance = decision {
                 telemetrySink?.event(VADTelemetryEvent(
                     kind: .startUtterance,
-                    samples: accumulator.count
+                    samples: accumulatorSampleCount
                 ))
             }
 
             if case .finalizeUtterance(let kind) = decision {
-                guard accumulator.count >= minChunkSamples,
+                guard accumulatorSampleCount >= minChunkSamples,
                       speechSamples >= minSpeechSamples else {
                     FileLogger.shared.info(.audio, "VAD: finalize discarded - below minimum speech or chunk duration",
-                                           payload: ["sampleCount": accumulator.count,
+                                           payload: ["sampleCount": accumulatorSampleCount,
                                                       "speechSamples": speechSamples])
                     telemetrySink?.event(VADTelemetryEvent(
                         kind: .discard,
-                        samples: accumulator.count,
+                        samples: accumulatorSampleCount,
                         reason: "below_minimums"
                     ))
-                    accumulator.removeAll(keepingCapacity: true)
+                    clearAccumulator()
                     chunkStartSessionSamples = nil
                     speechSamples = 0
                     silenceSamples = 0
@@ -745,13 +757,13 @@ private final class VADContext: @unchecked Sendable {
                                                       "floorDb": gate.snapshot.floorDb ?? NSNull()])
                 }
                 let silenceMs = Double(decisionSilenceSamples) / 16.0
-                let totalMs = Double(accumulator.count) / 16.0
+                let totalMs = Double(accumulatorSampleCount) / 16.0
                 let speechMs = Double(speechSamples) / 16.0
                 FileLogger.shared.info(.audio, "VAD: \(kind.rawValue) → emit",
                                        payload: ["silenceMs": silenceMs,
                                                  "totalMs": totalMs,
                                                  "speechMs": speechMs,
-                                                 "sampleCount": accumulator.count])
+                                                 "sampleCount": accumulatorSampleCount])
                 return emit(reason: kind.rawValue,
                             silenceMs: silenceMs,
                             totalMs: totalMs,
@@ -764,29 +776,29 @@ private final class VADContext: @unchecked Sendable {
             gate.updateFloorTracking(
                 frameDb: frameDb,
                 duration: frameDuration,
-                machineIsIdle: accumulator.isEmpty
+                machineIsIdle: accumulatorSampleCount == 0
             )
-            if accumulator.isEmpty {
+            if accumulatorSampleCount == 0 {
                 chunkStartSessionSamples = sessionElapsedSamples - frameLength
             }
-            accumulator.append(contentsOf: frame)
-            bufferHighWaterSamples = max(bufferHighWaterSamples, accumulator.count)
+            appendAccumulator(frame)
+            bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
             if out.isSpeech {
                 silenceSamples = 0
             } else {
                 silenceSamples += frame.count
             }
             if silenceSamples >= silenceThresholdSamples,
-               accumulator.count >= minChunkSamples,
+               accumulatorSampleCount >= minChunkSamples,
                speechSamples >= minSpeechSamples {
                 let silenceMs = Double(silenceSamples) / 16.0
-                let totalMs = Double(accumulator.count) / 16.0
+                let totalMs = Double(accumulatorSampleCount) / 16.0
                 let speechMs = Double(speechSamples) / 16.0
                 FileLogger.shared.info(.audio, "VAD: pause → emit",
                                        payload: ["silenceMs": silenceMs,
                                                  "totalMs": totalMs,
                                                  "speechMs": speechMs,
-                                                 "sampleCount": accumulator.count])
+                                                 "sampleCount": accumulatorSampleCount])
                 recordTelemetryFrame(
                     output: out,
                     frameDuration: frameDuration,
@@ -804,13 +816,13 @@ private final class VADContext: @unchecked Sendable {
 
             // Noise guard: less than 0.1 s of speech within the max-noise
             // window is discarded so ambient noise never ships.
-            if speechSamples < noiseGuardSpeechSamples && accumulator.count > maxNoiseSamples {
+            if speechSamples < noiseGuardSpeechSamples && accumulatorSampleCount > maxNoiseSamples {
                 telemetrySink?.event(VADTelemetryEvent(
                     kind: .discard,
-                    samples: accumulator.count,
+                    samples: accumulatorSampleCount,
                     reason: "noise_guard"
                 ))
-                accumulator = []
+                clearAccumulator()
                 chunkStartSessionSamples = nil
                 silenceSamples = 0
                 speechSamples = 0
@@ -853,6 +865,95 @@ private final class VADContext: @unchecked Sendable {
         preRollBuffer.append(contentsOf: frame)
     }
 
+    private var accumulatorSampleCount: Int {
+        accumulator.count + spilledSampleCount
+    }
+
+    private func sampleData(_ samples: [Float]) -> Data {
+        samples.withUnsafeBufferPointer { buffer in
+            guard let baseAddress = buffer.baseAddress else { return Data() }
+            return Data(bytes: baseAddress, count: buffer.count * MemoryLayout<Float>.size)
+        }
+    }
+
+    private func restoreAccumulatorAfterSpillFailure() {
+        guard let url = accumulatorSpillURL else { return }
+        try? accumulatorSpillHandle?.close()
+        accumulatorSpillHandle = nil
+        if let data = try? Data(contentsOf: url) {
+            let restored = data.withUnsafeBytes { $0.bindMemory(to: Float.self) }
+            accumulator.append(contentsOf: restored)
+        }
+        try? FileManager.default.removeItem(at: url)
+        accumulatorSpillURL = nil
+        spilledSampleCount = 0
+    }
+
+    private func clearAccumulator() {
+        try? accumulatorSpillHandle?.close()
+        accumulatorSpillHandle = nil
+        if let url = accumulatorSpillURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+        accumulatorSpillURL = nil
+        spilledSampleCount = 0
+        accumulator.removeAll(keepingCapacity: true)
+    }
+
+    private func appendAccumulator(_ samples: [Float]) {
+        if let handle = accumulatorSpillHandle {
+            do {
+                try handle.write(contentsOf: sampleData(samples))
+                spilledSampleCount += samples.count
+                return
+            } catch {
+                restoreAccumulatorAfterSpillFailure()
+                accumulator.append(contentsOf: samples)
+                FileLogger.shared.warn(.audio, "VAD accumulator spill failed; retaining audio in memory")
+                return
+            }
+        }
+        accumulator.append(contentsOf: samples)
+        guard accumulator.count > accumulatorSpillSamples else { return }
+        guard let container = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier: SharedConfig.Defaults.appGroupId
+        ) else {
+            FileLogger.shared.warn(.audio, "VAD accumulator spill unavailable; retaining audio in memory")
+            return
+        }
+        let url = container.appendingPathComponent("vad-accumulator-\(UUID().uuidString).tmp")
+        do {
+            guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.write(contentsOf: sampleData(accumulator))
+            spilledSampleCount = accumulator.count
+            accumulator.removeAll(keepingCapacity: false)
+            accumulatorSpillURL = url
+            accumulatorSpillHandle = handle
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            FileLogger.shared.warn(.audio, "VAD accumulator spill failed; retaining audio in memory")
+        }
+    }
+
+    private func assembledAccumulator() -> [Float] {
+        guard let url = accumulatorSpillURL else {
+            return accumulator
+        }
+        try? accumulatorSpillHandle?.synchronize()
+        try? accumulatorSpillHandle?.close()
+        accumulatorSpillHandle = nil
+        guard let data = try? Data(contentsOf: url) else { return accumulator }
+        let spilled = data.withUnsafeBytes { $0.bindMemory(to: Float.self) }
+        var samples: [Float] = []
+        samples.reserveCapacity(spilled.count + accumulator.count)
+        samples.append(contentsOf: spilled)
+        samples.append(contentsOf: accumulator)
+        return samples
+    }
+
     private func appendToSessionHead(
         _ frame: [Float],
         frameDb: Double,
@@ -892,8 +993,8 @@ private final class VADContext: @unchecked Sendable {
     }
 
     private func appendLiveFrame(_ frame: [Float]) {
-        accumulator.append(contentsOf: frame)
-        bufferHighWaterSamples = max(bufferHighWaterSamples, accumulator.count)
+        appendAccumulator(frame)
+        bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
     }
 
     /// Emit current accumulator and reset all VAD state.
@@ -905,11 +1006,12 @@ private final class VADContext: @unchecked Sendable {
         speechMs: Double,
         endpointState: String
     ) -> VADEmission {
-        let snapshot = accumulator
+        let snapshot = assembledAccumulator()
         let id = chunkId
-        let startSamples = chunkStartSessionSamples ?? (sessionElapsedSamples - snapshot.count)
+        let sampleCount = accumulatorSampleCount
+        let startSamples = chunkStartSessionSamples ?? (sessionElapsedSamples - sampleCount)
         let startMs = Double(startSamples) / 16.0
-        let endMs = startMs + Double(snapshot.count) / 16.0
+        let endMs = startMs + Double(sampleCount) / 16.0
         chunkId &+= 1
         pendingEmissionSummary = EmissionSummary(
             chunkId: id,
@@ -918,7 +1020,7 @@ private final class VADContext: @unchecked Sendable {
             totalMs: totalMs,
             speechMs: speechMs
         )
-        accumulator = []
+        clearAccumulator()
         chunkStartSessionSamples = nil
         preRollBuffer.removeAll()
         headBuffer = nil
@@ -940,7 +1042,7 @@ private final class VADContext: @unchecked Sendable {
         telemetrySink?.event(VADTelemetryEvent(
             kind: .emit,
             chunkId: id,
-            samples: snapshot.count,
+            samples: sampleCount,
             reason: reason,
             speechMs: speechMs,
             totalMs: totalMs,
@@ -966,13 +1068,13 @@ private final class VADContext: @unchecked Sendable {
         loudFlatTerminatorActive = false
         let decisionTimeEndpointState = endpoint.state.rawValue
         _ = endpoint.forceFinalize(kind: .stop)
-        let sampleCount = accumulator.count
+        let sampleCount = accumulatorSampleCount
         let trailingSpeechMs = Double(speechSamples) / 16.0
         let startSamples = chunkStartSessionSamples ?? (sessionElapsedSamples - sampleCount)
         let startMs = Double(startSamples) / 16.0
         let endMs = startMs + Double(sampleCount) / 16.0
         let flushReason: String
-        if accumulator.isEmpty {
+        if accumulatorSampleCount == 0 {
             flushReason = "empty"
         } else if speechSamples < minSpeechSamples {
             flushReason = "below_minimums"
@@ -989,22 +1091,22 @@ private final class VADContext: @unchecked Sendable {
             endMs: endMs,
             endpointState: decisionTimeEndpointState
         ))
-        guard !accumulator.isEmpty else { return nil }
+        guard accumulatorSampleCount > 0 else { return nil }
         guard speechSamples >= minSpeechSamples else {
             FileLogger.shared.debug(.audio, "VAD: flush discarded trailing noise",
-                                    payload: ["sampleCount": accumulator.count,
+                                    payload: ["sampleCount": accumulatorSampleCount,
                                               "speechSamples": speechSamples])
-            accumulator.removeAll(keepingCapacity: true)
+            clearAccumulator()
             chunkStartSessionSamples = nil
             preRollBuffer.removeAll()
             bufferHighWaterSamples = 0
             return nil
         }
         FileLogger.shared.info(.audio, "VAD: stop → emit",
-                               payload: ["count": accumulator.count])
+                               payload: ["count": accumulatorSampleCount])
         return emit(reason: "flush",
                     silenceMs: 0,
-                    totalMs: Double(accumulator.count) / 16.0,
+                    totalMs: Double(accumulatorSampleCount) / 16.0,
                     speechMs: Double(speechSamples) / 16.0,
                     endpointState: decisionTimeEndpointState)
     }

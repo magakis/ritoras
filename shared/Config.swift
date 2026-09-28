@@ -284,6 +284,8 @@ struct SharedConfig {
         static let streamVadAmbiguousRescueMsDefault: Int = 320
         static let streamVadPreRollMsKey = "streamVadPreRollMs"
         static let streamVadPreRollMsDefault: Int = 500
+        static let streamVadAccumulatorSpillSamplesKey = "streamVadAccumulatorSpillSamples"
+        static let streamVadAccumulatorSpillSamplesDefault: Int = 1_048_576
         static let sessionHeadBufferMsDefault: Int = 2500
         static let streamVadSensitivityProfileKey = "streamVadSensitivityProfile"
         static let streamVadSensitivityProfileDefault: VADSensitivityProfile = .automatic
@@ -987,6 +989,16 @@ struct SharedConfig {
             forKey: Defaults.streamVadPreRollMsKey
         ) as? NSNumber)?.intValue ?? Defaults.streamVadPreRollMsDefault
         return min(max(value, 100), 1_000)
+    }
+
+    static func streamVadAccumulatorSpillSamples() -> Int {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadAccumulatorSpillSamplesDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadAccumulatorSpillSamplesKey
+        ) as? NSNumber)?.intValue ?? Defaults.streamVadAccumulatorSpillSamplesDefault
+        return max(1, value)
     }
 
     /// Reads the user-facing VAD sensitivity profile from the App Group.
