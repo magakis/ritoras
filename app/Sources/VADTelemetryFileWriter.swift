@@ -167,6 +167,9 @@ final class VADTelemetryFileWriter: @unchecked Sendable, VADTelemetrySink, VADTe
         if let dynamicsSpreadDb = record.dynamicsSpreadDb {
             object["dy"] = dynamicsSpreadDb
         }
+        if record.isLoudRegime {
+            object["lr"] = true
+        }
         return serialize(object)
     }
 

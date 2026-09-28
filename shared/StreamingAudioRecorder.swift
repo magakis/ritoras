@@ -69,6 +69,7 @@ struct VADTelemetryFrame: @unchecked Sendable {
     let utteranceDurationSamples: Int
     let latchStreakMs: Double
     let latchLatched: Bool
+    let isLoudRegime: Bool
 }
 
 enum VADTelemetryEventKind: String, Sendable {
@@ -206,6 +207,10 @@ private final class VADContext: @unchecked Sendable {
     let endpointMachineEnabled: Bool
     let endpoint: StreamingEndpoint
     let preRollSamples: Int
+    let loudPreRollSamples: Int
+    let loudLatchMs: Int
+    let loudLatchAmbiguousEnabled: Bool
+    let loudLatchWitnessDb: Double
     let sessionHeadBufferSamples: Int
     let analysisHpf: VADHighPassFilter?
 
@@ -234,6 +239,7 @@ private final class VADContext: @unchecked Sendable {
     private var sustainedContinuingMs = 0.0
     private var streakStartFloorDb: Double?
     private var streakPeakDb: Double?
+    private var streakSawDynamics = false
     private var sustainedContinuingOnsetLatched = false
     private var telemetrySequence: UInt64 = 0
     private var telemetrySink: VADTelemetrySink?
@@ -246,6 +252,10 @@ private final class VADContext: @unchecked Sendable {
         maxNoiseSamples: Int,
         endpointMachineEnabled: Bool,
         preRollSamples: Int,
+        loudPreRollSamples: Int,
+        loudLatchMs: Int,
+        loudLatchAmbiguousEnabled: Bool,
+        loudLatchWitnessDb: Double,
         analysisHpfEnabled: Bool,
         analysisHpfCutoffHz: Double
     ) {
@@ -258,6 +268,8 @@ private final class VADContext: @unchecked Sendable {
         self.minChunkSamples = minChunkSamples
         self.maxNoiseSamples = maxNoiseSamples
         self.endpointMachineEnabled = endpointMachineEnabled
+        let effectivePreRollSamples = max(0, preRollSamples)
+        let effectiveLoudPreRollSamples = max(0, loudPreRollSamples)
         self.endpoint = StreamingEndpoint(configuration: StreamingEndpointConfiguration(
             onsetSamples: Int(Double(SharedConfig.streamVadOnsetMs()) * 16.0),
             endEvidenceSamples: Int(Double(SharedConfig.streamVadEndEvidenceMs()) * 16.0),
@@ -266,12 +278,16 @@ private final class VADContext: @unchecked Sendable {
             ambiguousRescueSamples: Int(Double(SharedConfig.streamVadAmbiguousRescueMs()) * 16.0),
             preRollSamples: Int(Double(SharedConfig.streamVadPreRollMs()) * 16.0)
         ))
-        self.preRollSamples = max(0, preRollSamples)
+        self.preRollSamples = effectivePreRollSamples
+        self.loudPreRollSamples = effectiveLoudPreRollSamples
+        self.loudLatchMs = max(1, loudLatchMs)
+        self.loudLatchAmbiguousEnabled = loudLatchAmbiguousEnabled
+        self.loudLatchWitnessDb = max(0, loudLatchWitnessDb)
         self.analysisHpf = analysisHpfEnabled
             ? VADHighPassFilter(cutoffHz: analysisHpfCutoffHz)
             : nil
         self.wasCalibrating = gateConfig.mode == .calibrated
-        self.preRollBuffer = SampleRingBuffer(capacity: max(0, preRollSamples))
+        self.preRollBuffer = SampleRingBuffer(capacity: max(effectivePreRollSamples, effectiveLoudPreRollSamples))
         let sessionHeadBufferSamples = SharedConfig.Defaults.sessionHeadBufferMsDefault * 16
         self.sessionHeadBufferSamples = sessionHeadBufferSamples
         self.headBuffer = SampleRingBuffer(capacity: sessionHeadBufferSamples)
@@ -303,6 +319,10 @@ private final class VADContext: @unchecked Sendable {
         config["endpointAmbiguousRescueMs"] = Double(endpoint.configuration.ambiguousRescueSamples) / 16.0
         config["endpointPreRollMs"] = Double(endpoint.configuration.preRollSamples) / 16.0
         config["sessionHeadBufferMs"] = Double(sessionHeadBufferSamples) / 16.0
+        config["loudLatchMs"] = loudLatchMs
+        config["loudLatchAmbiguousEnabled"] = loudLatchAmbiguousEnabled
+        config["loudLatchWitnessDb"] = loudLatchWitnessDb
+        config["loudPreRollMs"] = Double(loudPreRollSamples) / 16.0
         config["silenceMs"] = Double(silenceThresholdSamples) / 16.0
         config["minSpeechMs"] = Double(minSpeechSamples) / 16.0
         config["minChunkMs"] = Double(minChunkSamples) / 16.0
@@ -334,6 +354,7 @@ private final class VADContext: @unchecked Sendable {
         sustainedContinuingMs = 0
         streakStartFloorDb = nil
         streakPeakDb = nil
+        streakSawDynamics = false
         sustainedContinuingOnsetLatched = false
     }
 
@@ -411,7 +432,8 @@ private final class VADContext: @unchecked Sendable {
             decisionSilenceSamples: decisionSilenceSamples,
             utteranceDurationSamples: endpoint.utteranceDurationSamples,
             latchStreakMs: sustainedContinuingMs,
-            latchLatched: sustainedContinuingOnsetLatched
+            latchLatched: sustainedContinuingOnsetLatched,
+            isLoudRegime: output.isLoudRegime
         )
         telemetrySequence &+= 1
         sink.frame(record)
@@ -481,14 +503,20 @@ private final class VADContext: @unchecked Sendable {
             }
             let evidence = StreamingEndpointEvidence(rawValue: out.evidence.rawValue) ?? .silence
             let adaptivePath = out.floorDb != nil
-            if adaptivePath && out.evidence == .continuing && endpointWasIdle {
+            let eligibleStreakEvidence = out.evidence == .continuing
+                || (loudLatchAmbiguousEnabled && out.evidence == .ambiguous)
+            if adaptivePath && eligibleStreakEvidence && endpointWasIdle {
                 if sustainedContinuingMs == 0 {
                     streakStartFloorDb = gate.snapshot.floorDb
                     streakPeakDb = frameDb
+                    streakSawDynamics = false
                 } else {
                     streakPeakDb = max(streakPeakDb ?? frameDb, frameDb)
                 }
                 sustainedContinuingMs += frameDuration * 1000.0
+                if (out.dynamicsSpreadDb ?? 0) >= loudLatchWitnessDb {
+                    streakSawDynamics = true
+                }
             } else if !sustainedContinuingOnsetLatched {
                 let lostStreakMs = sustainedContinuingMs
                 if lostStreakMs >= 500.0 {  // 0.5 s — avoid per-frame ambient-noise logs
@@ -498,6 +526,7 @@ private final class VADContext: @unchecked Sendable {
                 sustainedContinuingMs = 0
                 streakStartFloorDb = nil
                 streakPeakDb = nil
+                streakSawDynamics = false
             }
 
             let quietRegimeEvidence = out.floorDb.map {
@@ -515,27 +544,38 @@ private final class VADContext: @unchecked Sendable {
             let loudRegimeEvidence = out.floorDb.map {
                 (streakPeakDb ?? -Double.infinity) >= $0 + gate.effectiveAdaptiveDeltaDb
             } == true
+            let legacyLoudBranch = !gate.config.loudRegimeEnabled
+                && out.floorDb.map { $0 >= VADThresholdGate.loudFloorRegimeDb } == true
+            let quietLatchQualified = quietRegimeEvidence
+                && quietRegimeFloorStable
+                && sustainedContinuingMs >= sustainedContinuingOnsetSeconds * 1000.0
+            let legacyLoudLatchQualified = legacyLoudBranch
+                && loudRegimeEvidence
+                && sustainedContinuingMs >= 1.5 * sustainedContinuingOnsetSeconds * 1000.0
+            let loudLatchQualified = out.isLoudRegime
+                && sustainedContinuingMs >= Double(loudLatchMs)
+                && streakSawDynamics
             if adaptivePath &&
                out.floorConverged &&
-               out.evidence == .continuing &&
-               endpointWasIdle &&
-                ((quietRegimeEvidence
-                    && quietRegimeFloorStable
-                    && sustainedContinuingMs >= sustainedContinuingOnsetSeconds * 1000.0)
-                    || (loudRegimeEvidence
-                        && sustainedContinuingMs >= 1.5 * sustainedContinuingOnsetSeconds * 1000.0)) {
+                eligibleStreakEvidence &&
+                endpointWasIdle &&
+                 (quietLatchQualified || legacyLoudLatchQualified || loudLatchQualified) {
                 sustainedContinuingOnsetLatched = true
             }
             let endpointInOnsetLimb = endpointWasIdle || previousState == .onsetPending
             if sustainedContinuingOnsetLatched &&
-               (!adaptivePath || !endpointInOnsetLimb || out.evidence == .ambiguous || out.evidence == .silence) {
+               (!adaptivePath || !endpointInOnsetLimb
+                || (out.evidence == .ambiguous && !loudLatchAmbiguousEnabled)
+                || out.evidence == .silence) {
                 sustainedContinuingOnsetLatched = false
                 sustainedContinuingMs = 0
                 streakStartFloorDb = nil
                 streakPeakDb = nil
+                streakSawDynamics = false
             }
             let latchedContinuingOnset = sustainedContinuingOnsetLatched &&
-                                         out.evidence == .continuing &&
+                                         (out.evidence == .continuing
+                                             || (loudLatchAmbiguousEnabled && out.evidence == .ambiguous)) &&
                                          endpointInOnsetLimb
             var endpointEvidence = adaptivePath && latchedContinuingOnset
                 ? StreamingEndpointEvidence.strong
@@ -568,6 +608,7 @@ private final class VADContext: @unchecked Sendable {
                 sustainedContinuingMs = 0
                 streakStartFloorDb = nil
                 streakPeakDb = nil
+                streakSawDynamics = false
                 sustainedContinuingOnsetLatched = false
                 accumulator.removeAll(keepingCapacity: true)
                 if let head = headBuffer {
@@ -578,8 +619,15 @@ private final class VADContext: @unchecked Sendable {
                                             payload: ["headSamples": head.count,
                                                       "trimmedSamples": trimmedSamples])
                 } else {
-                    preRollBuffer.append(to: &accumulator)
-                    chunkStartSessionSamples = sessionElapsedSamples - frameLength - preRollBuffer.count
+                    let requestedPreRollSamples = out.isLoudRegime
+                        ? max(preRollSamples, loudPreRollSamples)
+                        : preRollSamples
+                    let availablePreRollSamples = min(requestedPreRollSamples, preRollBuffer.count)
+                    preRollBuffer.append(
+                        to: &accumulator,
+                        droppingFirst: preRollBuffer.count - availablePreRollSamples
+                    )
+                    chunkStartSessionSamples = sessionElapsedSamples - frameLength - availablePreRollSamples
                 }
                 preRollBuffer.removeAll()
                 if headBuffer == nil {
@@ -824,6 +872,7 @@ private final class VADContext: @unchecked Sendable {
         sustainedContinuingMs = 0
         streakStartFloorDb = nil
         streakPeakDb = nil
+        streakSawDynamics = false
         sustainedContinuingOnsetLatched = false
         telemetrySink?.event(VADTelemetryEvent(
             kind: .emit,
@@ -847,6 +896,7 @@ private final class VADContext: @unchecked Sendable {
         sustainedContinuingMs = 0
         streakStartFloorDb = nil
         streakPeakDb = nil
+        streakSawDynamics = false
         sustainedContinuingOnsetLatched = false
         let decisionTimeEndpointState = endpoint.state.rawValue
         _ = endpoint.forceFinalize(kind: .stop)
@@ -1100,6 +1150,10 @@ actor StreamingAudioRecorder {
             maxNoiseSamples: maxNoiseSamples,
             endpointMachineEnabled: SharedConfig.streamEndpointMachineEnabled(),
             preRollSamples: Int(Double(SharedConfig.streamVadPreRollMs()) * 16.0),
+            loudPreRollSamples: Int(Double(SharedConfig.streamVadLoudPreRollMs()) * 16.0),
+            loudLatchMs: SharedConfig.streamVadLoudLatchMs(),
+            loudLatchAmbiguousEnabled: SharedConfig.streamVadLoudLatchAmbiguousEnabled(),
+            loudLatchWitnessDb: SharedConfig.streamVadLoudLatchWitnessDb(),
             analysisHpfEnabled: SharedConfig.streamVadAnalysisHpfEnabled(),
             analysisHpfCutoffHz: SharedConfig.Defaults.streamVadHpfCutoffHzDefault
         )

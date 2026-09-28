@@ -260,6 +260,14 @@ struct SharedConfig {
         static let streamVadLoudRiseDbPerSecDefault: Double = 12.0
         static let streamVadLoudDynamicsSpreadDbKey = "streamVadLoudDynamicsSpreadDb"
         static let streamVadLoudDynamicsSpreadDbDefault: Double = 9.0
+        static let streamVadLoudLatchMsKey = "streamVadLoudLatchMs"
+        static let streamVadLoudLatchMsDefault: Int = 400
+        static let streamVadLoudLatchAmbiguousEnabledKey = "streamVadLoudLatchAmbiguousEnabled"
+        static let streamVadLoudLatchAmbiguousEnabledDefault = false
+        static let streamVadLoudLatchWitnessDbKey = "streamVadLoudLatchWitnessDb"
+        static let streamVadLoudLatchWitnessDbDefault: Double = 3.0
+        static let streamVadLoudPreRollMsKey = "streamVadLoudPreRollMs"
+        static let streamVadLoudPreRollMsDefault: Int = 500
         static let streamVadOnsetMsKey = "streamVadOnsetMs"
         static let streamVadOnsetMsDefault: Int = 70
         static let streamVadEndEvidenceMsKey = "streamVadEndEvidenceMs"
@@ -852,6 +860,44 @@ struct SharedConfig {
             forKey: Defaults.streamVadLoudDynamicsSpreadDbKey
         ) as? NSNumber)?.doubleValue ?? Defaults.streamVadLoudDynamicsSpreadDbDefault
         return value.isFinite ? max(0, value) : Defaults.streamVadLoudDynamicsSpreadDbDefault
+    }
+
+    static func streamVadLoudLatchMs() -> Int {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudLatchMsDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadLoudLatchMsKey
+        ) as? NSNumber)?.intValue ?? Defaults.streamVadLoudLatchMsDefault
+        return min(max(value, 1), 3_000)
+    }
+
+    static func streamVadLoudLatchAmbiguousEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudLatchAmbiguousEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadLoudLatchAmbiguousEnabledKey) as? Bool)
+            ?? Defaults.streamVadLoudLatchAmbiguousEnabledDefault
+    }
+
+    static func streamVadLoudLatchWitnessDb() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudLatchWitnessDbDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadLoudLatchWitnessDbKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadLoudLatchWitnessDbDefault
+        return value.isFinite ? max(0, value) : Defaults.streamVadLoudLatchWitnessDbDefault
+    }
+
+    static func streamVadLoudPreRollMs() -> Int {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudPreRollMsDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadLoudPreRollMsKey
+        ) as? NSNumber)?.intValue ?? Defaults.streamVadLoudPreRollMsDefault
+        return min(max(value, 100), 1_000)
     }
 
     /// Reads the endpoint onset confirmation window (ms) from the App Group.

@@ -216,6 +216,38 @@ describe('VAD replay', () => {
     assert.equal(start.n, 480);
   });
 
+  it('keeps the pre-roll trace identical at the 500 ms default and uses a larger loud tail', () => {
+    function startAfterIdle(recorderConfig, idleFrames) {
+      const events = [];
+      const harness = makeRecorderHarness({
+        gateConfig: { mode: 'static', staticRms: 0.025 },
+        endpointSilenceMs: 100,
+        endpointConfig: {
+          onsetMs: 10,
+          endEvidenceMs: 50,
+          endpointSilenceMs: 100,
+          resumeMs: 20,
+          ambiguousRescueMs: 320,
+          preRollMs: 500,
+        },
+        recorderConfig,
+        onEvent: event => events.push(event),
+      });
+      harness.headLive = false;
+      harness.gate.isLoudRegime = true;
+      for (let index = 0; index < idleFrames; index += 1) harness.drive(-80);
+      harness.drive(-20);
+      return events.find(event => event.k === 'start_utterance');
+    }
+
+    const implicitDefault = startAfterIdle({}, 20);
+    const explicitDefault = startAfterIdle({ loudPreRollMs: 500 }, 20);
+    const extended = startAfterIdle({ loudPreRollMs: 1000 }, 80);
+    assert.deepStrictEqual(explicitDefault, implicitDefault);
+    assert.equal(implicitDefault.n, 3360);
+    assert.equal(extended.n, 12_960);
+  });
+
   it('applies windy-session threshold, silence, and dynamics overrides', () => {
     const session = adaptiveSession();
     const labels = [{ start: 2.7, end: 3.1 }];

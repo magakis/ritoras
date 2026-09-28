@@ -1,6 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { makeRecorderHarness } from '../lib/recorder-sim.mjs';
+import { parseSession, replaySession } from '../bin/replay-vad.mjs';
 
 const FRAME_MS = 10;
 
@@ -67,7 +69,7 @@ describe('sustained continuing onset latch regime split', () => {
     assert.strictEqual(harness.chunkCount, 0);
   });
 
-  it('rejects the loud latch when its sustained streak has no dynamics witness', () => {
+  it('rejects a steady pure-tone streak whose spread is below the witness', () => {
     const harness = makeRecorderHarness({
       gateConfig: {
         loudRegimeEnabled: true,
@@ -84,10 +86,90 @@ describe('sustained continuing onset latch regime split', () => {
     for (let index = 0; index < 120; index += 1) {
       const frame = harness.drive(-20);
       assert.strictEqual(frame.output.evidence, 'continuing');
+      assert.ok(frame.output.dynamicsSpreadDb < harness.loudLatchWitnessDb);
       assert.strictEqual(frame.latchedContinuingOnset, false);
     }
 
     assert.strictEqual(harness.latchMissingDynamicsWitnessCount, 1);
+    assert.strictEqual(harness.endpoint.state, 'idle');
+  });
+
+  it('rescues the E31F3FEF cold-seed speech regression with the 3 dB witness', () => {
+    const telemetry = fs.readFileSync(new URL(
+      '../fixtures/vad-telemetry/E31F3FEF-15A6-467B-AF05-7C7D7D9ACD06-vad.jsonl',
+      import.meta.url,
+    ), 'utf8');
+    const session = parseSession(telemetry);
+    const baseline = replaySession(session, {
+      ...session.config,
+      loudRegimeEnabled: false,
+      strongDeltaDb: 10,
+      continuationDeltaDb: 6,
+      silenceDeltaDb: 3,
+      loudLatchMs: 1500,
+    }, { compare: false });
+    assert.equal(baseline.metrics.chunkCount, 0);
+    assert.equal(baseline.events.find(event => event.k === 'stop_flush').r, 'empty');
+
+    const rescued = replaySession(session, session.config, { compare: false });
+    const start = rescued.events.find(event => event.k === 'start_utterance');
+    const emitted = rescued.events.find(event => event.k === 'emit');
+    assert.equal(session.config.loudLatchAmbiguousEnabled, false);
+    assert.equal(session.config.loudLatchWitnessDb, 3);
+    assert.equal(rescued.metrics.utteranceCount, 1);
+    assert.equal(rescued.metrics.chunkCount, 1);
+    assert.ok(start.time >= 0.9 && start.time <= 1.2);
+    assert.equal(emitted.s0, 0);
+    assert.ok(emitted.s1 >= 2100);
+    assert.ok(emitted.sm >= 1000);
+    assert.ok(rescued.frames.some(frame => frame.lr === true));
+    assert.ok(rescued.frames.every(frame => frame.lr === undefined || frame.lr === true));
+    assert.ok(rescued.frames.filter(frame => frame.q >= 4 && frame.q <= 6)
+      .every(frame => frame.e === 'ambiguous' && frame.ls === 0 && frame.ll === false));
+    const witnessedSpeech = rescued.frames.filter(frame => frame.q >= 7 && frame.q <= 10);
+    assert.ok(witnessedSpeech.some(frame => frame.dy >= 4 && frame.dy < 7));
+  });
+
+  it('leaves the quiet continuing branch unchanged with the loud master enabled', () => {
+    function quietTrace(loudRegimeEnabled) {
+      const frames = [];
+      const events = [];
+      const harness = makeRecorderHarness({
+        gateConfig: { loudRegimeEnabled },
+        onFrame: frame => frames.push(frame),
+        onEvent: event => events.push(event),
+      });
+      prefill(harness, -52);
+      for (let index = 0; index < 110; index += 1) harness.drive(-43);
+      harness.flush();
+      return {
+        frames,
+        starts: events.filter(event => event.k === 'start_utterance'),
+        emits: events.filter(event => event.k === 'emit'),
+      };
+    }
+
+    assert.deepStrictEqual(quietTrace(true), quietTrace(false));
+  });
+
+  it('keeps ambiguous-only streaks inert when the ambiguous option defaults off', () => {
+    const harness = makeRecorderHarness({
+      gateConfig: { loudRegimeEnabled: true },
+      recorderConfig: { loudLatchMs: 100 },
+    });
+    prefill(harness, -30);
+    harness.gate.floorDb = -30;
+    harness.gate.isLoudRegime = true;
+    for (let index = 0; index < 400; index += 1) harness.gate.process(-27.5, 0.01);
+    harness.gate.updateFloorTracking = () => {};
+
+    for (let index = 0; index < 120; index += 1) {
+      const frame = harness.drive(-27.5);
+      assert.strictEqual(frame.output.evidence, 'ambiguous');
+      assert.strictEqual(frame.latchedContinuingOnset, false);
+    }
+
+    assert.strictEqual(harness.loudLatchAmbiguousEnabled, false);
     assert.strictEqual(harness.endpoint.state, 'idle');
   });
 

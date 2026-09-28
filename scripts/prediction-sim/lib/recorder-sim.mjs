@@ -68,6 +68,7 @@ function makeSessionConfig(harness) {
     loudRiseDbPerSec: gate.config.loudRiseDbPerSec,
     loudLatchMs: harness.loudLatchMs,
     loudLatchAmbiguousEnabled: harness.loudLatchAmbiguousEnabled,
+    loudLatchWitnessDb: harness.loudLatchWitnessDb,
     loudFlatTerminateEnabled: harness.loudFlatTerminateEnabled,
     loudFlatSpreadDb: harness.loudFlatSpreadDb,
     loudFlatTerminateSeconds: harness.loudFlatTerminateSeconds,
@@ -108,6 +109,7 @@ export function makeRecorderHarness({
     loudPreRollMs: recorderConfig.loudPreRollMs ?? endpoint.configuration.preRollSamples / 16,
     loudLatchMs: recorderConfig.loudLatchMs ?? 400,
     loudLatchAmbiguousEnabled: recorderConfig.loudLatchAmbiguousEnabled ?? false,
+    loudLatchWitnessDb: recorderConfig.loudLatchWitnessDb ?? 3,
     loudFlatTerminateEnabled: recorderConfig.loudFlatTerminateEnabled ?? false,
     loudFlatSpreadDb: recorderConfig.loudFlatSpreadDb ?? 5,
     loudFlatTerminateSeconds: recorderConfig.loudFlatTerminateSeconds ?? 2,
@@ -168,6 +170,7 @@ export function makeRecorderHarness({
       copyOptional(record, 'fl', output.floorDb);
       record.fc = output.floorConverged;
       copyOptional(record, 'dy', output.dynamicsSpreadDb);
+      if (output.isLoudRegime) record.lr = true;
       this.frameSequence += 1;
       if (typeof onFrame === 'function') onFrame(record);
       return record;
@@ -220,7 +223,7 @@ export function makeRecorderHarness({
           this.streakPeakDb = Math.max(this.streakPeakDb ?? frameDb, frameDb);
         }
         this.sustainedContinuingMs += frameDuration * 1000;
-        if ((output.dynamicsSpreadDb ?? 0) >= this.gate.config.loudDynamicsSpreadDb) {
+        if ((output.dynamicsSpreadDb ?? 0) >= this.loudLatchWitnessDb) {
           this.streakSawDynamics = true;
         }
       } else if (!this.sustainedContinuingOnsetLatched) {
@@ -242,27 +245,25 @@ export function makeRecorderHarness({
           >= output.floorDb + this.gate.effectiveAdaptiveDeltaDb;
       const legacyLoudBranch = !this.gate.config.loudRegimeEnabled
         && output.floorDb >= VAD_LOUD_FLOOR_REGIME_DB;
+      const quietLatchQualified = quietRegimeEvidence
+        && quietRegimeFloorStable
+        && this.sustainedContinuingMs >= VAD_SUSTAINED_CONTINUING_ONSET_S * 1000;
+      const legacyLoudLatchQualified = legacyLoudBranch
+        && loudRegimeEvidence
+        && this.sustainedContinuingMs >= 1.5 * VAD_SUSTAINED_CONTINUING_ONSET_S * 1000;
+      const loudLatchQualified = output.isLoudRegime
+        && this.sustainedContinuingMs >= this.loudLatchMs
+        && this.streakSawDynamics;
       if (adaptivePath
         && output.floorConverged
         && (output.evidence === 'continuing'
           || (this.loudLatchAmbiguousEnabled && output.evidence === 'ambiguous'))
         && endpointWasIdle
-        && ((quietRegimeEvidence
-          && quietRegimeFloorStable
-          && this.sustainedContinuingMs >= VAD_SUSTAINED_CONTINUING_ONSET_S * 1000)
-          || ((output.isLoudRegime || legacyLoudBranch)
-            && loudRegimeEvidence
-            && this.sustainedContinuingMs >= (output.isLoudRegime
-              ? this.loudLatchMs
-              : 1.5 * VAD_SUSTAINED_CONTINUING_ONSET_S * 1000)
-            && ((legacyLoudBranch && !this.gate.config.loudRegimeEnabled)
-              || this.gate.config.loudDynamicsSpreadDb <= 0 || this.streakSawDynamics)))) {
+        && (quietLatchQualified || legacyLoudLatchQualified || loudLatchQualified)) {
         this.sustainedContinuingOnsetLatched = true;
       }
       if (output.isLoudRegime
         && this.sustainedContinuingMs >= this.loudLatchMs
-        && loudRegimeEvidence
-        && this.gate.config.loudDynamicsSpreadDb > 0
         && !this.streakSawDynamics
         && !this.latchWitnessRejectionCounted) {
         this.latchMissingDynamicsWitnessCount += 1;
@@ -584,6 +585,7 @@ export function makeRecorderHarness({
       this.streakStartFloorDb = null;
       this.streakPeakDb = null;
       this.sustainedContinuingOnsetLatched = false;
+      this.streakSawDynamics = false;
       return { type: 'finalizeUtterance', kind: 'stop' };
     },
 
