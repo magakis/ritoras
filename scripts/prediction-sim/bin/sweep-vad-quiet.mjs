@@ -265,6 +265,7 @@ function evaluateSession(item, override = {}, theta = STRONG_FRACTION_THRESHOLD)
     pureSilenceGrowthSeconds: g2.pureSilenceGrowthSeconds,
     softOnsetCount: replay.events.filter(event => event.k === 'start_utterance'
       && event.softOnset === true).length,
+    candidateEmitIntervals: candidateEmits,
     latchOriginatedThenDiscardedChurn: countLatchDiscardChurn(replay.events),
     gates: { G1: g1, G2: g2, G3: g3 },
     pass: g1.pass && g2.pass && g3.pass,
@@ -304,10 +305,18 @@ function parseArguments(argv) {
   return { inputs, overrides, theta };
 }
 
-export function runQuietSweep(inputs, { overrides = {}, theta = STRONG_FRACTION_THRESHOLD } = {}) {
+export function runQuietSweep(inputs, { overrides = {}, theta = STRONG_FRACTION_THRESHOLD, cache = null } = {}) {
   const files = inputs.flatMap(listTelemetryFiles).sort();
-  const sessions = files.map(readTelemetry);
-  const fidelity = sessions.map(mirrorFidelity);
+  const sessions = files.map(file => {
+    if (!cache) return readTelemetry(file);
+    if (!cache.sessions.has(file)) cache.sessions.set(file, readTelemetry(file));
+    return cache.sessions.get(file);
+  });
+  const fidelity = sessions.map(item => {
+    if (!cache) return mirrorFidelity(item);
+    if (!cache.fidelity.has(item.filePath)) cache.fidelity.set(item.filePath, mirrorFidelity(item));
+    return cache.fidelity.get(item.filePath);
+  });
   const evaluations = sessions.map(item => evaluateSession(item, overrides, theta));
   const sortedStrongFractions = evaluations.map(item => item.strongFraction).sort((a, b) => a - b);
   const quantile = p => sortedStrongFractions.length === 0
