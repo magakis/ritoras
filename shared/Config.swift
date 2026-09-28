@@ -240,6 +240,26 @@ struct SharedConfig {
         static let streamVadDynamicsSpreadDbDefault: Double = 9.0
         static let streamVadFlatSpreadDbKey = "streamVadFlatSpreadDb"
         static let streamVadFlatSpreadDbDefault: Double = 5.0
+        static let streamVadLoudRegimeEnabledKey = "streamVadLoudRegimeEnabled"
+        static let streamVadLoudRegimeEnabledDefault = true
+        static let streamVadLoudFloorRegimeEnterDbKey = "streamVadLoudFloorRegimeEnterDb"
+        static let streamVadLoudFloorRegimeEnterDbDefault: Double = -34.0
+        static let streamVadLoudFloorRegimeExitDbKey = "streamVadLoudFloorRegimeExitDb"
+        static let streamVadLoudFloorRegimeExitDbDefault: Double = -38.0
+        static let streamVadLoudRegimeEnterMsKey = "streamVadLoudRegimeEnterMs"
+        static let streamVadLoudRegimeEnterMsDefault: Int = 300
+        static let streamVadLoudRegimeExitMsKey = "streamVadLoudRegimeExitMs"
+        static let streamVadLoudRegimeExitMsDefault: Int = 1_000
+        static let streamVadLoudStrongDeltaDbKey = "streamVadLoudStrongDeltaDb"
+        static let streamVadLoudStrongDeltaDbDefault: Double = 7.0
+        static let streamVadLoudContinuationDeltaDbKey = "streamVadLoudContinuationDeltaDb"
+        static let streamVadLoudContinuationDeltaDbDefault: Double = 3.0
+        static let streamVadLoudSilenceDeltaDbKey = "streamVadLoudSilenceDeltaDb"
+        static let streamVadLoudSilenceDeltaDbDefault: Double = 2.0
+        static let streamVadLoudRiseDbPerSecKey = "streamVadLoudRiseDbPerSec"
+        static let streamVadLoudRiseDbPerSecDefault: Double = 12.0
+        static let streamVadLoudDynamicsSpreadDbKey = "streamVadLoudDynamicsSpreadDb"
+        static let streamVadLoudDynamicsSpreadDbDefault: Double = 9.0
         static let streamVadOnsetMsKey = "streamVadOnsetMs"
         static let streamVadOnsetMsDefault: Int = 70
         static let streamVadEndEvidenceMsKey = "streamVadEndEvidenceMs"
@@ -734,6 +754,104 @@ struct SharedConfig {
             forKey: Defaults.streamVadFlatSpreadDbKey
         ) as? NSNumber)?.doubleValue ?? Defaults.streamVadFlatSpreadDbDefault
         return value.isFinite ? min(max(value, 3.0), 8.0) : Defaults.streamVadFlatSpreadDbDefault
+    }
+
+    static func streamVadLoudRegimeEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudRegimeEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadLoudRegimeEnabledKey) as? Bool)
+            ?? Defaults.streamVadLoudRegimeEnabledDefault
+    }
+
+    static func streamVadLoudFloorRegimeEnterDb() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudFloorRegimeEnterDbDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadLoudFloorRegimeEnterDbKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadLoudFloorRegimeEnterDbDefault
+        return value.isFinite ? value : Defaults.streamVadLoudFloorRegimeEnterDbDefault
+    }
+
+    static func streamVadLoudFloorRegimeExitDb() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudFloorRegimeExitDbDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadLoudFloorRegimeExitDbKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadLoudFloorRegimeExitDbDefault
+        return value.isFinite ? value : Defaults.streamVadLoudFloorRegimeExitDbDefault
+    }
+
+    static func streamVadLoudRegimeEnterMs() -> Int {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudRegimeEnterMsDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadLoudRegimeEnterMsKey
+        ) as? NSNumber)?.intValue ?? Defaults.streamVadLoudRegimeEnterMsDefault
+        return max(0, value)
+    }
+
+    static func streamVadLoudRegimeExitMs() -> Int {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudRegimeExitMsDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadLoudRegimeExitMsKey
+        ) as? NSNumber)?.intValue ?? Defaults.streamVadLoudRegimeExitMsDefault
+        return max(0, value)
+    }
+
+    static func streamVadLoudStrongDeltaDb() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudStrongDeltaDbDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadLoudStrongDeltaDbKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadLoudStrongDeltaDbDefault
+        return value.isFinite ? value : Defaults.streamVadLoudStrongDeltaDbDefault
+    }
+
+    static func streamVadLoudContinuationDeltaDb() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudContinuationDeltaDbDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadLoudContinuationDeltaDbKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadLoudContinuationDeltaDbDefault
+        return value.isFinite ? value : Defaults.streamVadLoudContinuationDeltaDbDefault
+    }
+
+    static func streamVadLoudSilenceDeltaDb() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudSilenceDeltaDbDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadLoudSilenceDeltaDbKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadLoudSilenceDeltaDbDefault
+        return value.isFinite ? value : Defaults.streamVadLoudSilenceDeltaDbDefault
+    }
+
+    static func streamVadLoudRiseDbPerSec() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudRiseDbPerSecDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadLoudRiseDbPerSecKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadLoudRiseDbPerSecDefault
+        return value.isFinite ? max(0, value) : Defaults.streamVadLoudRiseDbPerSecDefault
+    }
+
+    static func streamVadLoudDynamicsSpreadDb() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudDynamicsSpreadDbDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadLoudDynamicsSpreadDbKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadLoudDynamicsSpreadDbDefault
+        return value.isFinite ? max(0, value) : Defaults.streamVadLoudDynamicsSpreadDbDefault
     }
 
     /// Reads the endpoint onset confirmation window (ms) from the App Group.

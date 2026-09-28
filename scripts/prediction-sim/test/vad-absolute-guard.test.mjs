@@ -55,7 +55,8 @@ describe('adaptive VAD absolute speech guard', () => {
     assert.ok(Math.abs(harness.gate.snapshot.floorDb - -25) <= 0.5);
     assert.ok(maximumDispersionDb >= 12);
     assert.ok(finalFrame !== null);
-    assert.ok(Math.abs(finalFrame.output.thresholdDb - (-25 + 10)) <= 0.5);
+    assert.strictEqual(finalFrame.output.isLoudRegime, true);
+    assert.ok(Math.abs(finalFrame.output.thresholdDb - (-25 + 7)) <= 0.5);
     assert.strictEqual(events.some(event => event.k === 'start_utterance'), false);
     assert.strictEqual(harness.chunkCount, 0);
     assert.strictEqual(harness.endpoint.state, 'idle');

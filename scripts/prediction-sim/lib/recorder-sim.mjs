@@ -106,7 +106,7 @@ export function makeRecorderHarness({
     headBufferSamples,
     postHeadPreRollSamples: 0,
     loudPreRollMs: recorderConfig.loudPreRollMs ?? endpoint.configuration.preRollSamples / 16,
-    loudLatchMs: recorderConfig.loudLatchMs ?? 1500,
+    loudLatchMs: recorderConfig.loudLatchMs ?? 400,
     loudLatchAmbiguousEnabled: recorderConfig.loudLatchAmbiguousEnabled ?? false,
     loudFlatTerminateEnabled: recorderConfig.loudFlatTerminateEnabled ?? false,
     loudFlatSpreadDb: recorderConfig.loudFlatSpreadDb ?? 5,

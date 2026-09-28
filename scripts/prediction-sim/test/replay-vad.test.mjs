@@ -42,6 +42,7 @@ function collectSession(frameDbs, options = {}) {
 function adaptiveSession() {
   const config = {
     mode: 'adaptive',
+    loudRegimeEnabled: false,
     strongDeltaDb: 10,
     continuationDeltaDb: 6,
     silenceDeltaDb: 3,
@@ -125,6 +126,11 @@ describe('VAD replay', () => {
     assert.strictEqual(SHIPPING_SESSION_CONFIG.minSpeechMs, 300);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.minChunkMs, 300);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.endpointPreRollMs, 500);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.loudRegimeEnabled, true);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.loudStrongDeltaDb, 7);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.loudContinuationDeltaDb, 3);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.loudSilenceDeltaDb, 2);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.loudLatchMs, 400);
   });
   it('records emitted chunk span and the endpoint state at the emission decision', () => {
     const events = [];

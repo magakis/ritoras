@@ -92,12 +92,23 @@ export function loadSession(input) {
     const text = fs.readFileSync(telemetryPath, 'utf8');
     const records = text.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
     const meta = records.find(record => record.t === 'meta') ?? {};
+    const sessionStartConfig = records.find(record => record.t === 'ev'
+      && record.k === 'session_start')?.c ?? null;
     const session = parseSession(text);
     const shortId = meta.jobId?.slice(0, 8) ?? path.basename(telemetryPath, '.jsonl').slice(0, 8);
     const id = `20260928-${shortId}`;
     const labelPath = path.join(fixtureDir, `${id}.txt`);
     const labels = fs.existsSync(labelPath) ? parseLabels(fs.readFileSync(labelPath, 'utf8').trim()) : [];
-    return { id, directory: path.dirname(telemetryPath), telemetryPath, meta, labels, session, source: 'telemetry' };
+    return {
+      id,
+      directory: path.dirname(telemetryPath),
+      telemetryPath,
+      meta,
+      sessionStartConfig,
+      labels,
+      session,
+      source: 'telemetry',
+    };
   }
   if (!wavPath || !fs.existsSync(wavPath)) {
     throw new Error(`session input must be a telemetry JSONL or a directory containing audio.wav: ${input}`);
@@ -117,14 +128,32 @@ function emittedIntervals(replay) {
   return replay.events.filter(event => event.k === 'emit').map(({ s0, s1 }) => ({ s0, s1 }));
 }
 
+function sessionWithConfig(session, config) {
+  const configured = { ...session, config };
+  Object.defineProperty(configured, 'configIsTelemetry', {
+    value: Boolean(session.configIsTelemetry),
+  });
+  return configured;
+}
+
 export function runSweep(directories, sets = [], sweeps = []) {
   const sessions = directories.map(loadSession);
-  const baseline = new Map(sessions.map(item => [item.id,
-    replaySession(item.session, item.source === 'telemetry' ? item.session.config : SHIPPING_SESSION_CONFIG, {
+  const baseline = new Map(sessions.map(item => {
+    const config = item.source === 'telemetry'
+      ? {
+        ...item.session.config,
+        // Older telemetry predates this master flag; reproduce the recorded
+        // path instead of inheriting today's enabled shipping default.
+        loudRegimeEnabled: item.sessionStartConfig?.loudRegimeEnabled ?? false,
+      }
+      : SHIPPING_SESSION_CONFIG;
+    const baselineSession = sessionWithConfig(item.session, config);
+    return [item.id, replaySession(baselineSession, baselineSession.config, {
       fromWav: item.wav ?? null,
       labels: item.labels,
       compare: false,
-    })]));
+    })];
+  }));
   const setOverrides = Object.fromEntries(sets.map(item => [item.key, item.value]));
   const configs = expandSweep({}, sweeps).map(config => ({ ...config, ...setOverrides }));
   const runs = configs.map((overrides, index) => {

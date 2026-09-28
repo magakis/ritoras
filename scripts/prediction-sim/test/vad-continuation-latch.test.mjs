@@ -31,7 +31,7 @@ describe('sustained continuing onset latch regime split', () => {
 
   it('does not latch dispersive loud-regime noise whose peaks stay below floor plus strong delta', () => {
     const harness = makeRecorderHarness({
-      gateConfig: { adaptiveDynamicsSpreadDb: 24 },
+      gateConfig: { adaptiveDynamicsSpreadDb: 24, loudRegimeEnabled: false },
     });
     prefill(harness, -30);
     assert.strictEqual(harness.gate.coldStartConverged, true);
@@ -49,7 +49,7 @@ describe('sustained continuing onset latch regime split', () => {
 
   it('latches a loud-room speech interjection after 1.5 seconds of strong-level continuing evidence', () => {
     const harness = makeRecorderHarness({
-      gateConfig: { adaptiveDynamicsSpreadDb: 24 },
+      gateConfig: { adaptiveDynamicsSpreadDb: 24, loudRegimeEnabled: false },
     });
     prefill(harness, -30);
     let latchAtMs = null;
@@ -135,6 +135,7 @@ describe('sustained continuing onset latch regime split', () => {
         mode: 'calibrated',
         calibrationMs: 120,
         adaptiveAbsoluteSpeechFloorDb: -80,
+        loudRegimeEnabled: false,
       },
     });
     for (let i = 0; i < 12; i++) {

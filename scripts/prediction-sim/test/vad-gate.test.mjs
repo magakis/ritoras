@@ -691,4 +691,104 @@ describe('VADThresholdGate', () => {
     gate.updateFloorTracking(-40, 0.02, true);
     assert.strictEqual(gate.isLoudRegime, false);
   });
+
+  it('pins the shipping loud-regime defaults and applies ordered relaxed thresholds', () => {
+    const defaults = config({ mode: 'adaptive' });
+    assert.strictEqual(defaults.loudRegimeEnabled, true);
+    assert.strictEqual(defaults.loudRegimeEnterDb, -34);
+    assert.strictEqual(defaults.loudRegimeExitDb, -38);
+    assert.strictEqual(defaults.loudRegimeEnterMs, 300);
+    assert.strictEqual(defaults.loudRegimeExitMs, 1000);
+    assert.strictEqual(defaults.loudStrongDeltaDb, 7);
+    assert.strictEqual(defaults.loudContinuationDeltaDb, 3);
+    assert.strictEqual(defaults.loudSilenceDeltaDb, 2);
+    assert.strictEqual(defaults.loudRiseDbPerSec, 12);
+    assert.strictEqual(defaults.loudDynamicsSpreadDb, 9);
+
+    const gate = seedAdaptiveGate({ mode: 'adaptive' }, -30);
+    gate.floorDb = -30;
+    for (let index = 0; index < 29; index += 1) {
+      gate.updateFloorTracking(-30, 0.01, false);
+    }
+    assert.strictEqual(gate.isLoudRegime, false);
+    gate.updateFloorTracking(-30, 0.01, false);
+    assert.strictEqual(gate.isLoudRegime, true);
+
+    const output = gate.process(-23, 0.01);
+    assert.strictEqual(output.isLoudRegime, true);
+    assert.strictEqual(output.thresholdDb, -23);
+    assert.strictEqual(output.continuationThresholdDb, -27);
+    assert.strictEqual(output.silenceThresholdDb, -28);
+    assert.ok(output.continuationThresholdDb <= output.thresholdDb - 1);
+    assert.ok(output.silenceThresholdDb <= Math.min(5, output.continuationThresholdDb - 1));
+  });
+
+  it('does not enter while floor oscillates inside the loud-regime dead band', () => {
+    const gate = seedAdaptiveGate({ mode: 'adaptive' }, -36);
+    gate.floorDb = -36;
+    for (let index = 0; index < 100; index += 1) {
+      gate.floorDb = index % 2 === 0 ? -34 : -36;
+      gate.updateFloorTracking(-36, 0.01, false);
+    }
+    assert.strictEqual(gate.isLoudRegime, false);
+  });
+
+  it('exits after 1000 ms only while the endpoint is idle', () => {
+    const gate = seedAdaptiveGate({ mode: 'adaptive' }, -30);
+    gate.floorDb = -30;
+    for (let index = 0; index < 30; index += 1) {
+      gate.updateFloorTracking(-30, 0.01, false);
+    }
+    assert.strictEqual(gate.isLoudRegime, true);
+
+    for (let index = 0; index < 150; index += 1) {
+      gate.floorDb = -38;
+      gate.updateFloorTracking(-38, 0.01, false);
+    }
+    assert.strictEqual(gate.isLoudRegime, true);
+
+    for (let index = 0; index < 99; index += 1) {
+      gate.floorDb = -38;
+      gate.updateFloorTracking(-38, 0.01, true);
+    }
+    assert.strictEqual(gate.isLoudRegime, true);
+    gate.floorDb = -38;
+    gate.updateFloorTracking(-38, 0.01, true);
+    assert.strictEqual(gate.isLoudRegime, false);
+  });
+
+  it('keeps quiet-floor outputs identical with loud-regime enabled or disabled', () => {
+    const enabled = seedAdaptiveGate({ mode: 'adaptive', loudRegimeEnabled: true }, -45);
+    const disabled = seedAdaptiveGate({ mode: 'adaptive', loudRegimeEnabled: false }, -45);
+    for (const db of [-44, -42, -45, -41, -43, -45]) {
+      enabled.floorDb = -40;
+      disabled.floorDb = -40;
+      assert.deepStrictEqual(enabled.process(db, 0.01), disabled.process(db, 0.01));
+    }
+  });
+
+  it('keeps the old loud-floor path byte-identical when the master kill switch is off', () => {
+    const baseline = seedAdaptiveGate({ mode: 'adaptive', loudRegimeEnabled: false }, -30);
+    const overridden = seedAdaptiveGate({
+      mode: 'adaptive',
+      loudRegimeEnabled: false,
+      loudStrongDeltaDb: 24,
+      loudContinuationDeltaDb: 20,
+      loudSilenceDeltaDb: 5,
+      loudDynamicsSpreadDb: 0,
+      loudRiseDbPerSec: 0,
+    }, -30);
+    const baselineOutputs = [];
+    const overriddenOutputs = [];
+    for (const gate of [baseline, overridden]) {
+      gate.floorDb = -30;
+    }
+    for (const db of [-19, -21, -20, -22, -19, -25]) {
+      baselineOutputs.push(baseline.process(db, 0.01));
+      overriddenOutputs.push(overridden.process(db, 0.01));
+    }
+    assert.deepStrictEqual(overriddenOutputs, baselineOutputs);
+    assert.strictEqual(baseline.isLoudRegime, false);
+    assert.strictEqual(overridden.isLoudRegime, false);
+  });
 });

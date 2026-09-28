@@ -1079,7 +1079,17 @@ actor StreamingAudioRecorder {
             adaptiveFallTauSeconds: SharedConfig.streamVadFallTauSeconds(),
             adaptiveDynamicsEnabled: SharedConfig.streamVadDynamicsEnabled(),
             adaptiveDynamicsSpreadDb: SharedConfig.streamVadDynamicsSpreadDb(),
-            adaptiveFlatSpreadDb: SharedConfig.streamVadFlatSpreadDb()
+            adaptiveFlatSpreadDb: SharedConfig.streamVadFlatSpreadDb(),
+            loudRegimeEnabled: SharedConfig.streamVadLoudRegimeEnabled(),
+            loudRegimeEnterDb: SharedConfig.streamVadLoudFloorRegimeEnterDb(),
+            loudRegimeExitDb: SharedConfig.streamVadLoudFloorRegimeExitDb(),
+            loudRegimeEnterMs: SharedConfig.streamVadLoudRegimeEnterMs(),
+            loudRegimeExitMs: SharedConfig.streamVadLoudRegimeExitMs(),
+            loudStrongDeltaDb: SharedConfig.streamVadLoudStrongDeltaDb(),
+            loudContinuationDeltaDb: SharedConfig.streamVadLoudContinuationDeltaDb(),
+            loudSilenceDeltaDb: SharedConfig.streamVadLoudSilenceDeltaDb(),
+            loudRiseDbPerSec: SharedConfig.streamVadLoudRiseDbPerSec(),
+            loudDynamicsSpreadDb: SharedConfig.streamVadLoudDynamicsSpreadDb()
         )
         self.vadGateConfig = vadGateConfig
         vad = VADContext(

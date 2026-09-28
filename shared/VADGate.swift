@@ -32,6 +32,68 @@ struct VADGateConfig {
     let adaptiveDynamicsEnabled: Bool
     let adaptiveDynamicsSpreadDb: Double
     let adaptiveFlatSpreadDb: Double
+    let loudRegimeEnabled: Bool
+    let loudRegimeEnterDb: Double
+    let loudRegimeExitDb: Double
+    let loudRegimeEnterMs: Int
+    let loudRegimeExitMs: Int
+    let loudStrongDeltaDb: Double
+    let loudContinuationDeltaDb: Double
+    let loudSilenceDeltaDb: Double
+    let loudRiseDbPerSec: Double
+    let loudDynamicsSpreadDb: Double
+
+    init(
+        mode: VADMode,
+        staticRms: Float,
+        calibrationMs: Int,
+        calibratedOffsetDb: Double,
+        adaptiveDeltaDb: Double,
+        adaptiveContinuationDeltaDb: Double,
+        adaptiveAbsoluteSpeechFloorDb: Double,
+        adaptiveRiseSpeedMultiplier: Double,
+        adaptiveSilenceDeltaDb: Double,
+        adaptiveStaleFloorSeconds: Double,
+        adaptiveFallTauSeconds: Double,
+        adaptiveDynamicsEnabled: Bool,
+        adaptiveDynamicsSpreadDb: Double,
+        adaptiveFlatSpreadDb: Double,
+        loudRegimeEnabled: Bool = true,
+        loudRegimeEnterDb: Double = -34.0,
+        loudRegimeExitDb: Double = -38.0,
+        loudRegimeEnterMs: Int = 300,
+        loudRegimeExitMs: Int = 1_000,
+        loudStrongDeltaDb: Double = 7.0,
+        loudContinuationDeltaDb: Double = 3.0,
+        loudSilenceDeltaDb: Double = 2.0,
+        loudRiseDbPerSec: Double = 12.0,
+        loudDynamicsSpreadDb: Double = 9.0
+    ) {
+        self.mode = mode
+        self.staticRms = staticRms
+        self.calibrationMs = calibrationMs
+        self.calibratedOffsetDb = calibratedOffsetDb
+        self.adaptiveDeltaDb = adaptiveDeltaDb
+        self.adaptiveContinuationDeltaDb = adaptiveContinuationDeltaDb
+        self.adaptiveAbsoluteSpeechFloorDb = adaptiveAbsoluteSpeechFloorDb
+        self.adaptiveRiseSpeedMultiplier = adaptiveRiseSpeedMultiplier
+        self.adaptiveSilenceDeltaDb = adaptiveSilenceDeltaDb
+        self.adaptiveStaleFloorSeconds = adaptiveStaleFloorSeconds
+        self.adaptiveFallTauSeconds = adaptiveFallTauSeconds
+        self.adaptiveDynamicsEnabled = adaptiveDynamicsEnabled
+        self.adaptiveDynamicsSpreadDb = adaptiveDynamicsSpreadDb
+        self.adaptiveFlatSpreadDb = adaptiveFlatSpreadDb
+        self.loudRegimeEnabled = loudRegimeEnabled
+        self.loudRegimeEnterDb = loudRegimeEnterDb
+        self.loudRegimeExitDb = loudRegimeExitDb
+        self.loudRegimeEnterMs = loudRegimeEnterMs
+        self.loudRegimeExitMs = loudRegimeExitMs
+        self.loudStrongDeltaDb = loudStrongDeltaDb
+        self.loudContinuationDeltaDb = loudContinuationDeltaDb
+        self.loudSilenceDeltaDb = loudSilenceDeltaDb
+        self.loudRiseDbPerSec = loudRiseDbPerSec
+        self.loudDynamicsSpreadDb = loudDynamicsSpreadDb
+    }
 }
 
 struct VADGateOutput {
@@ -48,6 +110,7 @@ struct VADGateOutput {
     let trailingSilenceMs: Double?
     let dynamicsSpreadDb: Double?
     let shortSpreadDb: Double?
+    let isLoudRegime: Bool
 }
 
 final class VADThresholdGate: @unchecked Sendable {
@@ -91,6 +154,9 @@ final class VADThresholdGate: @unchecked Sendable {
     private let effectiveFallTauSeconds: Double
     let effectiveDynamicsSpreadDb: Double
     let effectiveFlatSpreadDb: Double
+    private let effectiveLoudStrongDeltaDb: Double
+    private let effectiveLoudContinuationDeltaDb: Double
+    private let effectiveLoudSilenceDeltaDb: Double
     private var behaviorMode: VADMode
     private var calibrationFinished = false
     private var calibrationElapsed = 0.0
@@ -116,6 +182,9 @@ final class VADThresholdGate: @unchecked Sendable {
     private var adaptiveRollingPercentileCache: Double?
     private var lastKnownMachineIsIdle = true
     private var speechCeilingDb: Double?
+    private var isLoudRegime = false
+    private var loudRegimeEnterElapsed = 0.0
+    private var loudRegimeExitElapsed = 0.0
     private var unfairLock = os_unfair_lock()
     private var lastOutput: VADGateOutput
 
@@ -141,6 +210,21 @@ final class VADThresholdGate: @unchecked Sendable {
         let effectiveFallTauSeconds = clamp(config.adaptiveFallTauSeconds, 0.2, 2.0)
         let effectiveDynamicsSpreadDb = clamp(config.adaptiveDynamicsSpreadDb, 6.0, 24.0)
         let effectiveFlatSpreadDb = clamp(config.adaptiveFlatSpreadDb, 3.0, 8.0)
+        let effectiveLoudStrongDeltaDb = min(
+            effectiveAdaptiveDeltaDb,
+            clamp(config.loudStrongDeltaDb, 3.0, 24.0)
+        )
+        let effectiveLoudContinuationDeltaDb = min(
+            min(
+                effectiveAdaptiveContinuationDeltaDb,
+                clamp(config.loudContinuationDeltaDb, 2.0, effectiveAdaptiveDeltaDb - 1.0)
+            ),
+            effectiveLoudStrongDeltaDb - 1.0
+        )
+        let effectiveLoudSilenceDeltaDb = min(
+            effectiveSilenceDeltaDb,
+            clamp(config.loudSilenceDeltaDb, 1.0, min(5.0, effectiveLoudContinuationDeltaDb - 1.0))
+        )
         let initialFloorDb: Double? = config.mode == .adaptive ? Self.floorMinDb : nil
         let initialThresholdDb = config.mode == .adaptive
             ? max(Self.floorMinDb + effectiveAdaptiveDeltaDb, effectiveAbsoluteSpeechFloorDb)
@@ -155,6 +239,9 @@ final class VADThresholdGate: @unchecked Sendable {
         self.effectiveFallTauSeconds = effectiveFallTauSeconds
         self.effectiveDynamicsSpreadDb = effectiveDynamicsSpreadDb
         self.effectiveFlatSpreadDb = effectiveFlatSpreadDb
+        self.effectiveLoudStrongDeltaDb = effectiveLoudStrongDeltaDb
+        self.effectiveLoudContinuationDeltaDb = effectiveLoudContinuationDeltaDb
+        self.effectiveLoudSilenceDeltaDb = effectiveLoudSilenceDeltaDb
         self.behaviorMode = config.mode
         self.adaptiveRefinementComplete = config.mode != .adaptive
         self.floorDb = initialFloorDb
@@ -177,7 +264,8 @@ final class VADThresholdGate: @unchecked Sendable {
             retroactiveSpeechMs: 0,
             trailingSilenceMs: nil,
             dynamicsSpreadDb: nil,
-            shortSpreadDb: nil
+            shortSpreadDb: nil,
+            isLoudRegime: false
         )
         calibrationFrames.reserveCapacity(36)
         adaptiveRollingDbs = Array(repeating: 0, count: Self.adaptiveRollingWindowCapacity)
@@ -227,6 +315,16 @@ final class VADThresholdGate: @unchecked Sendable {
             "dynamicsSpreadDb": effectiveDynamicsSpreadDb,
             "flatSpreadDb": effectiveFlatSpreadDb,
             "dynamicsEnabled": config.adaptiveDynamicsEnabled,
+            "loudRegimeEnabled": config.loudRegimeEnabled,
+            "loudRegimeEnterDb": config.loudRegimeEnterDb,
+            "loudRegimeExitDb": config.loudRegimeExitDb,
+            "loudRegimeEnterMs": config.loudRegimeEnterMs,
+            "loudRegimeExitMs": config.loudRegimeExitMs,
+            "loudStrongDeltaDb": effectiveLoudStrongDeltaDb,
+            "loudContinuationDeltaDb": effectiveLoudContinuationDeltaDb,
+            "loudSilenceDeltaDb": effectiveLoudSilenceDeltaDb,
+            "loudRiseDbPerSec": config.loudRiseDbPerSec,
+            "loudDynamicsSpreadDb": config.loudDynamicsSpreadDb,
             "staleFloorSeconds": effectiveStaleFloorSeconds,
             "staleFloorSecondsRaw": config.adaptiveStaleFloorSeconds,
             "fallTauSeconds": effectiveFallTauSeconds,
@@ -582,12 +680,40 @@ final class VADThresholdGate: @unchecked Sendable {
     }
 
     private func dynamicsGatedEvidence(_ evidence: VADEvidence, dispersionDb: Double) -> VADEvidence {
+        let dynamicsSpreadDb = isLoudRegime
+            ? max(0, config.loudDynamicsSpreadDb)
+            : effectiveDynamicsSpreadDb
         guard config.adaptiveDynamicsEnabled,
               evidence == .strong,
-              dispersionDb < effectiveDynamicsSpreadDb else {
+              dynamicsSpreadDb > 0,
+              dispersionDb < dynamicsSpreadDb else {
             return evidence
         }
         return .continuing
+    }
+
+    private func updateLoudRegime(duration: Double, machineIsIdle: Bool) {
+        guard config.loudRegimeEnabled, let floorDb else { return }
+        if floorDb >= config.loudRegimeEnterDb {
+            loudRegimeEnterElapsed += max(0, duration)
+            loudRegimeExitElapsed = 0
+            if loudRegimeEnterElapsed * 1_000.0 >= Double(config.loudRegimeEnterMs) {
+                isLoudRegime = true
+            }
+        } else if floorDb <= config.loudRegimeExitDb {
+            loudRegimeEnterElapsed = 0
+            if machineIsIdle {
+                loudRegimeExitElapsed += max(0, duration)
+                if loudRegimeExitElapsed * 1_000.0 >= Double(config.loudRegimeExitMs) {
+                    isLoudRegime = false
+                }
+            } else {
+                loudRegimeExitElapsed = 0
+            }
+        } else {
+            loudRegimeEnterElapsed = 0
+            loudRegimeExitElapsed = 0
+        }
     }
 
     /// Updates the adaptive floor using the current VAD evidence. The rolling
@@ -602,6 +728,7 @@ final class VADThresholdGate: @unchecked Sendable {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         lastKnownMachineIsIdle = machineIsIdle
+        updateLoudRegime(duration: duration, machineIsIdle: machineIsIdle)
         guard behaviorMode == .adaptive else { return }
         guard floorDb != nil else { return }
         guard adaptiveRefinementComplete else { return }
@@ -611,11 +738,13 @@ final class VADThresholdGate: @unchecked Sendable {
             riseCap = 0
         case .continuing:
             riseCap = machineIsIdle
-                ? Self.elevatedRiseDbPerSecond * effectiveRiseSpeedMultiplier
+                ? (isLoudRegime ? config.loudRiseDbPerSec : Self.elevatedRiseDbPerSecond)
+                    * effectiveRiseSpeedMultiplier
                 : 0
         case .ambiguous, .silence:
             riseCap = machineIsIdle
-                ? Self.elevatedRiseDbPerSecond * effectiveRiseSpeedMultiplier
+                ? (isLoudRegime ? config.loudRiseDbPerSec : Self.elevatedRiseDbPerSecond)
+                    * effectiveRiseSpeedMultiplier
                 : 0
         }
         if machineIsIdle, let speechCeilingDb {
@@ -659,6 +788,9 @@ final class VADThresholdGate: @unchecked Sendable {
     func recalibrateFloor() {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
+        isLoudRegime = false
+        loudRegimeEnterElapsed = 0
+        loudRegimeExitElapsed = 0
         switch config.mode {
         case .adaptive:
             behaviorMode = .adaptive
@@ -706,7 +838,8 @@ final class VADThresholdGate: @unchecked Sendable {
             retroactiveSpeechMs: 0,
             trailingSilenceMs: nil,
             dynamicsSpreadDb: nil,
-            shortSpreadDb: nil
+            shortSpreadDb: nil,
+            isLoudRegime: false
         )
     }
 
@@ -859,14 +992,33 @@ final class VADThresholdGate: @unchecked Sendable {
             retroactiveSpeechMs: lastOutput.retroactiveSpeechMs,
             trailingSilenceMs: lastOutput.trailingSilenceMs,
             dynamicsSpreadDb: lastOutput.dynamicsSpreadDb,
-            shortSpreadDb: lastOutput.shortSpreadDb
+            shortSpreadDb: lastOutput.shortSpreadDb,
+            isLoudRegime: isLoudRegime
         )
     }
 
     private func adaptiveThresholds(
         floor: Double
     ) -> (strong: Double, continuation: Double, silence: Double) {
-        (
+        if isLoudRegime {
+            let strongThresholdDb = max(
+                floor + effectiveLoudStrongDeltaDb,
+                effectiveAbsoluteSpeechFloorDb
+            )
+            let continuationThresholdDb = min(
+                max(floor + effectiveLoudContinuationDeltaDb, effectiveAbsoluteSpeechFloorDb),
+                strongThresholdDb - 1.0
+            )
+            return (
+                strong: strongThresholdDb,
+                continuation: continuationThresholdDb,
+                silence: min(
+                    min(floor + effectiveLoudSilenceDeltaDb, 5.0),
+                    continuationThresholdDb - 1.0
+                )
+            )
+        }
+        return (
             strong: max(floor + effectiveAdaptiveDeltaDb, effectiveAbsoluteSpeechFloorDb),
             continuation: max(floor + effectiveAdaptiveContinuationDeltaDb, effectiveAbsoluteSpeechFloorDb),
             silence: floor + effectiveSilenceDeltaDb
@@ -943,7 +1095,8 @@ final class VADThresholdGate: @unchecked Sendable {
         retroactiveSpeechMs: Double,
         trailingSilenceMs: Double?,
         dynamicsSpreadDb: Double? = nil,
-        shortSpreadDb: Double? = nil
+        shortSpreadDb: Double? = nil,
+        isLoudRegime: Bool? = nil
     ) -> VADGateOutput {
         let output = VADGateOutput(
             isSpeech: isSpeech,
@@ -958,7 +1111,8 @@ final class VADThresholdGate: @unchecked Sendable {
             retroactiveSpeechMs: retroactiveSpeechMs,
             trailingSilenceMs: trailingSilenceMs,
             dynamicsSpreadDb: dynamicsSpreadDb,
-            shortSpreadDb: shortSpreadDb
+            shortSpreadDb: shortSpreadDb,
+            isLoudRegime: isLoudRegime ?? self.isLoudRegime
         )
         lastOutput = output
         return output
