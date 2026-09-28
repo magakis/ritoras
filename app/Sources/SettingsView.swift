@@ -194,6 +194,18 @@ struct SettingsView: View {
             }
             .pickerStyle(.segmented)
 
+            Stepper(value: Binding(
+                get: { settings.followMeWindowSeconds },
+                set: { settings.followMeWindowSeconds = min(max($0, 15), 600) }
+            ), in: 15...600) {
+                HStack {
+                    Text("Follow-Me Window")
+                    Spacer()
+                    Text("\(settings.followMeWindowSeconds) s")
+                        .foregroundColor(.secondary)
+                }
+            }
+
             if settings.dictationMode == .stream {
                 NavigationLink("Streaming VAD") {
                     VADSettingsView()
@@ -202,7 +214,7 @@ struct SettingsView: View {
         } header: {
             Text("Dictation")
         } footer: {
-            Text("Batch records the whole clip then transcribes (most reliable). Stream transcribes live as you pause — faster feedback, needs a stable connection. Streaming VAD settings only affect Stream mode.")
+            Text("Batch records the whole clip then transcribes (most reliable). Stream transcribes live as you pause — faster feedback, needs a stable connection. Streaming VAD settings only affect Stream mode. How long a completed dictation waits to be pasted into the next field you focus.")
         }
     }
 

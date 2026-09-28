@@ -10,6 +10,7 @@ class AppSettings: ObservableObject {
     @Published var autoCapitalizationEnabled: Bool = true
     @Published var autocorrectOnSpaceEnabled: Bool = true
     @Published var dictationMode: SharedConfig.DictationMode = .batch
+    @Published var followMeWindowSeconds: Int = SharedConfig.Defaults.followMeWindowSecondsDefault
     @Published var verboseLogging: Bool = SharedConfig.Defaults.verboseLoggingDefault
     @Published var hapticsEnabled: Bool = SharedConfig.Defaults.hapticsEnabledDefault
     @Published var keyboardLanguage: KeyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
@@ -38,6 +39,11 @@ class AppSettings: ObservableObject {
         autoCapitalizationEnabled = SharedConfig.autoCapitalizationEnabled()
         autocorrectOnSpaceEnabled = SharedConfig.autocorrectOnSpaceEnabled()
         dictationMode = SharedConfig.dictationMode()
+        followMeWindowSeconds = min(max(
+            appGroupDefaults?.object(forKey: SharedConfig.Defaults.followMeWindowSecondsKey) as? Int
+                ?? SharedConfig.Defaults.followMeWindowSecondsDefault,
+            15
+        ), 600)
         verboseLogging = SharedConfig.verboseLoggingEnabled()
         hapticsEnabled = SharedConfig.hapticsEnabled()
         keyboardLanguage = SharedConfig.keyboardLanguage()
@@ -79,6 +85,9 @@ class AppSettings: ObservableObject {
             FileLogger.shared.info(.settings, "saving dictationMode",
                                    payload: ["value": newValue.rawValue])
             self?.saveDictationMode(newValue)
+        }.store(in: &cancellables)
+        $followMeWindowSeconds.dropFirst().sink { [weak self] newValue in
+            self?.saveFollowMeWindowSeconds(newValue)
         }.store(in: &cancellables)
         $verboseLogging.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving verboseLogging",
@@ -155,6 +164,7 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(autoCapitalizationEnabled, forKey: SharedConfig.Defaults.autoCapitalizationEnabledKey)
         appGroupDefaults?.set(autocorrectOnSpaceEnabled, forKey: SharedConfig.Defaults.autocorrectOnSpaceEnabledKey)
         appGroupDefaults?.set(dictationMode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
+        saveFollowMeWindowSeconds(followMeWindowSeconds)
         appGroupDefaults?.set(verboseLogging, forKey: SharedConfig.Defaults.verboseLoggingKey)
         appGroupDefaults?.set(hapticsEnabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
         appGroupDefaults?.set(keyboardLanguage.rawValue, forKey: SharedConfig.Defaults.keyboardLanguageKey)
@@ -200,6 +210,12 @@ class AppSettings: ObservableObject {
 
     private func saveDictationMode(_ mode: SharedConfig.DictationMode) {
         appGroupDefaults?.set(mode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
+        postSettingsChanged()
+    }
+
+    private func saveFollowMeWindowSeconds(_ value: Int) {
+        let clampedValue = min(max(value, 15), 600)
+        appGroupDefaults?.set(clampedValue, forKey: SharedConfig.Defaults.followMeWindowSecondsKey)
         postSettingsChanged()
     }
 
@@ -290,6 +306,7 @@ class AppSettings: ObservableObject {
         autoCapitalizationEnabled = SharedConfig.Defaults.autoCapitalizationEnabledDefault
         autocorrectOnSpaceEnabled = SharedConfig.Defaults.autocorrectOnSpaceEnabledDefault
         dictationMode = .batch
+        followMeWindowSeconds = SharedConfig.Defaults.followMeWindowSecondsDefault
         verboseLogging = SharedConfig.Defaults.verboseLoggingDefault
         hapticsEnabled = SharedConfig.Defaults.hapticsEnabledDefault
         keyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault

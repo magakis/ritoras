@@ -173,6 +173,8 @@ struct SharedConfig {
         /// Must exceed the keyboard's catch-up window (seconds) so a suspended
         /// keyboard can still fetch it on return.
         static let terminalStateRetentionSeconds: TimeInterval = 120
+        static let followMeWindowSecondsKey = "followMeWindowSeconds"
+        static let followMeWindowSecondsDefault: Int = 120
         /// Background-task lifetime keeping the localhost listener serving /state
         /// after cancel(). Unlike stop(), cancel() has no transcription to finish;
         /// the grace window lets a suspended keyboard return and fetch the
@@ -656,6 +658,15 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.streamVadSpeechRmsKey) as? Float)
             ?? Defaults.streamVadSpeechRmsDefault
+    }
+
+    /// Reads the follow-me dictation delivery window from the App Group.
+    static func followMeWindowSeconds() -> Int {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.followMeWindowSecondsDefault
+        }
+        return (defaults.object(forKey: Defaults.followMeWindowSecondsKey) as? Int)
+            ?? Defaults.followMeWindowSecondsDefault
     }
 
     /// Reads the streaming VAD mode from the App Group.
@@ -1236,6 +1247,11 @@ struct SharedConfig {
         if let data = try? JSONEncoder().encode(payload) {
             defaults.set(data, forKey: Defaults.dictationPayloadKey)
         }
+    }
+
+    static func clearDictationSnapshot() {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return }
+        defaults.removeObject(forKey: Defaults.dictationPayloadKey)
     }
 
     // MARK: - Snapshot file channel (cfprefsd-bypass fast path)
