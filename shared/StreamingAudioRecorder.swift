@@ -81,6 +81,7 @@ enum VADTelemetryEventKind: String, Sendable {
     case sessionEnd = "session_end"
     case outcome
     case chunkReceived = "chunk_received"
+    case flatTerminate = "flat_terminate"
 }
 
 struct VADTelemetryEvent: @unchecked Sendable {
@@ -211,6 +212,9 @@ private final class VADContext: @unchecked Sendable {
     let loudLatchMs: Int
     let loudLatchAmbiguousEnabled: Bool
     let loudLatchWitnessDb: Double
+    let loudFlatSpreadDb: Double
+    let loudFlatTerminateSeconds: Double
+    let loudFlatTerminateEnabled: Bool
     let sessionHeadBufferSamples: Int
     let analysisHpf: VADHighPassFilter?
 
@@ -241,6 +245,9 @@ private final class VADContext: @unchecked Sendable {
     private var streakPeakDb: Double?
     private var streakSawDynamics = false
     private var sustainedContinuingOnsetLatched = false
+    private var loudFlatStreakMs = 0.0
+    private var loudFlatStreakStartSeconds: Double?
+    private var loudFlatTerminatorActive = false
     private var telemetrySequence: UInt64 = 0
     private var telemetrySink: VADTelemetrySink?
 
@@ -256,6 +263,9 @@ private final class VADContext: @unchecked Sendable {
         loudLatchMs: Int,
         loudLatchAmbiguousEnabled: Bool,
         loudLatchWitnessDb: Double,
+        loudFlatSpreadDb: Double,
+        loudFlatTerminateSeconds: Double,
+        loudFlatTerminateEnabled: Bool,
         analysisHpfEnabled: Bool,
         analysisHpfCutoffHz: Double
     ) {
@@ -283,6 +293,9 @@ private final class VADContext: @unchecked Sendable {
         self.loudLatchMs = max(1, loudLatchMs)
         self.loudLatchAmbiguousEnabled = loudLatchAmbiguousEnabled
         self.loudLatchWitnessDb = max(0, loudLatchWitnessDb)
+        self.loudFlatSpreadDb = max(0, loudFlatSpreadDb)
+        self.loudFlatTerminateSeconds = max(0, loudFlatTerminateSeconds)
+        self.loudFlatTerminateEnabled = loudFlatTerminateEnabled
         self.analysisHpf = analysisHpfEnabled
             ? VADHighPassFilter(cutoffHz: analysisHpfCutoffHz)
             : nil
@@ -323,6 +336,11 @@ private final class VADContext: @unchecked Sendable {
         config["loudLatchAmbiguousEnabled"] = loudLatchAmbiguousEnabled
         config["loudLatchWitnessDb"] = loudLatchWitnessDb
         config["loudPreRollMs"] = Double(loudPreRollSamples) / 16.0
+        config["loudFlatTerminateEnabled"] = loudFlatTerminateEnabled
+        config["loudFlatSpreadDb"] = loudFlatSpreadDb
+        config["loudFlatTerminateSeconds"] = loudFlatTerminateSeconds
+        config["loudFlatStreakMs"] = loudFlatStreakMs
+        config["loudFlatTerminatorActive"] = loudFlatTerminatorActive
         config["silenceMs"] = Double(silenceThresholdSamples) / 16.0
         config["minSpeechMs"] = Double(minSpeechSamples) / 16.0
         config["minChunkMs"] = Double(minChunkSamples) / 16.0
@@ -356,6 +374,9 @@ private final class VADContext: @unchecked Sendable {
         streakPeakDb = nil
         streakSawDynamics = false
         sustainedContinuingOnsetLatched = false
+        loudFlatStreakMs = 0
+        loudFlatStreakStartSeconds = nil
+        loudFlatTerminatorActive = false
     }
 
     func frameState(emissionSummary: EmissionSummary?) -> StreamingVADFrameState {
@@ -580,6 +601,40 @@ private final class VADContext: @unchecked Sendable {
             var endpointEvidence = adaptivePath && latchedContinuingOnset
                 ? StreamingEndpointEvidence.strong
                 : evidence
+            let flatTerminatorStateEligible = previousState == .speechActive
+                || (loudFlatTerminatorActive && previousState == .endPending)
+            let isLoudFlatFrame = loudFlatTerminateEnabled
+                && out.isLoudRegime
+                && flatTerminatorStateEligible
+                && out.dynamicsSpreadDb.map { $0 < loudFlatSpreadDb } == true
+                && out.shortSpreadDb.map { $0 < loudFlatSpreadDb } == true
+            if isLoudFlatFrame {
+                if !loudFlatTerminatorActive {
+                    loudFlatStreakStartSeconds = loudFlatStreakStartSeconds
+                        ?? Double(sessionElapsedSamples - frameLength) / 16_000.0
+                    loudFlatStreakMs += frameDuration * 1000.0
+                    if loudFlatStreakMs >= loudFlatTerminateSeconds * 1000.0 {
+                        loudFlatTerminatorActive = true
+                        if endpointEvidence != .silence {
+                            telemetrySink?.event(VADTelemetryEvent(
+                                kind: .flatTerminate,
+                                samples: Int(loudFlatStreakMs * 16.0),
+                                reason: "flat_spread",
+                                startMs: (loudFlatStreakStartSeconds ?? 0) * 1000.0,
+                                endMs: Double(sessionElapsedSamples) / 16.0,
+                                endpointState: previousState.rawValue
+                            ))
+                        }
+                    }
+                }
+                if loudFlatTerminatorActive {
+                    endpointEvidence = .silence
+                }
+            } else {
+                loudFlatStreakMs = 0
+                loudFlatStreakStartSeconds = nil
+                loudFlatTerminatorActive = false
+            }
             if previousState == .endPending,
                let shortSpreadDb = out.shortSpreadDb,
                let dynamicsSpreadDb = out.dynamicsSpreadDb,
@@ -590,6 +645,11 @@ private final class VADContext: @unchecked Sendable {
             }
             decision = endpoint.process(evidence: endpointEvidence, durationSamples: frameLength)
             telemetryDecision = decision
+            if loudFlatTerminatorActive && endpoint.state == .idle {
+                loudFlatStreakMs = 0
+                loudFlatStreakStartSeconds = nil
+                loudFlatTerminatorActive = false
+            }
             let decisionSilenceSamples = endpoint.accumulatedSilenceSamples
             telemetryDecisionSilenceSamples = decisionSilenceSamples
             if previousState != endpoint.state {
@@ -874,6 +934,9 @@ private final class VADContext: @unchecked Sendable {
         streakPeakDb = nil
         streakSawDynamics = false
         sustainedContinuingOnsetLatched = false
+        loudFlatStreakMs = 0
+        loudFlatStreakStartSeconds = nil
+        loudFlatTerminatorActive = false
         telemetrySink?.event(VADTelemetryEvent(
             kind: .emit,
             chunkId: id,
@@ -898,6 +961,9 @@ private final class VADContext: @unchecked Sendable {
         streakPeakDb = nil
         streakSawDynamics = false
         sustainedContinuingOnsetLatched = false
+        loudFlatStreakMs = 0
+        loudFlatStreakStartSeconds = nil
+        loudFlatTerminatorActive = false
         let decisionTimeEndpointState = endpoint.state.rawValue
         _ = endpoint.forceFinalize(kind: .stop)
         let sampleCount = accumulator.count
@@ -1154,6 +1220,9 @@ actor StreamingAudioRecorder {
             loudLatchMs: SharedConfig.streamVadLoudLatchMs(),
             loudLatchAmbiguousEnabled: SharedConfig.streamVadLoudLatchAmbiguousEnabled(),
             loudLatchWitnessDb: SharedConfig.streamVadLoudLatchWitnessDb(),
+            loudFlatSpreadDb: SharedConfig.streamVadLoudFlatSpreadDb(),
+            loudFlatTerminateSeconds: SharedConfig.streamVadLoudFlatTerminateSeconds(),
+            loudFlatTerminateEnabled: SharedConfig.streamVadLoudFlatTerminateEnabled(),
             analysisHpfEnabled: SharedConfig.streamVadAnalysisHpfEnabled(),
             analysisHpfCutoffHz: SharedConfig.Defaults.streamVadHpfCutoffHzDefault
         )

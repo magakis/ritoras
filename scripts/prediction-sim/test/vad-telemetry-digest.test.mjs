@@ -70,9 +70,20 @@ describe('VAD telemetry digest', () => {
     assert.match(text, /chunks=1 emitted speech=0\.1s\/0\.2s/);
     assert.match(text, /params\(onset=70ms endpointSilence=700ms mode=adaptive\)/);
     assert.match(text, /floorDb first\/min\/max\/last=-52\.0\/-55\.0\/-44\.0\/-44\.0/);
-    assert.match(text, /frames n=4 speech%=50 decisions\{emit=1,resume=1,rescue=1\}/);
+    assert.match(text, /frames n=4 speech%=50 decisions\{emit=1,resume=1,rescue=1,flatTerminate=0\}/);
     assert.match(text, /== Recording 1\/1 \(newest\) ==/);
     assert.match(text, /telemetryEnabled=ON mode=adaptive pause=balanced/);
+  });
+
+  it('includes the loud flat-terminator event in the decision tally', () => {
+    const jobId = '83345678-1234-1234-1234-123456789abc';
+    const file = recordingFile(`${jobId}-vad.jsonl`, [
+      { t: 'meta', jobId, startedAt: '2026-09-23T13:58:02Z' },
+      { t: 'ev', k: 'session_start', c: { mode: 'adaptive', loudFlatTerminateEnabled: true } },
+      { t: 'ev', k: 'flat_terminate', n: 48_000, r: 'flat_spread' },
+    ]);
+
+    assert.match(digest([file]), /decisions\{emit=0,resume=0,rescue=0,flatTerminate=1\}/);
   });
 
   it('renders chunk timing and receive correlation from full telemetry events', () => {

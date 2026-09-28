@@ -53,8 +53,8 @@ export const SHIPPING_SESSION_CONFIG = Object.freeze({
   loudLatchAmbiguousEnabled: false,
   loudLatchWitnessDb: 3,
   loudFlatTerminateEnabled: false,
-  loudFlatSpreadDb: 5,
-  loudFlatTerminateSeconds: 2,
+  loudFlatSpreadDb: 2.5,
+  loudFlatTerminateSeconds: 3,
   loudPreRollMs: 500,
 });
 
@@ -623,7 +623,8 @@ export function replaySession(session, configInput = session.config, {
     missedSpeechSeconds: labelMetrics.missedSpeechSeconds,
     chunkCount: emitted.length,
     meanOnsetLatencySeconds: labelMetrics.meanOnsetLatencySeconds,
-    terminatorActivationCount: generatedEvents.filter(event => event.k === 'loud_flat_terminate').length,
+    terminatorActivationCount: generatedEvents.filter(event =>
+      event.k === 'flat_terminate' || event.k === 'loud_flat_terminate').length,
     latchMissingDynamicsWitnessCount: harness.latchMissingDynamicsWitnessCount,
   };
   const divergence = compare && !fromWav

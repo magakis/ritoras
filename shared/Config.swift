@@ -268,6 +268,12 @@ struct SharedConfig {
         static let streamVadLoudLatchWitnessDbDefault: Double = 3.0
         static let streamVadLoudPreRollMsKey = "streamVadLoudPreRollMs"
         static let streamVadLoudPreRollMsDefault: Int = 500
+        static let streamVadLoudFlatSpreadDbKey = "streamVadLoudFlatSpreadDb"
+        static let streamVadLoudFlatSpreadDbDefault: Double = 2.5
+        static let streamVadLoudFlatTerminateSecondsKey = "streamVadLoudFlatTerminateSeconds"
+        static let streamVadLoudFlatTerminateSecondsDefault: Double = 3.0
+        static let streamVadLoudFlatTerminateEnabledKey = "streamVadLoudFlatTerminateEnabled"
+        static let streamVadLoudFlatTerminateEnabledDefault = false
         static let streamVadOnsetMsKey = "streamVadOnsetMs"
         static let streamVadOnsetMsDefault: Int = 70
         static let streamVadEndEvidenceMsKey = "streamVadEndEvidenceMs"
@@ -898,6 +904,34 @@ struct SharedConfig {
             forKey: Defaults.streamVadLoudPreRollMsKey
         ) as? NSNumber)?.intValue ?? Defaults.streamVadLoudPreRollMsDefault
         return min(max(value, 100), 1_000)
+    }
+
+    static func streamVadLoudFlatSpreadDb() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudFlatSpreadDbDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadLoudFlatSpreadDbKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadLoudFlatSpreadDbDefault
+        return value.isFinite ? max(0, value) : Defaults.streamVadLoudFlatSpreadDbDefault
+    }
+
+    static func streamVadLoudFlatTerminateSeconds() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudFlatTerminateSecondsDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadLoudFlatTerminateSecondsKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadLoudFlatTerminateSecondsDefault
+        return value.isFinite ? max(0, value) : Defaults.streamVadLoudFlatTerminateSecondsDefault
+    }
+
+    static func streamVadLoudFlatTerminateEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadLoudFlatTerminateEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadLoudFlatTerminateEnabledKey) as? Bool)
+            ?? Defaults.streamVadLoudFlatTerminateEnabledDefault
     }
 
     /// Reads the endpoint onset confirmation window (ms) from the App Group.

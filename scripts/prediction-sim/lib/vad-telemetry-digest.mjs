@@ -53,7 +53,7 @@ export function summarizeRecording({ filename, records, session = null, modified
   let speechFrames = 0;
   const floors = [];
   const timeline = [];
-  const decisionTallies = { emit: 0, resume: 0, rescue: 0 };
+  const decisionTallies = { emit: 0, resume: 0, rescue: 0, flatTerminate: 0 };
 
   for (const frame of frames) {
     const frameDuration = finiteNumber(frame.dt);
@@ -103,6 +103,7 @@ export function summarizeRecording({ filename, records, session = null, modified
   }
 
   const startEvent = events.find(event => event.k === 'session_start');
+  decisionTallies.flatTerminate = events.filter(event => event.k === 'flat_terminate').length;
   const parameters = startEvent && startEvent.c && typeof startEvent.c === 'object'
     && !Array.isArray(startEvent.c)
     ? startEvent.c
@@ -335,7 +336,7 @@ function render({ summaries, globalSettings, budget, exportedAt, timelineStride,
     lines.push(formatParameters(summary.parameters));
     lines.push(`floorDb first/min/max/last=${optionalFixed(summary.floorFirst)}/${optionalFixed(summary.floorMinimum)}/${optionalFixed(summary.floorMaximum)}/${optionalFixed(summary.floorLast)}`);
     const speechPercent = summary.speechPercent === null ? 'n/a' : String(summary.speechPercent);
-    const decisions = ['emit', 'resume', 'rescue']
+    const decisions = ['emit', 'resume', 'rescue', 'flatTerminate']
       .map(key => `${key}=${summary.decisionTallies[key] ?? 0}`)
       .join(',');
     lines.push(`frames n=${summary.frameCount} speech%=${speechPercent} decisions{${decisions}}`);

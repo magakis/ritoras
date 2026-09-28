@@ -185,7 +185,8 @@ export function runSweep(directories, sets = [], sweeps = []) {
         baselineReplay.frames,
         6,
       );
-      const terminatorEvents = replay.events.filter(event => event.k === 'loud_flat_terminate');
+      const terminatorEvents = replay.events.filter(event =>
+        event.k === 'flat_terminate' || event.k === 'loud_flat_terminate');
       const overlapSpeech = terminatorEvents.filter(event => item.labels.some(label =>
         event.time >= label.start && (event.startTime ?? event.time) < label.end)).length;
       return {

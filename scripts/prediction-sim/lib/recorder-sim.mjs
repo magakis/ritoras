@@ -72,6 +72,8 @@ function makeSessionConfig(harness) {
     loudFlatTerminateEnabled: harness.loudFlatTerminateEnabled,
     loudFlatSpreadDb: harness.loudFlatSpreadDb,
     loudFlatTerminateSeconds: harness.loudFlatTerminateSeconds,
+    loudFlatStreakMs: harness.flatFrameStreakMs,
+    loudFlatTerminatorActive: harness.flatTerminatorActive,
     loudPreRollMs: harness.loudPreRollMs,
   };
   return config;
@@ -111,10 +113,11 @@ export function makeRecorderHarness({
     loudLatchAmbiguousEnabled: recorderConfig.loudLatchAmbiguousEnabled ?? false,
     loudLatchWitnessDb: recorderConfig.loudLatchWitnessDb ?? 3,
     loudFlatTerminateEnabled: recorderConfig.loudFlatTerminateEnabled ?? false,
-    loudFlatSpreadDb: recorderConfig.loudFlatSpreadDb ?? 5,
-    loudFlatTerminateSeconds: recorderConfig.loudFlatTerminateSeconds ?? 2,
+    loudFlatSpreadDb: recorderConfig.loudFlatSpreadDb ?? 2.5,
+    loudFlatTerminateSeconds: recorderConfig.loudFlatTerminateSeconds ?? 3,
     flatFrameStreakMs: 0,
     flatFrameStreakStartTime: null,
+    flatTerminatorActive: false,
     terminatorActivationCount: 0,
     latchMissingDynamicsWitnessCount: 0,
     maxNoiseSamples,
@@ -227,10 +230,10 @@ export function makeRecorderHarness({
           this.streakSawDynamics = true;
         }
       } else if (!this.sustainedContinuingOnsetLatched) {
-        this.sustainedContinuingMs = 0;
-        this.streakStartFloorDb = null;
-        this.streakPeakDb = null;
-        this.streakSawDynamics = false;
+           this.sustainedContinuingMs = 0;
+           this.streakStartFloorDb = null;
+            this.streakPeakDb = null;
+            this.streakSawDynamics = false;
       }
 
       const quietRegimeEvidence = output.floorDb !== null
@@ -289,34 +292,39 @@ export function makeRecorderHarness({
         && latchedContinuingOnset
         ? 'strong'
         : output.evidence;
-      if (this.loudFlatTerminateEnabled && output.isLoudRegime
-        && previousState === 'speechActive') {
-        const flat = output.dynamicsSpreadDb !== null
+      const flatTerminatorStateEligible = previousState === 'speechActive'
+        || (this.flatTerminatorActive && previousState === 'endPending');
+      const flat = this.loudFlatTerminateEnabled
+        && output.isLoudRegime
+        && flatTerminatorStateEligible
+        && output.dynamicsSpreadDb !== null
           && output.shortSpreadDb !== null
           && output.dynamicsSpreadDb < this.loudFlatSpreadDb
           && output.shortSpreadDb < this.loudFlatSpreadDb;
-        if (flat) {
+      if (flat) {
+        if (!this.flatTerminatorActive) {
           this.flatFrameStreakStartTime ??= (this.sessionElapsedSamples - frameSamples) / 16000;
           this.flatFrameStreakMs += frameDuration * 1000;
-        } else {
-          this.flatFrameStreakMs = 0;
-          this.flatFrameStreakStartTime = null;
+          if (this.flatFrameStreakMs >= this.loudFlatTerminateSeconds * 1000) {
+            this.flatTerminatorActive = true;
+            if (endpointEvidence !== 'silence') {
+              this.terminatorActivationCount += 1;
+              this.emitEvent({
+                t: 'ev',
+                k: 'flat_terminate',
+                n: Math.round(this.flatFrameStreakMs * 16),
+                r: 'flat_spread',
+                startTime: this.flatFrameStreakStartTime,
+                time: this.sessionElapsedSamples / 16000,
+              });
+            }
+          }
         }
-        if (this.flatFrameStreakMs >= this.loudFlatTerminateSeconds * 1000) {
-          endpointEvidence = 'silence';
-          this.terminatorActivationCount += 1;
-          this.flatFrameStreakMs = 0;
-          this.emitEvent({
-            t: 'ev',
-            k: 'loud_flat_terminate',
-            startTime: this.flatFrameStreakStartTime,
-            time: this.sessionElapsedSamples / 16000,
-          });
-          this.flatFrameStreakStartTime = null;
-        }
+        if (this.flatTerminatorActive) endpointEvidence = 'silence';
       } else {
         this.flatFrameStreakMs = 0;
         this.flatFrameStreakStartTime = null;
+        this.flatTerminatorActive = false;
       }
       if (previousState === 'endPending'
         && output.shortSpreadDb !== null
@@ -336,6 +344,11 @@ export function makeRecorderHarness({
       let decisionSilenceSamples = this.silenceSamples;
       if (this.endpointMachineEnabled) {
         decision = this.endpoint.process(endpointEvidence, frameSamples);
+        if (this.flatTerminatorActive && this.endpoint.state === 'idle') {
+          this.flatFrameStreakMs = 0;
+          this.flatFrameStreakStartTime = null;
+          this.flatTerminatorActive = false;
+        }
         decisionSilenceSamples = this.endpoint.accumulatedSilenceSamples;
         this.gate.updateFloorTracking(
           frameDb,
