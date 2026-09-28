@@ -49,6 +49,14 @@ export const SHIPPING_SESSION_CONFIG = Object.freeze({
   loudSilenceDeltaDb: 2,
   loudDynamicsSpreadDb: 9,
   loudRiseDbPerSec: 12,
+  quietLatchMs: 1000,
+  quietLatchWitnessDb: 3.0,
+  quietLatchWitnessEnabled: false,
+  quietLatchDutyCycle: 1.0,
+  quietLatchAmbiguousEnabled: false,
+  quietContinuationRiseCapDbPerSec: 12.0,
+  softOnsetPreRollMs: 500,
+  softOnsetPreRollEnabled: false,
   loudLatchMs: 400,
   loudLatchAmbiguousEnabled: false,
   loudLatchWitnessDb: 3,
@@ -259,6 +267,10 @@ export function normalizeConfig(rawConfig = {}) {
     loudSilenceDeltaDb: asFiniteNumber(raw.loudSilenceDeltaDb, 'loudSilenceDeltaDb'),
     loudDynamicsSpreadDb: asFiniteNumber(raw.loudDynamicsSpreadDb, 'loudDynamicsSpreadDb'),
     loudRiseDbPerSec: asFiniteNumber(raw.loudRiseDbPerSec, 'loudRiseDbPerSec'),
+    quietContinuationRiseCapDbPerSec: asFiniteNumber(
+      raw.quietContinuationRiseCapDbPerSec,
+      'quietContinuationRiseCapDbPerSec',
+    ),
   });
   const gate = new VADThresholdGate(gateConfig);
   const endpointSilenceMs = asFiniteNumber(raw.silenceMs ?? raw.endpointSilenceMs, 'silenceMs');
@@ -304,6 +316,13 @@ export function normalizeConfig(rawConfig = {}) {
     loudFlatTerminateEnabled: Boolean(raw.loudFlatTerminateEnabled),
     loudFlatSpreadDb: asFiniteNumber(raw.loudFlatSpreadDb, 'loudFlatSpreadDb'),
     loudFlatTerminateSeconds: asFiniteNumber(raw.loudFlatTerminateSeconds, 'loudFlatTerminateSeconds'),
+    quietLatchMs: asFiniteNumber(raw.quietLatchMs, 'quietLatchMs'),
+    quietLatchWitnessDb: asFiniteNumber(raw.quietLatchWitnessDb, 'quietLatchWitnessDb'),
+    quietLatchWitnessEnabled: Boolean(raw.quietLatchWitnessEnabled),
+    quietLatchDutyCycle: asFiniteNumber(raw.quietLatchDutyCycle, 'quietLatchDutyCycle'),
+    quietLatchAmbiguousEnabled: Boolean(raw.quietLatchAmbiguousEnabled),
+    softOnsetPreRollMs: asFiniteNumber(raw.softOnsetPreRollMs, 'softOnsetPreRollMs'),
+    softOnsetPreRollEnabled: Boolean(raw.softOnsetPreRollEnabled),
   };
   return { config: normalized, endpoint, gateConfig, minSpeechSamples: minimum('minSpeechMs'), minChunkSamples: minimum('minChunkMs'), maxNoiseSamples, recorderConfig: {
     loudPreRollMs: normalized.loudPreRollMs,
@@ -313,6 +332,13 @@ export function normalizeConfig(rawConfig = {}) {
     loudFlatTerminateEnabled: normalized.loudFlatTerminateEnabled,
     loudFlatSpreadDb: normalized.loudFlatSpreadDb,
     loudFlatTerminateSeconds: normalized.loudFlatTerminateSeconds,
+    quietLatchMs: normalized.quietLatchMs,
+    quietLatchWitnessDb: normalized.quietLatchWitnessDb,
+    quietLatchWitnessEnabled: normalized.quietLatchWitnessEnabled,
+    quietLatchDutyCycle: normalized.quietLatchDutyCycle,
+    quietLatchAmbiguousEnabled: normalized.quietLatchAmbiguousEnabled,
+    softOnsetPreRollMs: normalized.softOnsetPreRollMs,
+    softOnsetPreRollEnabled: normalized.softOnsetPreRollEnabled,
   } };
 }
 

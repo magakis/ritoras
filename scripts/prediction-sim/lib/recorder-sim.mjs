@@ -25,6 +25,8 @@ function makeEndpoint(endpointSilenceMs = DEFAULT_ENDPOINT_SILENCE_MS, partial =
 
 function decisionLabel(decision) {
   if (decision.type === 'finalizeUtterance') return `finalize_${decision.kind}`;
+  if (decision.type === 'startUtterance') return 'start_utterance';
+  if (decision.type === 'continueUtterance') return 'continue_utterance';
   return decision.type;
 }
 
@@ -66,6 +68,7 @@ function makeSessionConfig(harness) {
     loudSilenceDeltaDb: gate.config.loudSilenceDeltaDb,
     loudDynamicsSpreadDb: gate.config.loudDynamicsSpreadDb,
     loudRiseDbPerSec: gate.config.loudRiseDbPerSec,
+    quietContinuationRiseCapDbPerSec: gate.config.quietContinuationRiseCapDbPerSec,
     loudLatchMs: harness.loudLatchMs,
     loudLatchAmbiguousEnabled: harness.loudLatchAmbiguousEnabled,
     loudLatchWitnessDb: harness.loudLatchWitnessDb,
@@ -75,6 +78,13 @@ function makeSessionConfig(harness) {
     loudFlatStreakMs: harness.flatFrameStreakMs,
     loudFlatTerminatorActive: harness.flatTerminatorActive,
     loudPreRollMs: harness.loudPreRollMs,
+    quietLatchMs: harness.quietLatchMs,
+    quietLatchWitnessDb: harness.quietLatchWitnessDb,
+    quietLatchWitnessEnabled: harness.quietLatchWitnessEnabled,
+    quietLatchDutyCycle: harness.quietLatchDutyCycle,
+    quietLatchAmbiguousEnabled: harness.quietLatchAmbiguousEnabled,
+    softOnsetPreRollMs: harness.softOnsetPreRollMs,
+    softOnsetPreRollEnabled: harness.softOnsetPreRollEnabled,
   };
   return config;
 }
@@ -109,9 +119,16 @@ export function makeRecorderHarness({
     headBufferSamples,
     postHeadPreRollSamples: 0,
     loudPreRollMs: recorderConfig.loudPreRollMs ?? endpoint.configuration.preRollSamples / 16,
+    softOnsetPreRollMs: recorderConfig.softOnsetPreRollMs ?? 500,
+    softOnsetPreRollEnabled: recorderConfig.softOnsetPreRollEnabled ?? false,
     loudLatchMs: recorderConfig.loudLatchMs ?? 400,
     loudLatchAmbiguousEnabled: recorderConfig.loudLatchAmbiguousEnabled ?? false,
     loudLatchWitnessDb: recorderConfig.loudLatchWitnessDb ?? 3,
+    quietLatchMs: recorderConfig.quietLatchMs ?? 1000,
+    quietLatchWitnessDb: recorderConfig.quietLatchWitnessDb ?? 3,
+    quietLatchWitnessEnabled: recorderConfig.quietLatchWitnessEnabled ?? false,
+    quietLatchDutyCycle: recorderConfig.quietLatchDutyCycle ?? 1,
+    quietLatchAmbiguousEnabled: recorderConfig.quietLatchAmbiguousEnabled ?? false,
     loudFlatTerminateEnabled: recorderConfig.loudFlatTerminateEnabled ?? false,
     loudFlatSpreadDb: recorderConfig.loudFlatSpreadDb ?? 2.5,
     loudFlatTerminateSeconds: recorderConfig.loudFlatTerminateSeconds ?? 3,
@@ -144,6 +161,10 @@ export function makeRecorderHarness({
     sustainedContinuingOnsetLatched: false,
     streakSawDynamics: false,
     latchWitnessRejectionCounted: false,
+    quietLatchHistory: [],
+    quietLatchCandidateStartTime: null,
+    quietLatchStartFloorDb: null,
+    quietLatchCoverageMs: 0,
     sawReanchorDuringUtterance: false,
     sessionConfig: null,
 
@@ -215,9 +236,13 @@ export function makeRecorderHarness({
       }
 
       const adaptivePath = output.floorDb !== null;
+      const quietWitnessMode = this.quietLatchWitnessEnabled && !output.isLoudRegime;
+      if (this.quietLatchWitnessEnabled && !quietWitnessMode) this.resetQuietLatchWindow();
       const eligibleStreak = output.evidence === 'continuing'
         || (this.loudLatchAmbiguousEnabled && output.evidence === 'ambiguous');
-      if (adaptivePath && eligibleStreak && endpointWasIdle) {
+      if (quietWitnessMode) {
+        this.updateQuietWitnessStreak(output, frameDb, frameDuration, endpointWasIdle);
+      } else if (adaptivePath && eligibleStreak && endpointWasIdle) {
         if (this.sustainedContinuingMs === 0) {
           this.streakStartFloorDb = this.gate.snapshot.floorDb;
           this.streakPeakDb = frameDb;
@@ -230,10 +255,10 @@ export function makeRecorderHarness({
           this.streakSawDynamics = true;
         }
       } else if (!this.sustainedContinuingOnsetLatched) {
-           this.sustainedContinuingMs = 0;
-           this.streakStartFloorDb = null;
-            this.streakPeakDb = null;
-            this.streakSawDynamics = false;
+        this.sustainedContinuingMs = 0;
+        this.streakStartFloorDb = null;
+        this.streakPeakDb = null;
+        this.streakSawDynamics = false;
       }
 
       const quietRegimeEvidence = output.floorDb !== null
@@ -248,9 +273,15 @@ export function makeRecorderHarness({
           >= output.floorDb + this.gate.effectiveAdaptiveDeltaDb;
       const legacyLoudBranch = !this.gate.config.loudRegimeEnabled
         && output.floorDb >= VAD_LOUD_FLOOR_REGIME_DB;
-      const quietLatchQualified = quietRegimeEvidence
-        && quietRegimeFloorStable
-        && this.sustainedContinuingMs >= VAD_SUSTAINED_CONTINUING_ONSET_S * 1000;
+      const quietLatchQualified = quietWitnessMode
+        ? this.quietLatchStreakQualified(
+          output,
+          quietRegimeEvidence,
+          quietRegimeFloorStable,
+        )
+        : quietRegimeEvidence
+          && quietRegimeFloorStable
+          && this.sustainedContinuingMs >= VAD_SUSTAINED_CONTINUING_ONSET_S * 1000;
       const legacyLoudLatchQualified = legacyLoudBranch
         && loudRegimeEvidence
         && this.sustainedContinuingMs >= 1.5 * VAD_SUSTAINED_CONTINUING_ONSET_S * 1000;
@@ -260,7 +291,10 @@ export function makeRecorderHarness({
       if (adaptivePath
         && output.floorConverged
         && (output.evidence === 'continuing'
-          || (this.loudLatchAmbiguousEnabled && output.evidence === 'ambiguous'))
+          || (output.isLoudRegime
+            ? this.loudLatchAmbiguousEnabled
+            : this.quietLatchWitnessEnabled && this.quietLatchAmbiguousEnabled)
+            && output.evidence === 'ambiguous')
         && endpointWasIdle
         && (quietLatchQualified || legacyLoudLatchQualified || loudLatchQualified)) {
         this.sustainedContinuingOnsetLatched = true;
@@ -276,7 +310,10 @@ export function makeRecorderHarness({
       if (this.sustainedContinuingOnsetLatched
         && (!adaptivePath
           || !endpointInOnsetLimb
-          || (output.evidence === 'ambiguous' && !this.loudLatchAmbiguousEnabled)
+          || (output.evidence === 'ambiguous'
+            && !(output.isLoudRegime
+              ? this.loudLatchAmbiguousEnabled
+              : this.quietLatchWitnessEnabled && this.quietLatchAmbiguousEnabled))
           || output.evidence === 'silence')) {
         this.sustainedContinuingOnsetLatched = false;
         this.sustainedContinuingMs = 0;
@@ -286,7 +323,10 @@ export function makeRecorderHarness({
       }
       const latchedContinuingOnset = this.sustainedContinuingOnsetLatched
         && (output.evidence === 'continuing'
-          || (this.loudLatchAmbiguousEnabled && output.evidence === 'ambiguous'))
+          || (output.isLoudRegime
+            ? this.loudLatchAmbiguousEnabled
+            : this.quietLatchWitnessEnabled && this.quietLatchAmbiguousEnabled)
+            && output.evidence === 'ambiguous')
         && endpointInOnsetLimb;
       let endpointEvidence = adaptivePath
         && latchedContinuingOnset
@@ -359,6 +399,9 @@ export function makeRecorderHarness({
 
         if (decision.type === 'startUtterance') {
           this.utteranceQuietestStrongDb = null;
+          const softOnset = this.quietLatchWitnessEnabled
+            && latchedContinuingOnset
+            && !output.isLoudRegime;
           if (this.headLive) {
             const trimmedSamples = this.headTrimSamples();
             this.accumulatorSamples = this.headSamples - trimmedSamples;
@@ -366,9 +409,13 @@ export function makeRecorderHarness({
             this.chunkStartSessionSamples = this.sessionElapsedSamples
               - this.headSamples + trimmedSamples;
           } else {
-            const requestedPreRollSamples = Math.round((output.isLoudRegime
+            let requestedPreRollMs = output.isLoudRegime
               ? Math.max(this.endpoint.configuration.preRollSamples / 16, this.loudPreRollMs)
-              : this.endpoint.configuration.preRollSamples / 16) * 16);
+              : this.endpoint.configuration.preRollSamples / 16;
+            if (softOnset && this.softOnsetPreRollEnabled) {
+              requestedPreRollMs = Math.max(requestedPreRollMs, this.softOnsetPreRollMs);
+            }
+            const requestedPreRollSamples = Math.round(requestedPreRollMs * 16);
             const preRollSamples = Math.min(requestedPreRollSamples, this.postHeadPreRollSamples);
             this.accumulatorSamples = preRollSamples + frameSamples;
             this.chunkStartSessionSamples = this.sessionElapsedSamples
@@ -380,6 +427,7 @@ export function makeRecorderHarness({
           this.streakPeakDb = null;
           this.streakSawDynamics = false;
           this.sustainedContinuingOnsetLatched = false;
+          this.resetQuietLatchWindow();
           this.silenceSamples = 0;
         } else if (decision.type === 'continueUtterance'
           || decision.type === 'finalizeUtterance') {
@@ -440,6 +488,9 @@ export function makeRecorderHarness({
           t: 'ev',
           k: 'start_utterance',
           n: this.accumulatorSamples,
+          ...(this.quietLatchWitnessEnabled
+            && latchedContinuingOnset
+            && !output.isLoudRegime ? { softOnset: true } : {}),
         });
       }
 
@@ -494,6 +545,7 @@ export function makeRecorderHarness({
            this.streakPeakDb = null;
            this.streakSawDynamics = false;
           this.sustainedContinuingOnsetLatched = false;
+          this.resetQuietLatchWindow();
         }
       }
 
@@ -504,6 +556,7 @@ export function makeRecorderHarness({
           const capacity = Math.max(
             this.endpoint.configuration.preRollSamples,
             Math.round(this.loudPreRollMs * 16),
+            Math.round(this.softOnsetPreRollMs * 16),
           );
           this.postHeadPreRollSamples = Math.min(
             capacity,
@@ -523,6 +576,102 @@ export function makeRecorderHarness({
         latchedContinuingOnset,
         frameRecord,
       };
+    },
+
+    resetQuietLatchWindow() {
+      this.quietLatchHistory.length = 0;
+      this.quietLatchCandidateStartTime = null;
+      this.quietLatchStartFloorDb = null;
+      this.quietLatchCoverageMs = 0;
+    },
+
+    updateQuietWitnessStreak(output, frameDb, frameDuration, endpointWasIdle) {
+      const eligible = output.evidence === 'continuing'
+        || (this.quietLatchAmbiguousEnabled && output.evidence === 'ambiguous');
+      if (!endpointWasIdle || output.floorDb === null) {
+        if (!this.sustainedContinuingOnsetLatched) this.resetQuietLatchWindow();
+        return;
+      }
+
+      const end = this.sessionElapsedSamples / 16000;
+      const start = end - frameDuration;
+      if (this.quietLatchCandidateStartTime === null && eligible) {
+        this.quietLatchCandidateStartTime = start;
+        this.quietLatchStartFloorDb = output.floorDb;
+      }
+      if (this.quietLatchCandidateStartTime === null) {
+        this.sustainedContinuingMs = 0;
+        this.streakStartFloorDb = null;
+        this.streakPeakDb = null;
+        this.streakSawDynamics = false;
+        return;
+      }
+
+      this.quietLatchHistory.push({
+        start,
+        end,
+        eligible,
+        frameDb,
+        floorDb: output.floorDb,
+        dynamicsSpreadDb: output.dynamicsSpreadDb,
+      });
+      const windowSeconds = Math.max(0, this.quietLatchMs) / 1000;
+      const cutoff = end - windowSeconds;
+      while (this.quietLatchHistory.length > 0
+        && this.quietLatchHistory[0].end <= cutoff) {
+        this.quietLatchHistory.shift();
+      }
+      if (this.quietLatchHistory.length > 0
+        && this.quietLatchHistory[0].start < cutoff) {
+        this.quietLatchHistory[0].start = cutoff;
+      }
+
+      const eligibleFrames = this.quietLatchHistory.filter(frame => frame.eligible);
+      if (eligibleFrames.length === 0) {
+        this.resetQuietLatchWindow();
+        this.sustainedContinuingMs = 0;
+        this.streakStartFloorDb = null;
+        this.streakPeakDb = null;
+        this.streakSawDynamics = false;
+        return;
+      }
+      if (output.floorDb - this.quietLatchStartFloorDb > 2) {
+        this.resetQuietLatchWindow();
+        this.sustainedContinuingMs = 0;
+        this.streakStartFloorDb = null;
+        this.streakPeakDb = null;
+        this.streakSawDynamics = false;
+        if (eligible) this.updateQuietWitnessStreak(output, frameDb, frameDuration, endpointWasIdle);
+        return;
+      }
+
+      this.quietLatchCoverageMs = eligibleFrames.reduce(
+        (total, frame) => total + (frame.end - frame.start) * 1000,
+        0,
+      );
+      this.sustainedContinuingMs = Math.min(
+        Math.max(0, this.quietLatchMs),
+        (end - this.quietLatchCandidateStartTime) * 1000,
+      );
+      this.streakStartFloorDb = this.quietLatchStartFloorDb;
+      this.streakPeakDb = Math.max(...eligibleFrames.map(frame => frame.frameDb));
+      this.streakSawDynamics = eligibleFrames.some(frame => (
+        (frame.dynamicsSpreadDb ?? 0) >= this.quietLatchWitnessDb
+      ));
+    },
+
+    quietLatchStreakQualified(output, legacyEvidence, floorStable) {
+      const windowMs = Math.max(0, this.quietLatchMs);
+      const dutyCycle = Math.min(1, Math.max(0, this.quietLatchDutyCycle));
+      const eligible = output.evidence === 'continuing'
+        || (this.quietLatchAmbiguousEnabled && output.evidence === 'ambiguous');
+      return eligible
+        && output.floorConverged
+        && !output.isLoudRegime
+        && floorStable
+        && this.sustainedContinuingMs >= windowMs
+        && this.quietLatchCoverageMs >= dutyCycle * windowMs
+        && (legacyEvidence || this.streakSawDynamics);
     },
 
     headTrimSamples() {

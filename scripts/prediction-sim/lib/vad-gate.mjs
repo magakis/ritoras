@@ -80,6 +80,7 @@ export function makeVadGateConfig(partial = {}) {
     loudSilenceDeltaDb: 2,
     loudDynamicsSpreadDb: 9,
     loudRiseDbPerSec: 12,
+    quietContinuationRiseCapDbPerSec: 12,
     ...(partial ?? {}),
   };
 }
@@ -551,14 +552,18 @@ export class VADThresholdGate {
         break;
       case 'continuing':
         riseCap = machineIsIdle
-          ? (this.isLoudRegime ? this.config.loudRiseDbPerSec : VAD_ELEVATED_RISE_DB_PER_SECOND)
+          ? (this.isLoudRegime
+            ? this.config.loudRiseDbPerSec
+            : this.config.quietContinuationRiseCapDbPerSec)
             * this.effectiveRiseSpeedMultiplier
           : 0;
         break;
       case 'ambiguous':
       case 'silence':
         riseCap = machineIsIdle
-          ? (this.isLoudRegime ? this.config.loudRiseDbPerSec : VAD_ELEVATED_RISE_DB_PER_SECOND)
+          ? (this.isLoudRegime
+            ? this.config.loudRiseDbPerSec
+            : this.config.quietContinuationRiseCapDbPerSec)
             * this.effectiveRiseSpeedMultiplier
           : 0;
         break;
