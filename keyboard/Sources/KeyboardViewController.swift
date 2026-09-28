@@ -169,16 +169,7 @@ class KeyboardViewController: UIInputViewController {
     private var pollTimer: Timer?
     private var pollCount = 0
 
-    /// Cancellable handle for the deferred-dictation flush so it can be
-    /// torn down on disappear / context change. See scheduleDeferredDictationFlush.
-    private var deferredFlushWorkItem: DispatchWorkItem?
-
-    /// Identity gate for scheduleDeferredDictationFlush: remembers the last
-    /// checked field identity so repeated textDidChange/selectionDidChange on
-    /// the same field skip the UserDefaults read + work-item churn. Reset in
-    /// viewDidAppear so a fresh appear always re-checks.
-    private var deferredFlushGate = DeferredFlushGate()
-    private var deferredFlushRetryTimer: DispatchSourceTimer?
+    private var followMeAwaitingFocus = false
 
     // MARK: - Snapshot Polling & Darwin Notifications
 
@@ -239,6 +230,10 @@ class KeyboardViewController: UIInputViewController {
     private var lastProcessedPayloadId: UUID? {
         get { UUID(uuidString: UserDefaults.standard.string(forKey: "ritoras_last_pid") ?? "") }
         set { UserDefaults.standard.set(newValue?.uuidString, forKey: "ritoras_last_pid") }
+    }
+    private var consumedPayloadIDs: [String] {
+        get { UserDefaults.standard.stringArray(forKey: "ritoras_consumed_ids") ?? [] }
+        set { UserDefaults.standard.set(newValue, forKey: "ritoras_consumed_ids") }
     }
 
     // MARK: - Server Polling
@@ -336,6 +331,17 @@ class KeyboardViewController: UIInputViewController {
         }
 
         setupKeyboardView()
+        let legacyDeferredKeys = ["ritoras_deferred_text", "ritoras_deferred_ts", "ritoras_deferred_doc_id"]
+        let hadLegacyDeferredValue = legacyDeferredKeys.contains { key in
+            guard let value = UserDefaults.standard.object(forKey: key) else { return false }
+            if let string = value as? String { return !string.isEmpty }
+            return (value as? NSNumber)?.doubleValue != 0
+        }
+        legacyDeferredKeys.forEach { UserDefaults.standard.removeObject(forKey: $0) }
+        if hadLegacyDeferredValue {
+            FileLogger.shared.info(.keyboard, "legacy deferred dictation keys cleared")
+        }
+        registerStateChangedObserver()
         HapticsManager.shared.reloadEnabledFromAppGroup()
         settingsCache.refresh()
         darwinSettingsChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinSettingsChangedNotificationName) { [weak self] in
@@ -365,6 +371,8 @@ class KeyboardViewController: UIInputViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         keyboardView.updateFullAccess(hasFullAccess)
+        registerStateChangedObserver()
+        followMeInboxCheck(reason: "viewDidAppear")
 
         // App-group snapshot polling (primary transport).
         consecutiveSessionEvidenceMiss = 0
@@ -372,7 +380,7 @@ class KeyboardViewController: UIInputViewController {
         appearRefreshTask = Task { @MainActor [weak self] in
             await self?.refreshFromSharedState()
         }
-        startSnapshotPolling()
+        if pendingRequestId != nil { startSnapshotPolling() }
 
         // T_wake — diagnostic anchor for the paste-delay timeline: wake event with
         // the pending request (or nil), snapshot revision, and the appear refresh.
@@ -392,20 +400,6 @@ class KeyboardViewController: UIInputViewController {
             uiMode = .emoji
         }
 
-        // Clear stale deferred text (Bug 3): if deferred text is older than 300s,
-        // discard it before Path A or Path B can act on it.
-        let deferredTs = UserDefaults.standard.double(forKey: "ritoras_deferred_ts")
-        if deferredTs > 0 {
-            let deferredAge = Date().timeIntervalSince1970 - deferredTs
-            if deferredAge > 300 {
-                clearDeferredResult()
-            }
-        }
-
-        // Reset the deferred-flush identity gate: a fresh appear can observe a
-        // new field identity, so the next flush check must run unconditionally.
-        deferredFlushGate.reset()
-
         // Resume a dictation that was in progress when iOS suspended/terminated
         // the extension. pendingRequestId survives in UserDefaults, so even a
         // fully relaunched keyboard process can recover the result.
@@ -419,14 +413,9 @@ class KeyboardViewController: UIInputViewController {
         } else {
             // Check for a deferred result — a dictation completed while the keyboard
             // was hidden and the paste was deferred until the keyboard reappears.
-            if UserDefaults.standard.string(forKey: "ritoras_deferred_text")?.isEmpty == false {
-                startDeferredFlushRetryTimer()
-                scheduleDeferredDictationFlush(reason: "viewDidAppear")
-            } else {
-                state = .idle
-                FileLogger.shared.info(.keyboard, "viewDidAppear — idle",
-                                       payload: ["hasFullAccess": hasFullAccess])
-            }
+            state = .idle
+            FileLogger.shared.info(.keyboard, "viewDidAppear — idle",
+                                   payload: ["hasFullAccess": hasFullAccess])
         }
     }
 
@@ -709,7 +698,6 @@ class KeyboardViewController: UIInputViewController {
 
     private func openContainerAppForDictation() {
         // Clear any stale data from previous sessions
-        clearDeferredResult()
         serverPollTimer?.invalidate()
         serverPollTimer = nil
         serverPollUnresponsiveCount = 0
@@ -799,20 +787,24 @@ class KeyboardViewController: UIInputViewController {
             "id": id.uuidString
         ])
 
-        // Register state-changed Darwin observer to trigger app-group snapshot refresh
+        registerStateChangedObserver()
+
+        // Start timeout timer
+        waitTimer = Timer.scheduledTimer(withTimeInterval: SharedConfig.Defaults.dictationTimeoutSeconds, repeats: false) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.handleTimeout()
+            }
+        }
+    }
+
+    private func registerStateChangedObserver() {
+        guard darwinStateChangedToken == nil else { return }
         darwinStateChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinStateChangedNotificationName) { [weak self] in
             DispatchQueue.main.async { [weak self] in
                 self?.appearRefreshTask?.cancel()
                 self?.appearRefreshTask = Task { @MainActor [weak self] in
                     await self?.refreshFromSharedState()
                 }
-            }
-        }
-
-        // Start timeout timer
-        waitTimer = Timer.scheduledTimer(withTimeInterval: SharedConfig.Defaults.dictationTimeoutSeconds, repeats: false) { [weak self] _ in
-            DispatchQueue.main.async {
-                self?.handleTimeout()
             }
         }
     }
@@ -1066,16 +1058,34 @@ class KeyboardViewController: UIInputViewController {
     /// (preventing silent hangs from empty-text results).
     @MainActor
     private func handleTerminalResult(id: UUID, text: String?, errorMessage: String?) {
-        guard id != lastProcessedPayloadId else { return }
+        if let text, !text.isEmpty {
+            guard let fieldId = safeDocumentIdentifier(), fieldId != Self.noFieldDocumentId else {
+                followMeAwaitingFocus = true
+                return
+            }
+        }
+        var ring = FollowMeConsumedIDRing(ids: consumedPayloadIDs.isEmpty
+            ? FollowMeConsumedIDRing.legacySeed(lastProcessedPayloadId?.uuidString).ids
+            : consumedPayloadIDs)
+        guard !ring.contains(id.uuidString) else { return }
+        ring.append(id.uuidString)
+        consumedPayloadIDs = ring.ids
         lastProcessedPayloadId = id
-        SharedConfig.clearSnapshotFile()   // hygiene — keep file from lingering for next dictation
         stopDictationTransports()
         if let text = text, !text.isEmpty {
             insertDictationResult(text: text)
         } else {
+            let belongsToPendingRequest = pendingRequestId == id
+            SharedConfig.clearSnapshotFile()
+            SharedConfig.clearDictationSnapshot()
             pendingRequestId = nil
             dictationTargetDocId = nil
-            state = .error(errorMessage ?? "Transcription failed")
+            if belongsToPendingRequest {
+                state = .error(errorMessage ?? "Transcription failed")
+            } else {
+                FileLogger.shared.info(.keyboard, "follow-me terminal failure consumed",
+                                       payload: ["id": String(id.uuidString.prefix(8))])
+            }
         }
     }
 
@@ -1260,7 +1270,6 @@ class KeyboardViewController: UIInputViewController {
         pollTimer = nil
         serverPollTimer?.invalidate()
         serverPollTimer = nil
-        stopDeferredFlushRetryTimer()
 
         // DispatchWorkItems
         serverPollWorkItem?.cancel()
@@ -1269,8 +1278,6 @@ class KeyboardViewController: UIInputViewController {
         errorResetWorkItem = nil
         suggestionRefreshWorkItem?.cancel()
         suggestionRefreshWorkItem = nil
-        deferredFlushWorkItem?.cancel()
-        deferredFlushWorkItem = nil
         deferredKeystrokeWorkItem?.cancel()
         deferredKeystrokeWorkItem = nil
 
@@ -1313,7 +1320,6 @@ class KeyboardViewController: UIInputViewController {
     /// via its own timeout/error handling.
     private func cancelDictation() {
         stopDictationTransports()
-        clearDeferredResult()
         FileLogger.shared.debug(.keyboard, "Dictation cancelled by user",
                                 payload: ["pendingRequestId": pendingRequestId?.uuidString ?? "nil"])
         pendingRequestId = nil
@@ -1415,19 +1421,6 @@ class KeyboardViewController: UIInputViewController {
             "total_elapsed_ms": totalElapsed
         ])
 
-        // If the keyboard view is not in a window (hidden with no active text field),
-        // textDocumentProxy.insertText would silently no-op. Defer the paste until
-        // the keyboard reappears.
-        guard self.view.window != nil else {
-            FileLogger.shared.info(.keyboard, "Deferring dictation insertion — keyboard view is hidden",
-                                   payload: ["length": text.count])
-            storeDeferredResult(text: text)
-            stopDictationTransports()
-            pendingRequestId = nil
-            dictationTargetDocId = nil
-            return
-        }
-
         // Active emoji-search recovery: if the insertion target is the internal emoji
         // search field, redirect to the host app and exit search mode so the dictation
         // result reaches the intended text field.
@@ -1445,49 +1438,17 @@ class KeyboardViewController: UIInputViewController {
         // keyboard transitions (UIKit bug) — direct access traps. Nil here means
         // the keyboard is transitional even though view.window != nil. Defer the
         // result so it flushes when the user taps into a field.
-        guard let currentDocId = safeDocumentIdentifier() else {
-            FileLogger.shared.warn(.keyboard, "documentIdentifier nil — keyboard transitional, deferring",
-                                   payload: ["text_length": text.count])
-            storeDeferredResult(text: text)
+        guard let currentDocId = safeDocumentIdentifier(), currentDocId != Self.noFieldDocumentId else {
+            followMeAwaitingFocus = true
             stopDictationTransports()
             pendingRequestId = nil
             dictationTargetDocId = nil
-            state = .waiting
-            startDeferredFlushRetryTimer()
             return
         }
 
         // No-field gate: if there is genuinely no focused text field (zero UUID),
         // defer the result so it can be inserted when the user taps into a field.
-        if currentDocId == Self.noFieldDocumentId {
-            FileLogger.shared.warn(.keyboard, "Dictation result arrived with no focused field (zero UUID) — deferring",
-                                   payload: ["documentIdentifier": currentDocId.uuidString])
-            storeDeferredResult(text: text)
-            stopDictationTransports()
-            pendingRequestId = nil
-            dictationTargetDocId = nil
-            state = .waiting
-            startDeferredFlushRetryTimer()
-            return
-        }
-
-        // Target-bound insertion: if the user switched text fields while the
-        // transcription was in flight, do NOT insert into the wrong field. Preserve
-        // the text + target so it flushes when they return to the original field
-        // (mirrors scheduleDeferredDictationFlush's mismatch handling).
-        if let targetId = dictationTargetDocId, targetId != Self.noFieldDocumentId,
-           currentDocId != targetId {
-            FileLogger.shared.warn(.keyboard, "Dictation target mismatch — deferring",
-                                   payload: ["target": targetId.uuidString,
-                                             "current": currentDocId.uuidString])
-            storeDeferredResult(text: text, docId: targetId)
-            stopDictationTransports()
-            pendingRequestId = nil
-            dictationTargetDocId = nil
-            state = .waiting
-            startDeferredFlushRetryTimer()
-            return
-        }
+        let target = dictationTargetDocId == nil || dictationTargetDocId == currentDocId ? "original" : "follow-me"
 
         FileLogger.shared.info(.keyboard, "insertDictationResult entry",
                                payload: ["length": text.count, "preview": String(text.prefix(30))])
@@ -1500,9 +1461,9 @@ class KeyboardViewController: UIInputViewController {
         }
         state = .inserting
         textDocumentProxy.insertText(normalizedDictationInsertion(of: text))
-        clearDeferredResult()
-        deferredFlushWorkItem?.cancel()
-        deferredFlushWorkItem = nil
+        SharedConfig.clearSnapshotFile()
+        SharedConfig.clearDictationSnapshot()
+        followMeAwaitingFocus = false
         FileLogger.shared.info(.keyboard, "Inserted dictation",
                                payload: ["length": text.count, "preview": String(text.prefix(30))])
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
@@ -1511,124 +1472,64 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
-    // MARK: - Deferred Result (Keyboard Hidden)
+    // MARK: - Follow-me delivery inbox
 
-    /// Stores a dictation result in UserDefaults when the keyboard is hidden,
-    /// so it can be recovered and auto-pasted on the next viewDidAppear.
-    private func storeDeferredResult(text: String, docId: UUID? = nil, ts: TimeInterval? = nil) {
-        deferredFlushGate.reset()
-        let idToStore = docId ?? dictationTargetDocId
-        UserDefaults.standard.set(text, forKey: "ritoras_deferred_text")
-        UserDefaults.standard.set(ts ?? Date().timeIntervalSince1970, forKey: "ritoras_deferred_ts")
-        UserDefaults.standard.set(idToStore?.uuidString ?? "", forKey: "ritoras_deferred_doc_id")
-    }
-
-    /// Clears the deferred result from UserDefaults. Called when starting
-    /// a new dictation or when explicitly cancelling.
-    private func clearDeferredResult() {
-        UserDefaults.standard.removeObject(forKey: "ritoras_deferred_text")
-        UserDefaults.standard.removeObject(forKey: "ritoras_deferred_ts")
-        UserDefaults.standard.removeObject(forKey: "ritoras_deferred_doc_id")
-    }
-
-    private func startDeferredFlushRetryTimer() {
-        stopDeferredFlushRetryTimer()
-        FileLogger.shared.info(.keyboard, "deferred flush retry timer started",
-                               payload: ["reason": "deferredResult"])
-        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-        timer.schedule(deadline: .now() + 0.3, repeating: 0.5)
-        timer.setEventHandler { [weak self] in
-            DispatchQueue.main.async { [weak self] in
-                self?.deferredFlushRetryTick()
-            }
-        }
-        timer.resume()
-        deferredFlushRetryTimer = timer
-    }
-
-    private func stopDeferredFlushRetryTimer() {
-        deferredFlushRetryTimer?.cancel()
-        deferredFlushRetryTimer = nil
-    }
-
-    private func deferredFlushRetryTick() {
-        FileLogger.shared.debug(.keyboard, "deferred flush retry tick")
-        guard let deferredText = UserDefaults.standard.string(forKey: "ritoras_deferred_text"),
-              !deferredText.isEmpty else {
-            stopDeferredFlushRetryTimer()
-            if pendingRequestId == nil && state == .waiting {
-                state = .idle
-            }
+    @MainActor
+    private func followMeInboxCheck(reason: String) {
+        let payload = SharedConfig.snapshotFile() ?? SharedConfig.dictationSnapshot()
+        guard let payload else {
+            FileLogger.shared.debug(.keyboard, "follow-me inbox empty")
             return
         }
-        scheduleDeferredDictationFlush(reason: "deferredRetry")
-    }
-
-    /// Reads + age-checks + clears the deferred dictation text synchronously
-    /// (so a re-entrant textDidChange/selectionDidChange cannot double-flush),
-    /// then inserts it on the NEXT run-loop turn so the mutation does not run
-    /// inside the host's own change/selection callback (caret snap-back fix).
-    /// Called from textDidChange / selectionDidChange and from viewDidAppear:
-    /// the appear path also defers one run-loop turn because the host's input
-    /// session (caret anchoring included) is still establishing during the
-    /// appearance callback.
-    private func scheduleDeferredDictationFlush(reason: String) {
-        guard let deferredText = UserDefaults.standard.string(forKey: "ritoras_deferred_text"),
-              !deferredText.isEmpty else { return }
-        let currentDocId = safeDocumentIdentifier()
-        guard deferredFlushGate.shouldAttempt(currentDocId: currentDocId) else { return }
-        deferredFlushGate.record(currentDocId: currentDocId)
-        let deferredTs = UserDefaults.standard.double(forKey: "ritoras_deferred_ts")
-        let storedDocIdString = UserDefaults.standard.string(forKey: "ritoras_deferred_doc_id") ?? ""
-        let targetDocId = UUID(uuidString: storedDocIdString)
-        let age = deferredTs > 0 ? Date().timeIntervalSince1970 - deferredTs : 0
-        if age >= 300 {
-            FileLogger.shared.info(.keyboard, "Deferred dictation result expired on flush check",
-                                   payload: ["age": age])
-            clearDeferredResult()
-            stopDeferredFlushRetryTimer()
-            if pendingRequestId == nil {
-                state = .idle
-            }
+        let status: FollowMeDeliveryGate.TerminalStatus
+        switch payload.status {
+        case .completed: status = .completed
+        case .error: status = .error
+        case .cancelled: status = .cancelled
+        case .recording, .transcribing:
+            guard pendingRequestId != nil else { return }
             return
         }
-        clearDeferredResult()
-        let textToInsert = deferredText
-        FileLogger.shared.info(.keyboard, "Scheduling deferred dictation flush",
-                               payload: ["reason": reason, "length": textToInsert.count, "age": age])
-        deferredFlushWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self = self else { return }
-            guard self.view.window != nil else {
-                self.storeDeferredResult(text: textToInsert, docId: targetDocId, ts: deferredTs)
+        let ring = FollowMeConsumedIDRing(ids: consumedPayloadIDs.isEmpty
+            ? FollowMeConsumedIDRing.legacySeed(lastProcessedPayloadId?.uuidString).ids
+            : consumedPayloadIDs)
+        let fieldId = safeDocumentIdentifier()
+        let hasRealField = fieldId != nil && fieldId != Self.noFieldDocumentId
+        let decision = FollowMeDeliveryGate.decide(
+            id: payload.id, status: status, terminalAt: payload.timestamp, now: Date(),
+            windowSeconds: SharedConfig.followMeWindowSeconds(), consumedIDs: ring.ids,
+            hasRealField: hasRealField)
+        switch decision {
+        case .deliver:
+            if payload.status == .cancelled {
+                var updatedRing = ring
+                updatedRing.append(payload.id.uuidString)
+                consumedPayloadIDs = updatedRing.ids
+                lastProcessedPayloadId = payload.id
+                pendingRequestId = nil
+                SharedConfig.clearSnapshotFile()
+                SharedConfig.clearDictationSnapshot()
+                followMeAwaitingFocus = false
                 return
             }
-            guard let currentDocId = self.safeDocumentIdentifier() else {
-                self.storeDeferredResult(text: textToInsert, docId: targetDocId, ts: deferredTs)
-                FileLogger.shared.warn(.keyboard, "Deferred flush — documentIdentifier nil, re-deferring",
-                                       payload: ["target": targetDocId?.uuidString ?? "nil",
-                                                 "length": textToInsert.count])
-                return
-            }
-            if let targetId = targetDocId, targetId != Self.noFieldDocumentId,
-               currentDocId != targetId {
-                // Original dictation field no longer focused — preserve text + target
-                // so it flushes when the user returns to that field. Do NOT discard.
-                self.storeDeferredResult(text: textToInsert, docId: targetId, ts: deferredTs)
-                FileLogger.shared.warn(.keyboard, "Deferred flush skipped — original field not focused",
-                                       payload: ["target": targetId.uuidString,
-                                                 "current": currentDocId.uuidString])
-                return
-            }
-            self.stopDeferredFlushRetryTimer()
-            self.state = .inserting
-            self.textDocumentProxy.insertText(self.normalizedDictationInsertion(of: textToInsert))
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                self?.state = .idle
-            }
+            let age = Date().timeIntervalSince(payload.timestamp)
+            let target = dictationTargetDocId == nil || dictationTargetDocId == fieldId ? "original" : "follow-me"
+            followMeAwaitingFocus = false
+            handleTerminalResult(id: payload.id, text: payload.text, errorMessage: payload.errorMessage)
+            FileLogger.shared.info(.keyboard, "follow-me delivered", payload: [
+                "id": String(payload.id.uuidString.prefix(8)), "length": payload.text?.count ?? 0,
+                "age": age, "reason": reason, "target": target
+            ])
+        case .waitNoField:
+            followMeAwaitingFocus = true
+            FileLogger.shared.debug(.keyboard, "follow-me waiting for focus")
+        case .dropConsumed:
+            FileLogger.shared.debug(.keyboard, "follow-me duplicate consumed")
+        case .dropExpired:
+            FileLogger.shared.info(.keyboard, "follow-me expired", payload: ["id": String(payload.id.uuidString.prefix(8))])
+            SharedConfig.clearSnapshotFile()
+            SharedConfig.clearDictationSnapshot()
         }
-        deferredFlushWorkItem = workItem
-        DispatchQueue.main.async(execute: workItem)
     }
 
     // MARK: - Server Polling (Works when app is backgrounded)
@@ -2122,7 +2023,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
             FileLogger.shared.warn(.keyboard, "identity flap detected — defensive mode")
         } else if wasDefensive && !isDefensive {
             FileLogger.shared.info(.keyboard, "identity stable — defensive mode exited")
-            deferredFlushGate.reset()   // let the next callback re-attempt a flush
         }
     }
 
@@ -2142,7 +2042,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         // Flush deferred dictation result if one exists (the user has now
         // focused/activated a text field).
-        scheduleDeferredDictationFlush(reason: "textDidChange")
+        if followMeAwaitingFocus { followMeInboxCheck(reason: "textDidChange") }
     }
 
     override func textWillChange(_ textInput: UITextInput?) {
@@ -2179,7 +2079,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         // Flush deferred dictation result if one exists (the user has now
         // focused/activated a text field).
-        scheduleDeferredDictationFlush(reason: "selectionDidChange")
+        if followMeAwaitingFocus { followMeInboxCheck(reason: "selectionDidChange") }
     }
 
     // MARK: - Autocorrect-on-space
