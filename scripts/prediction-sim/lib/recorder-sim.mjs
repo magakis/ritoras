@@ -104,6 +104,7 @@ export function makeRecorderHarness({
     minChunkSamples,
     minSpeechSamples,
     headBufferSamples,
+    postHeadPreRollSamples: 0,
     loudPreRollMs: recorderConfig.loudPreRollMs ?? endpoint.configuration.preRollSamples / 16,
     loudLatchMs: recorderConfig.loudLatchMs ?? 1500,
     loudLatchAmbiguousEnabled: recorderConfig.loudLatchAmbiguousEnabled ?? false,
@@ -351,13 +352,14 @@ export function makeRecorderHarness({
             this.chunkStartSessionSamples = this.sessionElapsedSamples
               - this.headSamples + trimmedSamples;
           } else {
-            // The simplified pre-roll assumes its ring is full; unlike headSamples, it does not track fill.
-            const preRollSamples = Math.round((output.isLoudRegime
+            const requestedPreRollSamples = Math.round((output.isLoudRegime
               ? Math.max(this.endpoint.configuration.preRollSamples / 16, this.loudPreRollMs)
               : this.endpoint.configuration.preRollSamples / 16) * 16);
+            const preRollSamples = Math.min(requestedPreRollSamples, this.postHeadPreRollSamples);
             this.accumulatorSamples = preRollSamples + frameSamples;
             this.chunkStartSessionSamples = this.sessionElapsedSamples
               - frameSamples - preRollSamples;
+            this.postHeadPreRollSamples = 0;
           }
           this.sustainedContinuingMs = 0;
           this.streakStartFloorDb = null;
@@ -466,6 +468,7 @@ export function makeRecorderHarness({
           });
           this.headLive = false;
           this.headSamples = 0;
+          this.postHeadPreRollSamples = 0;
           this.utteranceQuietestStrongDb = null;
           this.accumulatorSamples = 0;
           this.chunkStartSessionSamples = null;
@@ -477,6 +480,23 @@ export function makeRecorderHarness({
            this.streakPeakDb = null;
            this.streakSawDynamics = false;
           this.sustainedContinuingOnsetLatched = false;
+        }
+      }
+
+      if (!this.headLive && decision.type !== 'startUtterance') {
+        if (decision.type === 'finalizeUtterance' || discarded) {
+          this.postHeadPreRollSamples = 0;
+        } else if (previousState === 'idle' || previousState === 'onsetPending') {
+          const capacity = Math.max(
+            this.endpoint.configuration.preRollSamples,
+            Math.round(this.loudPreRollMs * 16),
+          );
+          this.postHeadPreRollSamples = Math.min(
+            capacity,
+            this.postHeadPreRollSamples + frameSamples,
+          );
+        } else {
+          this.postHeadPreRollSamples = 0;
         }
       }
 

@@ -193,6 +193,23 @@ describe('VAD replay', () => {
     assert.equal(replay.utterances[0].status, 'emitted');
   });
 
+  it('prepends only the samples available in a partially filled post-head pre-roll ring', () => {
+    const events = [];
+    const harness = makeRecorderHarness({
+      gateConfig: { mode: 'static', staticRms: 0.025 },
+      endpointConfig: { onsetMs: 10, preRollMs: 50 },
+      onEvent: event => events.push(event),
+    });
+    harness.headLive = false;
+    harness.drive(-80);
+    harness.drive(-80);
+    assert.equal(harness.postHeadPreRollSamples, 320);
+
+    harness.drive(-20);
+    const start = events.find(event => event.k === 'start_utterance');
+    assert.equal(start.n, 480);
+  });
+
   it('applies windy-session threshold, silence, and dynamics overrides', () => {
     const session = adaptiveSession();
     const labels = [{ start: 2.7, end: 3.1 }];
