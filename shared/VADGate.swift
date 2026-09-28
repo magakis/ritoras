@@ -145,6 +145,7 @@ final class VADThresholdGate: @unchecked Sendable {
     private static let calibrationCompletionEpsilon = 1e-9
 
     private let config: VADGateConfig
+    var loudRegimeEnabled: Bool { config.loudRegimeEnabled }
     let effectiveAdaptiveDeltaDb: Double
     private let effectiveAdaptiveContinuationDeltaDb: Double
     let effectiveAbsoluteSpeechFloorDb: Double

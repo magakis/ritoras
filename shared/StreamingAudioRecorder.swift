@@ -578,7 +578,7 @@ private final class VADContext: @unchecked Sendable {
             let loudRegimeEvidence = out.floorDb.map {
                 (streakPeakDb ?? -Double.infinity) >= $0 + gate.effectiveAdaptiveDeltaDb
             } == true
-            let legacyLoudBranch = !gate.config.loudRegimeEnabled
+            let legacyLoudBranch = !gate.loudRegimeEnabled
                 && out.floorDb.map { $0 >= VADThresholdGate.loudFloorRegimeDb } == true
             let quietLatchQualified = quietRegimeEvidence
                 && quietRegimeFloorStable
