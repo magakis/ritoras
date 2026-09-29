@@ -11,6 +11,8 @@ const DEFAULT_QUIET_CONFIG = {
   quietLatchWitnessEnabled: false,
   quietLatchDutyCycle: 1,
   quietLatchAmbiguousEnabled: false,
+  quietRiseCapAppliesToAmbiguous: false,
+  quietRiseCapWitnessDb: 3,
   quietContinuationRiseCapDbPerSec: 12,
   softOnsetPreRollMs: 500,
   softOnsetPreRollEnabled: false,
@@ -103,7 +105,7 @@ describe('quiet-path VAD mirror knobs', () => {
     let output;
     for (let index = 0; index < 10; index += 1) {
       output = gate.process(-36.8, 0.1);
-      gate.updateFloorTracking(-36.8, 0.1, true, false, 3);
+      gate.updateFloorTracking(-36.8, 0.1, true, false, false, 3);
     }
     assert.ok(Math.abs(gate.snapshot.floorDb - -36.8) < 0.5);
     assert.equal(output.evidence, 'silence');
@@ -141,7 +143,7 @@ describe('quiet-path VAD mirror knobs', () => {
       gate.adaptiveRefinementComplete = true;
       gate.adaptiveRollingPercentileCache = whisperDb;
       gate.lastOutput = { ...gate.lastOutput, evidence: 'continuing', dynamicsSpreadDb: 3.2584127426147447 };
-      gate.updateFloorTracking(whisperDb, 0.108, true, false, 3);
+      gate.updateFloorTracking(whisperDb, 0.108, true, false, false, 3);
       return { initialFloorDb, floorDb: gate.snapshot.floorDb, marginDb: whisperDb - gate.snapshot.floorDb };
     }
 
@@ -150,6 +152,27 @@ describe('quiet-path VAD mirror knobs', () => {
     assert.equal(frozen.floorDb, frozen.initialFloorDb);
     assert.ok(Math.abs(capped.floorDb - (capped.initialFloorDb + 0.324)) < 0.001);
     assert.ok(frozen.marginDb >= capped.marginDb);
+  });
+
+  it('gates ambiguous floor rise only when enabled and uses its independent witness', () => {
+    function floorAfter({ applies, witness, spread, cap }) {
+      const gate = new VADThresholdGate(makeVadGateConfig({
+        mode: 'adaptive',
+        loudRegimeEnabled: false,
+        quietContinuationRiseCapDbPerSec: cap,
+      }));
+      gate.floorDb = -50;
+      gate.adaptiveRefinementComplete = true;
+      gate.adaptiveRollingPercentileCache = -10;
+      gate.lastOutput = { ...gate.lastOutput, evidence: 'ambiguous', dynamicsSpreadDb: spread };
+      gate.updateFloorTracking(-10, 0.1, true, false, applies, witness);
+      return gate.snapshot.floorDb;
+    }
+
+    assert.ok(Math.abs(floorAfter({ applies: false, witness: 2, spread: 2.5, cap: 0 }) - -48.8) < 0.001);
+    assert.equal(floorAfter({ applies: true, witness: 2, spread: 2.5, cap: 0 }), -50);
+    assert.ok(Math.abs(floorAfter({ applies: true, witness: 3, spread: 2.5, cap: 0 }) - -48.8) < 0.001);
+    assert.ok(Math.abs(floorAfter({ applies: true, witness: 2, spread: 2.5, cap: 3 }) - -49.7) < 0.001);
   });
 
   it('bridges one 108 ms breath hiccup at duty 0.6 but not duty 1.0', () => {

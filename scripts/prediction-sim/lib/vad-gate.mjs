@@ -524,7 +524,8 @@ export class VADThresholdGate {
     return evidence;
   }
 
-  updateFloorTracking(frameDb, duration, machineIsIdle = true, machineIsEnding = false, quietLatchWitnessDb = 3) {
+  updateFloorTracking(frameDb, duration, machineIsIdle = true, machineIsEnding = false,
+    quietRiseCapAppliesToAmbiguous = false, quietRiseCapWitnessDb = 3) {
     this.lastKnownMachineIsIdle = machineIsIdle;
     if (this.config.loudRegimeEnabled && this.floorDb !== null) {
       if (this.floorDb >= this.config.loudRegimeEnterDb) {
@@ -555,7 +556,7 @@ export class VADThresholdGate {
           riseCap = 0;
         } else if (this.isLoudRegime) {
           riseCap = this.config.loudRiseDbPerSec * this.effectiveRiseSpeedMultiplier;
-        } else if ((this.lastOutput.dynamicsSpreadDb ?? -Infinity) >= quietLatchWitnessDb) {
+        } else if ((this.lastOutput.dynamicsSpreadDb ?? -Infinity) >= quietRiseCapWitnessDb) {
           riseCap = this.config.quietContinuationRiseCapDbPerSec
             * this.effectiveRiseSpeedMultiplier;
         } else {
@@ -564,12 +565,18 @@ export class VADThresholdGate {
         break;
       case 'ambiguous':
       case 'silence':
-        riseCap = machineIsIdle
-          ? (this.isLoudRegime
-            ? this.config.loudRiseDbPerSec
-            : VAD_ELEVATED_RISE_DB_PER_SECOND)
-            * this.effectiveRiseSpeedMultiplier
-          : 0;
+        if (!machineIsIdle) {
+          riseCap = 0;
+        } else if (this.isLoudRegime) {
+          riseCap = this.config.loudRiseDbPerSec * this.effectiveRiseSpeedMultiplier;
+        } else if (this.lastOutput.evidence === 'ambiguous'
+          && quietRiseCapAppliesToAmbiguous
+          && (this.lastOutput.dynamicsSpreadDb ?? -Infinity) >= quietRiseCapWitnessDb) {
+          riseCap = this.config.quietContinuationRiseCapDbPerSec
+            * this.effectiveRiseSpeedMultiplier;
+        } else {
+          riseCap = VAD_ELEVATED_RISE_DB_PER_SECOND * this.effectiveRiseSpeedMultiplier;
+        }
         break;
       default:
         riseCap = machineIsIdle

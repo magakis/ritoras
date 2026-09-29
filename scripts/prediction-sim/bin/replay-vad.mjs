@@ -54,6 +54,8 @@ export const SHIPPING_SESSION_CONFIG = Object.freeze({
   quietLatchWitnessEnabled: false,
   quietLatchDutyCycle: 1.0,
   quietLatchAmbiguousEnabled: false,
+  quietRiseCapAppliesToAmbiguous: false,
+  quietRiseCapWitnessDb: 3.0,
   quietContinuationRiseCapDbPerSec: 12.0,
   softOnsetPreRollMs: 500,
   softOnsetPreRollEnabled: false,
@@ -321,6 +323,8 @@ export function normalizeConfig(rawConfig = {}) {
     quietLatchWitnessEnabled: Boolean(raw.quietLatchWitnessEnabled),
     quietLatchDutyCycle: asFiniteNumber(raw.quietLatchDutyCycle, 'quietLatchDutyCycle'),
     quietLatchAmbiguousEnabled: Boolean(raw.quietLatchAmbiguousEnabled),
+    quietRiseCapAppliesToAmbiguous: Boolean(raw.quietRiseCapAppliesToAmbiguous),
+    quietRiseCapWitnessDb: asFiniteNumber(raw.quietRiseCapWitnessDb, 'quietRiseCapWitnessDb'),
     softOnsetPreRollMs: asFiniteNumber(raw.softOnsetPreRollMs, 'softOnsetPreRollMs'),
     softOnsetPreRollEnabled: Boolean(raw.softOnsetPreRollEnabled),
   };
@@ -337,6 +341,8 @@ export function normalizeConfig(rawConfig = {}) {
     quietLatchWitnessEnabled: normalized.quietLatchWitnessEnabled,
     quietLatchDutyCycle: normalized.quietLatchDutyCycle,
     quietLatchAmbiguousEnabled: normalized.quietLatchAmbiguousEnabled,
+    quietRiseCapAppliesToAmbiguous: normalized.quietRiseCapAppliesToAmbiguous,
+    quietRiseCapWitnessDb: normalized.quietRiseCapWitnessDb,
     softOnsetPreRollMs: normalized.softOnsetPreRollMs,
     softOnsetPreRollEnabled: normalized.softOnsetPreRollEnabled,
   } };

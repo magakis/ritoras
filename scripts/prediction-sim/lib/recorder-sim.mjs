@@ -83,6 +83,8 @@ function makeSessionConfig(harness) {
     quietLatchWitnessEnabled: harness.quietLatchWitnessEnabled,
     quietLatchDutyCycle: harness.quietLatchDutyCycle,
     quietLatchAmbiguousEnabled: harness.quietLatchAmbiguousEnabled,
+    quietRiseCapAppliesToAmbiguous: harness.quietRiseCapAppliesToAmbiguous,
+    quietRiseCapWitnessDb: harness.quietRiseCapWitnessDb,
     softOnsetPreRollMs: harness.softOnsetPreRollMs,
     softOnsetPreRollEnabled: harness.softOnsetPreRollEnabled,
   };
@@ -129,6 +131,8 @@ export function makeRecorderHarness({
     quietLatchWitnessEnabled: recorderConfig.quietLatchWitnessEnabled ?? false,
     quietLatchDutyCycle: recorderConfig.quietLatchDutyCycle ?? 1,
     quietLatchAmbiguousEnabled: recorderConfig.quietLatchAmbiguousEnabled ?? false,
+    quietRiseCapAppliesToAmbiguous: recorderConfig.quietRiseCapAppliesToAmbiguous ?? false,
+    quietRiseCapWitnessDb: recorderConfig.quietRiseCapWitnessDb ?? 3,
     loudFlatTerminateEnabled: recorderConfig.loudFlatTerminateEnabled ?? false,
     loudFlatSpreadDb: recorderConfig.loudFlatSpreadDb ?? 2.5,
     loudFlatTerminateSeconds: recorderConfig.loudFlatTerminateSeconds ?? 3,
@@ -395,7 +399,8 @@ export function makeRecorderHarness({
           frameDuration,
           previousState === 'idle' && this.endpoint.state === 'idle',
           previousState === 'endPending' || this.endpoint.state === 'endPending',
-          this.quietLatchWitnessDb,
+          this.quietRiseCapAppliesToAmbiguous,
+          this.quietRiseCapWitnessDb,
         );
 
         if (decision.type === 'startUtterance') {
@@ -446,7 +451,8 @@ export function makeRecorderHarness({
           frameDuration,
           this.accumulatorSamples === 0,
           false,
-          this.quietLatchWitnessDb,
+          this.quietRiseCapAppliesToAmbiguous,
+          this.quietRiseCapWitnessDb,
         );
         if (this.accumulatorSamples === 0) {
           this.chunkStartSessionSamples = this.sessionElapsedSamples - frameSamples;
