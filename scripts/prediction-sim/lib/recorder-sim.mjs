@@ -395,6 +395,7 @@ export function makeRecorderHarness({
           frameDuration,
           previousState === 'idle' && this.endpoint.state === 'idle',
           previousState === 'endPending' || this.endpoint.state === 'endPending',
+          this.quietLatchWitnessDb,
         );
 
         if (decision.type === 'startUtterance') {
@@ -444,6 +445,8 @@ export function makeRecorderHarness({
           frameDb,
           frameDuration,
           this.accumulatorSamples === 0,
+          false,
+          this.quietLatchWitnessDb,
         );
         if (this.accumulatorSamples === 0) {
           this.chunkStartSessionSamples = this.sessionElapsedSamples - frameSamples;

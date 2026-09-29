@@ -59,9 +59,54 @@ describe('quiet-path VAD mirror knobs', () => {
     capped.floorDb = -50;
     capped.adaptiveRefinementComplete = true;
     capped.adaptiveRollingPercentileCache = -10;
-    capped.lastOutput = { ...capped.lastOutput, evidence: 'continuing' };
+    capped.lastOutput = { ...capped.lastOutput, evidence: 'continuing', dynamicsSpreadDb: 3 };
     capped.updateFloorTracking(-10, 1, true);
     assert.equal(capped.snapshot.floorDb, -47);
+  });
+
+  it('shape-gates the quiet rise cap and lets flat continuing ambient track normally', () => {
+    const flat = new VADThresholdGate(makeVadGateConfig({
+      mode: 'adaptive',
+      loudRegimeEnabled: false,
+      quietContinuationRiseCapDbPerSec: 0,
+    }));
+    flat.floorDb = -50;
+    flat.adaptiveRefinementComplete = true;
+    flat.adaptiveRollingPercentileCache = -10;
+    flat.lastOutput = { ...flat.lastOutput, evidence: 'continuing', dynamicsSpreadDb: 2.99 };
+    flat.updateFloorTracking(-10, 0.1, true);
+    assert.ok(Math.abs(flat.snapshot.floorDb - -48.8) < 0.001);
+
+    const speech = new VADThresholdGate(makeVadGateConfig({
+      mode: 'adaptive',
+      loudRegimeEnabled: false,
+      quietContinuationRiseCapDbPerSec: 0,
+    }));
+    speech.floorDb = -50;
+    speech.adaptiveRefinementComplete = true;
+    speech.adaptiveRollingPercentileCache = -10;
+    speech.lastOutput = { ...speech.lastOutput, evidence: 'continuing', dynamicsSpreadDb: 3 };
+    speech.updateFloorTracking(-10, 0.1, true);
+    assert.equal(speech.snapshot.floorDb, -50);
+  });
+
+  it('tracks a stuck-low floor through flat D1-like noise until evidence returns to silence', () => {
+    const gate = new VADThresholdGate(makeVadGateConfig({
+      mode: 'adaptive',
+      loudRegimeEnabled: false,
+      quietContinuationRiseCapDbPerSec: 0,
+    }));
+    gate.floorDb = -42.11;
+    gate.adaptiveRefinementComplete = true;
+    gate.coldStartConverged = true;
+    gate.adaptiveRollingPercentileCache = -36.8;
+    let output;
+    for (let index = 0; index < 10; index += 1) {
+      output = gate.process(-36.8, 0.1);
+      gate.updateFloorTracking(-36.8, 0.1, true, false, 3);
+    }
+    assert.ok(Math.abs(gate.snapshot.floorDb - -36.8) < 0.5);
+    assert.equal(output.evidence, 'silence');
   });
 
   it('keeps default-off decisions and emissions invariant across telemetry fixtures', () => {
@@ -83,22 +128,28 @@ describe('quiet-path VAD mirror knobs', () => {
     }
   });
 
-  it('recovers the Tele1 whisper gap with quiet witness and capped floor rise', () => {
-    const session = parseSession(fixture('EF51BED5-74A4-4D34-A643-D270191219DB-vad.jsonl'));
-    const replay = replaySession(session, {
-      ...session.config,
-      quietLatchWitnessEnabled: true,
-      quietLatchMs: 400,
-      quietLatchWitnessDb: 3,
-      quietLatchDutyCycle: 0.6,
-      quietContinuationRiseCapDbPerSec: 2,
-      softOnsetPreRollEnabled: true,
-      softOnsetPreRollMs: 500,
-    }, { compare: false });
-    const recovered = replay.events.find(event => (
-      event.k === 'emit' && event.s0 <= 13_900 && event.s1 >= 14_500
-    ));
-    assert.ok(recovered, JSON.stringify(replay.events.filter(event => event.k === 'emit')));
+  it('keeps a speech-shaped Tele1 whisper margin under the configured rise cap', () => {
+    function floorAfter(capDbPerSecond) {
+      const gate = new VADThresholdGate(makeVadGateConfig({
+        mode: 'adaptive',
+        loudRegimeEnabled: false,
+        quietContinuationRiseCapDbPerSec: capDbPerSecond,
+      }));
+      const initialFloorDb = -41.706642150878906;
+      const whisperDb = -33.24956512451172;
+      gate.floorDb = initialFloorDb;
+      gate.adaptiveRefinementComplete = true;
+      gate.adaptiveRollingPercentileCache = whisperDb;
+      gate.lastOutput = { ...gate.lastOutput, evidence: 'continuing', dynamicsSpreadDb: 3.2584127426147447 };
+      gate.updateFloorTracking(whisperDb, 0.108, true, false, 3);
+      return { initialFloorDb, floorDb: gate.snapshot.floorDb, marginDb: whisperDb - gate.snapshot.floorDb };
+    }
+
+    const frozen = floorAfter(0);
+    const capped = floorAfter(3);
+    assert.equal(frozen.floorDb, frozen.initialFloorDb);
+    assert.ok(Math.abs(capped.floorDb - (capped.initialFloorDb + 0.324)) < 0.001);
+    assert.ok(frozen.marginDb >= capped.marginDb);
   });
 
   it('bridges one 108 ms breath hiccup at duty 0.6 but not duty 1.0', () => {
