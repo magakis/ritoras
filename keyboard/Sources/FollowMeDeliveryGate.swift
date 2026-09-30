@@ -21,11 +21,12 @@ enum FollowMeDeliveryGate {
         now: Date,
         windowSeconds: Int,
         consumedIDs: [String],
+        matchesPendingRequest: Bool,
         hasRealField: Bool
     ) -> Decision {
         let idString = id.uuidString
         guard !consumedIDs.contains(idString) else { return .dropConsumed }
-        guard now.timeIntervalSince(terminalAt) <= Double(windowSeconds) else {
+        guard matchesPendingRequest || now.timeIntervalSince(terminalAt) <= Double(windowSeconds) else {
             return .dropExpired
         }
         _ = status

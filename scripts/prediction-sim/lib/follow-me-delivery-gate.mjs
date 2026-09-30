@@ -20,10 +20,11 @@ export function decideFollowMeDelivery({
   now,
   windowSeconds,
   consumedIDs,
+  matchesPendingRequest,
   hasRealField,
 }) {
   if (consumedIDs.includes(id)) return Decision.dropConsumed;
-  if (now - terminalAt > windowSeconds * 1000) return Decision.dropExpired;
+  if (!matchesPendingRequest && now - terminalAt > windowSeconds * 1000) return Decision.dropExpired;
   void status;
   return hasRealField ? Decision.deliver : Decision.waitNoField;
 }

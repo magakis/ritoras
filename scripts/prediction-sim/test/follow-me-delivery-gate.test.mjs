@@ -14,6 +14,7 @@ const input = (overrides = {}) => ({
   now: 15_000,
   windowSeconds: 10,
   consumedIDs: [],
+  matchesPendingRequest: false,
   hasRealField: true,
   ...overrides,
 });
@@ -26,6 +27,26 @@ describe('FollowMeDeliveryGate (JS port)', () => {
   it('delivers at the exact window boundary and expires strictly after it', () => {
     assert.strictEqual(decideFollowMeDelivery(input({ now: 20_000 })), Decision.deliver);
     assert.strictEqual(decideFollowMeDelivery(input({ now: 20_001 })), Decision.dropExpired);
+  });
+
+  it('delivers an unconsumed pending match beyond the window', () => {
+    assert.strictEqual(decideFollowMeDelivery(input({
+      now: 30_001,
+      matchesPendingRequest: true,
+    })), Decision.deliver);
+  });
+
+  it('expires an out-of-window payload without a pending match', () => {
+    assert.strictEqual(decideFollowMeDelivery(input({ now: 20_001 })), Decision.dropExpired);
+  });
+
+  it('delivers at the exact window edge and drops a consumed pending match', () => {
+    assert.strictEqual(decideFollowMeDelivery(input({ now: 20_000 })), Decision.deliver);
+    assert.strictEqual(decideFollowMeDelivery(input({
+      now: 30_001,
+      matchesPendingRequest: true,
+      consumedIDs: ['payload-1'],
+    })), Decision.dropConsumed);
   });
 
   it('drops an already consumed id, including a legacy-seeded id', () => {
