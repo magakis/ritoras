@@ -230,10 +230,11 @@ struct SettingsView: View {
             Toggle("Auto-Capitalization", isOn: $settings.autoCapitalizationEnabled)
             Toggle("Auto-Correction", isOn: $settings.autocorrectOnSpaceEnabled)
             Toggle("Haptic Feedback", isOn: $settings.hapticsEnabled)
+            Toggle("In-keyboard recording (experimental)", isOn: $settings.inKeyboardRecording)
         } header: {
             Text("Keyboard")
         } footer: {
-            Text("iOS's built-in Keyboard Feedback setting does not apply to custom keyboards. This toggle provides independent control.")
+            Text("iOS's built-in Keyboard Feedback setting does not apply to custom keyboards. Experimental recording captures and streams audio inside the keyboard; enable Full Access and grant microphone access in Ritoras first.")
         }
     }
 

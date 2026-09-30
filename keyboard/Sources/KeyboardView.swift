@@ -657,6 +657,7 @@ class KeyboardView: UIView {
 
     // Key references
     private weak var micKeyButton: KeyButton?
+    private let dictationTranscriptLabel = UILabel()
     private weak var emojiKeyButton: KeyButton?
     private weak var shiftKeyButton: KeyButton?
     private weak var bottomRowView: KeyboardRowView?
@@ -755,6 +756,13 @@ class KeyboardView: UIView {
             self.languageTapped?()
         }
         addSubview(suggestionBar)
+        dictationTranscriptLabel.font = .systemFont(ofSize: 12)
+        dictationTranscriptLabel.textColor = .secondaryLabel
+        dictationTranscriptLabel.textAlignment = .center
+        dictationTranscriptLabel.lineBreakMode = .byTruncatingTail
+        dictationTranscriptLabel.isHidden = true
+        dictationTranscriptLabel.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(dictationTranscriptLabel)
     }
 
     private func setupLetterRegion() {
@@ -807,6 +815,10 @@ class KeyboardView: UIView {
             suggestionBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             suggestionBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             suggestionBar.heightAnchor.constraint(equalToConstant: 36),
+            dictationTranscriptLabel.leadingAnchor.constraint(equalTo: suggestionBar.leadingAnchor, constant: 8),
+            dictationTranscriptLabel.trailingAnchor.constraint(equalTo: suggestionBar.trailingAnchor, constant: -8),
+            dictationTranscriptLabel.centerYAnchor.constraint(equalTo: suggestionBar.centerYAnchor),
+            dictationTranscriptLabel.heightAnchor.constraint(equalToConstant: 20),
 
             // Letter region container — middle (rows 1–3)
             letterRegionContainer.topAnchor.constraint(equalTo: suggestionBar.bottomAnchor, constant: 6),
@@ -1232,6 +1244,12 @@ class KeyboardView: UIView {
 
     func configure(for state: KeyboardState) {
         setMicState(state)
+    }
+
+    func setDictationTranscript(_ text: String?) {
+        dictationTranscriptLabel.text = text
+        dictationTranscriptLabel.isHidden = text == nil || text?.isEmpty == true
+        if text != nil { bringSubviewToFront(dictationTranscriptLabel) }
     }
 
     func updateFullAccess(_ hasAccess: Bool) {

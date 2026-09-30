@@ -464,6 +464,8 @@ struct SharedConfig {
 
         static let hapticsEnabledKey = "hapticsEnabled"
         static let hapticsEnabledDefault = true
+        static let inKeyboardRecordingKey = "inKeyboardRecording"
+        static let inKeyboardRecordingDefault = false
 
         // MARK: - Keyboard Language
 
@@ -624,6 +626,14 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.hapticsEnabledKey) as? Bool)
             ?? Defaults.hapticsEnabledDefault
+    }
+
+    static func inKeyboardRecordingEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.inKeyboardRecordingDefault
+        }
+        return (defaults.object(forKey: Defaults.inKeyboardRecordingKey) as? Bool)
+            ?? Defaults.inKeyboardRecordingDefault
     }
 
     /// Reads the active keyboard language from the App Group.

@@ -1,5 +1,5 @@
 import UIKit
-
+import AVFAudio
 
 private enum BackspacePhase {
     case charRepeat
@@ -27,6 +27,11 @@ class KeyboardViewController: UIInputViewController {
     private var state: KeyboardState = .idle {
         didSet {
             keyboardView.configure(for: state)
+            if case .error(let message) = state {
+                keyboardView.setDictationTranscript(message)
+            } else if state == .idle {
+                keyboardView.setDictationTranscript(nil)
+            }
             errorResetWorkItem?.cancel()
             if case .error = state {
                 scheduleErrorReset()
@@ -221,6 +226,14 @@ class KeyboardViewController: UIInputViewController {
     /// stop/cancel requests. Set synchronously (before the Task) so a rapid
     /// double-tap is observed by the second call.
     private var stopCancelRequestInFlight = false
+    private var inKeyboardRecorder: StreamingAudioRecorder?
+    private var inKeyboardClient: WhisperStreamClient?
+    private var inKeyboardSendTask: Task<Void, Never>?
+    private var inKeyboardReceiveTask: Task<Void, Never>?
+    private var inKeyboardMemoryTimer: Timer?
+    private var inKeyboardStartMemoryTask: Task<Void, Never>?
+    private var audioInterruptionObserver: NSObjectProtocol?
+    private var inKeyboardSessionActive = false
 
     // Settings cache (refreshed by Darwin notification from container app)
     private let settingsCache = KeyboardSettingsCache()
@@ -507,6 +520,7 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        if inKeyboardSessionActive { stopInKeyboardRecording(cancel: true) }
         shedPredictionEngine()
         FileLogger.shared.info(.keyboard, "viewWillDisappear")
 
@@ -535,6 +549,7 @@ class KeyboardViewController: UIInputViewController {
         darwinStateChangedToken = nil
         darwinSettingsChangedToken = nil
         darwinLearnedWordsChangedToken = nil
+        if inKeyboardSessionActive { stopInKeyboardRecording(cancel: true) }
     }
 
     // MARK: - Setup
@@ -676,16 +691,25 @@ class KeyboardViewController: UIInputViewController {
     private func handleMicButtonTap() {
         switch state {
         case .idle:
+            if settingsCache.inKeyboardRecording {
+                startInKeyboardRecording()
+                return
+            }
             guard hasFullAccess else {
                 state = .error("Full Access required. Settings \u{2192} General \u{2192} Keyboard \u{2192} Ritoras \u{2192} Allow Full Access.")
                 return
             }
             openContainerAppForDictation()
         case .recording:
+            if inKeyboardSessionActive {
+                stopInKeyboardRecording(cancel: false)
+                return
+            }
             FileLogger.shared.info(.keyboard, "Mic: .recording -> POST /stop")
             requestStop()
 
         case .waiting:
+            if inKeyboardSessionActive { return }
             FileLogger.shared.info(.keyboard, "Mic: .waiting -> POST /stop")
             requestStop()
         case .error:
@@ -694,6 +718,193 @@ class KeyboardViewController: UIInputViewController {
         default:
             break   // ignore taps while openingApp/inserting
         }
+    }
+
+    private func startInKeyboardRecording() {
+        guard hasFullAccess else {
+            state = .error("Full Access required. Settings → General → Keyboard → Ritoras → Allow Full Access.")
+            return
+        }
+        switch AVAudioSession.sharedInstance().recordPermission {
+        case .granted: break
+        case .undetermined, .denied:
+            state = .error("Open Ritoras once and grant microphone access, then return to the keyboard.")
+            return
+        @unknown default:
+            state = .error("Open Ritoras once and grant microphone access, then return to the keyboard.")
+            return
+        }
+
+        let audioSession = AVAudioSession.sharedInstance()
+        FileLogger.shared.debug(.audio, "in-kb-rec other audio state", payload: ["isOtherAudioPlaying": audioSession.isOtherAudioPlaying])
+        logInKeyboardMemory("before-start")
+
+        let config = SharedConfig.load()
+        let servers = config.servers
+        let server = SharedConfig.selectedServer().flatMap { selected in
+            servers.contains(selected) ? selected : nil
+        } ?? servers.first
+        guard let server,
+              let client = WhisperStreamClient(baseURL: server, dictationID: UUID()) else {
+            state = .error("No valid transcription server is configured.")
+            return
+        }
+
+        inKeyboardSessionActive = true
+        inKeyboardClient = client
+        inKeyboardSendTask = Task {}
+        state = .recording
+        keyboardView.setDictationTranscript("Connecting…")
+        audioInterruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: audioSession,
+            queue: .main
+        ) { [weak self] notification in
+            guard let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  AVAudioSession.InterruptionType(rawValue: raw) == .began else { return }
+            self?.stopInKeyboardRecording(cancel: true, message: "Audio was interrupted. Tap the mic to try again.")
+        }
+
+        inKeyboardStartMemoryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await client.connect()
+                guard self.inKeyboardSessionActive else {
+                    await client.disconnect()
+                    return
+                }
+                self.keyboardView.setDictationTranscript(nil)
+                self.inKeyboardReceiveTask = Task { @MainActor [weak self] in
+                    do {
+                        let transcript = try await client.receiveMessages(onPartial: { partial in
+                            Task { @MainActor [weak self] in
+                                guard self?.inKeyboardSessionActive == true else { return }
+                                self?.keyboardView.setDictationTranscript(partial)
+                            }
+                        })
+                        guard let self, self.inKeyboardSessionActive else { return }
+                        self.finishInKeyboardTranscript(transcript)
+                    } catch {
+                        guard let self, self.inKeyboardSessionActive else { return }
+                        self.stopInKeyboardRecording(cancel: true, message: "Transcription server failed: \(error.localizedDescription)")
+                    }
+                }
+                let recorder = StreamingAudioRecorder()
+                self.inKeyboardRecorder = recorder
+                try await recorder.start(onChunk: { [weak self] chunkID, samples in
+                    Task { @MainActor [weak self] in
+                        self?.queueInKeyboardChunk(id: chunkID, samples: samples, client: client)
+                    }
+                })
+                self.inKeyboardMemoryTimer?.invalidate()
+                self.inKeyboardMemoryTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+                    self?.logInKeyboardMemory("during-capture")
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard self.inKeyboardSessionActive else { return }
+                self.logInKeyboardMemory("after-start-1s")
+                FileLogger.shared.info(.audio, "in-kb-rec capture started")
+            } catch {
+                self.stopInKeyboardRecording(cancel: true, message: "Couldn't start keyboard recording: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func queueInKeyboardChunk(id: UInt32, samples: [Float], client: WhisperStreamClient) {
+        let previous = inKeyboardSendTask
+        inKeyboardSendTask = Task {
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            do {
+                try await client.sendChunk(id: id, samples: samples)
+            } catch {
+                await MainActor.run {
+                    self.stopInKeyboardRecording(cancel: true, message: "Couldn't reach the transcription server.")
+                }
+            }
+        }
+    }
+
+    private func stopInKeyboardRecording(cancel: Bool, message: String? = nil) {
+        guard inKeyboardSessionActive else { return }
+        if cancel || message != nil {
+            inKeyboardSessionActive = false
+        } else {
+            state = .waiting
+        }
+        inKeyboardMemoryTimer?.invalidate()
+        inKeyboardMemoryTimer = nil
+        inKeyboardStartMemoryTask?.cancel()
+        inKeyboardStartMemoryTask = nil
+        if let audioInterruptionObserver {
+            NotificationCenter.default.removeObserver(audioInterruptionObserver)
+            self.audioInterruptionObserver = nil
+        }
+        let recorder = inKeyboardRecorder
+        inKeyboardRecorder = nil
+        let client = inKeyboardClient
+        if cancel || message != nil { inKeyboardClient = nil }
+        inKeyboardSendTask = nil
+        if cancel || message != nil {
+            inKeyboardReceiveTask?.cancel()
+            inKeyboardReceiveTask = nil
+        }
+        Task { @MainActor [weak self] in
+            await recorder?.stop()
+            await self?.inKeyboardSendTask?.value
+            if !cancel, let client {
+                do {
+                    try await client.sendEnd()
+                } catch {
+                    self?.stopInKeyboardRecording(cancel: true, message: "Couldn't finish streaming to the server.")
+                }
+            } else {
+                if let client {
+                    do { try await client.sendCancel() } catch {
+                        FileLogger.shared.debug(.network, "in-kb-rec CANCEL could not be sent")
+                    }
+                }
+                await client?.disconnect()
+                self?.inKeyboardSessionActive = false
+                self?.state = message.map(KeyboardState.error) ?? .idle
+                self?.keyboardView.setDictationTranscript(nil)
+                self?.logInKeyboardMemory("after-stop")
+                AudioSession.deactivate()
+            }
+        }
+    }
+
+    private func finishInKeyboardTranscript(_ transcript: String) {
+        guard !transcript.isEmpty else {
+            stopInKeyboardRecording(cancel: true, message: "Nothing was heard. Try again.")
+            return
+        }
+        inKeyboardSessionActive = false
+        inKeyboardMemoryTimer?.invalidate()
+        inKeyboardMemoryTimer = nil
+        inKeyboardStartMemoryTask?.cancel()
+        inKeyboardStartMemoryTask = nil
+        let recorder = inKeyboardRecorder
+        inKeyboardRecorder = nil
+        let client = inKeyboardClient
+        inKeyboardClient = nil
+        inKeyboardReceiveTask = nil
+        keyboardView.setDictationTranscript(nil)
+        Task { @MainActor [weak self] in
+            await recorder?.stop()
+            await client?.disconnect()
+            AudioSession.deactivate()
+            self?.logInKeyboardMemory("after-stop")
+            self?.textDocumentProxy.insertText(transcript)
+            self?.state = .idle
+        }
+    }
+
+    private func logInKeyboardMemory(_ checkpoint: String) {
+        FileLogger.shared.info(.audio, "in-kb-rec memory \(checkpoint)", payload: [
+            "footprintBytes": MemoryMonitor.currentFootprint(),
+            "residentBytes": MemoryMonitor.currentResidentSize()
+        ])
     }
 
     // MARK: - Dictation via Container App
@@ -2164,6 +2375,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     override func textWillChange(_ textInput: UITextInput?) {
         super.textWillChange(textInput)
+        if inKeyboardSessionActive { stopInKeyboardRecording(cancel: true) }
         observeIdentityForFlapDetection()
         keyboardView.noteSuggestionContextChange()
         backspaceNilContextRetries = 0
