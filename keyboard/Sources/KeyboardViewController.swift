@@ -436,6 +436,7 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        settingsCache.refresh()
         installOrUpdateHeightConstraint()
         view.setNeedsLayout()
         view.layoutIfNeeded()
@@ -689,9 +690,45 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Mic Button
 
     private func handleMicButtonTap() {
+        let cachedSettingBeforeRefresh = settingsCache.inKeyboardRecording
+        let appGroupInKeyboardSetting = SharedConfig.inKeyboardRecordingEnabled()
+        settingsCache.refresh()
+        let cachedInKeyboardSetting = settingsCache.inKeyboardRecording
+        let recordPermission = AVAudioSession.sharedInstance().recordPermission
+        let permissionLabel: String
+        switch recordPermission {
+        case .granted: permissionLabel = "granted"
+        case .denied: permissionLabel = "denied"
+        case .undetermined: permissionLabel = "undetermined"
+        @unknown default: permissionLabel = "unknown"
+        }
+        let selectedBranch: String
         switch state {
         case .idle:
-            if settingsCache.inKeyboardRecording {
+            selectedBranch = cachedInKeyboardSetting ? "in-keyboard-start" : "container-app-open"
+        case .recording:
+            selectedBranch = inKeyboardSessionActive ? "in-keyboard-stop" : "container-app-stop"
+        case .waiting:
+            selectedBranch = inKeyboardSessionActive ? "in-keyboard-waiting" : "container-app-stop"
+        case .error:
+            selectedBranch = "dismiss-error"
+        case .openingApp:
+            selectedBranch = "opening-app-ignored"
+        case .inserting:
+            selectedBranch = "inserting-ignored"
+        }
+        FileLogger.shared.debug(.keyboard, "Mic tap branch", payload: [
+            "settingCachedBeforeRefresh": cachedSettingBeforeRefresh,
+            "settingCached": cachedInKeyboardSetting,
+            "settingAppGroup": appGroupInKeyboardSetting,
+            "hasFullAccess": hasFullAccess,
+            "recordPermission": permissionLabel,
+            "branch": selectedBranch
+        ])
+
+        switch state {
+        case .idle:
+            if cachedInKeyboardSetting {
                 startInKeyboardRecording()
                 return
             }
