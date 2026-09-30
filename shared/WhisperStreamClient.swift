@@ -24,6 +24,7 @@ actor WhisperStreamClient {
 
     /// The WebSocket URL derived from the HTTP base URL.
     private let url: URL
+    private let dictationID: String
 
     /// The active WebSocket task, or nil when disconnected.
     private var task: URLSessionWebSocketTask?
@@ -51,7 +52,8 @@ actor WhisperStreamClient {
     /// - Parameter baseURL: Base URL of the Whisper server, e.g.
     ///   `"http://192.168.1.100:5000"`.
     /// - Returns: `nil` if the base URL cannot be parsed into a valid WebSocket URL.
-    init?(baseURL: String) {
+    init?(baseURL: String, dictationID: UUID) {
+        self.dictationID = String(dictationID.uuidString.prefix(8))
         var urlString = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 
         // Rewrite scheme: http → ws, https → wss
@@ -83,8 +85,8 @@ actor WhisperStreamClient {
         task = newTask
         newTask.resume()
 
-        FileLogger.shared.debug(.network, "Connecting to WebSocket",
-                               payload: ["url": url.absoluteString])
+        FileLogger.shared.debug(.network, "Stream: connecting",
+                               payload: ["id": dictationID])
 
         try await withThrowingTaskGroup(of: Void.self) { group in
             // Probe: send PING, wait for PONG
@@ -97,7 +99,7 @@ actor WhisperStreamClient {
                         case .string(let text):
                             if text.contains("PONG") {
                                 FileLogger.shared.info(.network, "Connected (PONG received)",
-                                                       payload: ["url": self.url.absoluteString])
+                                                       payload: ["id": self.dictationID])
                                 return
                             }
                             // Unexpected message before PONG — ignore
@@ -121,7 +123,7 @@ actor WhisperStreamClient {
                     nanoseconds: UInt64(SharedConfig.Defaults.streamWsConnectTimeout * 1_000_000_000)
                 )
                 FileLogger.shared.debug(.network, "Connection timed out",
-                                       payload: ["url": self.url.absoluteString,
+                                       payload: ["id": self.dictationID,
                                                  "timeout": SharedConfig.Defaults.streamWsConnectTimeout])
                 throw WhisperError.timeout
             }
@@ -187,7 +189,7 @@ actor WhisperStreamClient {
             throw WhisperError.networkError(URLError(.notConnectedToInternet))
         }
         try await task.send(.string(#"{"type":"END"}"#))
-        FileLogger.shared.info(.network, "Sent END")
+        FileLogger.shared.info(.network, "Stream: END sent", payload: ["id": dictationID])
     }
 
     /// Sends a keepalive ping (`{"type":"PING"}`).  The server's
@@ -284,9 +286,10 @@ actor WhisperStreamClient {
                                         await onChunkResult?(chunkId, msg.transcription)
                                     }
                                     FileLogger.shared.info(.network, "Received final",
-                                                           payload: ["preview": String(msg.transcription.prefix(60)),
-                                                                     "length": msg.transcription.count,
-                                                                     "chunkId": msg.chunk_id as Any])
+                                                           payload: ["id": self.dictationID,
+                                                                     "preview": String(msg.transcription.prefix(60)),
+                                                                      "length": msg.transcription.count,
+                                                                      "chunkId": msg.chunk_id as Any])
                                     return msg.transcription
 
                                 case "PONG":
@@ -297,8 +300,9 @@ actor WhisperStreamClient {
                                 case "error":
                                     let msg = try JSONDecoder().decode(
                                         StreamError.self, from: data)
-                                    FileLogger.shared.error(.network, "Received error",
-                                                            payload: ["message": msg.message])
+                                    FileLogger.shared.error(.network, "Stream: server error",
+                                                            payload: ["id": self.dictationID,
+                                                                      "reason": String(msg.message.prefix(120))])
                                     throw WhisperError.httpError(0, msg.message)
 
                                 default:
@@ -350,7 +354,7 @@ actor WhisperStreamClient {
                     let stale = await self.secondsSinceLastActivity()
                     if stale > interval * Double(maxMissed) {
                         FileLogger.shared.warn(.network, "Stream liveness: no activity, declaring timeout",
-                                               payload: ["staleSec": stale, "interval": interval, "maxMissedPongs": maxMissed])
+                                               payload: ["id": self.dictationID, "staleSec": stale, "interval": interval, "maxMissedPongs": maxMissed])
                         throw WhisperError.timeout
                     }
                 }
@@ -386,7 +390,7 @@ actor WhisperStreamClient {
         // Cancel any in-flight receive/send operations and close.
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
-        FileLogger.shared.info(.network, "Disconnected")
+        FileLogger.shared.info(.network, "Stream: disconnected", payload: ["id": dictationID])
     }
 
 

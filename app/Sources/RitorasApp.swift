@@ -96,14 +96,20 @@ struct RitorasApp: App {
                 }
             }
             .onChange(of: scenePhase) { newPhase in
+                let phaseName: String
                 switch newPhase {
                 case .active:
+                    phaseName = "active"
                     dictationViewModel.ensureLocalhostServerHealthy()
-                case .background, .inactive:
-                    break
+                case .background:
+                    phaseName = "background"
+                case .inactive:
+                    phaseName = "inactive"
                 @unknown default:
-                    break
+                    phaseName = "unknown"
                 }
+                FileLogger.shared.info(.lifecycle, "ScenePhase: \(phaseName)",
+                                       payload: ["id": dictationViewModel.activeID.map { String($0.uuidString.prefix(8)) } ?? "nil"])
             }
             .fullScreenCover(item: $dictationRequest) { request in
                 DictationView(requestId: request.id)

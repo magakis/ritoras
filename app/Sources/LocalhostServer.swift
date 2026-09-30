@@ -218,21 +218,23 @@ final class LocalhostServer {
     }
 
     private func handleConnection(_ connection: NWConnection) {
+        let connectionTag = String(UUID().uuidString.prefix(8))
         let connQueue = DispatchQueue(
-            label: "com.ritoras.localhostserver.conn.\(UUID().uuidString.prefix(8))",
+            label: "com.ritoras.localhostserver.conn.\(connectionTag)",
             qos: .utility
         )
         connection.start(queue: connQueue)
 
         registerConnection(connection)
+        FileLogger.shared.debug(.network, "LocalhostServer: connection accepted", payload: ["connection": connectionTag])
 
         var requestData = Data()
 
         func readNext() {
             let remaining = Self.maxRequestSize - requestData.count
             guard remaining > 0 else {
-                let response = handleRequest(data: requestData)
-                sendResponse(response, on: connection)
+                let response = handleRequest(data: requestData, connectionTag: connectionTag)
+                sendResponse(response, on: connection, connectionTag: connectionTag)
                 return
             }
 
@@ -243,6 +245,7 @@ final class LocalhostServer {
                     FileLogger.shared.debug(.network, "LocalhostServer: receive error",
                                            payload: ["error": error.localizedDescription])
                     self.unregisterConnection(connection)
+                    FileLogger.shared.debug(.network, "LocalhostServer: connection closed", payload: ["connection": connectionTag])
                     connection.cancel()
                     return
                 }
@@ -254,8 +257,8 @@ final class LocalhostServer {
                 // Body-completeness check: if headers are done and we have enough
                 // body bytes, process the request. Otherwise keep reading.
                 if Self.isRequestComplete(requestData) || isComplete || requestData.count >= Self.maxRequestSize {
-                    let response = self.handleRequest(data: requestData)
-                    self.sendResponse(response, on: connection)
+                    let response = self.handleRequest(data: requestData, connectionTag: connectionTag)
+                    self.sendResponse(response, on: connection, connectionTag: connectionTag)
                 } else {
                     readNext()
                 }
@@ -265,10 +268,11 @@ final class LocalhostServer {
         readNext()
     }
 
-    private func sendResponse(_ data: Data, on connection: NWConnection) {
+    private func sendResponse(_ data: Data, on connection: NWConnection, connectionTag: String) {
         connection.send(content: data, completion: .contentProcessed { [weak self] _ in
             connection.cancel()
             self?.unregisterConnection(connection)
+            FileLogger.shared.debug(.network, "LocalhostServer: connection closed", payload: ["connection": connectionTag])
         })
     }
 
@@ -319,7 +323,7 @@ final class LocalhostServer {
 
     // MARK: - Request Handling
 
-    private func handleRequest(data: Data) -> Data {
+    private func handleRequest(data: Data, connectionTag: String) -> Data {
         // Locate header terminator via findHeaderEnd (works on raw Data)
         guard let headerEndOffset = Self.findHeaderEnd(data) else {
             return Self.makeJSONResponse(status: 400, body: ["error": "Bad Request", "detail": "Missing header terminator"])
@@ -345,6 +349,7 @@ final class LocalhostServer {
 
         let method = parts[0].uppercased()
         let rawPath = parts[1]
+        FileLogger.shared.debug(.network, "LocalhostServer: served route", payload: ["connection": connectionTag, "route": rawPath])
 
         if method == "POST" {
             if rawPath == "/logs" {
@@ -429,7 +434,7 @@ final class LocalhostServer {
     /// dictation session. Fire-and-forget — returns 202 immediately; the
     /// keyboard learns the outcome via the app-group snapshot pipeline.
     private func handlePostStop() -> Data {
-        FileLogger.shared.info(.network, "POST /stop received", payload: ["hasHandler": onStop != nil])
+        FileLogger.shared.info(.network, "POST /stop received", payload: ["id": onState?().map { String($0.id.uuidString.prefix(8)) } ?? "nil", "hasHandler": onStop != nil])
         guard let handler = onStop else {
             return Self.makeJSONResponse(status: 503, body: ["error": "no handler"])
         }
@@ -441,7 +446,7 @@ final class LocalhostServer {
     /// dictation session. Fire-and-forget — returns 202 immediately; the
     /// keyboard learns the outcome via the app-group snapshot pipeline.
     private func handlePostCancel() -> Data {
-        FileLogger.shared.info(.network, "POST /cancel received", payload: ["hasHandler": onCancel != nil])
+        FileLogger.shared.info(.network, "POST /cancel received", payload: ["id": onState?().map { String($0.id.uuidString.prefix(8)) } ?? "nil", "hasHandler": onCancel != nil])
         guard let handler = onCancel else {
             return Self.makeJSONResponse(status: 503, body: ["error": "no handler"])
         }
