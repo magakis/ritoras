@@ -24,16 +24,23 @@ SideStore" — they are the canonical transport for all dictation results.
 
 ### What the localhost server still does
 
-A minimal HTTP server on `127.0.0.1:47321` (Apple Network framework, `NWListener`)
-remains for two auxiliary functions:
+A minimal HTTP server on loopback port `47321` (Apple Network framework,
+`NWListener`) remains for health checks, a current-state fallback, log shipping,
+and dictation stop/cancel commands:
 
-- **`/health`** — health check (used for debugging)
-- **`/logs`** — log shipping (keyboard extension `FileLogger` entries are
-  POSTed here, stored in the container app's `LogStore` SQLite database, surfaced
-  in the Debug Log Viewer)
+- **`GET /health`** — health check.
+- **`GET /state`** — serves the latest in-memory `DictationPayload` snapshot,
+  or reports no active session. This is a fallback probe, not the canonical
+  cross-process transport.
+- **`POST /logs`** — keyboard log shipping to the container app's `FileLogger`
+  and `LogStore` SQLite database, surfaced in the Debug Log Viewer.
+- **`POST /stop`** and **`POST /cancel`** — fire-and-forget commands to stop or
+  cancel the active dictation session; outcomes arrive through the app-group
+  snapshot pipeline.
 
-The dictation-transport endpoints `/state` and `/result` have been **removed**.
-The localhost server no longer carries dictation data.
+There is no `/result` or `/logs/ack` endpoint. Dictation snapshots and terminal
+results are primarily transported through app-group UserDefaults; `/state` is
+an implemented fallback endpoint.
 
 ---
 
@@ -210,16 +217,18 @@ to recover after the container app is relaunched.
 ## 8. Localhost server endpoints
 
 The server listens on `127.0.0.1:47321` using Apple's Network framework
-(`NWListener`). These are the only remaining endpoints:
+(`NWListener`). These are the implemented endpoints:
 
-| Method | Path | Request body | Response (200) | Notes |
-|--------|------|-------------|-----------------|-------|
-| GET | `/health` | — | `{"status":"ok","port":47321}` | Always works while server is up |
-| POST | `/logs` | Array of `LogEntry` JSON objects | `{"ok":true,"count":N}` | Keyboard ships buffered log entries |
-| POST | `/logs/ack` | — | `{"ok":true}` | Acknowledges receipt; keyboard rotates active log file |
+| Method | Path | Request body | Response | Notes |
+|--------|------|-------------|----------|-------|
+| GET | `/health` | — | 200 `{"status":"ok","port":47321}` | Health check; port is the listener's actual bound port. |
+| GET | `/state` | — | 200 with the current `DictationPayload`, or 204 with no body when no snapshot is available | In-memory snapshot fallback; not the canonical transport. |
+| POST | `/logs` | `{"entries":[LogShipmentEntry, ...]}` | 200 `{"received":N}`; 400 for an invalid JSON body | Keyboard ships buffered log entries. |
+| POST | `/stop` | — | 202 `{"status":"stopRequested"}`; 503 if no handler is installed | Accepted command runs asynchronously; result is delivered through the snapshot pipeline. |
+| POST | `/cancel` | — | 202 `{"status":"cancelRequested"}`; 503 if no handler is installed | Accepted command runs asynchronously; result is delivered through the snapshot pipeline. |
 
-**Removed endpoints:** `/state`, `/result` (dictation transport) — their
-function is now served by app-group UserDefaults.
+Unknown paths return 404; methods other than GET and POST return 405. All
+responses close the connection. The server binds to loopback only.
 
 ### Curl examples
 
@@ -253,9 +262,9 @@ this constant. Any value between 1024 and 65535 works.
 
 ### Server start
 
-The localhost server is started in `RitorasApp.onOpenURL` when the container app
-receives a `ritoras://dictate?id=<UUID>` URL (opened by the keyboard extension
-via `extensionContext.open()`):
+The localhost server is started by `DictationViewModel.startLocalhostServer()`
+when the container app receives a `ritoras://dictate?id=<UUID>` URL (opened by
+the keyboard extension via `extensionContext.open()`):
 
 ```
 RitorasApp.onOpenURL(url)
@@ -264,19 +273,27 @@ RitorasApp.onOpenURL(url)
   → LocalhostServer.start() creates NWListener on 127.0.0.1:47321
 ```
 
-The server is idempotent — calling `start()` while already running is a no-op.
+Starting is idempotent. On scene activation the app health-checks an already
+started server and may restart it; that check does not start a server that has
+not already been created. During active recording/transcription, a 10-second
+health-check timer also monitors it. Listener failures trigger automatic
+restarts with a 2-second debounce, capped at five consecutive retries. The
+server's `stop()` is called on deinitialization; the listener also ends when
+the container process is killed.
 
 ### Server stop
 
-There is no explicit stop path. The `NWListener` is a child of the container app
-process; it dies when the app is killed.
+There is no normal app-lifecycle stop call; `LocalhostServer.stop()` runs on
+deinitialization. The `NWListener` is a child of the container app process and
+also dies when the app is killed.
 
 ### App-group snapshot writes
 
 The container app's `DictationViewModel.publishSnapshot(status:text:errorMessage:)`
 writes to app-group UserDefaults on every phase transition. This is the canonical
-data path. The localhost server is **not** involved in data delivery — it only
-serves health checks and log shipping.
+data path. The localhost server additionally exposes `GET /state` as a fallback
+snapshot probe and `POST /stop` and `POST /cancel` as commands; it is not the
+canonical result-delivery path.
 
 ### Backgrounding
 
@@ -301,7 +318,8 @@ are available to the keyboard regardless of the container app's foreground state
   so the server retained the job. If the job has also expired (>10 min), the
   keyboard ultimately times out after 60 s.
 
-- **No SSL/TLS:** Localhost connections (health, log shipping) are plain HTTP.
+- **No SSL/TLS:** Localhost connections (health, state, commands, and log
+  shipping) are plain HTTP.
   This is acceptable because the loopback interface is not accessible to other
   processes without root, and iOS's ATS does not apply to `127.0.0.1`.
 
@@ -312,9 +330,9 @@ are available to the keyboard regardless of the container app's foreground state
   transport is unaffected — the keyboard still reads the snapshot that the
   container app writes (if the container app is running).
 
-- **No request body parsing beyond `/logs`:** The server only handles `GET
-  /health` and `POST /logs` (with `/logs/ack`). This is a pure log shipper; all
-  dictation data goes through app-group UserDefaults.
+- **Request body parsing:** Only `POST /logs` accepts and decodes a JSON request
+  body. The stop and cancel commands have no request body; `GET /health` and
+  `GET /state` are read-only.
 
 ---
 
@@ -361,8 +379,8 @@ services use well-known ports). If it happens, change the port in
 | `shared/DictationPayload.swift` | Codable model for the cross-process snapshot |
 | `shared/Config.swift` | `AppGroupResolver`, `dictationSnapshot()`, `setDictationSnapshot()`, constants |
 | `app/Sources/DictationViewModel.swift` | Snapshot writes (`publishSnapshot`), background task, server wiring |
-| `app/Sources/LocalhostServer.swift` | HTTP server (NWListener, `/health` + `/logs` + `/logs/ack` routing) |
-| `shared/LocalhostClient.swift` | HTTP client (URLSession, `healthCheck`, `postLogs`, error mapping) |
+| `app/Sources/LocalhostServer.swift` | HTTP server (NWListener, `/health`, `/state`, `/logs`, `/stop`, and `/cancel` routing) |
+| `shared/LocalhostClient.swift` | HTTP client (URLSession, health/state probes, log shipping, stop/cancel commands) |
 | `shared/DarwinNotifier.swift` | Darwin notification post/observe helpers |
 | `keyboard/Sources/KeyboardViewController.swift` | Client wiring (`refreshFromSharedState`, snapshot polling, Darwin observer, `/jobs/{id}` fallback) |
 | `shared/DictationSnapshot.swift` | Legacy snapshot types (kept for compatibility references) |
@@ -421,8 +439,9 @@ This is a **transient shipper buffer**, not a long-term store:
   through `.log.6`).
 - The keyboard ships these logs to the container app via `POST /logs` on the
   localhost HTTP transport (see [§8](#8-localhost-server-endpoints)).
-- Once shipped, the container app calls `POST /logs/ack` and the keyboard
-  rotates its active file.
+- The container app writes received entries through `FileLogger.shared.logBatch`;
+  the response reports how many entries were received. There is no separate
+  acknowledgement route.
 
 ### Process boundary for logs
 
@@ -430,7 +449,7 @@ The keyboard flat files live in the keyboard's per-process `Documents/`
 directory; the container app database lives in the app-group container (or the
 container's `Documents/` as a fallback). Logs cross the process boundary only
 via the HTTP shipper: keyboard → `POST /logs` → container app's
-`LogStore.insert()`.
+`FileLogger.shared.logBatch` → `LogStore` persistence.
 
 ### Migration (`LogStoreMigration`)
 
