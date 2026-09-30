@@ -170,6 +170,7 @@ class KeyboardViewController: UIInputViewController {
     private var pollCount = 0
 
     private var followMeAwaitingFocus = false
+    private var completedResultAwaitingFocusID: UUID?
 
     // MARK: - Snapshot Polling & Darwin Notifications
 
@@ -254,6 +255,7 @@ class KeyboardViewController: UIInputViewController {
     private var pendingRequestId: UUID? {
         get { UUID(uuidString: UserDefaults.standard.string(forKey: "ritoras_pending_id") ?? "") }
         set {
+            completedResultAwaitingFocusID = nil
             if let newValue = newValue {
                 UserDefaults.standard.set(newValue.uuidString, forKey: "ritoras_pending_id")
             } else {
@@ -789,8 +791,14 @@ class KeyboardViewController: UIInputViewController {
 
         registerStateChangedObserver()
 
-        // Start timeout timer
-        waitTimer = Timer.scheduledTimer(withTimeInterval: SharedConfig.Defaults.dictationTimeoutSeconds, repeats: false) { [weak self] _ in
+        // Use the original absolute deadline when resuming a persisted request.
+        let remaining = SharedConfig.Defaults.dictationTimeoutSeconds
+            - (Date().timeIntervalSince1970 - pendingRequestStart)
+        guard pendingRequestStart > 0, remaining > 0 else {
+            handleTimeout()
+            return
+        }
+        waitTimer = Timer.scheduledTimer(withTimeInterval: remaining, repeats: false) { [weak self] _ in
             DispatchQueue.main.async {
                 self?.handleTimeout()
             }
@@ -970,6 +978,13 @@ class KeyboardViewController: UIInputViewController {
     /// the miss counter. Shared by the app-group (file + defaults) and the
     /// localhost /state fallback transports.
     private func applySnapshotPayload(_ payload: DictationPayload, source: String) {
+        if completedResultAwaitingFocusID == payload.id
+            && (payload.status == .recording || payload.status == .transcribing) {
+            FileLogger.shared.debug(.keyboard, "reject in-progress: completed retained",
+                                    payload: ["id": String(payload.id.uuidString.prefix(8)),
+                                              "status": payload.status.rawValue])
+            return
+        }
         switch payload.status {
         case .completed:
             handleTerminalResult(id: payload.id, text: payload.text, errorMessage: nil)
@@ -1060,7 +1075,17 @@ class KeyboardViewController: UIInputViewController {
     private func handleTerminalResult(id: UUID, text: String?, errorMessage: String?) {
         if let text, !text.isEmpty {
             guard let fieldId = safeDocumentIdentifier(), fieldId != Self.noFieldDocumentId else {
+                if pendingRequestId == id {
+                    completedResultAwaitingFocusID = id
+                    waitTimer?.invalidate()
+                    waitTimer = nil
+                    serverPollWorkItem?.cancel()
+                    serverPollWorkItem = nil
+                    currentPollTask?.cancel()
+                    currentPollTask = nil
+                }
                 followMeAwaitingFocus = true
+                state = .idle
                 return
             }
         }
@@ -1094,6 +1119,10 @@ class KeyboardViewController: UIInputViewController {
     /// the server reports "recording" or "transcribing", so the mic button
     /// shows the active state without waiting for a localhost response.
     private func updateRecordingInProgressUI(phase: String) {
+        if let completedID = completedResultAwaitingFocusID,
+           completedID == pendingRequestId {
+            return
+        }
         switch phase {
         case "recording":
             state = .recording
@@ -1110,6 +1139,12 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func handleTimeout() {
+        if let completedID = completedResultAwaitingFocusID,
+           completedID == pendingRequestId {
+            waitTimer?.invalidate()
+            waitTimer = nil
+            return
+        }
         FileLogger.shared.warn(.keyboard, "Dictation timed out",
                                payload: ["pendingRequestId": pendingRequestId?.uuidString ?? "nil"])
         stopDictationTransports()
@@ -1131,14 +1166,20 @@ class KeyboardViewController: UIInputViewController {
 
     private func reconcilePendingDictationOnReappear(id: UUID) async {
         guard pendingRequestId == id else { return }
+        FileLogger.shared.info(.keyboard, "recovery reappear", payload: ["id": String(id.uuidString.prefix(8))])
         switch await LocalhostClient.probeState() {
         case .payload(let payload):
             guard pendingRequestId == id else { return }
             guard payload.id == id else {
-                pendingRequestId = nil
-                dictationTargetDocId = nil
-                stopDictationTransports()
-                state = .idle
+                FileLogger.shared.debug(.keyboard, "recovery mismatch", payload: ["id": String(id.uuidString.prefix(8))])
+                clearStalePendingDictation()
+                return
+            }
+            if completedResultAwaitingFocusID == id
+                && (payload.status == .recording || payload.status == .transcribing) {
+                FileLogger.shared.debug(.keyboard, "reject in-progress: completed retained",
+                                        payload: ["id": String(id.uuidString.prefix(8)),
+                                                  "status": payload.status.rawValue])
                 return
             }
             if let revision = payload.revision {
@@ -1146,10 +1187,20 @@ class KeyboardViewController: UIInputViewController {
             }
             applySnapshotPayload(payload, source: "localhost-reappear")
             guard pendingRequestId == id else { return }
-            checkForPendingDictation(snapshotAlreadyReconciled: true)
+            checkForPendingDictation(
+                snapshotAlreadyReconciled: true,
+                completedResultAwaitingFocus: payload.status == .completed)
         case .noSession:
             guard pendingRequestId == id else { return }
             let snapshot = readSharedSnapshotForReappear(for: id)
+            if completedResultAwaitingFocusID == id,
+               let snapshot,
+               (snapshot.status == .recording || snapshot.status == .transcribing) {
+                FileLogger.shared.debug(.keyboard, "reject in-progress: completed retained",
+                                        payload: ["id": String(id.uuidString.prefix(8)),
+                                                  "status": snapshot.status.rawValue])
+                return
+            }
             if let snapshot,
                snapshot.status == .completed || snapshot.status == .error || snapshot.status == .cancelled {
                 applySnapshotPayload(snapshot, source: "appgroup-reappear")
@@ -1164,16 +1215,22 @@ class KeyboardViewController: UIInputViewController {
             dictationTargetDocId = nil
             stopDictationTransports()
             state = .idle
+            FileLogger.shared.info(.keyboard, "recovery no session -> idle", payload: ["id": String(id.uuidString.prefix(8))])
         case .malformed, .unreachable:
             checkForPendingDictation()
         }
     }
 
-    private func checkForPendingDictation(snapshotAlreadyReconciled: Bool = false) {
+    private func checkForPendingDictation(
+        snapshotAlreadyReconciled: Bool = false,
+        completedResultAwaitingFocus: Bool = false
+    ) {
         guard let id = pendingRequestId else {
             state = .idle
             return
         }
+        let preservingCompletedResult = completedResultAwaitingFocus
+            || completedResultAwaitingFocusID == id
         FileLogger.shared.info(.keyboard, "Resuming pending dictation",
                                payload: ["pendingRequestId": id.uuidString])
 
@@ -1181,7 +1238,7 @@ class KeyboardViewController: UIInputViewController {
         // defaulting to .waiting, which masks the recording phase. Uses the
         // reappear reader (revision-agnostic) because the appear refresh may
         // have already consumed the current revision.
-        if snapshotAlreadyReconciled {
+        if snapshotAlreadyReconciled || preservingCompletedResult {
             // The localhost response already reconciled the current request.
         } else if let payload = readSharedSnapshotForReappear(for: id) {
             FileLogger.shared.info(.keyboard, "checkForPendingDictation snapshot",
@@ -1204,15 +1261,27 @@ class KeyboardViewController: UIInputViewController {
                 return
             }
         } else {
+            if snapshotHasDifferentPendingID(from: id) {
+                clearStalePendingDictation()
+                return
+            }
             FileLogger.shared.debug(.keyboard,
                 "checkForPendingDictation — no snapshot for id; defaulting to .waiting",
                 payload: ["priorState": String(describing: state)])
-            switch state {
-            case .recording, .waiting, .inserting:
-                break   // keep a concrete in-progress state; poll will catch the next snapshot
-            default:
-                state = .waiting   // .idle / .openingApp / .error → genuinely unknown
+            guard pendingRequestStart > 0 else {
+                FileLogger.shared.info(.keyboard, "recovery missing start -> timeout", payload: ["id": String(id.uuidString.prefix(8))])
+                handleTimeout()
+                return
             }
+            let remaining = SharedConfig.Defaults.dictationTimeoutSeconds
+                - (Date().timeIntervalSince1970 - pendingRequestStart)
+            guard remaining > 0 else {
+                FileLogger.shared.info(.keyboard, "recovery deadline elapsed -> timeout", payload: ["id": String(id.uuidString.prefix(8))])
+                handleTimeout()
+                return
+            }
+            state = .waiting
+            FileLogger.shared.debug(.keyboard, "recovery waiting", payload: ["id": String(id.uuidString.prefix(8)), "remainingSec": Int(remaining)])
         }
 
         // Re-register the state-changed Darwin observer (it was torn down in viewWillDisappear).
@@ -1232,14 +1301,21 @@ class KeyboardViewController: UIInputViewController {
 
         // Recreate the waitTimer if it was invalidated in viewWillDisappear.
         // Use the remaining time from the original 900s dictation timeout.
-        if waitTimer == nil, pendingRequestStart > 0 {
+        if preservingCompletedResult {
+            waitTimer?.invalidate()
+            waitTimer = nil
+        } else if waitTimer == nil, pendingRequestStart > 0 {
             let elapsed = Date().timeIntervalSince1970 - pendingRequestStart
             let remaining = max(SharedConfig.Defaults.dictationTimeoutSeconds - elapsed, 0)
             if remaining > 0 {
                 waitTimer = Timer.scheduledTimer(withTimeInterval: remaining, repeats: false) { [weak self] _ in
                     DispatchQueue.main.async { self?.handleTimeout() }
                 }
+            } else {
+                handleTimeout()
             }
+        } else if waitTimer == nil {
+            handleTimeout()
         }
 
     }
@@ -1256,6 +1332,21 @@ class KeyboardViewController: UIInputViewController {
         serverPollWorkItem?.cancel()
         serverPollWorkItem = nil
         stopSnapshotPolling()
+    }
+
+    private func snapshotHasDifferentPendingID(from id: UUID) -> Bool {
+        let fileSnapshot = SharedConfig.snapshotFile()
+        let defaultsSnapshot = SharedConfig.dictationSnapshot()
+        if fileSnapshot?.id == id || defaultsSnapshot?.id == id { return false }
+        return fileSnapshot != nil || defaultsSnapshot != nil
+    }
+
+    private func clearStalePendingDictation() {
+        FileLogger.shared.info(.keyboard, "recovery stale pending -> idle", payload: ["id": pendingRequestId.map { String($0.uuidString.prefix(8)) } ?? "nil"])
+        pendingRequestId = nil
+        dictationTargetDocId = nil
+        stopDictationTransports()
+        state = .idle
     }
 
     /// Cancels the common subset of outstanding async work across both
@@ -1331,7 +1422,7 @@ class KeyboardViewController: UIInputViewController {
     /// app-group pipeline delivers the terminal phase; no local state change
     /// happens here — the dots keep showing until the transcript lands.
     private func requestStop() {
-        FileLogger.shared.info(.keyboard, "Mic: requesting stop via /stop")
+        FileLogger.shared.info(.keyboard, "Mic: requesting stop via /stop", payload: ["id": pendingRequestId.map { String($0.uuidString.prefix(8)) } ?? "nil"])
         guard !stopCancelRequestInFlight else { return }
         stopCancelRequestInFlight = true
         Task { @MainActor [weak self] in
@@ -1498,7 +1589,14 @@ class KeyboardViewController: UIInputViewController {
         let decision = FollowMeDeliveryGate.decide(
             id: payload.id, status: status, terminalAt: payload.timestamp, now: Date(),
             windowSeconds: SharedConfig.followMeWindowSeconds(), consumedIDs: ring.ids,
+            matchesPendingRequest: pendingRequestId == payload.id,
             hasRealField: hasRealField)
+        FileLogger.shared.debug(.keyboard, "follow-me decision", payload: [
+            "id": String(payload.id.uuidString.prefix(8)), "verdict": String(describing: decision),
+            "ageSec": Int(Date().timeIntervalSince(payload.timestamp)),
+            "windowSec": Int(SharedConfig.followMeWindowSeconds()),
+            "pendingMatch": pendingRequestId == payload.id
+        ])
         switch decision {
         case .deliver:
             if payload.status == .cancelled {
@@ -1522,13 +1620,11 @@ class KeyboardViewController: UIInputViewController {
             ])
         case .waitNoField:
             followMeAwaitingFocus = true
-            FileLogger.shared.debug(.keyboard, "follow-me waiting for focus")
+            FileLogger.shared.debug(.keyboard, "follow-me waiting for focus", payload: ["id": String(payload.id.uuidString.prefix(8))])
         case .dropConsumed:
-            FileLogger.shared.debug(.keyboard, "follow-me duplicate consumed")
+            FileLogger.shared.debug(.keyboard, "follow-me duplicate consumed", payload: ["id": String(payload.id.uuidString.prefix(8))])
         case .dropExpired:
             FileLogger.shared.info(.keyboard, "follow-me expired", payload: ["id": String(payload.id.uuidString.prefix(8))])
-            SharedConfig.clearSnapshotFile()
-            SharedConfig.clearDictationSnapshot()
         }
     }
 
@@ -1565,10 +1661,16 @@ class KeyboardViewController: UIInputViewController {
     /// `pendingRequestId` guard in `scheduleNextServerPoll`.
     private func performServerPollCycle() {
         guard let id = pendingRequestId else { return }
+        if completedResultAwaitingFocusID == id {
+            serverPollWorkItem?.cancel()
+            serverPollWorkItem = nil
+            return
+        }
         serverPollCount += 1
         serverPollUnresponsiveCount += 1
 
         if serverPollUnresponsiveCount >= 120 {  // ~140s of unresponsive polls
+            FileLogger.shared.warn(.keyboard, "jobs recovery exhausted", payload: ["id": String(id.uuidString.prefix(8)), "poll": serverPollCount])
             stopDictationTransports()
             serverPollWorkItem?.cancel()
             serverPollWorkItem = nil
@@ -1582,6 +1684,9 @@ class KeyboardViewController: UIInputViewController {
         }
 
         // Whisper /jobs/{id} direct (source of truth).
+        if serverPollCount == 1 || serverPollCount == 6 {
+            FileLogger.shared.debug(.keyboard, "jobs recovery poll tier", payload: ["id": String(id.uuidString.prefix(8)), "poll": serverPollCount])
+        }
         pollWhisperJobStatus(id: id)
 
         scheduleNextServerPoll()
@@ -1621,6 +1726,8 @@ class KeyboardViewController: UIInputViewController {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
 
             DispatchQueue.main.async {
+                guard self.completedResultAwaitingFocusID != id else { return }
+
                 // 404 — job not found yet; keep polling.
                 if statusCode == 404 {
                     FileLogger.shared.debug(.network, "poll job: 404, retrying next cycle",
@@ -1681,14 +1788,14 @@ class KeyboardViewController: UIInputViewController {
                 case "ready":
                     guard self.pendingRequestId != nil else { return }
                     FileLogger.shared.info(.network, "poll job: status=ready",
-                                           payload: ["jobId": id.uuidString.lowercased(),
+                                           payload: ["id": String(id.uuidString.prefix(8)), "jobId": id.uuidString.lowercased(),
                                                      "textLength": text?.count ?? 0])
                     self.handleTerminalResult(id: id, text: text, errorMessage: nil)
 
                 case "failed":
                     guard self.pendingRequestId != nil else { return }
                     FileLogger.shared.info(.network, "poll job: status=failed",
-                                           payload: ["jobId": id.uuidString.lowercased()])
+                                           payload: ["id": String(id.uuidString.prefix(8)), "jobId": id.uuidString.lowercased()])
                     self.handleTerminalResult(id: id, text: nil, errorMessage: "Transcription failed.")
 
                 case "pending", "transcribing":
@@ -1714,7 +1821,17 @@ class KeyboardViewController: UIInputViewController {
             guard let self = self else { return }
             if case .error = self.state {
                 if self.pendingRequestId != nil {
-                    // Recording still active — resume waiting instead of going idle
+                    let remaining = SharedConfig.Defaults.dictationTimeoutSeconds
+                        - (Date().timeIntervalSince1970 - self.pendingRequestStart)
+                    guard self.pendingRequestStart > 0, remaining > 0 else {
+                        self.handleTimeout()
+                        return
+                    }
+                    if self.waitTimer == nil {
+                        self.waitTimer = Timer.scheduledTimer(withTimeInterval: remaining, repeats: false) { [weak self] _ in
+                            DispatchQueue.main.async { self?.handleTimeout() }
+                        }
+                    }
                     self.state = .waiting
                 } else {
                     self.state = .idle
