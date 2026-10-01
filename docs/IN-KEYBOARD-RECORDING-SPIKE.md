@@ -60,6 +60,21 @@ resolver strategy/availability, Full Access, and microphone permission. It
 blocks touches to the keyboard beneath it and can be dismissed with Close or a
 tap outside the panel.
 
+The **Transcription server** field saves an optional keyboard-local base URL.
+Save a valid `http://` or `https://` URL (trailing slashes are removed); an
+invalid value is shown inline and is not saved. Saving the field empty clears
+the override. A local URL takes precedence over the App Group server selection
+and list; with no local URL, the existing App Group list/selection is used, then
+the compiled-in server default. The panel reports the effective URL and its
+source. Thus a SideStore install can use its real Whisper server without the
+App Group container being available.
+
+When the keyboard is dismissed or another field takes focus during active
+in-keyboard recording, the latest non-empty partial is inserted at the cursor
+once before the stream is cancelled and audio is torn down. With VAD chunking,
+closing the keyboard keeps what you said up to the last pause; an unfinished
+utterance that has not produced a partial is still cancelled without text.
+
 The suggestion/status strip no longer shows build or settings diagnostics. It
 is reserved for dictation state, live partials, and guidance. The language key
 is temporarily replaced by the cog for this test phase; language switching is
@@ -93,9 +108,12 @@ contract.
    fresh App Group value, then choose **On** in the keyboard-local Dictation Mode
    control.
 3. Verify local mode is on, effective mode is on, and Next mic reports
-   `in-keyboard-start` before leaving the panel.
+   `in-keyboard-start` before leaving the panel. If the compiled-in server is
+   not reachable, enter the device's transcription server URL in the panel,
+   save it, and verify the effective server/source display.
 4. Tap the mic, confirm Connecting → live partials → stop → final text inserted;
-   verify a 60+ second recording completes without jetsam and that dismiss or
-   interruption cancels cleanly.
+   verify a 60+ second recording completes without jetsam. Also dismiss during
+   active recording and confirm the latest partial remains inserted once while
+   the stream is cancelled and audio tears down cleanly.
 5. Return to the cog panel and choose **Unset**. With App Group mode false, tap
    mic and confirm the legacy container-app flow opens and completes unchanged.

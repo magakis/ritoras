@@ -10,11 +10,16 @@ struct KeyboardSettingsPanelModel {
     let containerAvailable: Bool
     let hasFullAccess: Bool
     let microphonePermission: String
+    let localServerOverride: String?
+    let effectiveServerURL: String
+    let effectiveServerSource: String
 }
 
-final class KeyboardSettingsPanel: UIView {
+final class KeyboardSettingsPanel: UIView, UITextFieldDelegate {
     var onDismiss: (() -> Void)?
     var onModeChange: ((Bool?) -> Void)?
+    var onServerURLSave: ((String?) -> Void)?
+    var onServerEditingChanged: ((Bool) -> Void)?
 
     private let backdrop = UIView()
     private let card = UIView()
@@ -25,6 +30,9 @@ final class KeyboardSettingsPanel: UIView {
     private let buildLabel = UILabel()
     private let groupLabel = UILabel()
     private let permissionLabel = UILabel()
+    private let serverURLField = UITextField()
+    private let serverURLErrorLabel = UILabel()
+    private let effectiveServerLabel = UILabel()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -54,7 +62,7 @@ final class KeyboardSettingsPanel: UIView {
         stack.axis = .vertical
         stack.alignment = .fill
         stack.distribution = .fill
-        stack.spacing = 6
+        stack.spacing = 1
         stack.translatesAutoresizingMaskIntoConstraints = false
         card.addSubview(stack)
 
@@ -77,11 +85,11 @@ final class KeyboardSettingsPanel: UIView {
 
         modeControl.selectedSegmentTintColor = EmojiPanelView.categoryHighlightColor
         modeControl.addTarget(self, action: #selector(modeChanged), for: .valueChanged)
-        modeControl.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        modeControl.heightAnchor.constraint(equalToConstant: 28).isActive = true
 
         configureDetailLabel(modeSummaryLabel, weight: .medium)
-        modeSummaryLabel.numberOfLines = 2
-        modeSummaryLabel.lineBreakMode = .byWordWrapping
+        modeSummaryLabel.numberOfLines = 1
+        modeSummaryLabel.lineBreakMode = .byTruncatingTail
         configureDetailLabel(branchLabel)
         branchLabel.numberOfLines = 2
         branchLabel.lineBreakMode = .byWordWrapping
@@ -99,9 +107,44 @@ final class KeyboardSettingsPanel: UIView {
         configureDetailLabel(groupLabel)
         configureDetailLabel(permissionLabel)
 
+        serverURLField.placeholder = "Server URL override (http:// or https://)"
+        serverURLField.font = .systemFont(ofSize: 12)
+        serverURLField.borderStyle = .roundedRect
+        serverURLField.autocapitalizationType = .none
+        serverURLField.autocorrectionType = .no
+        serverURLField.spellCheckingType = .no
+        serverURLField.keyboardType = .URL
+        serverURLField.returnKeyType = .done
+        serverURLField.clearButtonMode = .whileEditing
+        serverURLField.delegate = self
+        serverURLField.addTarget(self, action: #selector(serverEditingChanged), for: .editingDidBegin)
+        serverURLField.addTarget(self, action: #selector(serverEditingEnded), for: .editingDidEnd)
+
+        let saveServerButton = UIButton(type: .system)
+        saveServerButton.setTitle("Save", for: .normal)
+        saveServerButton.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
+        saveServerButton.addTarget(self, action: #selector(saveServerURLTapped), for: .touchUpInside)
+
+        let serverInputRow = UIStackView(arrangedSubviews: [serverURLField, saveServerButton])
+        serverInputRow.axis = .horizontal
+        serverInputRow.alignment = .center
+        serverInputRow.distribution = .fill
+        serverInputRow.spacing = 6
+        serverInputRow.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        saveServerButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        serverURLErrorLabel.font = .systemFont(ofSize: 10)
+        serverURLErrorLabel.textColor = .systemRed
+        serverURLErrorLabel.numberOfLines = 1
+        serverURLErrorLabel.isHidden = true
+        configureDetailLabel(effectiveServerLabel)
+        effectiveServerLabel.numberOfLines = 2
+        effectiveServerLabel.font = .systemFont(ofSize: 10)
+
         let arrangedSubviews: [UIView] = [
             header, modeControl, modeSummaryLabel, branchLabel, divider, diagnosticsTitle,
-            buildLabel, groupLabel, permissionLabel
+            buildLabel, groupLabel, permissionLabel, serverInputRow,
+            serverURLErrorLabel, effectiveServerLabel
         ]
         arrangedSubviews.forEach { stack.addArrangedSubview($0) }
 
@@ -119,16 +162,16 @@ final class KeyboardSettingsPanel: UIView {
             card.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -6),
             preferredCardWidth,
 
-            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 10),
-            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -12),
-            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -10),
+            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 6),
+            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 10),
+            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -10),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -6),
             card.widthAnchor.constraint(lessThanOrEqualToConstant: 380),
         ])
     }
 
     private func configureDetailLabel(_ label: UILabel, weight: UIFont.Weight = .regular) {
-        label.font = .systemFont(ofSize: 12, weight: weight)
+        label.font = .systemFont(ofSize: 11, weight: weight)
         label.textColor = .label
         label.lineBreakMode = .byTruncatingTail
     }
@@ -143,11 +186,17 @@ final class KeyboardSettingsPanel: UIView {
         let localDescription = model.localOverride == nil
             ? "unset (follows Group)"
             : modeLabel(model.localOverride)
-        modeSummaryLabel.text = "Local: \(localDescription); Group: \(model.appGroupEnabled ? "on" : "off"); Effective: \(model.effectiveEnabled ? "on" : "off")"
+        modeSummaryLabel.text = "Local \(localDescription) · Group \(model.appGroupEnabled ? "on" : "off") · Effective \(model.effectiveEnabled ? "on" : "off")"
         branchLabel.text = "Next mic: \(model.nextBranch)"
         buildLabel.text = "Build: \(model.buildIdentity)"
         groupLabel.text = "App Group: \(model.resolverStrategy) · \(model.containerAvailable ? "available" : "unavailable")"
         permissionLabel.text = "Full Access: \(model.hasFullAccess ? "yes" : "no") · Mic: \(model.microphonePermission)"
+        effectiveServerLabel.text = "Effective server: \(model.effectiveServerURL) · Source: \(model.effectiveServerSource)"
+        if wasHidden {
+            serverURLField.text = model.localServerOverride
+            serverURLErrorLabel.text = nil
+            serverURLErrorLabel.isHidden = true
+        }
         guard wasHidden else { return }
         isHidden = false
         alpha = 0
@@ -170,7 +219,64 @@ final class KeyboardSettingsPanel: UIView {
         return override ? "on" : "off"
     }
 
+    func insertServerURLText(_ text: String) {
+        serverURLField.insertText(text)
+    }
+
+    func deleteServerURLBackward() {
+        serverURLField.deleteBackward()
+    }
+
+    var hasServerURLText: Bool {
+        !(serverURLField.text?.isEmpty ?? true)
+    }
+
+    func resignServerURLField() {
+        serverURLField.resignFirstResponder()
+    }
+
+    private func saveServerURL() {
+        let input = (serverURLField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else {
+            serverURLField.text = ""
+            serverURLErrorLabel.text = nil
+            serverURLErrorLabel.isHidden = true
+            serverURLField.resignFirstResponder()
+            onServerURLSave?(nil)
+            return
+        }
+        guard let normalizedURL = Self.normalizeServerBaseURL(input) else {
+            serverURLErrorLabel.text = "Enter a valid http:// or https:// server URL."
+            serverURLErrorLabel.isHidden = false
+            return
+        }
+        serverURLField.text = normalizedURL
+        serverURLErrorLabel.text = nil
+        serverURLErrorLabel.isHidden = true
+        serverURLField.resignFirstResponder()
+        onServerURLSave?(normalizedURL)
+    }
+
+    func commitServerURLInput() {
+        saveServerURL()
+    }
+
+    private static func normalizeServerBaseURL(_ input: String) -> String? {
+        guard var components = URLComponents(string: input),
+              let rawScheme = components.scheme?.lowercased(),
+              rawScheme == "http" || rawScheme == "https",
+              let host = components.host,
+              !host.isEmpty else { return nil }
+        components.scheme = rawScheme
+        while components.path.hasSuffix("/") {
+            components.path.removeLast()
+        }
+        guard let url = components.url else { return nil }
+        return url.absoluteString
+    }
+
     @objc private func modeChanged() {
+        serverURLField.resignFirstResponder()
         switch modeControl.selectedSegmentIndex {
         case 0: onModeChange?(nil)
         case 1: onModeChange?(true)
@@ -181,6 +287,23 @@ final class KeyboardSettingsPanel: UIView {
 
     @objc private func closeTapped() {
         onDismiss?()
+    }
+
+    @objc private func saveServerURLTapped() {
+        saveServerURL()
+    }
+
+    @objc private func serverEditingChanged() {
+        onServerEditingChanged?(true)
+    }
+
+    @objc private func serverEditingEnded() {
+        onServerEditingChanged?(false)
+    }
+
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        saveServerURL()
+        return false
     }
 
     @objc private func backdropTapped() {

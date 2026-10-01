@@ -1275,6 +1275,7 @@ class KeyboardView: UIView {
     }
 
     func dismissSettingsPanel() {
+        settingsPanel.resignServerURLField()
         settingsPanel.dismiss()
     }
 
