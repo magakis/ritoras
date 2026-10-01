@@ -75,6 +75,34 @@ once before the stream is cancelled and audio is torn down. With VAD chunking,
 closing the keyboard keeps what you said up to the last pause; an unfinished
 utterance that has not produced a partial is still cancelled without text.
 
+## Final mixable-session dismissal experiment
+
+The keyboard-only recorder explicitly configures `.playAndRecord` with
+`.mixWithOthers`, then activates after the keyboard has already set its
+recording state/Connecting status and completed the WebSocket handshake. It
+does not request `.defaultToSpeaker`: this path only captures microphone input
+and should not force an output route. The container app continues using its
+existing non-mixable `.record` session.
+
+For the next device run, confirm the keyboard Audio log reports
+`session activation result` with `result=success`, then `session configured`
+with `category=AVAudioSessionCategoryPlayAndRecord`, `options=mixWithOthers`,
+`mixable=true`, and the active input sample rate. An activation
+failure is logged at `.error` with NSError domain/code and the keyboard shows
+guidance to pause host audio and retry. If the host still dismisses the keyboard
+immediately after activation despite those mixable-session lines, record the
+timestamps and conclude this is an OS-level keyboard/audio-session limitation;
+the feature remains disabled by default rather than prompting another UX or
+capture redesign.
+
+The startup-path self-dismissal audit found no pre-capture `textDocumentProxy`
+mutation, `dismissKeyboard`, or `advanceToNextInputMode` call. Before capture,
+the controller only updates its own mic styling and transcript/status label,
+then connects the WebSocket; `setDictationTranscript` changes a UILabel in the
+keyboard's own view. `advanceToNextInputMode` remains on the separate globe-key
+action. `viewWillDisappear` and controller deinit are teardown responses to a
+dismissal, not calls made by the in-keyboard start path.
+
 The suggestion/status strip no longer shows build or settings diagnostics. It
 is reserved for dictation state, live partials, and guidance. The language key
 is temporarily replaced by the cog for this test phase; language switching is

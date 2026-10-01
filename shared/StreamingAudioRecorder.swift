@@ -1342,13 +1342,17 @@ actor StreamingAudioRecorder {
     ///   (starting at 0); the second is float32 PCM samples at 16 kHz mono.
     /// - Parameter onVADState: Called on vadQueue after each processed audio
     ///   frame with the current VAD and endpoint state.
+    /// - Parameter mixWithOthers: Uses a mixable `.playAndRecord` audio session
+    ///   when true. The keyboard passes true only after updating its recording UI;
+    ///   the container app keeps the default non-mixable `.record` session.
     /// - Parameter telemetry: Optional per-frame VAD telemetry sink. Telemetry
     ///   callbacks run on vadQueue and are disabled when this is `nil`.
     /// - Throws: `AudioRecorder.AudioRecorderError.permissionDenied` or `.permissionNotRequested`
     ///   if mic access is unavailable; `AudioRecorder.AudioRecorderError.invalidSessionConfiguration`
-    ///   if session setup fails; `StreamingRecorderError.engineStartFailed` if
-    ///   the audio engine cannot start.
-    func start(fileURL: URL? = nil, onVADCalibration: ((Bool) -> Void)? = nil, onChunk: @escaping ChunkHandler, onVADState: ((StreamingVADFrameState) -> Void)? = nil, telemetry: VADTelemetrySink? = nil) async throws {
+    ///   if session setup fails; `AudioSessionActivationError` if session
+    ///   activation fails; `StreamingRecorderError.engineStartFailed` if the
+    ///   audio engine cannot start.
+    func start(mixWithOthers: Bool = false, fileURL: URL? = nil, onVADCalibration: ((Bool) -> Void)? = nil, onChunk: @escaping ChunkHandler, onVADState: ((StreamingVADFrameState) -> Void)? = nil, telemetry: VADTelemetrySink? = nil) async throws {
         guard !isRecording else {
             throw StreamingRecorderError.alreadyStreaming
         }
@@ -1368,8 +1372,11 @@ actor StreamingAudioRecorder {
 
         // 2. Configure audio session (must be before engine start)
         do {
-            try AudioSession.configure()
+            try AudioSession.configure(mixWithOthers: mixWithOthers)
         } catch {
+            if mixWithOthers, error is AudioSessionActivationError {
+                throw error
+            }
             throw AudioRecorder.AudioRecorderError.invalidSessionConfiguration(error)
         }
 
@@ -1496,6 +1503,7 @@ actor StreamingAudioRecorder {
             self.onChunk = nil
             self.onVADState = nil
             AudioSession.deactivate()
+            if error is AudioSessionActivationError { throw error }
             throw StreamingRecorderError.engineStartFailed(error)
         }
 

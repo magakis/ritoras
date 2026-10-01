@@ -1007,7 +1007,7 @@ class KeyboardViewController: UIInputViewController {
                 }
                 let recorder = StreamingAudioRecorder()
                 self.inKeyboardRecorder = recorder
-                try await recorder.start(onChunk: { [weak self] chunkID, samples in
+                try await recorder.start(mixWithOthers: true, onChunk: { [weak self] chunkID, samples in
                     Task { @MainActor [weak self] in
                         self?.queueInKeyboardChunk(id: chunkID, samples: samples, client: client)
                     }
@@ -1021,7 +1021,10 @@ class KeyboardViewController: UIInputViewController {
                 self.logInKeyboardMemory("after-start-1s")
                 FileLogger.shared.info(.audio, "in-kb-rec capture started")
             } catch {
-                self.stopInKeyboardRecording(cancel: true, message: "Couldn't start keyboard recording: \(error.localizedDescription)")
+                let message = error is AudioSessionActivationError
+                    ? "Audio session couldn't activate. Pause other audio and try again."
+                    : "Couldn't start keyboard recording: \(error.localizedDescription)"
+                self.stopInKeyboardRecording(cancel: true, message: message)
             }
         }
     }
