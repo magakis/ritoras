@@ -546,6 +546,14 @@ struct SharedConfig {
     let timeoutSeconds: TimeInterval
 
     let apiKey: String
+
+    static var buildIdentity: String {
+        let info = Bundle.main.infoDictionary
+        let commit = info?["RitorasBuildCommit"] as? String ?? "unknown"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(commit)/\(build)"
+    }
+
     static func load() -> SharedConfig {
         if let suiteDefaults = UserDefaults(suiteName: Defaults.appGroupId) {
             let servers: [String]

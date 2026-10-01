@@ -36,6 +36,10 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
+      - name: Resolve build commit identity
+        id: build_identity
+        run: echo "short_sha=$(git rev-parse --short=8 HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Build (unsigned, Release)
         run: |
           xcodebuild \
@@ -48,7 +52,23 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            RITORAS_BUILD_COMMIT=${{ steps.build_identity.outputs.short_sha }} \
             SYMROOT=build
+
+      - name: Verify bundle build identity
+        env:
+          EXPECTED_BUILD_COMMIT: ${{ steps.build_identity.outputs.short_sha }}
+          EXPECTED_BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          for PLIST in \
+            "build/Release-iphoneos/Ritoras.app/Info.plist" \
+            "build/Release-iphoneos/Ritoras.app/PlugIns/RitorasKeyboard.appex/Info.plist"; do
+            COMMIT=$(plutil -extract RitorasBuildCommit raw -o - "$PLIST")
+            BUILD=$(plutil -extract CFBundleVersion raw -o - "$PLIST")
+            test "$COMMIT" = "$EXPECTED_BUILD_COMMIT"
+            test "$BUILD" = "$EXPECTED_BUILD_NUMBER"
+            echo "Verified $PLIST identity $COMMIT/$BUILD"
+          done
 
       - name: Verify keyboard Info.plist
         run: |
