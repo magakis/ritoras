@@ -1,5 +1,4 @@
 import UIKit
-import AVFAudio
 
 private enum BackspacePhase {
     case charRepeat
@@ -20,75 +19,13 @@ private struct RetroactiveCandidateSnapshot {
     let commitContextSuffix: String
 }
 
-private final class InKeyboardPartialStore: @unchecked Sendable {
-    private let lock = NSLock()
-    private var activeSessionID: UUID?
-    private var latestPartial: String?
-
-    func beginSession() -> UUID {
-        let sessionID = UUID()
-        lock.lock()
-        activeSessionID = sessionID
-        latestPartial = nil
-        lock.unlock()
-        return sessionID
-    }
-
-    func record(_ partial: String, sessionID: UUID) {
-        guard !partial.isEmpty else { return }
-        lock.lock()
-        defer { lock.unlock() }
-        guard activeSessionID == sessionID else { return }
-        latestPartial = partial
-    }
-
-    func finishSession(_ sessionID: UUID) -> String? {
-        lock.lock()
-        defer { lock.unlock() }
-        guard activeSessionID == sessionID else { return nil }
-        activeSessionID = nil
-        let partial = latestPartial
-        latestPartial = nil
-        return partial
-    }
-}
-
 class KeyboardViewController: UIInputViewController {
-
-    private enum MicPressRoute {
-        case inKeyboardStart
-        case containerAppStart
-        case fullAccessGuidance
-        case inKeyboardStop
-        case containerAppStop
-        case dismissError
-        case ignore
-    }
-
-    private struct EffectiveKeyboardServer {
-        let url: String
-        let source: String
-    }
-
-    private struct KeyboardModeInputs {
-        let localOverride: Bool?
-        let appGroupEnabled: Bool
-        let effectiveEnabled: Bool
-    }
-
-    private static let localRecordingOverrideKey = "ritoras.inKeyboardRecording.localOverride"
-    private static let localServerOverrideKey = "ritoras.inKeyboardRecording.serverURL"
 
     // MARK: - State
 
     private var state: KeyboardState = .idle {
         didSet {
             keyboardView.configure(for: state)
-            if case .error(let message) = state {
-                keyboardView.setDictationTranscript(message)
-            } else if state == .idle {
-                keyboardView.setDictationTranscript(nil)
-            }
             errorResetWorkItem?.cancel()
             if case .error = state {
                 scheduleErrorReset()
@@ -137,7 +74,7 @@ class KeyboardViewController: UIInputViewController {
 
     // MARK: - Input Target (keystroke routing)
 
-    enum InputTarget { case hostApp, emojiSearch, keyboardSettingsServerURL }
+    enum InputTarget { case hostApp, emojiSearch }
     private var inputTarget: InputTarget = .hostApp {
         didSet {
             // Any input-target switch invalidates a pending deferred autocorrect.
@@ -283,17 +220,6 @@ class KeyboardViewController: UIInputViewController {
     /// stop/cancel requests. Set synchronously (before the Task) so a rapid
     /// double-tap is observed by the second call.
     private var stopCancelRequestInFlight = false
-    private var inKeyboardRecorder: StreamingAudioRecorder?
-    private var inKeyboardClient: WhisperStreamClient?
-    private var inKeyboardSendTask: Task<Void, Never>?
-    private var inKeyboardReceiveTask: Task<Void, Never>?
-    private var inKeyboardMemoryTimer: Timer?
-    private var inKeyboardStartMemoryTask: Task<Void, Never>?
-    private var audioInterruptionObserver: NSObjectProtocol?
-    private var inKeyboardSessionActive = false
-    private let inKeyboardPartialStore = InKeyboardPartialStore()
-    private var inKeyboardPartialSessionID: UUID?
-    private var inKeyboardTeardownStarted = false
 
     // Settings cache (refreshed by Darwin notification from container app)
     private let settingsCache = KeyboardSettingsCache()
@@ -496,7 +422,6 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        settingsCache.refresh()
         installOrUpdateHeightConstraint()
         view.setNeedsLayout()
         view.layoutIfNeeded()
@@ -580,7 +505,6 @@ class KeyboardViewController: UIInputViewController {
     }
 
     override func viewWillDisappear(_ animated: Bool) {
-        if inKeyboardSessionActive { stopInKeyboardRecording(cancel: true) }
         super.viewWillDisappear(animated)
         shedPredictionEngine()
         FileLogger.shared.info(.keyboard, "viewWillDisappear")
@@ -606,7 +530,6 @@ class KeyboardViewController: UIInputViewController {
                       "buildId": Self.buildGeneration])
         KeyboardLogShipper.shared.stop()
         FileLogger.broadcast = nil
-        if inKeyboardSessionActive { stopInKeyboardRecording(cancel: true) }
         cancelOutstandingAsyncWork()
         darwinStateChangedToken = nil
         darwinSettingsChangedToken = nil
@@ -679,47 +602,15 @@ class KeyboardViewController: UIInputViewController {
         keyboardView.settingsPanel.onDismiss = { [weak self] in
             self?.keyboardView.dismissSettingsPanel()
         }
-        keyboardView.settingsPanel.onModeChange = { [weak self] override in
-            self?.setKeyboardLocalRecordingOverride(override)
-        }
-        keyboardView.settingsPanel.onServerURLSave = { [weak self] url in
-            self?.setKeyboardLocalServerOverride(url)
-        }
-        keyboardView.settingsPanel.onServerEditingChanged = { [weak self] isEditing in
-            guard let self else { return }
-            self.inputTarget = isEditing ? .keyboardSettingsServerURL : .hostApp
-            if !isEditing {
-                self.scheduleSuggestionRefresh()
-                self.recomputeAutoCap()
-            }
-        }
-        keyboardView.languageMenu.onSelect = { [weak self] language in
-            guard let self = self else { return }
-            self.handleLanguageSelection(language)
-        }
-        keyboardView.languageMenu.onDismiss = { [weak self] in
-            guard let self = self else { return }
-            self.keyboardView.languageMenu.dismiss()
+        keyboardView.settingsPanel.onLanguageChange = { [weak self] language in
+            self?.handleLanguageSelection(language)
         }
     }
 
-    // MARK: - Language Picker
-
-    /// Shows the reusable language picker overlay, marked with the active language.
-    private func presentLanguageMenu() {
-        let menu = keyboardView.languageMenu
-        guard menu.isHidden else { return }
-        // The accent picker and the language menu are mutually exclusive
-        // surfaces; dismiss the picker defensively before the menu opens.
-        keyboardView.accentPicker.hide()
-        menu.show(activeLanguage: keyboardView.currentLanguage)
-    }
-
-    /// Applies a menu selection: persists it, switches the key grid, resets to
+    /// Applies a panel selection: persists it, switches the key grid, resets to
     /// the letters layout, applies the runtime primaryLanguage, and swaps the
     /// prediction stack (SymSpell + providers) to the selected language.
     private func handleLanguageSelection(_ language: KeyboardLanguage) {
-        keyboardView.languageMenu.dismiss()
         lastSigmaConvertedWord = nil  // a language switch closes the sigma revert window
         // Proceed when the selection differs from the grid OR the prediction
         // stack. They are tracked independently: at launch the grid may already
@@ -764,383 +655,30 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Mic Button
 
     private func handleMicButtonTap() {
-        let modeInputs = readKeyboardModeInputs()
-        let recordPermission = AVAudioSession.sharedInstance().recordPermission
-        let route = micPressRoute(settingEnabled: modeInputs.effectiveEnabled)
-        FileLogger.shared.info(.keyboard, "Mic tap branch", payload: [
-            "localOverride": localRecordingOverrideLabel(modeInputs.localOverride),
-            "settingEffective": modeInputs.effectiveEnabled,
-            "settingAppGroup": modeInputs.appGroupEnabled,
-            "hasFullAccess": hasFullAccess,
-            "recordPermission": recordPermissionLabel(recordPermission),
-            "branch": routeLabel(route, permission: recordPermission)
-        ])
-
-        switch route {
-        case .inKeyboardStart:
-            startInKeyboardRecording()
-        case .containerAppStart:
-            openContainerAppForDictation()
-        case .fullAccessGuidance:
-            state = .error("Full Access required. Settings \u{2192} General \u{2192} Keyboard \u{2192} Ritoras \u{2192} Allow Full Access.")
-        case .inKeyboardStop:
-            stopInKeyboardRecording(cancel: false)
-        case .containerAppStop:
-            FileLogger.shared.info(.keyboard, state == .waiting
-                ? "Mic: .waiting -> POST /stop"
-                : "Mic: .recording -> POST /stop")
-            requestStop()
-        case .dismissError:
-            cancelOutstandingAsyncWork()
-            state = .idle
-        case .ignore:
-            break
-        }
-    }
-
-    private func readKeyboardModeInputs() -> KeyboardModeInputs {
-        let localOverride = UserDefaults.standard.object(forKey: Self.localRecordingOverrideKey) as? Bool
-        let appGroupEnabled = SharedConfig.inKeyboardRecordingEnabled()
-        return KeyboardModeInputs(
-            localOverride: localOverride,
-            appGroupEnabled: appGroupEnabled,
-            effectiveEnabled: localOverride ?? appGroupEnabled
-        )
-    }
-
-    private func localRecordingOverrideLabel(_ value: Bool?) -> String {
-        guard let value else { return "unset" }
-        return value ? "on" : "off"
-    }
-
-    private func setKeyboardLocalRecordingOverride(_ override: Bool?) {
-        guard !inKeyboardSessionActive, state != .recording else { return }
-        if let override {
-            UserDefaults.standard.set(override, forKey: Self.localRecordingOverrideKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: Self.localRecordingOverrideKey)
-        }
-        FileLogger.shared.info(.keyboard, "In-keyboard local recording override changed", payload: [
-            "value": localRecordingOverrideLabel(override)
-        ])
-        presentKeyboardSettingsPanel()
-    }
-
-    private func localKeyboardServerOverride() -> String? {
-        guard let value = UserDefaults.standard.string(forKey: Self.localServerOverrideKey) else { return nil }
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    private func setKeyboardLocalServerOverride(_ url: String?) {
-        if let url {
-            UserDefaults.standard.set(url, forKey: Self.localServerOverrideKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: Self.localServerOverrideKey)
-        }
-        FileLogger.shared.info(.keyboard, "In-keyboard server override changed", payload: [
-            "source": url == nil ? "unset" : "keyboard-local"
-        ])
-        presentKeyboardSettingsPanel()
-    }
-
-    private func resolveEffectiveKeyboardServer() -> EffectiveKeyboardServer {
-        if let localOverride = localKeyboardServerOverride() {
-            return EffectiveKeyboardServer(url: localOverride, source: "keyboard-local override")
-        }
-
-        let defaults = UserDefaults(suiteName: SharedConfig.Defaults.appGroupId)
-        let storedServerList = defaults?.data(forKey: "servers").flatMap {
-            try? JSONDecoder().decode([String].self, from: $0)
-        }
-        let servers = SharedConfig.load().servers
-        let selectedServer = SharedConfig.selectedServer().flatMap { selected in
-            servers.contains(selected) ? selected : nil
-        }
-        if let selectedServer {
-            return EffectiveKeyboardServer(
-                url: selectedServer,
-                source: "App Group selected"
-            )
-        }
-        if let server = servers.first {
-            return EffectiveKeyboardServer(
-                url: server,
-                source: storedServerList == nil ? "compiled default" : "App Group"
-            )
-        }
-        return EffectiveKeyboardServer(url: "<none>", source: "App Group list empty")
-    }
-
-    private func recordPermissionLabel(_ permission: AVAudioSession.RecordPermission) -> String {
-        switch permission {
-        case .granted: return "granted"
-        case .denied: return "denied"
-        case .undetermined: return "undetermined"
-        @unknown default: return "unknown"
-        }
-    }
-
-    private func micPressRoute(settingEnabled: Bool) -> MicPressRoute {
         switch state {
         case .idle:
-            if settingEnabled { return .inKeyboardStart }
-            return hasFullAccess ? .containerAppStart : .fullAccessGuidance
+            guard hasFullAccess else {
+                state = .error("Full Access required. Settings \u{2192} General \u{2192} Keyboard \u{2192} Ritoras \u{2192} Allow Full Access.")
+                return
+            }
+            openContainerAppForDictation()
         case .recording:
-            return inKeyboardSessionActive ? .inKeyboardStop : .containerAppStop
-        case .waiting:
-            return inKeyboardSessionActive ? .ignore : .containerAppStop
-        case .error:
-            return .dismissError
-        case .openingApp, .inserting:
-            return .ignore
-        }
-    }
+            FileLogger.shared.info(.keyboard, "Mic: .recording -> POST /stop")
+            requestStop()
 
-    private func routeLabel(_ route: MicPressRoute, permission: AVAudioSession.RecordPermission) -> String {
-        switch route {
-        case .inKeyboardStart:
-            if !hasFullAccess { return "in-keyboard-start/full-access-guidance" }
-            if permission != .granted { return "in-keyboard-start/mic-permission-guidance" }
-            return "in-keyboard-start"
-        case .containerAppStart: return "container-app-open"
-        case .fullAccessGuidance: return "full-access-guidance"
-        case .inKeyboardStop: return "in-keyboard-stop"
-        case .containerAppStop: return "container-app-stop"
-        case .dismissError: return "dismiss-error"
-        case .ignore: return "ignored"
+        case .waiting:
+            FileLogger.shared.info(.keyboard, "Mic: .waiting -> POST /stop")
+            requestStop()
+        case .error:
+            cancelOutstandingAsyncWork()
+            state = .idle
+        default:
+            break   // ignore taps while openingApp/inserting
         }
     }
 
     private func presentKeyboardSettingsPanel() {
-        guard !inKeyboardSessionActive, state != .recording else { return }
-        let modeInputs = readKeyboardModeInputs()
-        let permission = AVAudioSession.sharedInstance().recordPermission
-        let resolver = AppGroupResolver.shared
-        let route = micPressRoute(settingEnabled: modeInputs.effectiveEnabled)
-        let effectiveServer = resolveEffectiveKeyboardServer()
-        keyboardView.showSettingsPanel(KeyboardSettingsPanelModel(
-            localOverride: modeInputs.localOverride,
-            appGroupEnabled: modeInputs.appGroupEnabled,
-            effectiveEnabled: modeInputs.effectiveEnabled,
-            nextBranch: routeLabel(route, permission: permission),
-            buildIdentity: SharedConfig.buildIdentity,
-            resolverStrategy: resolver.resolvedStrategy,
-            containerAvailable: resolver.containerAvailable,
-            hasFullAccess: hasFullAccess,
-            microphonePermission: recordPermissionLabel(permission),
-            localServerOverride: localKeyboardServerOverride(),
-            effectiveServerURL: effectiveServer.url,
-            effectiveServerSource: effectiveServer.source
-        ))
-    }
-
-    private func startInKeyboardRecording() {
-        guard hasFullAccess else {
-            state = .error("Full Access required. Settings → General → Keyboard → Ritoras → Allow Full Access.")
-            return
-        }
-        switch AVAudioSession.sharedInstance().recordPermission {
-        case .granted: break
-        case .undetermined, .denied:
-            state = .error("Open Ritoras once and grant microphone access, then return to the keyboard.")
-            return
-        @unknown default:
-            state = .error("Open Ritoras once and grant microphone access, then return to the keyboard.")
-            return
-        }
-
-        let audioSession = AVAudioSession.sharedInstance()
-        FileLogger.shared.debug(.audio, "in-kb-rec other audio state", payload: ["isOtherAudioPlaying": audioSession.isOtherAudioPlaying])
-        logInKeyboardMemory("before-start")
-
-        let server = resolveEffectiveKeyboardServer()
-        guard server.url != "<none>",
-              let client = WhisperStreamClient(baseURL: server.url, dictationID: UUID()) else {
-            state = .error("No valid transcription server is configured.")
-            return
-        }
-
-        inKeyboardSessionActive = true
-        inKeyboardTeardownStarted = false
-        let partialSessionID = inKeyboardPartialStore.beginSession()
-        inKeyboardPartialSessionID = partialSessionID
-        inKeyboardClient = client
-        inKeyboardSendTask = Task {}
-        state = .recording
-        keyboardView.setDictationTranscript("Connecting…")
-        audioInterruptionObserver = NotificationCenter.default.addObserver(
-            forName: AVAudioSession.interruptionNotification,
-            object: audioSession,
-            queue: .main
-        ) { [weak self] notification in
-            guard let raw = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-                  AVAudioSession.InterruptionType(rawValue: raw) == .began else { return }
-            self?.stopInKeyboardRecording(cancel: true, message: "Audio was interrupted. Tap the mic to try again.")
-        }
-
-        inKeyboardStartMemoryTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                try await client.connect()
-                guard self.inKeyboardSessionActive else {
-                    await client.disconnect()
-                    return
-                }
-                self.keyboardView.setDictationTranscript(nil)
-                let partialStore = self.inKeyboardPartialStore
-                self.inKeyboardReceiveTask = Task { @MainActor [weak self] in
-                    do {
-                        let transcript = try await client.receiveMessages(onPartial: { partial in
-                            partialStore.record(partial, sessionID: partialSessionID)
-                            Task { @MainActor [weak self] in
-                                guard self?.inKeyboardSessionActive == true else { return }
-                                self?.keyboardView.setDictationTranscript(partial)
-                            }
-                        })
-                        guard let self, self.inKeyboardSessionActive else { return }
-                        self.finishInKeyboardTranscript(transcript)
-                    } catch {
-                        guard let self, self.inKeyboardSessionActive else { return }
-                        self.stopInKeyboardRecording(cancel: true, message: "Transcription server failed: \(error.localizedDescription)")
-                    }
-                }
-                let recorder = StreamingAudioRecorder()
-                self.inKeyboardRecorder = recorder
-                try await recorder.start(mixWithOthers: true, onChunk: { [weak self] chunkID, samples in
-                    Task { @MainActor [weak self] in
-                        self?.queueInKeyboardChunk(id: chunkID, samples: samples, client: client)
-                    }
-                })
-                self.inKeyboardMemoryTimer?.invalidate()
-                self.inKeyboardMemoryTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-                    self?.logInKeyboardMemory("during-capture")
-                }
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-                guard self.inKeyboardSessionActive else { return }
-                self.logInKeyboardMemory("after-start-1s")
-                FileLogger.shared.info(.audio, "in-kb-rec capture started")
-            } catch {
-                let message = error is AudioSessionActivationError
-                    ? "Audio session couldn't activate. Pause other audio and try again."
-                    : "Couldn't start keyboard recording: \(error.localizedDescription)"
-                self.stopInKeyboardRecording(cancel: true, message: message)
-            }
-        }
-    }
-
-    private func queueInKeyboardChunk(id: UInt32, samples: [Float], client: WhisperStreamClient) {
-        let previous = inKeyboardSendTask
-        inKeyboardSendTask = Task {
-            await previous?.value
-            guard !Task.isCancelled else { return }
-            do {
-                try await client.sendChunk(id: id, samples: samples)
-            } catch {
-                await MainActor.run {
-                    self.stopInKeyboardRecording(cancel: true, message: "Couldn't reach the transcription server.")
-                }
-            }
-        }
-    }
-
-    private func stopInKeyboardRecording(cancel: Bool, message: String? = nil) {
-        guard inKeyboardSessionActive else { return }
-        if cancel || message != nil {
-            guard !inKeyboardTeardownStarted else { return }
-            inKeyboardTeardownStarted = true
-            preserveLatestInKeyboardPartial()
-            inKeyboardSessionActive = false
-        } else {
-            state = .waiting
-        }
-        inKeyboardMemoryTimer?.invalidate()
-        inKeyboardMemoryTimer = nil
-        inKeyboardStartMemoryTask?.cancel()
-        inKeyboardStartMemoryTask = nil
-        if let audioInterruptionObserver {
-            NotificationCenter.default.removeObserver(audioInterruptionObserver)
-            self.audioInterruptionObserver = nil
-        }
-        let recorder = inKeyboardRecorder
-        inKeyboardRecorder = nil
-        let client = inKeyboardClient
-        if cancel || message != nil { inKeyboardClient = nil }
-        inKeyboardSendTask = nil
-        if cancel || message != nil {
-            inKeyboardReceiveTask?.cancel()
-            inKeyboardReceiveTask = nil
-        }
-        Task { @MainActor [weak self] in
-            await recorder?.stop()
-            await self?.inKeyboardSendTask?.value
-            if !cancel, let client {
-                do {
-                    try await client.sendEnd()
-                } catch {
-                    self?.stopInKeyboardRecording(cancel: true, message: "Couldn't finish streaming to the server.")
-                }
-            } else {
-                if let client {
-                    do { try await client.sendCancel() } catch {
-                        FileLogger.shared.debug(.network, "in-kb-rec CANCEL could not be sent")
-                    }
-                }
-                await client?.disconnect()
-                self?.inKeyboardSessionActive = false
-                self?.state = message.map(KeyboardState.error) ?? .idle
-                self?.keyboardView.setDictationTranscript(nil)
-                self?.logInKeyboardMemory("after-stop")
-                AudioSession.deactivate()
-            }
-        }
-    }
-
-    private func preserveLatestInKeyboardPartial() {
-        guard let sessionID = inKeyboardPartialSessionID else { return }
-        inKeyboardPartialSessionID = nil
-        guard let partial = inKeyboardPartialStore.finishSession(sessionID), !partial.isEmpty else { return }
-        textDocumentProxy.insertText(partial)
-        FileLogger.shared.info(.transcription, "in-kb-rec preserved partial on teardown", payload: [
-            "characters": partial.count
-        ])
-    }
-
-    private func finishInKeyboardTranscript(_ transcript: String) {
-        guard !transcript.isEmpty else {
-            stopInKeyboardRecording(cancel: true, message: "Nothing was heard. Try again.")
-            return
-        }
-        inKeyboardSessionActive = false
-        if let sessionID = inKeyboardPartialSessionID {
-            _ = inKeyboardPartialStore.finishSession(sessionID)
-            inKeyboardPartialSessionID = nil
-        }
-        inKeyboardMemoryTimer?.invalidate()
-        inKeyboardMemoryTimer = nil
-        inKeyboardStartMemoryTask?.cancel()
-        inKeyboardStartMemoryTask = nil
-        let recorder = inKeyboardRecorder
-        inKeyboardRecorder = nil
-        let client = inKeyboardClient
-        inKeyboardClient = nil
-        inKeyboardReceiveTask = nil
-        keyboardView.setDictationTranscript(nil)
-        Task { @MainActor [weak self] in
-            await recorder?.stop()
-            await client?.disconnect()
-            AudioSession.deactivate()
-            self?.logInKeyboardMemory("after-stop")
-            self?.textDocumentProxy.insertText(transcript)
-            self?.state = .idle
-        }
-    }
-
-    private func logInKeyboardMemory(_ checkpoint: String) {
-        FileLogger.shared.info(.audio, "in-kb-rec memory \(checkpoint)", payload: [
-            "footprintBytes": MemoryMonitor.currentFootprint(),
-            "residentBytes": MemoryMonitor.currentResidentSize()
-        ])
+        keyboardView.showSettingsPanel(activeLanguage: settingsCache.language)
     }
 
     // MARK: - Dictation via Container App
@@ -1857,10 +1395,6 @@ class KeyboardViewController: UIInputViewController {
     /// the container app (which may be crashed). The container app cleans up
     /// via its own timeout/error handling.
     private func cancelDictation() {
-        if inKeyboardSessionActive {
-            stopInKeyboardRecording(cancel: true)
-            return
-        }
         stopDictationTransports()
         FileLogger.shared.debug(.keyboard, "Dictation cancelled by user",
                                 payload: ["pendingRequestId": pendingRequestId?.uuidString ?? "nil"])
@@ -2325,10 +1859,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
             }
 
         case .backspace:
-            if inputTarget == .keyboardSettingsServerURL {
-                deleteTargetedBackward()
-                return
-            }
             // REVERT-ON-BACKSPACE: If cursor is immediately after "corrected_word " and
             // the previous action was an autocorrect, revert instead of just deleting the space.
             if let correction = lastAutoCorrection,
@@ -2382,9 +1912,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             wordOrigin.resetToTyping()
 
         case .return:
-            if inputTarget == .keyboardSettingsServerURL {
-                keyboardView.settingsPanel.commitServerURLInput()
-            } else if inputTarget == .emojiSearch {
+            if inputTarget == .emojiSearch {
                 keyboardView.emojiPanelView.onSearchReturn?()
             } else {
                 applyFinalSigmaToCommittedWord()
@@ -2555,10 +2083,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
     }
 
     func keyboardViewDidRequestCancelDictation(_ view: KeyboardView) {
-        if inKeyboardSessionActive {
-            stopInKeyboardRecording(cancel: true)
-            return
-        }
         guard state == .recording || state == .waiting else { return }
         requestCancel()
     }
@@ -2570,12 +2094,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
         backspaceTimer = nil
         backspaceSingleCharCount = 0
         backspacePhase = nil
-        if inputTarget == .keyboardSettingsServerURL {
-            deleteTargetedBackward()
-            backspacePhase = .charRepeat
-            scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceInitialRepeatDelay, repeats: false)
-            return
-        }
         // The single-backspace final-sigma revert (ς → σ) consumes this press;
         // otherwise the normal delete runs. The revert is checked only on the
         // first press of a fresh sequence, never inside the repeat timer.
@@ -2630,7 +2148,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
     }
 
     override func textWillChange(_ textInput: UITextInput?) {
-        if inKeyboardSessionActive { stopInKeyboardRecording(cancel: true) }
         super.textWillChange(textInput)
         observeIdentityForFlapDetection()
         keyboardView.noteSuggestionContextChange()
@@ -3281,7 +2798,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
         switch inputTarget {
         case .hostApp:     return textDocumentProxy.hasText
         case .emojiSearch: return !(keyboardView.emojiSearchOverlay.searchField.text?.isEmpty ?? true)
-        case .keyboardSettingsServerURL: return keyboardView.settingsPanel.hasServerURLText
         }
     }
 
@@ -3290,7 +2806,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
         switch inputTarget {
         case .hostApp:     textDocumentProxy.insertText(text)
         case .emojiSearch: keyboardView.emojiSearchOverlay.searchField.insertText(text)
-        case .keyboardSettingsServerURL: keyboardView.settingsPanel.insertServerURLText(text)
         }
     }
 
@@ -3301,8 +2816,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
             textDocumentProxy.deleteBackward()
         case .emojiSearch:
             keyboardView.emojiSearchOverlay.searchField.deleteBackward()
-        case .keyboardSettingsServerURL:
-            keyboardView.settingsPanel.deleteServerURLBackward()
         }
     }
 
@@ -3317,19 +2830,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
     }
 
     private func handleBackspaceTick() {
-        if inputTarget == .keyboardSettingsServerURL {
-            guard hasTextInCurrentTarget else {
-                backspaceTimer?.invalidate()
-                backspaceTimer = nil
-                backspacePhase = nil
-                return
-            }
-            deleteTargetedBackward()
-            HapticsManager.shared.tapImpact()
-            scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceCharRepeatInterval, repeats: true)
-            return
-        }
-
         // In search mode, always use char-repeat (no word-mode) since the
         // search field is a single-line input with no need for word-level deletion.
         if inputTarget == .emojiSearch {

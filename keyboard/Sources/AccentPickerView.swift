@@ -2,8 +2,7 @@ import UIKit
 
 /// Small horizontal accent-picker strip shown above a Greek vowel key on
 /// long-press (Apple-style). One reusable instance, recycled across shows —
-/// never per-open allocated (48 MB Jetsam discipline, mirroring the single
-/// KeyPreviewView / LanguageMenuView pattern).
+/// never per-open allocated (48 MB Jetsam discipline, mirroring KeyPreviewView).
 final class AccentPickerView: UIView {
 
     // MARK: - Callbacks

@@ -13,7 +13,6 @@ class AppSettings: ObservableObject {
     @Published var followMeWindowSeconds: Int = SharedConfig.Defaults.followMeWindowSecondsDefault
     @Published var verboseLogging: Bool = SharedConfig.Defaults.verboseLoggingDefault
     @Published var hapticsEnabled: Bool = SharedConfig.Defaults.hapticsEnabledDefault
-    @Published var inKeyboardRecording: Bool = SharedConfig.Defaults.inKeyboardRecordingDefault
     @Published var keyboardLanguage: KeyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
 
     @Published var streamVadMode: VADMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .staticMode
@@ -47,7 +46,6 @@ class AppSettings: ObservableObject {
         ), 600)
         verboseLogging = SharedConfig.verboseLoggingEnabled()
         hapticsEnabled = SharedConfig.hapticsEnabled()
-        inKeyboardRecording = SharedConfig.inKeyboardRecordingEnabled()
         keyboardLanguage = SharedConfig.keyboardLanguage()
         streamVadMode = SharedConfig.streamVadMode()
         streamVadSensitivityProfile = SharedConfig.streamVadSensitivityProfile()
@@ -100,11 +98,6 @@ class AppSettings: ObservableObject {
             FileLogger.shared.info(.settings, "saving hapticsEnabled",
                                    payload: ["value": newValue])
             self?.saveHapticsEnabled(newValue)
-        }.store(in: &cancellables)
-        $inKeyboardRecording.dropFirst().sink { [weak self] newValue in
-            FileLogger.shared.info(.settings, "saving inKeyboardRecording", payload: ["value": newValue])
-            self?.appGroupDefaults?.set(newValue, forKey: SharedConfig.Defaults.inKeyboardRecordingKey)
-            self?.postSettingsChanged()
         }.store(in: &cancellables)
         $keyboardLanguage.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving keyboardLanguage",
@@ -174,7 +167,6 @@ class AppSettings: ObservableObject {
         saveFollowMeWindowSeconds(followMeWindowSeconds)
         appGroupDefaults?.set(verboseLogging, forKey: SharedConfig.Defaults.verboseLoggingKey)
         appGroupDefaults?.set(hapticsEnabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
-        appGroupDefaults?.set(inKeyboardRecording, forKey: SharedConfig.Defaults.inKeyboardRecordingKey)
         appGroupDefaults?.set(keyboardLanguage.rawValue, forKey: SharedConfig.Defaults.keyboardLanguageKey)
         appGroupDefaults?.set(streamVadMode.rawValue, forKey: SharedConfig.Defaults.streamVadModeKey)
         appGroupDefaults?.set(streamVadSensitivityProfile.rawValue, forKey: SharedConfig.Defaults.streamVadSensitivityProfileKey)
@@ -317,7 +309,6 @@ class AppSettings: ObservableObject {
         followMeWindowSeconds = SharedConfig.Defaults.followMeWindowSecondsDefault
         verboseLogging = SharedConfig.Defaults.verboseLoggingDefault
         hapticsEnabled = SharedConfig.Defaults.hapticsEnabledDefault
-        inKeyboardRecording = SharedConfig.Defaults.inKeyboardRecordingDefault
         keyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
         streamVadMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .staticMode
         streamVadPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault

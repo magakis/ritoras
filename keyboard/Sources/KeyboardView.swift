@@ -616,17 +616,6 @@ class KeyboardView: UIView {
         return v
     }
 
-    /// Single reusable language picker overlay — recycled across shows. Never
-    /// per-open allocated. See 48 MB Jetsam constraint.
-    private var _languageMenu: LanguageMenuView?
-    var languageMenu: LanguageMenuView {
-        if let v = _languageMenu { return v }
-        let v = LanguageMenuView()
-        v.translatesAutoresizingMaskIntoConstraints = false
-        _languageMenu = v
-        return v
-    }
-
     private var _settingsPanel: KeyboardSettingsPanel?
     var settingsPanel: KeyboardSettingsPanel {
         if let v = _settingsPanel { return v }
@@ -658,7 +647,6 @@ class KeyboardView: UIView {
 
     // Key references
     private weak var micKeyButton: KeyButton?
-    private let dictationTranscriptLabel = UILabel()
     private weak var emojiKeyButton: KeyButton?
     private weak var shiftKeyButton: KeyButton?
     private weak var bottomRowView: KeyboardRowView?
@@ -716,9 +704,6 @@ class KeyboardView: UIView {
         addSubview(emojiSearchOverlay)
         bringSubviewToFront(emojiSearchOverlay)
 
-        addSubview(languageMenu)
-        bringSubviewToFront(languageMenu)
-
         addSubview(settingsPanel)
 
         setupConstraints()
@@ -760,14 +745,6 @@ class KeyboardView: UIView {
             self.settingsTapped?()
         }
         addSubview(suggestionBar)
-        dictationTranscriptLabel.font = .systemFont(ofSize: 12)
-        dictationTranscriptLabel.textColor = .secondaryLabel
-        dictationTranscriptLabel.textAlignment = .center
-        dictationTranscriptLabel.lineBreakMode = .byTruncatingTail
-        dictationTranscriptLabel.isUserInteractionEnabled = false
-        dictationTranscriptLabel.isHidden = true
-        dictationTranscriptLabel.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(dictationTranscriptLabel)
     }
 
     private func setupLetterRegion() {
@@ -820,10 +797,6 @@ class KeyboardView: UIView {
             suggestionBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             suggestionBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             suggestionBar.heightAnchor.constraint(equalToConstant: 36),
-            dictationTranscriptLabel.leadingAnchor.constraint(equalTo: suggestionBar.leadingAnchor, constant: 8),
-            dictationTranscriptLabel.trailingAnchor.constraint(equalTo: suggestionBar.trailingAnchor, constant: -8),
-            dictationTranscriptLabel.centerYAnchor.constraint(equalTo: suggestionBar.centerYAnchor),
-            dictationTranscriptLabel.heightAnchor.constraint(equalToConstant: 20),
 
             // Letter region container — middle (rows 1–3)
             letterRegionContainer.topAnchor.constraint(equalTo: suggestionBar.bottomAnchor, constant: 6),
@@ -842,12 +815,6 @@ class KeyboardView: UIView {
             bottomActionRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             bottomActionRow.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
             bottomActionRow.heightAnchor.constraint(equalToConstant: 48),
-
-            // Language picker overlay — covers the whole keyboard when shown
-            languageMenu.topAnchor.constraint(equalTo: topAnchor),
-            languageMenu.leadingAnchor.constraint(equalTo: leadingAnchor),
-            languageMenu.trailingAnchor.constraint(equalTo: trailingAnchor),
-            languageMenu.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             settingsPanel.topAnchor.constraint(equalTo: topAnchor),
             settingsPanel.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -1106,7 +1073,6 @@ class KeyboardView: UIView {
         guard currentLanguage == .greek else { return }
         button.accentLongPressDidFire = true
         keyPreview.hide()
-        languageMenu.dismiss()   // defensive — the two overlays never overlap
         let keyFrame = button.convert(button.bounds, to: self)
         accentPicker.show(for: button.keyDefinition.label,
                           anchoredAbove: keyFrame,
@@ -1188,13 +1154,6 @@ class KeyboardView: UIView {
             return super.hitTest(point, with: event)
         }
 
-        // When the language picker overlay is visible it owns all touches: skip
-        // key-region dead-zone routing so taps on the dimmed backdrop dismiss
-        // the menu instead of pressing the keys beneath it.
-        if !languageMenu.isHidden {
-            return super.hitTest(point, with: event)
-        }
-
         // Same for the accent picker: its transparent backdrop covers the whole
         // keyboard, so any touch outside the strip dismisses instead of firing
         // the key beneath it.
@@ -1261,21 +1220,12 @@ class KeyboardView: UIView {
         setMicState(state)
     }
 
-    func setDictationTranscript(_ text: String?) {
-        dictationTranscriptLabel.text = text
-        dictationTranscriptLabel.isHidden = text == nil || text?.isEmpty == true
-        if text != nil, settingsPanel.isHidden {
-            bringSubviewToFront(dictationTranscriptLabel)
-        }
-    }
-
-    func showSettingsPanel(_ model: KeyboardSettingsPanelModel) {
-        settingsPanel.show(model: model)
+    func showSettingsPanel(activeLanguage: KeyboardLanguage) {
+        settingsPanel.show(activeLanguage: activeLanguage)
         bringSubviewToFront(settingsPanel)
     }
 
     func dismissSettingsPanel() {
-        settingsPanel.resignServerURLField()
         settingsPanel.dismiss()
     }
 

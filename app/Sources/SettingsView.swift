@@ -230,21 +230,10 @@ struct SettingsView: View {
             Toggle("Auto-Capitalization", isOn: $settings.autoCapitalizationEnabled)
             Toggle("Auto-Correction", isOn: $settings.autocorrectOnSpaceEnabled)
             Toggle("Haptic Feedback", isOn: $settings.hapticsEnabled)
-            if isAppGroupContainerAvailable {
-                Toggle("In-keyboard recording (experimental)", isOn: $settings.inKeyboardRecording)
-            } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("In-keyboard recording (experimental)")
-                    Text("Not available on this install — open keyboard settings with the cog key and turn recording on there.")
-                        .font(.footnote)
-                        .foregroundColor(.secondary)
-                }
-                .accessibilityElement(children: .combine)
-            }
         } header: {
             Text("Keyboard")
         } footer: {
-            Text("iOS's built-in Keyboard Feedback setting does not apply to custom keyboards. Experimental recording captures and streams audio inside the keyboard; enable Full Access and grant microphone access in Ritoras first.")
+            Text("iOS's built-in Keyboard Feedback setting does not apply to custom keyboards. This toggle provides independent control.")
         }
     }
 
@@ -283,11 +272,6 @@ struct SettingsView: View {
             NavigationLink("Debug Log") {
                 DebugLogView()
             }
-            diagnosticValueRow("Build identity", value: SharedConfig.buildIdentity)
-            diagnosticValueRow("Resolved App Group suite", value: SharedConfig.Defaults.appGroupId)
-            diagnosticValueRow("Resolver strategy", value: AppGroupResolver.shared.resolvedStrategy)
-            diagnosticValueRow("Container available", value: isAppGroupContainerAvailable ? "yes" : "no")
-            diagnosticValueRow("In-keyboard toggle last written", value: settings.inKeyboardRecording ? "ON" : "OFF")
         } header: {
             Text("Diagnostics")
         } footer: {
@@ -330,22 +314,6 @@ struct SettingsView: View {
         let version = (info?["CFBundleShortVersionString"] as? String) ?? "?"
         let build = (info?["CFBundleVersion"] as? String) ?? "?"
         return "\(version) (\(build))"
-    }
-
-    private var isAppGroupContainerAvailable: Bool {
-        AppGroupResolver.shared.containerAvailable
-    }
-
-    private func diagnosticValueRow(_ title: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(.caption)
-                .foregroundColor(.secondary)
-            Text(value)
-                .font(.system(.caption, design: .monospaced))
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-        }
     }
 
     private func testServer(at index: Int) {

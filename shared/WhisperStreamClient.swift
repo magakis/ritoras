@@ -192,15 +192,6 @@ actor WhisperStreamClient {
         FileLogger.shared.info(.network, "Stream: END sent", payload: ["id": dictationID])
     }
 
-    /// Cancels the active stream without requesting a final transcription.
-    func sendCancel() async throws {
-        guard let task = task else {
-            throw WhisperError.networkError(URLError(.notConnectedToInternet))
-        }
-        try await task.send(.string(#"{"type":"CANCEL"}"#))
-        FileLogger.shared.info(.network, "Stream: CANCEL sent", payload: ["id": dictationID])
-    }
-
     /// Sends a keepalive ping (`{"type":"PING"}`).  The server's
     /// idle timeout is 600 s; the caller should send a PING well
     /// before that threshold during long pauses.
