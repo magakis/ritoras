@@ -12,7 +12,6 @@ final class KeyboardSettingsCache {
     private var _autocorrectOnSpace: Bool
     private var _haptics: Bool
     private var _language: KeyboardLanguage
-    private var _inKeyboardRecording: Bool
 
     var autoCapitalization: Bool {
         lock.lock()
@@ -38,18 +37,11 @@ final class KeyboardSettingsCache {
         return _language
     }
 
-    var inKeyboardRecording: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return _inKeyboardRecording
-    }
-
     init() {
         _autoCapitalization = SharedConfig.autoCapitalizationEnabled()
         _autocorrectOnSpace = SharedConfig.autocorrectOnSpaceEnabled()
         _haptics = SharedConfig.hapticsEnabled()
         _language = SharedConfig.keyboardLanguage()
-        _inKeyboardRecording = SharedConfig.inKeyboardRecordingEnabled()
     }
 
     /// Reads all four settings from the App Group under a single lock acquire.
@@ -58,13 +50,11 @@ final class KeyboardSettingsCache {
         let autoCorr = SharedConfig.autocorrectOnSpaceEnabled()
         let hapticsVal = SharedConfig.hapticsEnabled()
         let languageVal = SharedConfig.keyboardLanguage()
-        let inKeyboardRecordingVal = SharedConfig.inKeyboardRecordingEnabled()
         lock.lock()
         _autoCapitalization = autoCap
         _autocorrectOnSpace = autoCorr
         _haptics = hapticsVal
         _language = languageVal
-        _inKeyboardRecording = inKeyboardRecordingVal
         lock.unlock()
     }
 }

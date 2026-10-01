@@ -22,6 +22,24 @@ private struct RetroactiveCandidateSnapshot {
 
 class KeyboardViewController: UIInputViewController {
 
+    private enum MicPressRoute {
+        case inKeyboardStart
+        case containerAppStart
+        case fullAccessGuidance
+        case inKeyboardStop
+        case containerAppStop
+        case dismissError
+        case ignore
+    }
+
+    private struct KeyboardModeInputs {
+        let localOverride: Bool?
+        let appGroupEnabled: Bool
+        let effectiveEnabled: Bool
+    }
+
+    private static let localRecordingOverrideKey = "ritoras.inKeyboardRecording.localOverride"
+
     // MARK: - State
 
     private var state: KeyboardState = .idle {
@@ -432,6 +450,7 @@ class KeyboardViewController: UIInputViewController {
             FileLogger.shared.info(.keyboard, "viewDidAppear — idle",
                                    payload: ["hasFullAccess": hasFullAccess])
         }
+        showKeyboardDiagnosticFlash()
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -619,6 +638,9 @@ class KeyboardViewController: UIInputViewController {
             guard let self = self else { return }
             self.presentLanguageMenu()
         }
+        keyboardView.diagnosticRequested = { [weak self] in
+            self?.cycleKeyboardLocalRecordingMode()
+        }
         keyboardView.languageMenu.onSelect = { [weak self] language in
             guard let self = self else { return }
             self.handleLanguageSelection(language)
@@ -690,71 +712,129 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Mic Button
 
     private func handleMicButtonTap() {
-        let cachedSettingBeforeRefresh = settingsCache.inKeyboardRecording
-        let appGroupInKeyboardSetting = SharedConfig.inKeyboardRecordingEnabled()
-        settingsCache.refresh()
-        let cachedInKeyboardSetting = settingsCache.inKeyboardRecording
+        let modeInputs = readKeyboardModeInputs()
         let recordPermission = AVAudioSession.sharedInstance().recordPermission
-        let permissionLabel: String
-        switch recordPermission {
-        case .granted: permissionLabel = "granted"
-        case .denied: permissionLabel = "denied"
-        case .undetermined: permissionLabel = "undetermined"
-        @unknown default: permissionLabel = "unknown"
-        }
-        let selectedBranch: String
-        switch state {
-        case .idle:
-            selectedBranch = cachedInKeyboardSetting ? "in-keyboard-start" : "container-app-open"
-        case .recording:
-            selectedBranch = inKeyboardSessionActive ? "in-keyboard-stop" : "container-app-stop"
-        case .waiting:
-            selectedBranch = inKeyboardSessionActive ? "in-keyboard-waiting" : "container-app-stop"
-        case .error:
-            selectedBranch = "dismiss-error"
-        case .openingApp:
-            selectedBranch = "opening-app-ignored"
-        case .inserting:
-            selectedBranch = "inserting-ignored"
-        }
-        FileLogger.shared.debug(.keyboard, "Mic tap branch", payload: [
-            "settingCachedBeforeRefresh": cachedSettingBeforeRefresh,
-            "settingCached": cachedInKeyboardSetting,
-            "settingAppGroup": appGroupInKeyboardSetting,
+        let route = micPressRoute(settingEnabled: modeInputs.effectiveEnabled)
+        FileLogger.shared.info(.keyboard, "Mic tap branch", payload: [
+            "localOverride": localRecordingOverrideLabel(modeInputs.localOverride),
+            "settingEffective": modeInputs.effectiveEnabled,
+            "settingAppGroup": modeInputs.appGroupEnabled,
             "hasFullAccess": hasFullAccess,
-            "recordPermission": permissionLabel,
-            "branch": selectedBranch
+            "recordPermission": recordPermissionLabel(recordPermission),
+            "branch": routeLabel(route, permission: recordPermission)
         ])
 
-        switch state {
-        case .idle:
-            if cachedInKeyboardSetting {
-                startInKeyboardRecording()
-                return
-            }
-            guard hasFullAccess else {
-                state = .error("Full Access required. Settings \u{2192} General \u{2192} Keyboard \u{2192} Ritoras \u{2192} Allow Full Access.")
-                return
-            }
+        switch route {
+        case .inKeyboardStart:
+            startInKeyboardRecording()
+        case .containerAppStart:
             openContainerAppForDictation()
-        case .recording:
-            if inKeyboardSessionActive {
-                stopInKeyboardRecording(cancel: false)
-                return
-            }
-            FileLogger.shared.info(.keyboard, "Mic: .recording -> POST /stop")
+        case .fullAccessGuidance:
+            state = .error("Full Access required. Settings \u{2192} General \u{2192} Keyboard \u{2192} Ritoras \u{2192} Allow Full Access.")
+        case .inKeyboardStop:
+            stopInKeyboardRecording(cancel: false)
+        case .containerAppStop:
+            FileLogger.shared.info(.keyboard, state == .waiting
+                ? "Mic: .waiting -> POST /stop"
+                : "Mic: .recording -> POST /stop")
             requestStop()
-
-        case .waiting:
-            if inKeyboardSessionActive { return }
-            FileLogger.shared.info(.keyboard, "Mic: .waiting -> POST /stop")
-            requestStop()
-        case .error:
+        case .dismissError:
             cancelOutstandingAsyncWork()
             state = .idle
-        default:
-            break   // ignore taps while openingApp/inserting
+        case .ignore:
+            break
         }
+    }
+
+    private func readKeyboardModeInputs() -> KeyboardModeInputs {
+        let localOverride = UserDefaults.standard.object(forKey: Self.localRecordingOverrideKey) as? Bool
+        let appGroupEnabled = SharedConfig.inKeyboardRecordingEnabled()
+        return KeyboardModeInputs(
+            localOverride: localOverride,
+            appGroupEnabled: appGroupEnabled,
+            effectiveEnabled: localOverride ?? appGroupEnabled
+        )
+    }
+
+    private func localRecordingOverrideLabel(_ value: Bool?) -> String {
+        guard let value else { return "unset" }
+        return value ? "on" : "off"
+    }
+
+    private func cycleKeyboardLocalRecordingMode() {
+        guard !inKeyboardSessionActive, state != .recording else { return }
+        let current = UserDefaults.standard.object(forKey: Self.localRecordingOverrideKey) as? Bool
+        let next: Bool?
+        switch current {
+        case .none: next = true
+        case .some(true): next = false
+        case .some(false): next = nil
+        }
+        if let next {
+            UserDefaults.standard.set(next, forKey: Self.localRecordingOverrideKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.localRecordingOverrideKey)
+        }
+        FileLogger.shared.info(.keyboard, "In-keyboard local recording override changed", payload: [
+            "value": localRecordingOverrideLabel(next)
+        ])
+        showKeyboardDiagnosticFlash()
+    }
+
+    private func recordPermissionLabel(_ permission: AVAudioSession.RecordPermission) -> String {
+        switch permission {
+        case .granted: return "granted"
+        case .denied: return "denied"
+        case .undetermined: return "undetermined"
+        @unknown default: return "unknown"
+        }
+    }
+
+    private func micPressRoute(settingEnabled: Bool) -> MicPressRoute {
+        switch state {
+        case .idle:
+            if settingEnabled { return .inKeyboardStart }
+            return hasFullAccess ? .containerAppStart : .fullAccessGuidance
+        case .recording:
+            return inKeyboardSessionActive ? .inKeyboardStop : .containerAppStop
+        case .waiting:
+            return inKeyboardSessionActive ? .ignore : .containerAppStop
+        case .error:
+            return .dismissError
+        case .openingApp, .inserting:
+            return .ignore
+        }
+    }
+
+    private func routeLabel(_ route: MicPressRoute, permission: AVAudioSession.RecordPermission) -> String {
+        switch route {
+        case .inKeyboardStart:
+            if !hasFullAccess { return "in-keyboard-start/full-access-guidance" }
+            if permission != .granted { return "in-keyboard-start/mic-permission-guidance" }
+            return "in-keyboard-start"
+        case .containerAppStart: return "container-app-open"
+        case .fullAccessGuidance: return "full-access-guidance"
+        case .inKeyboardStop: return "in-keyboard-stop"
+        case .containerAppStop: return "container-app-stop"
+        case .dismissError: return "dismiss-error"
+        case .ignore: return "ignored"
+        }
+    }
+
+    private func showKeyboardDiagnosticFlash() {
+        guard !inKeyboardSessionActive, state != .recording else { return }
+        let modeInputs = readKeyboardModeInputs()
+        let permission = AVAudioSession.sharedInstance().recordPermission
+        let resolver = AppGroupResolver.shared
+        let availability = resolver.containerAvailable ? "available" : "unavailable"
+        let route = micPressRoute(settingEnabled: modeInputs.effectiveEnabled)
+        keyboardView.showDiagnosticFlash(lines: [
+            "Build \(SharedConfig.buildIdentity)",
+            "Group \(resolver.resolvedStrategy) · \(availability)",
+            "Mode local=\(localRecordingOverrideLabel(modeInputs.localOverride)) group=\(modeInputs.appGroupEnabled) effective=\(modeInputs.effectiveEnabled)",
+            "Full=\(hasFullAccess) mic=\(recordPermissionLabel(permission))",
+            "Next: \(routeLabel(route, permission: permission))"
+        ])
     }
 
     private func startInKeyboardRecording() {

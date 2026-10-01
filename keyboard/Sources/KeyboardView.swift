@@ -425,6 +425,7 @@ private class SuggestionBar: UIView {
     var suggestionTapped: ((Int) -> Void)?
     var suggestionLongPressed: ((Int) -> Void)?
     var languageTapped: (() -> Void)?
+    var diagnosticRequested: (() -> Void)?
 
     private let stack = UIStackView()
     private var segments: [UIButton] = []
@@ -466,6 +467,10 @@ private class SuggestionBar: UIView {
                 : UIColor(white: 0.92, alpha: 1)
         }
         languageButton.addTarget(self, action: #selector(languageButtonTapped), for: .touchUpInside)
+        let diagnosticTap = UITapGestureRecognizer(target: self, action: #selector(diagnosticTwoFingerTapped))
+        diagnosticTap.numberOfTouchesRequired = 2
+        diagnosticTap.cancelsTouchesInView = true
+        languageButton.addGestureRecognizer(diagnosticTap)
         addSubview(languageButton)
 
         NSLayoutConstraint.activate([
@@ -519,6 +524,10 @@ private class SuggestionBar: UIView {
         languageTapped?()
     }
 
+    @objc private func diagnosticTwoFingerTapped() {
+        diagnosticRequested?()
+    }
+
     func updateLanguage(_ language: KeyboardLanguage) {
         languageButton.setTitle(language.shortLabel, for: .normal)
     }
@@ -550,6 +559,7 @@ class KeyboardView: UIView {
 
     /// Called when the suggestion bar's language button is tapped; the controller presents the language picker.
     var languageTapped: (() -> Void)?
+    var diagnosticRequested: (() -> Void)?
 
     // Subviews
     private var _suggestionBar: SuggestionBar?
@@ -658,6 +668,9 @@ class KeyboardView: UIView {
     // Key references
     private weak var micKeyButton: KeyButton?
     private let dictationTranscriptLabel = UILabel()
+    private var diagnosticFlashTimer: Timer?
+    private var diagnosticFlashLines: [String] = []
+    private var diagnosticFlashIndex = 0
     private weak var emojiKeyButton: KeyButton?
     private weak var shiftKeyButton: KeyButton?
     private weak var bottomRowView: KeyboardRowView?
@@ -755,11 +768,15 @@ class KeyboardView: UIView {
             guard let self = self else { return }
             self.languageTapped?()
         }
+        suggestionBar.diagnosticRequested = { [weak self] in
+            self?.diagnosticRequested?()
+        }
         addSubview(suggestionBar)
         dictationTranscriptLabel.font = .systemFont(ofSize: 12)
         dictationTranscriptLabel.textColor = .secondaryLabel
         dictationTranscriptLabel.textAlignment = .center
         dictationTranscriptLabel.lineBreakMode = .byTruncatingTail
+        dictationTranscriptLabel.isUserInteractionEnabled = false
         dictationTranscriptLabel.isHidden = true
         dictationTranscriptLabel.translatesAutoresizingMaskIntoConstraints = false
         addSubview(dictationTranscriptLabel)
@@ -1247,9 +1264,38 @@ class KeyboardView: UIView {
     }
 
     func setDictationTranscript(_ text: String?) {
+        diagnosticFlashTimer?.invalidate()
+        diagnosticFlashTimer = nil
+        diagnosticFlashLines.removeAll(keepingCapacity: true)
         dictationTranscriptLabel.text = text
         dictationTranscriptLabel.isHidden = text == nil || text?.isEmpty == true
         if text != nil { bringSubviewToFront(dictationTranscriptLabel) }
+    }
+
+    func showDiagnosticFlash(lines: [String]) {
+        guard !lines.isEmpty else { return }
+        diagnosticFlashTimer?.invalidate()
+        diagnosticFlashLines = lines
+        diagnosticFlashIndex = 0
+        dictationTranscriptLabel.text = lines[0]
+        dictationTranscriptLabel.isHidden = false
+        bringSubviewToFront(dictationTranscriptLabel)
+        diagnosticFlashTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            guard let self else {
+                timer.invalidate()
+                return
+            }
+            self.diagnosticFlashIndex += 1
+            guard self.diagnosticFlashIndex < self.diagnosticFlashLines.count else {
+                timer.invalidate()
+                self.diagnosticFlashTimer = nil
+                self.diagnosticFlashLines.removeAll(keepingCapacity: true)
+                self.dictationTranscriptLabel.text = nil
+                self.dictationTranscriptLabel.isHidden = true
+                return
+            }
+            self.dictationTranscriptLabel.text = self.diagnosticFlashLines[self.diagnosticFlashIndex]
+        }
     }
 
     func updateFullAccess(_ hasAccess: Bool) {

@@ -230,7 +230,17 @@ struct SettingsView: View {
             Toggle("Auto-Capitalization", isOn: $settings.autoCapitalizationEnabled)
             Toggle("Auto-Correction", isOn: $settings.autocorrectOnSpaceEnabled)
             Toggle("Haptic Feedback", isOn: $settings.hapticsEnabled)
-            Toggle("In-keyboard recording (experimental)", isOn: $settings.inKeyboardRecording)
+            if isAppGroupContainerAvailable {
+                Toggle("In-keyboard recording (experimental)", isOn: $settings.inKeyboardRecording)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("In-keyboard recording (experimental)")
+                    Text("Not available on this install — enable from the keyboard: two-finger tap the language badge to cycle local mode to ON.")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+            }
         } header: {
             Text("Keyboard")
         } footer: {
@@ -273,6 +283,11 @@ struct SettingsView: View {
             NavigationLink("Debug Log") {
                 DebugLogView()
             }
+            diagnosticValueRow("Build identity", value: SharedConfig.buildIdentity)
+            diagnosticValueRow("Resolved App Group suite", value: SharedConfig.Defaults.appGroupId)
+            diagnosticValueRow("Resolver strategy", value: AppGroupResolver.shared.resolvedStrategy)
+            diagnosticValueRow("Container available", value: isAppGroupContainerAvailable ? "yes" : "no")
+            diagnosticValueRow("In-keyboard toggle last written", value: settings.inKeyboardRecording ? "ON" : "OFF")
         } header: {
             Text("Diagnostics")
         } footer: {
@@ -315,6 +330,22 @@ struct SettingsView: View {
         let version = (info?["CFBundleShortVersionString"] as? String) ?? "?"
         let build = (info?["CFBundleVersion"] as? String) ?? "?"
         return "\(version) (\(build))"
+    }
+
+    private var isAppGroupContainerAvailable: Bool {
+        AppGroupResolver.shared.containerAvailable
+    }
+
+    private func diagnosticValueRow(_ title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Text(value)
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private func testServer(at index: Int) {
