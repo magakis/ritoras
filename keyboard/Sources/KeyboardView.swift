@@ -424,12 +424,11 @@ private class KeyboardRowView: UIView {
 private class SuggestionBar: UIView {
     var suggestionTapped: ((Int) -> Void)?
     var suggestionLongPressed: ((Int) -> Void)?
-    var languageTapped: (() -> Void)?
-    var diagnosticRequested: (() -> Void)?
+    var settingsTapped: (() -> Void)?
 
     private let stack = UIStackView()
     private var segments: [UIButton] = []
-    private let languageButton = UIButton(type: .system)
+    private let settingsButton = UIButton(type: .system)
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -453,36 +452,29 @@ private class SuggestionBar: UIView {
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
-        languageButton.translatesAutoresizingMaskIntoConstraints = false
-        languageButton.setTitle(KeyboardLanguage.english.shortLabel, for: .normal)
-        languageButton.titleLabel?.font = .systemFont(ofSize: 16, weight: .medium)
-        languageButton.setTitleColor(UIColor { tc in
-            tc.userInterfaceStyle == .dark
-                ? UIColor.white
-                : UIColor.black
-        }, for: .normal)
-        languageButton.backgroundColor = UIColor { tc in
+        settingsButton.translatesAutoresizingMaskIntoConstraints = false
+        let settingsIcon = UIImage.SymbolConfiguration(pointSize: 17, weight: .regular)
+        settingsButton.setImage(UIImage(systemName: "gearshape", withConfiguration: settingsIcon), for: .normal)
+        settingsButton.accessibilityLabel = "Keyboard settings"
+        settingsButton.tintColor = EmojiPanelView.modeKeyTextColor
+        settingsButton.backgroundColor = UIColor { tc in
             tc.userInterfaceStyle == .dark
                 ? UIColor(white: 0.18, alpha: 1)
                 : UIColor(white: 0.92, alpha: 1)
         }
-        languageButton.addTarget(self, action: #selector(languageButtonTapped), for: .touchUpInside)
-        let diagnosticTap = UITapGestureRecognizer(target: self, action: #selector(diagnosticTwoFingerTapped))
-        diagnosticTap.numberOfTouchesRequired = 2
-        diagnosticTap.cancelsTouchesInView = true
-        languageButton.addGestureRecognizer(diagnosticTap)
-        addSubview(languageButton)
+        settingsButton.addTarget(self, action: #selector(settingsButtonTapped), for: .touchUpInside)
+        addSubview(settingsButton)
 
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: languageButton.leadingAnchor, constant: -1),
+            stack.trailingAnchor.constraint(equalTo: settingsButton.leadingAnchor, constant: -1),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            languageButton.trailingAnchor.constraint(equalTo: trailingAnchor),
-            languageButton.topAnchor.constraint(equalTo: topAnchor),
-            languageButton.bottomAnchor.constraint(equalTo: bottomAnchor),
-            languageButton.widthAnchor.constraint(equalToConstant: 40),
+            settingsButton.trailingAnchor.constraint(equalTo: trailingAnchor),
+            settingsButton.topAnchor.constraint(equalTo: topAnchor),
+            settingsButton.bottomAnchor.constraint(equalTo: bottomAnchor),
+            settingsButton.widthAnchor.constraint(equalToConstant: 40),
         ])
 
         for i in 0..<3 {
@@ -520,16 +512,8 @@ private class SuggestionBar: UIView {
         suggestionLongPressed?(button.tag)
     }
 
-    @objc private func languageButtonTapped() {
-        languageTapped?()
-    }
-
-    @objc private func diagnosticTwoFingerTapped() {
-        diagnosticRequested?()
-    }
-
-    func updateLanguage(_ language: KeyboardLanguage) {
-        languageButton.setTitle(language.shortLabel, for: .normal)
+    @objc private func settingsButtonTapped() {
+        settingsTapped?()
     }
 
     func update(with suggestions: [String]) {
@@ -557,9 +541,7 @@ class KeyboardView: UIView {
     /// Called when the emoji panel's ABC button is tapped; the controller sets this to route through uiMode.
     var onReturnToLetters: (() -> Void)?
 
-    /// Called when the suggestion bar's language button is tapped; the controller presents the language picker.
-    var languageTapped: (() -> Void)?
-    var diagnosticRequested: (() -> Void)?
+    var settingsTapped: (() -> Void)?
 
     // Subviews
     private var _suggestionBar: SuggestionBar?
@@ -645,6 +627,15 @@ class KeyboardView: UIView {
         return v
     }
 
+    private var _settingsPanel: KeyboardSettingsPanel?
+    var settingsPanel: KeyboardSettingsPanel {
+        if let v = _settingsPanel { return v }
+        let v = KeyboardSettingsPanel()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        _settingsPanel = v
+        return v
+    }
+
     /// Single reusable Greek accent picker overlay — recycled across shows.
     /// Never per-open allocated. See 48 MB Jetsam constraint. Variant selection
     /// routes through the normal `.insertText` commit path so the chosen accent
@@ -668,9 +659,6 @@ class KeyboardView: UIView {
     // Key references
     private weak var micKeyButton: KeyButton?
     private let dictationTranscriptLabel = UILabel()
-    private var diagnosticFlashTimer: Timer?
-    private var diagnosticFlashLines: [String] = []
-    private var diagnosticFlashIndex = 0
     private weak var emojiKeyButton: KeyButton?
     private weak var shiftKeyButton: KeyButton?
     private weak var bottomRowView: KeyboardRowView?
@@ -731,6 +719,8 @@ class KeyboardView: UIView {
         addSubview(languageMenu)
         bringSubviewToFront(languageMenu)
 
+        addSubview(settingsPanel)
+
         setupConstraints()
 
         addSubview(keyPreview)
@@ -738,6 +728,7 @@ class KeyboardView: UIView {
 
         addSubview(accentPicker)
         bringSubviewToFront(accentPicker)
+        bringSubviewToFront(settingsPanel)
 
         rebuildKeyRows()
         apply(mode: .letters)
@@ -764,12 +755,9 @@ class KeyboardView: UIView {
             }
             self.delegate?.keyboardView(self, didLongPressSuggestion: suggestion)
         }
-        suggestionBar.languageTapped = { [weak self] in
+        suggestionBar.settingsTapped = { [weak self] in
             guard let self = self else { return }
-            self.languageTapped?()
-        }
-        suggestionBar.diagnosticRequested = { [weak self] in
-            self?.diagnosticRequested?()
+            self.settingsTapped?()
         }
         addSubview(suggestionBar)
         dictationTranscriptLabel.font = .systemFont(ofSize: 12)
@@ -860,6 +848,11 @@ class KeyboardView: UIView {
             languageMenu.leadingAnchor.constraint(equalTo: leadingAnchor),
             languageMenu.trailingAnchor.constraint(equalTo: trailingAnchor),
             languageMenu.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            settingsPanel.topAnchor.constraint(equalTo: topAnchor),
+            settingsPanel.leadingAnchor.constraint(equalTo: leadingAnchor),
+            settingsPanel.trailingAnchor.constraint(equalTo: trailingAnchor),
+            settingsPanel.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
     }
 
@@ -1190,6 +1183,11 @@ class KeyboardView: UIView {
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         guard isUserInteractionEnabled, !isHidden, alpha > 0.01 else { return nil }
 
+        // The settings panel covers the entire keyboard and owns all input while open.
+        if !settingsPanel.isHidden {
+            return super.hitTest(point, with: event)
+        }
+
         // When the language picker overlay is visible it owns all touches: skip
         // key-region dead-zone routing so taps on the dimmed backdrop dismiss
         // the menu instead of pressing the keys beneath it.
@@ -1264,38 +1262,20 @@ class KeyboardView: UIView {
     }
 
     func setDictationTranscript(_ text: String?) {
-        diagnosticFlashTimer?.invalidate()
-        diagnosticFlashTimer = nil
-        diagnosticFlashLines.removeAll(keepingCapacity: true)
         dictationTranscriptLabel.text = text
         dictationTranscriptLabel.isHidden = text == nil || text?.isEmpty == true
-        if text != nil { bringSubviewToFront(dictationTranscriptLabel) }
+        if text != nil, settingsPanel.isHidden {
+            bringSubviewToFront(dictationTranscriptLabel)
+        }
     }
 
-    func showDiagnosticFlash(lines: [String]) {
-        guard !lines.isEmpty else { return }
-        diagnosticFlashTimer?.invalidate()
-        diagnosticFlashLines = lines
-        diagnosticFlashIndex = 0
-        dictationTranscriptLabel.text = lines[0]
-        dictationTranscriptLabel.isHidden = false
-        bringSubviewToFront(dictationTranscriptLabel)
-        diagnosticFlashTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
-            guard let self else {
-                timer.invalidate()
-                return
-            }
-            self.diagnosticFlashIndex += 1
-            guard self.diagnosticFlashIndex < self.diagnosticFlashLines.count else {
-                timer.invalidate()
-                self.diagnosticFlashTimer = nil
-                self.diagnosticFlashLines.removeAll(keepingCapacity: true)
-                self.dictationTranscriptLabel.text = nil
-                self.dictationTranscriptLabel.isHidden = true
-                return
-            }
-            self.dictationTranscriptLabel.text = self.diagnosticFlashLines[self.diagnosticFlashIndex]
-        }
+    func showSettingsPanel(_ model: KeyboardSettingsPanelModel) {
+        settingsPanel.show(model: model)
+        bringSubviewToFront(settingsPanel)
+    }
+
+    func dismissSettingsPanel() {
+        settingsPanel.dismiss()
     }
 
     func updateFullAccess(_ hasAccess: Bool) {
@@ -1448,7 +1428,6 @@ class KeyboardView: UIView {
         currentLayoutMode = .letters
         accentPicker.hide()   // defensive — the picker cannot follow a language switch
         rebuildKeyRows()
-        suggestionBar.updateLanguage(language)
     }
 
     func noteSuggestionContextChange() {

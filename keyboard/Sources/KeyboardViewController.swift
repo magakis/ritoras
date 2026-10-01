@@ -450,7 +450,6 @@ class KeyboardViewController: UIInputViewController {
             FileLogger.shared.info(.keyboard, "viewDidAppear — idle",
                                    payload: ["hasFullAccess": hasFullAccess])
         }
-        showKeyboardDiagnosticFlash()
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -632,14 +631,14 @@ class KeyboardViewController: UIInputViewController {
             self?.uiMode = .letters
         }
 
-        // Wire the language picker: the suggestion-bar button presents the menu;
-        // selection persists + applies the language; backdrop taps dismiss.
-        keyboardView.languageTapped = { [weak self] in
-            guard let self = self else { return }
-            self.presentLanguageMenu()
+        keyboardView.settingsTapped = { [weak self] in
+            self?.presentKeyboardSettingsPanel()
         }
-        keyboardView.diagnosticRequested = { [weak self] in
-            self?.cycleKeyboardLocalRecordingMode()
+        keyboardView.settingsPanel.onDismiss = { [weak self] in
+            self?.keyboardView.dismissSettingsPanel()
+        }
+        keyboardView.settingsPanel.onModeChange = { [weak self] override in
+            self?.setKeyboardLocalRecordingOverride(override)
         }
         keyboardView.languageMenu.onSelect = { [weak self] language in
             guard let self = self else { return }
@@ -761,24 +760,17 @@ class KeyboardViewController: UIInputViewController {
         return value ? "on" : "off"
     }
 
-    private func cycleKeyboardLocalRecordingMode() {
+    private func setKeyboardLocalRecordingOverride(_ override: Bool?) {
         guard !inKeyboardSessionActive, state != .recording else { return }
-        let current = UserDefaults.standard.object(forKey: Self.localRecordingOverrideKey) as? Bool
-        let next: Bool?
-        switch current {
-        case .none: next = true
-        case .some(true): next = false
-        case .some(false): next = nil
-        }
-        if let next {
-            UserDefaults.standard.set(next, forKey: Self.localRecordingOverrideKey)
+        if let override {
+            UserDefaults.standard.set(override, forKey: Self.localRecordingOverrideKey)
         } else {
             UserDefaults.standard.removeObject(forKey: Self.localRecordingOverrideKey)
         }
         FileLogger.shared.info(.keyboard, "In-keyboard local recording override changed", payload: [
-            "value": localRecordingOverrideLabel(next)
+            "value": localRecordingOverrideLabel(override)
         ])
-        showKeyboardDiagnosticFlash()
+        presentKeyboardSettingsPanel()
     }
 
     private func recordPermissionLabel(_ permission: AVAudioSession.RecordPermission) -> String {
@@ -821,20 +813,23 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
-    private func showKeyboardDiagnosticFlash() {
+    private func presentKeyboardSettingsPanel() {
         guard !inKeyboardSessionActive, state != .recording else { return }
         let modeInputs = readKeyboardModeInputs()
         let permission = AVAudioSession.sharedInstance().recordPermission
         let resolver = AppGroupResolver.shared
-        let availability = resolver.containerAvailable ? "available" : "unavailable"
         let route = micPressRoute(settingEnabled: modeInputs.effectiveEnabled)
-        keyboardView.showDiagnosticFlash(lines: [
-            "Build \(SharedConfig.buildIdentity)",
-            "Group \(resolver.resolvedStrategy) · \(availability)",
-            "Mode local=\(localRecordingOverrideLabel(modeInputs.localOverride)) group=\(modeInputs.appGroupEnabled) effective=\(modeInputs.effectiveEnabled)",
-            "Full=\(hasFullAccess) mic=\(recordPermissionLabel(permission))",
-            "Next: \(routeLabel(route, permission: permission))"
-        ])
+        keyboardView.showSettingsPanel(KeyboardSettingsPanelModel(
+            localOverride: modeInputs.localOverride,
+            appGroupEnabled: modeInputs.appGroupEnabled,
+            effectiveEnabled: modeInputs.effectiveEnabled,
+            nextBranch: routeLabel(route, permission: permission),
+            buildIdentity: SharedConfig.buildIdentity,
+            resolverStrategy: resolver.resolvedStrategy,
+            containerAvailable: resolver.containerAvailable,
+            hasFullAccess: hasFullAccess,
+            microphonePermission: recordPermissionLabel(permission)
+        ))
     }
 
     private func startInKeyboardRecording() {

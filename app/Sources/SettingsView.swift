@@ -235,7 +235,7 @@ struct SettingsView: View {
             } else {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("In-keyboard recording (experimental)")
-                    Text("Not available on this install — enable from the keyboard: two-finger tap the language badge to cycle local mode to ON.")
+                    Text("Not available on this install — open keyboard settings with the cog key and turn recording on there.")
                         .font(.footnote)
                         .foregroundColor(.secondary)
                 }
