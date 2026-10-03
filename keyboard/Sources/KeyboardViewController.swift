@@ -776,10 +776,28 @@ class KeyboardViewController: UIInputViewController {
 
         registerStateChangedObserver()
 
-        // Use the original absolute deadline when resuming a persisted request.
-        let remaining = SharedConfig.Defaults.dictationTimeoutSeconds
-            - (Date().timeIntervalSince1970 - pendingRequestStart)
-        guard pendingRequestStart > 0, remaining > 0 else {
+        guard pendingRequestStart > 0 else {
+            handleTimeout()
+            return
+        }
+        scheduleWaitTimer(until: dictationWaitDeadline(for: id))
+    }
+
+    private func dictationWaitDeadline(for id: UUID) -> Date {
+        if let payload = SharedConfig.snapshotFile() ?? SharedConfig.dictationSnapshot(),
+           payload.id == id,
+           let deadline = payload.returnToIdleDeadline,
+           deadline.timeIntervalSince1970.isFinite {
+            return deadline
+        }
+        return Date(timeIntervalSince1970: pendingRequestStart
+            + SharedConfig.Defaults.dictationTimeoutSeconds)
+    }
+
+    private func scheduleWaitTimer(until deadline: Date) {
+        waitTimer?.invalidate()
+        let remaining = deadline.timeIntervalSinceNow
+        guard remaining > 0 else {
             handleTimeout()
             return
         }
@@ -788,6 +806,12 @@ class KeyboardViewController: UIInputViewController {
                 self?.handleTimeout()
             }
         }
+    }
+
+    private func scheduleWaitTimer(from payload: DictationPayload) {
+        guard pendingRequestId == payload.id,
+              let deadline = payload.returnToIdleDeadline else { return }
+        scheduleWaitTimer(until: deadline)
     }
 
     private func registerStateChangedObserver() {
@@ -984,6 +1008,7 @@ class KeyboardViewController: UIInputViewController {
             FileLogger.shared.info(.keyboard, "refreshFromSharedState — in-progress",
                                    payload: ["status": payload.status.rawValue])
             updateRecordingInProgressUI(phase: payload.status.rawValue)
+            scheduleWaitTimer(from: payload)
         }
         consecutiveSnapshotMisses = 0
         consecutiveSessionEvidenceMiss = 0
@@ -1232,6 +1257,8 @@ class KeyboardViewController: UIInputViewController {
             switch payload.status {
             case .recording, .transcribing:
                 updateRecordingInProgressUI(phase: payload.status.rawValue)
+                scheduleWaitTimer(from: payload)
+                guard pendingRequestId == id else { return }
             case .completed:
                 handleTerminalResult(id: payload.id, text: payload.text, errorMessage: nil)
                 return
@@ -1258,8 +1285,7 @@ class KeyboardViewController: UIInputViewController {
                 handleTimeout()
                 return
             }
-            let remaining = SharedConfig.Defaults.dictationTimeoutSeconds
-                - (Date().timeIntervalSince1970 - pendingRequestStart)
+            let remaining = dictationWaitDeadline(for: id).timeIntervalSinceNow
             guard remaining > 0 else {
                 FileLogger.shared.info(.keyboard, "recovery deadline elapsed -> timeout", payload: ["id": String(id.uuidString.prefix(8))])
                 handleTimeout()
@@ -1285,20 +1311,12 @@ class KeyboardViewController: UIInputViewController {
         startSnapshotPolling()
 
         // Recreate the waitTimer if it was invalidated in viewWillDisappear.
-        // Use the remaining time from the original 900s dictation timeout.
+        // Use the app-published deadline when available, otherwise the original timeout.
         if preservingCompletedResult {
             waitTimer?.invalidate()
             waitTimer = nil
         } else if waitTimer == nil, pendingRequestStart > 0 {
-            let elapsed = Date().timeIntervalSince1970 - pendingRequestStart
-            let remaining = max(SharedConfig.Defaults.dictationTimeoutSeconds - elapsed, 0)
-            if remaining > 0 {
-                waitTimer = Timer.scheduledTimer(withTimeInterval: remaining, repeats: false) { [weak self] _ in
-                    DispatchQueue.main.async { self?.handleTimeout() }
-                }
-            } else {
-                handleTimeout()
-            }
+            scheduleWaitTimer(until: dictationWaitDeadline(for: id))
         } else if waitTimer == nil {
             handleTimeout()
         }
@@ -1806,16 +1824,15 @@ class KeyboardViewController: UIInputViewController {
             guard let self = self else { return }
             if case .error = self.state {
                 if self.pendingRequestId != nil {
-                    let remaining = SharedConfig.Defaults.dictationTimeoutSeconds
-                        - (Date().timeIntervalSince1970 - self.pendingRequestStart)
+                    guard let id = self.pendingRequestId else { return }
+                    let deadline = self.dictationWaitDeadline(for: id)
+                    let remaining = deadline.timeIntervalSinceNow
                     guard self.pendingRequestStart > 0, remaining > 0 else {
                         self.handleTimeout()
                         return
                     }
                     if self.waitTimer == nil {
-                        self.waitTimer = Timer.scheduledTimer(withTimeInterval: remaining, repeats: false) { [weak self] _ in
-                            DispatchQueue.main.async { self?.handleTimeout() }
-                        }
+                        self.scheduleWaitTimer(until: deadline)
                     }
                     self.state = .waiting
                 } else {

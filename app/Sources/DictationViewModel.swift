@@ -134,6 +134,7 @@ final class DictationViewModel: ObservableObject {
     /// Monotonic revision counter for app-group snapshot writes.
     /// Bumped on every write so the keyboard can detect freshness.
     private var snapshotRevision: UInt64 = 0
+    private var returnToIdleDeadline: Date?
 
     private var recorder: AudioRecorder?
     private(set) var activeID: UUID?
@@ -320,6 +321,7 @@ final class DictationViewModel: ObservableObject {
             status: status,
             text: text,
             errorMessage: errorMessage,
+            returnToIdleDeadline: returnToIdleDeadline,
             timestamp: Date(),
             revision: snapshotRevision
         )
@@ -339,11 +341,30 @@ final class DictationViewModel: ObservableObject {
         SharedConfig.setDictationSnapshot(payload)
     }
 
+    private func makeReturnToIdleDeadline(
+        config: SharedConfig,
+        recordingDurationSeconds: TimeInterval
+    ) -> Date {
+        let routeTimeoutBudget = SharedConfig.AsyncTranscription.routeTranscriptionTimeoutBudget(
+            baseTimeoutSeconds: config.timeoutSeconds,
+            recordingDurationSeconds: recordingDurationSeconds
+        )
+        let retryCount = max(1, SharedConfig.Defaults.transcriptionAutoRetryMaxAttempts)
+        let retryDelayBudget = Double(retryCount - 1)
+            * SharedConfig.Defaults.transcriptionAutoRetryDelaySeconds
+
+        // Keep the keyboard alive through every route attempt the app may retry.
+        return Date().addingTimeInterval(
+            routeTimeoutBudget * Double(retryCount) + retryDelayBudget
+        )
+    }
+
 
 
     func start(id: UUID) async {
         clearChunkReviews()
         activeID = id
+        returnToIdleDeadline = nil
         chunkAudioStore = ChunkAudioStore(sessionID: id)
         livePartial = ""
         vadState = nil
@@ -733,7 +754,8 @@ final class DictationViewModel: ObservableObject {
             guard let recorder = recorder, let id = activeID else { return }
             self.recorder = nil
 
-            let recordedDurationMs = recordingStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? 0
+            let recordedDurationSeconds = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
+            let recordedDurationMs = recordedDurationSeconds * 1000
             FileLogger.shared.info(.transcription, "dictation stop (user requested)", payload: [
                 "id": id.uuidString,
                 "recordedDurationMs": recordedDurationMs
@@ -755,6 +777,11 @@ final class DictationViewModel: ObservableObject {
                 return
             }
 
+            let config = SharedConfig.load()
+            returnToIdleDeadline = makeReturnToIdleDeadline(
+                config: config,
+                recordingDurationSeconds: recordedDurationSeconds
+            )
             phase = .transcribing
             UIApplication.shared.isIdleTimerDisabled = false
             // Deactivate audio session on a background queue — do not block the upload.
@@ -765,8 +792,6 @@ final class DictationViewModel: ObservableObject {
                 FileLogger.shared.debug(.audio, "audio deactivate (background)",
                                         payload: ["elapsed_ms": elapsed])
             }
-
-            let config = SharedConfig.load()
 
             // Foreground upload (Scenario A) — runs immediately while the app is in
             // the foreground and updates the UI directly. A background task keeps
@@ -810,7 +835,8 @@ final class DictationViewModel: ObservableObject {
                     let text = try await transcribeWithAutoRetry(
                         audioURL: url, jobId: id, config: config,
                         correlationId: activeID, initialServer: chosenServer,
-                        language: SharedConfig.keyboardLanguage().dictationLanguageField)
+                        language: SharedConfig.keyboardLanguage().dictationLanguageField,
+                        recordingDurationSeconds: recordedDurationSeconds)
                     FileLogger.shared.debug(.network, "async transcription succeeded",
                                             payload: ["textLength": text.count])
                     guard activeID == id else { self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
@@ -856,17 +882,16 @@ final class DictationViewModel: ObservableObject {
                         "audioExists": FileManager.default.fileExists(atPath: url.path)
                     ])
                     if FileManager.default.fileExists(atPath: url.path) {
-                        let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
                         FailedJobStore.shared.append(FailedJobRecord(
                             jobId: id,
                             audioFilePath: url.path,
                             errorMessage: message,
-                            recordedDurationSeconds: duration,
+                            recordedDurationSeconds: recordedDurationSeconds,
                             createdAt: Date(),
                             retryCount: 0,
                             lastRetriedAt: nil))
                         FileLogger.shared.debug(.app, "failed-job record appended",
-                                                payload: ["jobId": id.uuidString, "durationSec": duration, "audioPath": url.path])
+                                                payload: ["jobId": id.uuidString, "durationSec": recordedDurationSeconds, "audioPath": url.path])
                     } else {
                         FileLogger.shared.debug(.app, "failed-job record SKIPPED — audio file not found", payload: [
                             "jobId": id.uuidString,
@@ -895,6 +920,10 @@ final class DictationViewModel: ObservableObject {
                 "recordedDurationMs": recordedDurationMs
             ])
 
+            returnToIdleDeadline = makeReturnToIdleDeadline(
+                config: SharedConfig.load(),
+                recordingDurationSeconds: recordedDurationMs / 1000
+            )
             phase = .transcribing
             UIApplication.shared.isIdleTimerDisabled = false
 
@@ -1160,7 +1189,8 @@ final class DictationViewModel: ObservableObject {
         config: SharedConfig,
         correlationId: UUID?,
         initialServer: String?,
-        language: String?
+        language: String?,
+        recordingDurationSeconds: TimeInterval
     ) async throws -> String {
         let maxAttempts = max(1, SharedConfig.Defaults.transcriptionAutoRetryMaxAttempts)
         var attempt = 0
@@ -1172,7 +1202,8 @@ final class DictationViewModel: ObservableObject {
                     audioURL: audioURL, jobId: jobId, config: config,
                     correlationId: correlationId,
                     preferredServer: attempt == 0 ? initialServer : nil,
-                    language: language)
+                    language: language,
+                    recordingDurationSeconds: recordingDurationSeconds)
             } catch WhisperError.cancelled {
                 throw WhisperError.cancelled
             } catch {
@@ -1196,7 +1227,20 @@ final class DictationViewModel: ObservableObject {
                     throw error
                 }
 
-                guard attemptElapsed < SharedConfig.Defaults.transcriptionFastFailWindowSeconds else {
+                let retryElapsedWindow: TimeInterval
+                if let whisperError = error as? WhisperError,
+                   case .timeout = whisperError {
+                    retryElapsedWindow = max(
+                        SharedConfig.Defaults.transcriptionFastFailWindowSeconds,
+                        SharedConfig.AsyncTranscription.routeTranscriptionTimeoutBudget(
+                            baseTimeoutSeconds: config.timeoutSeconds,
+                            recordingDurationSeconds: recordingDurationSeconds
+                        )
+                    )
+                } else {
+                    retryElapsedWindow = SharedConfig.Defaults.transcriptionFastFailWindowSeconds
+                }
+                guard attemptElapsed < retryElapsedWindow else {
                     throw error
                 }
 
@@ -1261,7 +1305,8 @@ final class DictationViewModel: ObservableObject {
             let text = try await transcribeWithAutoRetry(
                 audioURL: audioURL, jobId: jobId, config: config,
                 correlationId: jobId, initialServer: nil,
-                language: SharedConfig.keyboardLanguage().dictationLanguageField)
+                language: SharedConfig.keyboardLanguage().dictationLanguageField,
+                recordingDurationSeconds: record.recordedDurationSeconds)
 
             // Add to persistent text history.
             TranscriptionHistory.shared.add(text: text)
@@ -1289,8 +1334,15 @@ final class DictationViewModel: ObservableObject {
     /// Retry a failed dictation from the error screen, going through the same
     /// phase transitions as a live dictation. The user sees the transcribing UI.
     func retryAsLiveDictation(jobId: UUID) async {
-        // Transition to transcribing — user sees the loading UI
         activeID = jobId
+        if let record = FailedJobStore.shared.list().first(where: { $0.jobId == jobId }) {
+            returnToIdleDeadline = makeReturnToIdleDeadline(
+                config: SharedConfig.load(),
+                recordingDurationSeconds: record.recordedDurationSeconds
+            )
+        } else {
+            returnToIdleDeadline = nil
+        }
         phase = .transcribing
 
         do {

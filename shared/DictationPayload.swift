@@ -13,6 +13,7 @@ struct DictationPayload: Codable, Equatable {
     var status: Status
     var text: String?
     var errorMessage: String?
+    var returnToIdleDeadline: Date?
     let timestamp: Date
     var revision: UInt64?
 
