@@ -16,26 +16,46 @@ final class SessionHolder: @unchecked Sendable {
 
     private let lock = NSLock()
     private var session: URLSession
+    private var resourceTimeoutSeconds: TimeInterval
     private var lastResetAt: Date = .distantPast
 
     private init() {
+        let resourceTimeoutSeconds = SharedConfig.AsyncTranscription.totalDeadline
+        self.resourceTimeoutSeconds = resourceTimeoutSeconds
+        self.session = Self.makeSession(resourceTimeoutSeconds: resourceTimeoutSeconds)
+    }
+
+    private static func makeSession(resourceTimeoutSeconds: TimeInterval) -> URLSession {
         let config = URLSessionConfiguration.default
         config.waitsForConnectivity = false
         config.timeoutIntervalForRequest = SharedConfig.Defaults.timeoutSeconds
-        // Resource timeout must accommodate full Whisper inference (sync /transcribe
-        // holds the connection for the whole transcription, which can take a minute+
-        // on real audio). URLRequest.timeoutInterval cannot override this session-level
-        // ceiling, so it must be >= the per-request timeout buildRequest sets (totalDeadline).
-        config.timeoutIntervalForResource = SharedConfig.AsyncTranscription.totalDeadline
+        config.timeoutIntervalForResource = resourceTimeoutSeconds
         config.httpShouldUsePipelining = false // HTTP/1 pipelining deprecated in Swift 6.1; causes multipart file-upload hangs
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        self.session = URLSession(configuration: config)
+        return URLSession(configuration: config)
     }
 
-    /// Returns the current active session.
-    func get() -> URLSession {
-        lock.lock(); defer { lock.unlock() }
-        return session
+    /// Returns a session whose resource timeout can accommodate the request.
+    /// If needed, swaps in a longer-lived session without cancelling tasks on the old one.
+    func get(minimumResourceTimeout: TimeInterval = SharedConfig.AsyncTranscription.totalDeadline) -> URLSession {
+        lock.lock()
+        let requiredResourceTimeout = max(
+            SharedConfig.AsyncTranscription.totalDeadline,
+            minimumResourceTimeout
+        )
+        guard requiredResourceTimeout > resourceTimeoutSeconds else {
+            let currentSession = session
+            lock.unlock()
+            return currentSession
+        }
+
+        let newSession = Self.makeSession(resourceTimeoutSeconds: requiredResourceTimeout)
+        let old = session
+        session = newSession
+        resourceTimeoutSeconds = requiredResourceTimeout
+        lock.unlock()
+        _ = old
+        return newSession
     }
 
     /// Creates a new URLSession and swaps it in atomically. The old session is
@@ -52,21 +72,14 @@ final class SessionHolder: @unchecked Sendable {
         }
         lastResetAt = now
 
-        let config = URLSessionConfiguration.default
-        config.waitsForConnectivity = false
-        config.timeoutIntervalForRequest = SharedConfig.Defaults.timeoutSeconds
-        // Resource timeout must accommodate full Whisper inference (sync /transcribe
-        // holds the connection for the whole transcription, which can take a minute+
-        // on real audio). URLRequest.timeoutInterval cannot override this session-level
-        // ceiling, so it must be >= the per-request timeout buildRequest sets (totalDeadline).
-        config.timeoutIntervalForResource = SharedConfig.AsyncTranscription.totalDeadline
-        config.httpShouldUsePipelining = false // HTTP/1 pipelining deprecated in Swift 6.1; causes multipart file-upload hangs
-        config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        let newSession = URLSession(configuration: config)
+        let resourceTimeoutSeconds = SharedConfig.AsyncTranscription.totalDeadline
+        let newSession = Self.makeSession(resourceTimeoutSeconds: resourceTimeoutSeconds)
 
         let old = session
         session = newSession
+        self.resourceTimeoutSeconds = resourceTimeoutSeconds
         lock.unlock()
+        _ = old
         // old goes out of scope — URLSession retains itself while tasks are
         // outstanding, then deallocs when they drain. Do NOT call
         // invalidateAndCancel or finishTasksAndInvalidate.

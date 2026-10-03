@@ -180,10 +180,8 @@ struct SharedConfig {
         /// the grace window lets a suspended keyboard return and fetch the
         /// terminal `.cancelled` snapshot before the app is suspended.
         static let cancelGraceSeconds: TimeInterval = 25
-        /// UX-guard timeout for the keyboard extension's return-to-idle.
-        /// Not a correctness timeout — the localhost fallback chain handles
-        /// keyboard return-to-idle. Set to AsyncTranscription.totalDeadline
-        /// so the keyboard stays alive long enough for async transcription.
+        /// Fallback UX timeout for the keyboard when no app-published deadline
+        /// is available. Active dictations use their published job deadline.
         static let dictationTimeoutSeconds: TimeInterval = AsyncTranscription.totalDeadline
         static let backspaceInitialRepeatDelay: TimeInterval = 0.5
         static let backspaceCharRepeatInterval: TimeInterval = 0.1
@@ -505,11 +503,81 @@ struct SharedConfig {
         static let initialPollCount: Int = 10
         /// Baseline poll cadence while the job is in-flight (SERVER-CONTRACT §12 recommends 500–1000 ms).
         static let pollInterval: TimeInterval = 1.0
-        /// Hard ceiling on total wait. Server retains jobs ≥10 min (§13) with
-        /// STREAM_RECV_TIMEOUT=600s, so 600s matches the server's own window.
+        /// Baseline total poll wait. Longer recordings scale this deadline below.
         static let totalDeadline: TimeInterval = 600
+        /// Submit budget grows by 100 ms per recorded second, with the configured
+        /// request timeout remaining the floor (20 seconds by default).
+        static let submitTimeoutPerRecordingSecond: TimeInterval = 0.1
+        /// Poll budget scales at twice the recorded duration, with `totalDeadline` as
+        /// its floor.
+        static let pollDeadlinePerRecordingSecond: TimeInterval = 2.0
         /// Per-poll request timeout — short, because each poll is a tiny JSON GET.
         static let pollRequestTimeout: TimeInterval = 5
+        /// Additional submissions after the initial POST /transcriptions times out.
+        static let submitTimeoutRetryCount = 2
+        /// Initial submit-timeout retry backoff; consecutive retries double it.
+        static let submitTimeoutRetryBackoffSeconds: TimeInterval = 1
+
+        static func submitTimeout(
+            baseTimeoutSeconds: TimeInterval,
+            recordingDurationSeconds: TimeInterval
+        ) -> TimeInterval {
+            max(
+                baseTimeoutSeconds,
+                nonnegativeRecordingDuration(recordingDurationSeconds)
+                    * submitTimeoutPerRecordingSecond
+            )
+        }
+
+        static func pollDeadline(recordingDurationSeconds: TimeInterval) -> TimeInterval {
+            max(
+                totalDeadline,
+                nonnegativeRecordingDuration(recordingDurationSeconds)
+                    * pollDeadlinePerRecordingSecond
+            )
+        }
+
+        static func syncRequestTimeout(
+            baseTimeoutSeconds: TimeInterval,
+            recordingDurationSeconds: TimeInterval
+        ) -> TimeInterval {
+            max(baseTimeoutSeconds, pollDeadline(recordingDurationSeconds: recordingDurationSeconds))
+        }
+
+        /// Bounds one route attempt, including async polling or submit retries plus sync fallback.
+        static func routeTranscriptionTimeoutBudget(
+            baseTimeoutSeconds: TimeInterval,
+            recordingDurationSeconds: TimeInterval
+        ) -> TimeInterval {
+            let submitTimeout = submitTimeout(
+                baseTimeoutSeconds: baseTimeoutSeconds,
+                recordingDurationSeconds: recordingDurationSeconds
+            )
+            let pollBudget = submitTimeout + pollDeadline(
+                recordingDurationSeconds: recordingDurationSeconds
+            )
+            let retryBackoffBudget = (1...submitTimeoutRetryCount).reduce(0.0) { total, retryNumber in
+                total + submitTimeoutRetryDelay(retryNumber: retryNumber)
+            }
+            let syncFallbackBudget = submitTimeout * Double(submitTimeoutRetryCount + 1)
+                + retryBackoffBudget
+                + syncRequestTimeout(
+                    baseTimeoutSeconds: baseTimeoutSeconds,
+                    recordingDurationSeconds: recordingDurationSeconds
+                )
+
+            let serverSelectionBudget = SharedConfig.Defaults.serverProbeTimeoutSeconds * 2
+            return max(pollBudget, syncFallbackBudget) + serverSelectionBudget
+        }
+
+        static func submitTimeoutRetryDelay(retryNumber: Int) -> TimeInterval {
+            submitTimeoutRetryBackoffSeconds * pow(2, Double(retryNumber - 1))
+        }
+
+        private static func nonnegativeRecordingDuration(_ duration: TimeInterval) -> TimeInterval {
+            guard duration.isFinite else { return 0 }
+            return max(0, duration)
+        }
     }
 
     // MARK: - Recording

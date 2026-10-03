@@ -50,10 +50,10 @@ enum WhisperError: Error, LocalizedError {
 }
 
 extension WhisperError {
-    /// Whether this error represents a transient connection failure that can be retried quickly.
+    /// Whether this error represents a transient connection or request timeout that can be retried.
     var isRetryableConnectionFailure: Bool {
         switch self {
-        case .serverUnreachable, .allServersFailed:
+        case .timeout, .allServersFailed:
             return true
         case .networkError(let error):
             guard let urlError = error as? URLError else { return false }
@@ -128,13 +128,15 @@ enum WhisperClient {
     ///   - config:        Server configuration from `SharedConfig`.
     ///   - correlationId: Optional UUID to correlate this request across processes.
     ///   - language:      Optional ISO-639-1 language code sent as a form field.
+    ///   - recordingDurationSeconds: Recorded audio duration used to scale the request timeout.
     /// - Returns: The transcribed text string.
     /// - Throws: `WhisperError` if all servers fail.
     static func transcribe(
         audioURL: URL,
         config: SharedConfig,
         correlationId: UUID? = nil,
-        language: String? = nil
+        language: String? = nil,
+        recordingDurationSeconds: TimeInterval = 0
     ) async throws -> String {
         var failedServers: [String] = []
         let t0 = Date()
@@ -173,6 +175,7 @@ enum WhisperClient {
                     bodyFileURL: bodyFileURL,
                     boundary: boundary,
                     timeout: config.timeoutSeconds,
+                    recordingDurationSeconds: recordingDurationSeconds,
                     correlationId: correlationId
                 )
                 return text
@@ -188,21 +191,24 @@ enum WhisperClient {
     }
 
     /// Transcribes against a single, pre-selected server. Used when a health
-    /// probe has already identified the target server, avoiding the per-server
-    /// 30s timeout in the iterating transcribe. If this throws, callers should
+    /// probe has already identified the target server, avoiding iteration over
+    /// configured servers. If this throws, callers should
     /// fall back to the iterating transcribe(audioURL:config:) for safety.
     /// - Parameters:
     ///   - audioURL:      Local file URL of the recorded audio (.m4a or .wav).
     ///   - serverURL:     The target server base URL.
     ///   - correlationId: Optional UUID to correlate this request across processes.
     ///   - language:      Optional ISO-639-1 language code sent as a form field.
+    ///   - recordingDurationSeconds: Recorded audio duration used to scale the request timeout.
     /// - Returns: The transcribed text string.
     /// - Throws: `WhisperError` if the single server attempt fails.
     static func transcribe(
         audioURL: URL,
         serverURL: String,
         correlationId: UUID? = nil,
-        language: String? = nil
+        language: String? = nil,
+        recordingDurationSeconds: TimeInterval = 0,
+        timeout: TimeInterval = SharedConfig.Defaults.timeoutSeconds
     ) async throws -> String {
         let boundary = "Boundary-\(UUID().uuidString)"
         let bodyFileURL: URL
@@ -224,7 +230,8 @@ enum WhisperClient {
             serverURL: serverURL,
             bodyFileURL: bodyFileURL,
             boundary: boundary,
-            timeout: SharedConfig.Defaults.timeoutSeconds,
+            timeout: timeout,
+            recordingDurationSeconds: recordingDurationSeconds,
             correlationId: correlationId
         )
     }
@@ -246,7 +253,8 @@ enum WhisperClient {
         config: SharedConfig,
         correlationId: UUID? = nil,
         preferredServer: String? = nil,
-        language: String? = nil
+        language: String? = nil,
+        recordingDurationSeconds: TimeInterval = 0
     ) async throws -> String {
         let serverURL: String
         if let preferredServer, config.servers.contains(preferredServer) {
@@ -260,12 +268,18 @@ enum WhisperClient {
         do {
             return try await transcribeAsync(
                 audioURL: audioURL, jobId: jobId, config: config,
-                correlationId: correlationId, preferredServer: serverURL, language: language)
+                correlationId: correlationId, preferredServer: serverURL, language: language,
+                recordingDurationSeconds: recordingDurationSeconds)
         } catch WhisperError.asyncUnsupported {
             FileLogger.shared.info(.network, "async unsupported; sync fallback",
                                    payload: ["server": serverURL])
             return try await transcribe(
-                audioURL: audioURL, serverURL: serverURL, correlationId: correlationId, language: language)
+                audioURL: audioURL,
+                serverURL: serverURL,
+                correlationId: correlationId,
+                language: language,
+                recordingDurationSeconds: recordingDurationSeconds,
+                timeout: config.timeoutSeconds)
         }
     }
 
@@ -412,7 +426,7 @@ enum WhisperClient {
         }
         request.timeoutInterval = timeout
 
-        let session = SessionHolder.shared.get()
+        let session = SessionHolder.shared.get(minimumResourceTimeout: request.timeoutInterval)
         let bodyBytes = (try? FileManager.default.attributesOfItem(atPath: bodyFileURL.path)[.size] as? Int64).map(Int.init) ?? 0
 
         FileLogger.shared.debug(.network, "async submit start", payload: [
@@ -559,6 +573,7 @@ enum WhisperClient {
     ///   - correlationId:   Optional UUID to correlate this request across processes.
     ///   - preferredServer: Optional pre-selected server URL to use without probing.
     ///   - language:        Optional ISO-639-1 language code sent as a form field.
+    ///   - recordingDurationSeconds: Recorded audio duration used to scale timeouts.
     /// - Returns: The transcribed text string.
     /// - Throws: `WhisperError.asyncUnsupported` if the server lacks /transcriptions;
     ///           `.jobFailed` on transcription failure; `.timeout` on deadline.
@@ -568,7 +583,8 @@ enum WhisperClient {
         config: SharedConfig,
         correlationId: UUID? = nil,
         preferredServer: String? = nil,
-        language: String? = nil
+        language: String? = nil,
+        recordingDurationSeconds: TimeInterval = 0
     ) async throws -> String {
         FileLogger.shared.debug(.network, "transcribeAsync start", payload: [
             "jobId": jobId.uuidString,
@@ -612,14 +628,17 @@ enum WhisperClient {
 
         // 3. Submit transcription. A compliant async server returns 202 immediately.
         // Some servers (e.g. optiplex) accept /transcriptions but block on full
-        // inference instead of returning 202 up front — the per-request submit
-        // timeout (config.timeoutSeconds, 20s) then fires before inference
-        // finishes. On a SUBMIT timeout, fall back to the sync /transcribe path,
-        // which floors its own timeout at AsyncTranscription.totalDeadline (600s)
-        // and is proven to handle blocking servers (manual sync retry succeeds in
-        // ~48s for an 85s clip). The poll-loop deadline timeout (below) is NOT
-        // caught here, so a genuinely-async job that runs out of polling time is
-        // still surfaced as a real failure rather than retried redundantly.
+        // inference instead of returning 202 up front — the duration-scaled submit
+        // timeout then fires before inference finishes. On a submit timeout,
+        // retry twice with backoff using the same idempotency key, then fall back
+        // to sync /transcribe, whose timeout is at least the duration-scaled poll
+        // deadline. The poll-loop deadline timeout (below) is NOT caught here, so
+        // a genuinely-async job that runs out of polling time is still surfaced
+        // as a real failure rather than falling back redundantly.
+        let submitTimeout = SharedConfig.AsyncTranscription.submitTimeout(
+            baseTimeoutSeconds: config.timeoutSeconds,
+            recordingDurationSeconds: recordingDurationSeconds
+        )
         let submitResponse: AsyncSubmitResponse
         do {
             submitResponse = try await submitTranscription(
@@ -628,22 +647,36 @@ enum WhisperClient {
                 bodyFileURL: bodyFileURL,
                 boundary: boundary,
                 jobId: jobId,
-                timeout: config.timeoutSeconds,
+                timeout: submitTimeout,
                 correlationId: correlationId
             )
         } catch WhisperError.timeout {
-            FileLogger.shared.warn(.network, "async submit timed out; server blocks on /transcriptions instead of returning 202. Falling back to sync /transcribe.", payload: [
-                "serverURL": serverURL,
-                "jobId": jobId.uuidString,
-                "submitTimeoutSeconds": config.timeoutSeconds
-            ])
-            return try await transcribeAgainst(
-                serverURL: serverURL,
-                bodyFileURL: bodyFileURL,
-                boundary: boundary,
-                timeout: config.timeoutSeconds,
-                correlationId: correlationId
-            )
+            do {
+                submitResponse = try await retryTimedOutSubmission(
+                    audioURL: audioURL,
+                    serverURL: serverURL,
+                    bodyFileURL: bodyFileURL,
+                    boundary: boundary,
+                    jobId: jobId,
+                    timeout: submitTimeout,
+                    correlationId: correlationId
+                )
+            } catch WhisperError.timeout {
+                FileLogger.shared.warn(.network, "async submit retries exhausted; falling back to sync /transcribe", payload: [
+                    "serverURL": serverURL,
+                    "jobId": jobId.uuidString,
+                    "submitTimeoutSeconds": submitTimeout,
+                    "resubmissions": SharedConfig.AsyncTranscription.submitTimeoutRetryCount
+                ])
+                return try await transcribeAgainst(
+                    serverURL: serverURL,
+                    bodyFileURL: bodyFileURL,
+                    boundary: boundary,
+                    timeout: config.timeoutSeconds,
+                    recordingDurationSeconds: recordingDurationSeconds,
+                    correlationId: correlationId
+                )
+            }
         }
         FileLogger.shared.debug(.network, "transcribeAsync submitted", payload: [
             "jobId": submitResponse.jobId,
@@ -651,7 +684,10 @@ enum WhisperClient {
         ])
 
         // 4. Poll loop.
-        let deadline = Date().addingTimeInterval(SharedConfig.AsyncTranscription.totalDeadline)
+        let pollDeadline = SharedConfig.AsyncTranscription.pollDeadline(
+            recordingDurationSeconds: recordingDurationSeconds
+        )
+        let deadline = Date().addingTimeInterval(pollDeadline)
         var pollCount = 0
         var consecutivePollFailures = 0
         var lastSuccessfulPollAt = Date()
@@ -801,6 +837,49 @@ enum WhisperClient {
 
     // MARK: - Private Helpers
 
+    private static func retryTimedOutSubmission(
+        audioURL: URL,
+        serverURL: String,
+        bodyFileURL: URL,
+        boundary: String,
+        jobId: UUID,
+        timeout: TimeInterval,
+        correlationId: UUID?
+    ) async throws -> AsyncSubmitResponse {
+        var retryNumber = 1
+        while retryNumber <= SharedConfig.AsyncTranscription.submitTimeoutRetryCount {
+            guard !Task.isCancelled else { throw WhisperError.cancelled }
+
+            let backoff = SharedConfig.AsyncTranscription.submitTimeoutRetryDelay(retryNumber: retryNumber)
+            FileLogger.shared.debug(.network, "async submit timed out; retrying", payload: [
+                "jobId": jobId.uuidString,
+                "resubmission": retryNumber,
+                "backoffSeconds": backoff
+            ])
+            do {
+                try await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
+            } catch {
+                throw WhisperError.cancelled
+            }
+
+            do {
+                return try await submitTranscription(
+                    audioURL: audioURL,
+                    serverURL: serverURL,
+                    bodyFileURL: bodyFileURL,
+                    boundary: boundary,
+                    jobId: jobId,
+                    timeout: timeout,
+                    correlationId: correlationId
+                )
+            } catch WhisperError.timeout {
+                retryNumber += 1
+            }
+        }
+
+        throw WhisperError.timeout
+    }
+
     /// Builds the multipart form body as a temp file off the caller thread on a .userInitiated queue.
     private static func buildBodyFileOffMain(audioURL: URL, boundary: String, language: String?) async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
@@ -895,7 +974,8 @@ enum WhisperClient {
     private static func buildRequest(
         baseURL: String,
         boundary: String,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        recordingDurationSeconds: TimeInterval
     ) throws -> URLRequest {
         guard let url = URL(string: "\(baseURL)/transcribe") else {
             throw WhisperError.invalidURL
@@ -905,9 +985,10 @@ enum WhisperClient {
         request.httpMethod = "POST"
         applyAuth(to: &request)
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        // Floor timeout at totalDeadline so legacy servers (no /transcriptions)
-        // get a long enough leash for one sync attempt.
-        request.timeoutInterval = max(timeout, SharedConfig.AsyncTranscription.totalDeadline)
+        request.timeoutInterval = SharedConfig.AsyncTranscription.syncRequestTimeout(
+            baseTimeoutSeconds: timeout,
+            recordingDurationSeconds: recordingDurationSeconds
+        )
 
         return request
     }
@@ -928,6 +1009,7 @@ enum WhisperClient {
         bodyFileURL: URL,
         boundary: String,
         timeout: TimeInterval,
+        recordingDurationSeconds: TimeInterval,
         correlationId: UUID?
     ) async throws -> String {
         let base = serverURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -936,7 +1018,8 @@ enum WhisperClient {
         let request = try buildRequest(
             baseURL: base,
             boundary: boundary,
-            timeout: timeout
+            timeout: timeout,
+            recordingDurationSeconds: recordingDurationSeconds
         )
 
         let bodyBytes = (try? FileManager.default.attributesOfItem(atPath: bodyFileURL.path)[.size] as? Int64).map(Int.init) ?? 0
@@ -946,7 +1029,7 @@ enum WhisperClient {
         if let id = correlationId { postPayload["id"] = id.uuidString }
         FileLogger.shared.debug(.transcription, "HTTP POST /transcribe start", payload: postPayload)
 
-        let session = SessionHolder.shared.get()
+        let session = SessionHolder.shared.get(minimumResourceTimeout: request.timeoutInterval)
         let httpT0 = Date()
         let (data, response): (Data, URLResponse)
         do {
