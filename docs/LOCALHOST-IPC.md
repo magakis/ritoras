@@ -92,6 +92,7 @@ struct DictationPayload: Codable, Equatable {
     let status: Status
     let text: String?
     let errorMessage: String?
+    var returnToIdleDeadline: Date?
     let timestamp: Date
     let revision: UInt64?
 }
@@ -103,6 +104,7 @@ struct DictationPayload: Codable, Equatable {
 | `status` | `Status` | `idle`, `recording`, `transcribing`, `done`, `error` |
 | `text` | `String?` | Transcribed text (present when `status == .done`) |
 | `errorMessage` | `String?` | Error description (present when `status == .error`) |
+| `returnToIdleDeadline` | `Date?` | App-computed deadline for the keyboard's pending-dictation watchdog; set when transcription starts from the duration-scaled route timeout budget and configured auto-retry allowance |
 | `timestamp` | `Date` | When the payload was written |
 | `revision` | `UInt64?` | Monotonically increasing counter — incremented on every write to guard against stale reads |
 

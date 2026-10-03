@@ -102,8 +102,16 @@ The client uploads AAC/MPEG-4 audio. Accepted formats and server-side decoding
 are deployment-specific; the client does not require or assert a particular
 server conversion pipeline.
 
-The client-side timeout setting is `SharedConfig.timeoutSeconds`, whose default
-is **20 seconds**.
+The configured base timeout is `SharedConfig.timeoutSeconds`, whose default is
+**20 seconds**. For an async batch transcription, the `POST /transcriptions`
+submit timeout is the greater of this setting and **0.1 seconds per recorded
+second** (for example, 120 seconds for a 20-minute recording). The async
+poll-loop deadline is the greater of
+**600 seconds** and **2 seconds per recorded second** (2,400 seconds for a
+20-minute recording). A sync `POST /transcribe` fallback receives at least that
+same poll-deadline budget. Short recordings therefore retain the existing
+20-second submit and 600-second poll defaults. Streaming partial and final
+response waits use their separate streaming timeouts.
 
 ---
 
