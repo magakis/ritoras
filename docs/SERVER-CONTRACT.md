@@ -171,6 +171,9 @@ The client handles these text JSON response types:
 | `final` | `{"type":"final","transcription":"...","chunk_id":N}` | Terminal result after END and drain |
 | `PONG` | `{"type":"PONG"}` | Response to PING |
 
+The receive-side liveness monitor sends PINGs every **5 seconds** and declares
+a timeout only after **30 seconds** without activity (PONG or partial response).
+
 ---
 
 ## 6. Result semantics and stop behavior
@@ -188,7 +191,7 @@ When the user stops recording, the client:
    drained only when the FIFO queue is empty and no chunk is in flight.
 3. Sends `{"type":"END"}` after the drain completes.
 4. Awaits the `final` response, bounded by
-   `SharedConfig.Defaults.streamFinalTimeout` (**30 seconds**).
+   `SharedConfig.Defaults.streamFinalTimeout` (**60 seconds**).
 
 ---
 
@@ -251,7 +254,7 @@ later retry. The user-facing failure messages are:
   but queued audio cannot be completed.
 
 The client sends a keepalive PING every **25 seconds**. The WebSocket connection
-attempt timeout is `streamWsConnectTimeout`, **8.0 seconds**.
+attempt timeout is `streamWsConnectTimeout`, **16.0 seconds**.
 
 HTTP 401 responses are non-retryable. The app surfaces them as
 `WhisperError.unauthorized` with an API-key error; the keyboard's job-poll path

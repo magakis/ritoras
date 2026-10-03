@@ -2,6 +2,11 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_TIMEOUT_SECONDS,
+  STREAM_FINAL_TIMEOUT_SECONDS,
+  STREAM_HEALTH_CHECK_INTERVAL_SECONDS,
+  STREAM_LIVENESS_SILENCE_WINDOW_SECONDS,
+  STREAM_MAX_MISSED_PONGS,
+  STREAM_WS_CONNECT_TIMEOUT_SECONDS,
   SUBMIT_TIMEOUT_RETRY_COUNT,
   TRANSCRIPTION_FAST_FAIL_WINDOW_SECONDS,
   isRetryableConnectionFailure,
@@ -52,6 +57,23 @@ describe('duration-scaled transcription timeouts', () => {
       assert.strictEqual(submitTimeout({ recordingDurationSeconds }), DEFAULT_TIMEOUT_SECONDS);
       assert.strictEqual(pollDeadline(recordingDurationSeconds), 600);
     }
+  });
+});
+
+describe('streaming transcription timeouts', () => {
+  it('doubles the WebSocket connect and final/drain waits', () => {
+    assert.strictEqual(STREAM_WS_CONNECT_TIMEOUT_SECONDS, 16);
+    assert.strictEqual(STREAM_FINAL_TIMEOUT_SECONDS, 60);
+  });
+
+  it('derives the 30-second liveness window from the ping cadence and missed intervals', () => {
+    assert.strictEqual(STREAM_HEALTH_CHECK_INTERVAL_SECONDS, 5);
+    assert.strictEqual(STREAM_MAX_MISSED_PONGS, 6);
+    assert.strictEqual(
+      STREAM_LIVENESS_SILENCE_WINDOW_SECONDS,
+      STREAM_HEALTH_CHECK_INTERVAL_SECONDS * STREAM_MAX_MISSED_PONGS,
+    );
+    assert.strictEqual(STREAM_LIVENESS_SILENCE_WINDOW_SECONDS, 30);
   });
 });
 

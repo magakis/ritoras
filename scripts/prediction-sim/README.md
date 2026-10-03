@@ -16,6 +16,7 @@ Pure-logic components only:
 - `AutocorrectController` (threshold-gated decision logic)
 - `PredictionEngine` fusion (Apple boost + KenLM min-max normalization + two-tier threshold + absolute-floor gate)
 - duration-scaled transcription timeout budgets and retry eligibility
+- streaming transcription timeouts (WebSocket connect, liveness silence, final/drain)
 - VAD telemetry digest reduction (bounded summaries from retained JSONL recordings)
 
 ## What this does NOT cover
