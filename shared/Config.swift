@@ -316,9 +316,9 @@ struct SharedConfig {
         static let streamVadMaxNoiseSecKey = "streamVadMaxNoiseSec"
         static let streamVadMaxNoiseSecDefault: Double = 6.0
         /// WebSocket connection timeout.
-        static let streamWsConnectTimeout: TimeInterval = 16.0
+        static let streamWsConnectTimeout: TimeInterval = 32.0
         /// How long to wait for a final transcription after the last audio chunk.
-        static let streamFinalTimeout: TimeInterval = 60.0
+        static let streamFinalTimeout: TimeInterval = 120.0
         /// Application-level PING interval; must stay under nginx idle (~60s). Resets the server 600s recv timer and keeps NAT/nginx alive.
         static let streamKeepaliveIntervalSeconds: TimeInterval = 25.0
 
@@ -327,8 +327,8 @@ struct SharedConfig {
         /// a long transcription.
         static let streamHealthCheckInterval: TimeInterval = 5.0
         /// Consecutive health-check intervals with no activity (PONG or partial) before
-        /// declaring the stream dead. 6 × 5s ≈ 30s tolerance for transient latency.
-        static let streamMaxMissedPongs: Int = 6
+        /// declaring the stream dead. 12 × 5s ≈ 60s tolerance for transient latency.
+        static let streamMaxMissedPongs: Int = 12
 
         /// Backoff intervals (seconds) between chunk send retries.
         /// The last value is the cap for all subsequent retries.
