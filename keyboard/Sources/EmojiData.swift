@@ -333,6 +333,7 @@ enum EmojiRecents {
             FileLogger.shared.warn(.keyboard, "emoji recents rejected non-emoji \(emoji.prefix(8)) from \(caller)")
             return
         }
+        EmojiUsage.record(emoji)
         var recents = get()
         // Remove existing occurrence so we can move it to front
         if let index = recents.firstIndex(of: emoji) {
@@ -356,6 +357,77 @@ enum EmojiRecents {
         }
     }
 
+}
+
+// MARK: - EmojiUsage
+
+enum EmojiUsage {
+    private static let storageKey = "ritoras_emoji_frequency"
+
+    static func record(_ emoji: String) {
+        guard EmojiRecents.isSingleEmoji(emoji) else { return }
+
+        var counts = load()
+        let base = EmojiSkinTone.base(of: emoji)
+        counts[base, default: 0] += 1
+        save(counts)
+    }
+
+    static func top(_ n: Int) -> [String] {
+        guard n > 0 else { return [] }
+
+        let counts = load()
+        var recencyByBase: [String: Int] = [:]
+        for (index, emoji) in EmojiRecents.get().enumerated() {
+            let base = EmojiSkinTone.base(of: emoji)
+            if recencyByBase[base] == nil {
+                recencyByBase[base] = index
+            }
+        }
+
+        let ranked = counts.keys.sorted { left, right in
+            let leftCount = counts[left, default: 0]
+            let rightCount = counts[right, default: 0]
+            guard leftCount == rightCount else { return leftCount > rightCount }
+
+            let leftRecency = recencyByBase[left]
+            let rightRecency = recencyByBase[right]
+            if let leftRecency, let rightRecency {
+                return leftRecency < rightRecency
+            }
+            if leftRecency != nil { return true }
+            if rightRecency != nil { return false }
+            return left < right
+        }
+        return Array(ranked.prefix(n))
+    }
+
+    private static func load() -> [String: Int] {
+        UserDefaults.standard.dictionary(forKey: storageKey) as? [String: Int] ?? [:]
+    }
+
+    private static func save(_ counts: [String: Int]) {
+        UserDefaults.standard.set(counts, forKey: storageKey)
+    }
+}
+
+// MARK: - EmojiListMode
+
+enum EmojiListMode: String {
+    case recent
+    case frequent
+
+    private static let storageKey = "ritoras_emoji_recents_mode"
+
+    static var current: EmojiListMode {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: storageKey) else { return .recent }
+            return EmojiListMode(rawValue: raw) ?? .recent
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: storageKey)
+        }
+    }
 }
 
 // MARK: - EmojiSkinTone
@@ -395,6 +467,35 @@ enum EmojiSkinTone: String, CaseIterable {
         set {
             UserDefaults.standard.set(newValue.rawValue, forKey: storageKey)
         }
+    }
+
+    private static func normalizedBaseKey(of emoji: String) -> String {
+        var normalizedScalars: [Unicode.Scalar] = []
+        for scalar in emoji.unicodeScalars {
+            let value = scalar.value
+            if value != 0xFE0F && (value < 0x1F3FB || value > 0x1F3FF) {
+                normalizedScalars.append(scalar)
+            }
+        }
+        return String(String.UnicodeScalarView(normalizedScalars))
+    }
+
+    private static let canonicalBaseByNormalizedKey: [String: String] = {
+        var bases: [String: String] = [:]
+        for canonicalBase in skinToneCapable.sorted() {
+            bases[normalizedBaseKey(of: canonicalBase)] = canonicalBase
+        }
+        return bases
+    }()
+
+    static func base(of emoji: String) -> String {
+        let hasSkinToneModifier = emoji.unicodeScalars.contains { scalar in
+            scalar.value >= 0x1F3FB && scalar.value <= 0x1F3FF
+        }
+        guard hasSkinToneModifier else { return emoji }
+
+        let normalized = normalizedBaseKey(of: emoji)
+        return canonicalBaseByNormalizedKey[normalized] ?? normalized
     }
 
     // MARK: - Application

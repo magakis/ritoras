@@ -296,7 +296,7 @@ final class EmojiPanelView: UIView {
         toneButton.tintColor = UIColor { tc in
             tc.userInterfaceStyle == .dark ? UIColor(white: 0.9, alpha: 1) : UIColor(white: 0.2, alpha: 1)
         }
-        toneButton.menu = buildToneMenu()
+        toneButton.menu = buildOptionsMenu()
         toneButton.showsMenuAsPrimaryAction = true
         searchContainer.addSubview(toneButton)
 
@@ -354,14 +354,20 @@ final class EmojiPanelView: UIView {
             return
         }
         if selectedCategory == nil {
-            // Recents tab
-            let recents = EmojiRecents.get()
-            if recents.isEmpty {
-                allEmojis = []
+            let list: [String]
+            switch EmojiListMode.current {
+            case .recent:
+                list = EmojiRecents.get()
+                emptyStateLabel.text = "No recent emojis yet"
+            case .frequent:
+                list = EmojiUsage.top(32)
+                emptyStateLabel.text = "No emojis used yet"
+            }
+            allEmojis = list
+            if list.isEmpty {
                 emptyStateLabel.isHidden = false
                 bringSubviewToFront(emptyStateLabel)
             } else {
-                allEmojis = recents
                 emptyStateLabel.isHidden = true
             }
         } else {
@@ -523,27 +529,55 @@ final class EmojiPanelView: UIView {
         // Phase 4 will wire begin/end pairing for repeat-delete
     }
 
-    // MARK: - Tone Menu
+    // MARK: - Options Menu
 
-    private func buildToneMenu() -> UIMenu {
-        let actions = EmojiSkinTone.allCases.map { tone in
+    private func buildOptionsMenu() -> UIMenu {
+        let mode = EmojiListMode.current
+        let listSection = UIMenu(
+            title: "Show",
+            options: .displayInline,
+            children: [
+                UIAction(title: "Recent", state: mode == .recent ? .on : .off) { [weak self] _ in
+                    self?.selectListMode(.recent)
+                },
+                UIAction(title: "Most Used", state: mode == .frequent ? .on : .off) { [weak self] _ in
+                    self?.selectListMode(.frequent)
+                },
+            ]
+        )
+        let toneActions = EmojiSkinTone.allCases.map { tone in
             UIAction(
                 title: "\(tone.sample) \(tone.displayName)",
                 state: tone == EmojiSkinTone.current ? .on : .off
             ) { [weak self] _ in
                 EmojiSkinTone.current = tone
                 self?.collectionView.reloadData()
-                self?.toneButton.menu = self?.buildToneMenu()
+                self?.toneButton.menu = self?.buildOptionsMenu()
             }
         }
-        return UIMenu(title: "", children: actions)
+        let toneSubmenu = UIMenu(title: "Skin Tone", children: toneActions)
+        return UIMenu(title: "", children: [listSection, toneSubmenu])
+    }
+
+    private func selectListMode(_ mode: EmojiListMode) {
+        EmojiListMode.current = mode
+        if !currentQuery.isEmpty {
+            searchField.text = ""
+            currentQuery = ""
+            searchDebounceWorkItem?.cancel()
+            searchDebounceWorkItem = nil
+            onSearchDismiss?()
+        }
+        selectedCategory = nil
+        updateTabSelection()
+        reloadData()
+        toneButton.menu = buildOptionsMenu()
     }
 
     // MARK: - Emoji Cell Long-Press (Recents Removal)
 
     @objc private func emojiCellLongPressed(_ gesture: UILongPressGestureRecognizer) {
-        // Recents-only: no-op in any other category tab
-        guard selectedCategory == nil else { return }
+        guard selectedCategory == nil, EmojiListMode.current == .recent else { return }
 
         let location = gesture.location(in: collectionView)
 
@@ -567,6 +601,7 @@ final class EmojiPanelView: UIView {
             let workItem = DispatchWorkItem { [weak self] in
                 guard let self = self else { return }
                 guard self.selectedCategory == nil,
+                      EmojiListMode.current == .recent,
                       self.emojiLongPressIndexPath == indexPath,
                       indexPath.item < self.allEmojis.count,
                       self.allEmojis[indexPath.item] == emoji,
@@ -583,6 +618,14 @@ final class EmojiPanelView: UIView {
                     cell.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
                     cell.alpha = 0
                 }, completion: { _ in
+                    guard EmojiListMode.current == .recent else {
+                        cell.transform = .identity
+                        cell.alpha = 1.0
+                        self.emojiLongPressIndexPath = nil
+                        self.emojiLongPressRemoving = false
+                        return
+                    }
+
                     EmojiRecents.remove(emoji)
                     self.allEmojis.remove(at: indexPath.item)
 
