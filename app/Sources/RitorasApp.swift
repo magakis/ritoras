@@ -49,10 +49,11 @@ struct RitorasApp: App {
                 }
             }
             .task {
-                // Phase 4: LogStore flat-file migration (one-time).
+                // Phase 4: migrate flat-file logs, then run the first SQLite retention pass.
                 let taskId = UIApplication.shared.beginBackgroundTask(withName: "LogStoreMigration")
                 DispatchQueue.global(qos: .utility).async {
                     LogStoreMigration.runIfNeeded()
+                    LogStore.shared.rotateIfNeeded()
                     DispatchQueue.main.async {
                         UIApplication.shared.endBackgroundTask(taskId)
                     }

@@ -54,6 +54,12 @@ final class LogStore {
     private var didAttemptRecovery = false
     /// Set `true` after WAL/SHM files have been protected (one-shot guard).
     private var didApplyProtectionToWalShm = false
+    /// Enabled by the post-migration launch pass so imports are never pruned mid-migration.
+    private var automaticRotationChecksEnabled = false
+    /// One check per 10,000 inserted rows limits retention lag to one-tenth of the cap
+    /// without running a row count for every log entry.
+    private static let rotationCheckInterval = 10_000
+    private var insertsSinceRotationCheck = 0
 
     // MARK: - Cached prepared statements (finalized in deinit)
 
@@ -414,11 +420,15 @@ final class LogStore {
             return
         }
 
-        bindAndStepInsert(stmt: stmt, level: level, component: component,
-                          message: message, payload: payload, raw: raw)
+        let insertResult = bindAndStepInsert(stmt: stmt, level: level, component: component,
+                                             message: message, payload: payload, raw: raw)
 
-        if sqlite3_exec(db, "COMMIT", nil, nil, nil) != SQLITE_OK {
+        let commitResult = sqlite3_exec(db, "COMMIT", nil, nil, nil)
+        if commitResult != SQLITE_OK {
             recordDiagnostic("insert commit failed: \(String(cString: sqlite3_errmsg(db)))")
+        }
+        if insertResult == SQLITE_DONE && commitResult == SQLITE_OK {
+            noteInsertedEntries(1)
         }
 
         if !didApplyProtectionToWalShm {
@@ -436,19 +446,37 @@ final class LogStore {
             return
         }
 
+        var insertedCount = 0
         for entry in entries {
-            bindAndStepInsert(stmt: stmt, level: entry.0, component: entry.1,
-                              message: entry.2, payload: entry.3, raw: entry.4)
+            let result = bindAndStepInsert(stmt: stmt, level: entry.0, component: entry.1,
+                                           message: entry.2, payload: entry.3, raw: entry.4)
+            if result == SQLITE_DONE {
+                insertedCount += 1
+            }
         }
 
-        if sqlite3_exec(db, "COMMIT", nil, nil, nil) != SQLITE_OK {
+        let commitResult = sqlite3_exec(db, "COMMIT", nil, nil, nil)
+        if commitResult != SQLITE_OK {
             recordDiagnostic("batch commit failed: \(String(cString: sqlite3_errmsg(db)))")
+        } else {
+            noteInsertedEntries(insertedCount)
         }
 
         if !didApplyProtectionToWalShm {
             applyFileProtection()
             didApplyProtectionToWalShm = true
         }
+    }
+
+    /// Counts committed rows and appends a rotation pass to the serial queue.
+    /// Called only from that queue, so existing database requests stay ahead of maintenance.
+    private func noteInsertedEntries(_ count: Int) {
+        guard automaticRotationChecksEnabled, count > 0 else { return }
+
+        insertsSinceRotationCheck += count
+        guard insertsSinceRotationCheck >= Self.rotationCheckInterval else { return }
+        insertsSinceRotationCheck %= Self.rotationCheckInterval
+        queue.async { self._rotateIfNeeded() }
     }
 
     /// Binds parameters, steps, resets, and clears. Returns SQLITE_OK on
@@ -748,12 +776,17 @@ final class LogStore {
     // MARK: - Rotate
 
     /// If the log table has more than 100,000 rows, deletes the oldest
-    /// excess rows and runs a passive WAL checkpoint.
+    /// excess rows and runs a passive WAL checkpoint. The first call also
+    /// enables asynchronous in-session checks; call it after migration completes.
     func rotateIfNeeded() {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
             _rotateIfNeeded()
+            automaticRotationChecksEnabled = true
         } else {
-            queue.sync { self._rotateIfNeeded() }
+            queue.sync {
+                self._rotateIfNeeded()
+                self.automaticRotationChecksEnabled = true
+            }
         }
     }
 
