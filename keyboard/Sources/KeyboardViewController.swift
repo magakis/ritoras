@@ -1703,20 +1703,31 @@ class KeyboardViewController: UIInputViewController {
     /// silently — the next poll cycle will retry.
     private func pollWhisperJobStatus(id: UUID) {
         let config = SharedConfig.load()
-        // Prefer the probe-selected server (written by the container app on recording
-        // start). Fall back to config.servers.first if the probe hasn't run, returned
-        // nil, or the selected server is no longer in the configured list (user
-        // removed it mid-dictation).
+        let pendingPayload = SharedConfig.snapshotFile()
+            .flatMap { $0.id == id ? $0 : nil }
+            ?? SharedConfig.dictationSnapshot().flatMap { $0.id == id ? $0 : nil }
+        let payloadServer = pendingPayload.flatMap { payload -> String? in
+            guard let server = payload.server,
+                  !server.isEmpty,
+                  let serverURL = URL(string: server),
+                  let scheme = serverURL.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  let host = serverURL.host,
+                  !host.isEmpty else { return nil }
+            return server
+        }
+        // The matching payload records the host used by this dictation. For
+        // legacy or unusable payload values, keep the existing validated fallback.
         let selected = SharedConfig.selectedServer().flatMap { s -> String? in
             config.servers.contains(s) ? s : nil
         }
-        guard let server = selected ?? config.servers.first else { return }
+        guard let server = payloadServer ?? selected ?? config.servers.first else { return }
         guard let url = URL(string: "\(server)/jobs/\(id.uuidString.lowercased())") else { return }
 
         FileLogger.shared.debug(.network, "poll job direct", payload: [
             "server": server,
             "jobId": id.uuidString.lowercased(),
-            "source": selected != nil ? "probe" : "fallback_first"
+            "source": payloadServer != nil ? "payload" : "fallback"
         ])
 
         currentPollTask?.cancel()

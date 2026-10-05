@@ -10,9 +10,10 @@ struct FailedJobRecord: Codable, Equatable {
     let createdAt: Date
     var retryCount: Int
     var lastRetriedAt: Date?
+    var server: String?
 
     enum CodingKeys: String, CodingKey {
-        case jobId, audioFilePath, errorMessage, recordedDurationSeconds, createdAt, retryCount, lastRetriedAt
+        case jobId, audioFilePath, errorMessage, recordedDurationSeconds, createdAt, retryCount, lastRetriedAt, server
     }
 }
 
@@ -27,6 +28,7 @@ extension FailedJobRecord {
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         retryCount = try container.decode(Int.self, forKey: .retryCount)
         lastRetriedAt = try container.decodeIfPresent(Date.self, forKey: .lastRetriedAt)
+        server = try container.decodeIfPresent(String.self, forKey: .server)
     }
 }
 
@@ -102,6 +104,14 @@ final class FailedJobStore: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard let index = records.firstIndex(where: { $0.jobId == jobId }) else { return }
         records[index].errorMessage = message
+        persist()
+    }
+
+    /// Updates the pinned server for the given job. No-op if the record is absent.
+    func updateServer(jobId: UUID, server: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard let index = records.firstIndex(where: { $0.jobId == jobId }) else { return }
+        records[index].server = server
         persist()
     }
 

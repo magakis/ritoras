@@ -475,11 +475,9 @@ struct SharedConfig {
 
         // MARK: - Server Selection (Health Probe)
 
-        /// Ephemeral App Group key holding the probe-selected server URL for the
-        /// current/next dictation. Written by the container app's DictationViewModel
-        /// on probe completion; read by the keyboard extension's poll path. Not a
-        /// durable user preference — overwritten by each probe, never cleared on
-        /// cancel (stale value is the best guess for the next dictation).
+        /// Ephemeral App Group key holding the server URL pinned for the current
+        /// dictation. The app updates it when a probe, submit, or stream connection
+        /// resolves an actual server; it is not a durable user preference.
         static let selectedServerKey = "selectedServer"
 
         /// Per-server health-probe timeout. 5s balances false-negative risk on slow
@@ -1271,9 +1269,9 @@ struct SharedConfig {
             ?? Defaults.streamVadMaxNoiseSecDefault
     }
 
-    /// Reads the probe-selected server URL for the current/next dictation.
+    /// Reads the server URL most recently pinned by a dictation stage.
     /// Used by the keyboard extension to decide where to poll for results.
-    /// Returns nil when the App Group is unavailable or no probe has run yet.
+    /// Returns nil when the App Group is unavailable or no server was selected.
     /// The caller MUST validate the returned value is still in `servers` before
     /// using it, in case the user removed the server from Settings after the probe.
     static func selectedServer() -> String? {
@@ -1281,9 +1279,8 @@ struct SharedConfig {
         return defaults.string(forKey: Defaults.selectedServerKey)
     }
 
-    /// Writes (or clears) the probe-selected server URL. Called by the container
-    /// app's DictationViewModel when the parallel health probe completes. Passing
-    /// nil removes the key.
+    /// Writes (or clears) the server URL pinned by the current dictation stage.
+    /// Passing nil removes the key.
     /// NOTE: this is the only *writer* on SharedConfig — justified because
     /// selectedServer is ephemeral runtime state, not a durable preference.
     static func setSelectedServer(_ server: String?) {

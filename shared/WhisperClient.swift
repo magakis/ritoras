@@ -101,6 +101,31 @@ struct JobStatusResponse: Decodable {
     let revision: Int?
 }
 
+private struct ServerStatusResponse: Decodable {
+    let modelLoaded: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case modelLoaded = "model_loaded"
+    }
+}
+
+private struct ServerProbeOutcome: Sendable {
+    let server: String
+    let configuredIndex: Int
+    let statusCode: Int?
+    let modelLoaded: Bool?
+    let roundTripTimeMilliseconds: Double
+
+    var isAuthenticated: Bool {
+        guard let statusCode else { return false }
+        return (200..<300).contains(statusCode)
+    }
+
+    var receivedResponse: Bool {
+        statusCode != nil
+    }
+}
+
 // MARK: - Client
 
 enum WhisperClient {
@@ -238,21 +263,24 @@ enum WhisperClient {
 
     /// Single canonical entrypoint for transcribing a recorded audio file.
     ///
-    /// Resolves a healthy server (using `preferredServer` when it is present in
-    /// `config.servers`, otherwise a parallel probe of `config.servers`), submits
-    /// via async /transcriptions with polling, and falls back to sync POST
-    /// /transcribe against the same resolved server when the server does not
-    /// implement the async endpoint.
+    /// Resolves a server (using `preferredServer` when it is present in
+    /// `config.servers`, otherwise a scored parallel probe), submits via async
+    /// /transcriptions with polling, and falls back to sync POST /transcribe
+    /// against the same resolved server when the server does not implement the
+    /// async endpoint.
     ///
-    /// Order-independent: when `preferredServer` is nil, all servers are probed
-    /// concurrently and the first healthy responder is used, so an unreachable
-    /// server at index 0 cannot block a reachable server later in the list.
+    /// When `preferredServer` is nil, all servers are probed concurrently.
+    /// Authenticated 2xx responders rank above non-2xx responders; within each
+    /// group, configured order breaks ties after the applicable score. Unreachable
+    /// candidates are ineligible.
+    /// `onServerSelected` runs on the main actor after the actual submit server is resolved.
     static func routeTranscription(
         audioURL: URL,
         jobId: UUID,
         config: SharedConfig,
         correlationId: UUID? = nil,
         preferredServer: String? = nil,
+        onServerSelected: (@MainActor (String) -> Void)? = nil,
         language: String? = nil,
         recordingDurationSeconds: TimeInterval = 0
     ) async throws -> String {
@@ -265,10 +293,12 @@ enum WhisperClient {
             }
             serverURL = healthy
         }
+        SharedConfig.setSelectedServer(serverURL)
         do {
             return try await transcribeAsync(
                 audioURL: audioURL, jobId: jobId, config: config,
-                correlationId: correlationId, preferredServer: serverURL, language: language,
+                correlationId: correlationId, preferredServer: serverURL,
+                onServerSelected: onServerSelected, language: language,
                 recordingDurationSeconds: recordingDurationSeconds)
         } catch WhisperError.asyncUnsupported {
             FileLogger.shared.info(.network, "async unsupported; sync fallback",
@@ -326,12 +356,15 @@ enum WhisperClient {
         return false
     }
 
-    /// Fires a fire-and-forget POST /warmup so the server pre-loads its model
-    /// while the user is still dictating. Never throws; failures are logged
-    /// at debug level and tolerated — warm-up is strictly best-effort.
+    /// Fires a best-effort POST /warmup so the server pre-loads its model while
+    /// the user is still dictating. Only HTTP 200 (already warm) and 202
+    /// (warming) count as success; failures are logged and tolerated.
     static func warmup(serverURL: String, timeout: TimeInterval = 5) async {
         let base = serverURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard !base.isEmpty, let url = URL(string: "\(base)/warmup") else { return }
+        guard !base.isEmpty, let url = URL(string: "\(base)/warmup") else {
+            FileLogger.shared.warn(.network, "warmup invalid URL", payload: ["server": serverURL])
+            return
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         applyAuth(to: &request)
@@ -339,53 +372,187 @@ enum WhisperClient {
         let session = SessionHolder.shared.get()
         do {
             let (_, response) = try await session.data(for: request)
-            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-            FileLogger.shared.debug(.network, "warmup", payload: ["status": status])
+            guard let httpResponse = response as? HTTPURLResponse else {
+                FileLogger.shared.warn(.network, "warmup invalid response", payload: ["server": base])
+                return
+            }
+
+            switch httpResponse.statusCode {
+            case 200:
+                FileLogger.shared.debug(.network, "warmup ready", payload: [
+                    "server": base,
+                    "status": httpResponse.statusCode
+                ])
+            case 202:
+                FileLogger.shared.debug(.network, "warmup started", payload: [
+                    "server": base,
+                    "status": httpResponse.statusCode
+                ])
+            default:
+                FileLogger.shared.warn(.network, "warmup rejected", payload: [
+                    "server": base,
+                    "status": httpResponse.statusCode
+                ])
+            }
         } catch {
-            FileLogger.shared.debug(.network, "warmup failed (tolerated)", payload: [
+            FileLogger.shared.warn(.network, "warmup failed", payload: [
+                "server": base,
                 "error": error.localizedDescription
             ])
         }
     }
 
-    /// Probes all servers in parallel and returns the first healthy one.
-    /// Returns as soon as any server responds, cancelling remaining probes.
+    /// Probes every configured server with authenticated GET /status and waits
+    /// for all probes to finish. Ranks authenticated 2xx responders above
+    /// non-2xx responders. Within 2xx, prefers a loaded model, lower RTT, then
+    /// configured order; non-2xx responders use configured order. Unreachable
+    /// candidates are ineligible; returns nil when none respond.
     /// - Parameters:
-    ///   - servers: Candidate server URLs in priority order.
+    ///   - servers: Candidate server URLs in configured order.
     ///   - timeout: Per-server probe timeout (default from SharedConfig.Defaults).
-    /// - Returns: The first server (by input order) that responded healthy, or nil if none did.
+    /// - Returns: The highest-ranked server, or nil if all probes fail without a response.
     static func selectFirstHealthyServer(
         servers: [String],
         timeout: TimeInterval = SharedConfig.Defaults.serverProbeTimeoutSeconds
     ) async -> String? {
-        let candidates = servers
-            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
-            .filter { !$0.isEmpty }
+        let candidates = servers.enumerated().compactMap { entry -> (index: Int, server: String)? in
+            let server = entry.element.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard !server.isEmpty else { return nil }
+            return (index: entry.offset, server: server)
+        }
         guard !candidates.isEmpty else { return nil }
 
-        let selected: String? = await withTaskGroup(of: (String, Bool).self) { group in
-            for server in candidates {
-                group.addTask {
-                    let ok = await Self.checkHealth(serverURL: server, timeout: timeout)
-                    return (server, ok)
-                }
+        let probeTasks = candidates.map { candidate in
+            Task.detached(priority: .utility) {
+                await Self.probeServerStatus(
+                    serverURL: candidate.server,
+                    configuredIndex: candidate.index,
+                    timeout: timeout
+                )
             }
+        }
+        var outcomes: [ServerProbeOutcome] = []
+        outcomes.reserveCapacity(probeTasks.count)
+        for probeTask in probeTasks {
+            outcomes.append(await probeTask.value)
+        }
+        guard !Task.isCancelled else { return nil }
 
-            for await result in group {
-                if result.1 {
-                    group.cancelAll()
-                    return result.0
-                }
-            }
-
+        let respondingOutcomes = outcomes.filter(\.receivedResponse)
+        guard !respondingOutcomes.isEmpty else {
+            FileLogger.shared.info(.network, "server selection", payload: [
+                "selected": "none",
+                "candidates": candidates.map(\.server)
+            ])
             return nil
+        }
+
+        let winner = respondingOutcomes.min(by: Self.ranksBefore)
+        let selected = winner?.server
+        if let winner, winner.isAuthenticated, winner.modelLoaded == false {
+            Task {
+                await Self.warmup(serverURL: winner.server)
+            }
         }
 
         FileLogger.shared.info(.network, "server selection", payload: [
             "selected": selected ?? "none",
-            "candidates": candidates
+            "candidates": candidates.map(\.server)
         ])
         return selected
+    }
+
+    private static func probeServerStatus(
+        serverURL: String,
+        configuredIndex: Int,
+        timeout: TimeInterval
+    ) async -> ServerProbeOutcome {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        guard let url = URL(string: "\(serverURL)/status") else {
+            let outcome = ServerProbeOutcome(
+                server: serverURL,
+                configuredIndex: configuredIndex,
+                statusCode: nil,
+                modelLoaded: nil,
+                roundTripTimeMilliseconds: 0
+            )
+            FileLogger.shared.debug(.network, "server status probe failed", payload: [
+                "server": serverURL,
+                "error": "invalid URL",
+                "elapsed_ms": 0
+            ])
+            return outcome
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        applyAuth(to: &request)
+        request.timeoutInterval = timeout
+
+        do {
+            let (data, response) = try await SessionHolder.shared.get().data(for: request)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode
+            let statusPayload: ServerStatusResponse?
+            if let statusCode, (200..<300).contains(statusCode) {
+                statusPayload = try? JSONDecoder().decode(ServerStatusResponse.self, from: data)
+            } else {
+                statusPayload = nil
+            }
+            let elapsedMilliseconds = max(0, (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+            let outcome = ServerProbeOutcome(
+                server: serverURL,
+                configuredIndex: configuredIndex,
+                statusCode: statusCode,
+                modelLoaded: statusPayload?.modelLoaded,
+                roundTripTimeMilliseconds: elapsedMilliseconds
+            )
+            var payload: [String: Any] = [
+                "server": serverURL,
+                "statusCode": statusCode ?? -1,
+                "elapsed_ms": elapsedMilliseconds
+            ]
+            if let modelLoaded = outcome.modelLoaded {
+                payload["model_loaded"] = modelLoaded
+            }
+            if statusCode == nil {
+                payload["response"] = "non-HTTP"
+            }
+            FileLogger.shared.debug(.network, "server status probe", payload: payload)
+            return outcome
+        } catch {
+            let elapsedMilliseconds = max(0, (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+            FileLogger.shared.debug(.network, "server status probe failed", payload: [
+                "server": serverURL,
+                "elapsed_ms": elapsedMilliseconds,
+                "error": error.localizedDescription
+            ])
+            return ServerProbeOutcome(
+                server: serverURL,
+                configuredIndex: configuredIndex,
+                statusCode: nil,
+                modelLoaded: nil,
+                roundTripTimeMilliseconds: elapsedMilliseconds
+            )
+        }
+    }
+
+    private static func ranksBefore(_ lhs: ServerProbeOutcome, _ rhs: ServerProbeOutcome) -> Bool {
+        if lhs.isAuthenticated != rhs.isAuthenticated {
+            return lhs.isAuthenticated
+        }
+        guard lhs.isAuthenticated else {
+            return lhs.configuredIndex < rhs.configuredIndex
+        }
+
+        let lhsIsWarm = lhs.modelLoaded == true
+        let rhsIsWarm = rhs.modelLoaded == true
+        if lhsIsWarm != rhsIsWarm {
+            return lhsIsWarm
+        }
+        if lhs.roundTripTimeMilliseconds != rhs.roundTripTimeMilliseconds {
+            return lhs.roundTripTimeMilliseconds < rhs.roundTripTimeMilliseconds
+        }
+        return lhs.configuredIndex < rhs.configuredIndex
     }
 
     // MARK: - Async Transcription (Phase 3)
@@ -558,13 +725,13 @@ enum WhisperClient {
     /// polling pattern. Suitable for long recordings where holding a synchronous
     /// HTTP connection risks `URLError(.networkConnectionLost)` on app suspend.
     ///
-    /// Uses `selectFirstHealthyServer` to pick a live server, submits via
+    /// Uses `selectFirstHealthyServer` to pick a ranked server, submits via
     /// `submitTranscription`, then polls until the job reaches a terminal state
     /// or the deadline expires. Respects `Task.isCancelled` and the total deadline.
     ///
-    /// When `preferredServer` is provided and is in `config.servers`, health probe
-    /// is skipped entirely and the preferred server is used directly. This avoids
-    /// redundant probing when a background probe already selected a healthy server.
+    /// When `preferredServer` is provided and is in `config.servers`, server
+    /// selection is skipped entirely and the preferred server is used directly.
+    /// This avoids redundant probing when a background probe already selected it.
     ///
     /// - Parameters:
     ///   - audioURL:        Local file URL of the recorded audio (.m4a or .wav).
@@ -572,6 +739,7 @@ enum WhisperClient {
     ///   - config:          Server configuration from `SharedConfig`.
     ///   - correlationId:   Optional UUID to correlate this request across processes.
     ///   - preferredServer: Optional pre-selected server URL to use without probing.
+    ///   - onServerSelected: Optional main-actor callback when the actual server is resolved.
     ///   - language:        Optional ISO-639-1 language code sent as a form field.
     ///   - recordingDurationSeconds: Recorded audio duration used to scale timeouts.
     /// - Returns: The transcribed text string.
@@ -583,6 +751,7 @@ enum WhisperClient {
         config: SharedConfig,
         correlationId: UUID? = nil,
         preferredServer: String? = nil,
+        onServerSelected: (@MainActor (String) -> Void)? = nil,
         language: String? = nil,
         recordingDurationSeconds: TimeInterval = 0
     ) async throws -> String {
@@ -591,8 +760,8 @@ enum WhisperClient {
             "serverCount": config.servers.count
         ])
 
-        // 1. Pick a healthy server — use preferredServer if available and valid,
-        //    otherwise probe candidates in parallel until the first responds.
+        // 1. Pick a server — use preferredServer if available and valid, otherwise
+        //    probe candidates in parallel and rank the completed outcomes.
         let serverURL: String
         if let preferredServer, config.servers.contains(preferredServer) {
             serverURL = preferredServer
@@ -605,6 +774,14 @@ enum WhisperClient {
             }
             serverURL = healthyServer
         }
+        SharedConfig.setSelectedServer(serverURL)
+        if let onServerSelected {
+            await onServerSelected(serverURL)
+        }
+        FileLogger.shared.info(.network, "server selection", payload: [
+            "selected": serverURL,
+            "jobId": jobId.uuidString
+        ])
         FileLogger.shared.debug(.network, "transcribeAsync server selected", payload: [
             "serverURL": serverURL
         ])

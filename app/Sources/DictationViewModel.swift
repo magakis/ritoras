@@ -283,6 +283,22 @@ final class DictationViewModel: ObservableObject {
         }
     }
 
+    private func setPinnedServer(_ server: String?, for jobId: UUID) {
+        SharedConfig.setSelectedServer(server)
+        if let server {
+            FailedJobStore.shared.updateServer(jobId: jobId, server: server)
+        }
+        guard activeID == jobId, selectedServer != server else { return }
+        selectedServer = server
+        switch phase {
+        case .connecting, .recording, .transcribing:
+            updateStateSnapshot()
+            DarwinNotifier.post(SharedConfig.Defaults.darwinStateChangedNotificationName)
+        case .done, .error, .cancelled:
+            break
+        }
+    }
+
     /// Captures terminal results (`.done`, `.error`) and publishes them
     /// through the app-group canonical snapshot.
     private func storeTerminalResultIfNeeded() {
@@ -322,6 +338,7 @@ final class DictationViewModel: ObservableObject {
             text: text,
             errorMessage: errorMessage,
             returnToIdleDeadline: returnToIdleDeadline,
+            server: selectedServer,
             timestamp: Date(),
             revision: snapshotRevision
         )
@@ -378,6 +395,7 @@ final class DictationViewModel: ObservableObject {
         chunkSentAt.removeAll()
         chunkResultsReceived.removeAll()
         vadTelemetryWriter = nil
+        selectedServer = nil
         phase = .connecting
         FileLogger.shared.info(.transcription, "dictation connecting", payload: [
             "id": id.uuidString
@@ -385,12 +403,13 @@ final class DictationViewModel: ObservableObject {
 
         // Kick off parallel health probe — runs in background while mic
         // permission is checked and recording starts.
-        selectedServer = nil
         let probeConfig = SharedConfig.load()
         serverSelectionTask = Task { [weak self] in
             let selected = await WhisperClient.selectFirstHealthyServer(servers: probeConfig.servers)
-            SharedConfig.setSelectedServer(selected)
-            await MainActor.run { self?.selectedServer = selected }
+            await MainActor.run {
+                guard let self, self.activeID == id else { return }
+                self.setPinnedServer(selected, for: id)
+            }
             return selected
         }
 
@@ -638,6 +657,12 @@ final class DictationViewModel: ObservableObject {
                         await candidate.disconnect()
                         return
                     }
+                    if probeResult?.trimmingCharacters(in: CharacterSet(charactersIn: "/")) != server {
+                        Task.detached(priority: .utility) {
+                            await WhisperClient.warmup(serverURL: server)
+                        }
+                    }
+                    setPinnedServer(server, for: sessionID)
                     let elapsed = Date().timeIntervalSince(attemptStart) * 1000
                     FileLogger.shared.debug(.network, "Stream: server connect succeeded",
                                             payload: ["id": String(sessionID.uuidString.prefix(8)), "server": server,
@@ -829,7 +854,7 @@ final class DictationViewModel: ObservableObject {
                         "id": id.uuidString,
                         "audioBytes": audioBytes,
                         "serverCount": config.servers.count,
-                        "server": chosenServer ?? config.servers.first ?? ""
+                        "server": chosenServer ?? "pending selection"
                     ])
 
                     let text = try await transcribeWithAutoRetry(
@@ -889,7 +914,8 @@ final class DictationViewModel: ObservableObject {
                             recordedDurationSeconds: recordedDurationSeconds,
                             createdAt: Date(),
                             retryCount: 0,
-                            lastRetriedAt: nil))
+                            lastRetriedAt: nil,
+                            server: self.selectedServer))
                         FileLogger.shared.debug(.app, "failed-job record appended",
                                                 payload: ["jobId": id.uuidString, "durationSec": recordedDurationSeconds, "audioPath": url.path])
                     } else {
@@ -1194,14 +1220,23 @@ final class DictationViewModel: ObservableObject {
     ) async throws -> String {
         let maxAttempts = max(1, SharedConfig.Defaults.transcriptionAutoRetryMaxAttempts)
         var attempt = 0
+        var pinnedServer = initialServer
+        var selectFreshServerBeforeNextAttempt = false
 
         while true {
+            if selectFreshServerBeforeNextAttempt {
+                pinnedServer = await WhisperClient.selectFirstHealthyServer(servers: config.servers)
+                selectFreshServerBeforeNextAttempt = false
+            }
             let attemptStart = Date()
             do {
                 return try await WhisperClient.routeTranscription(
                     audioURL: audioURL, jobId: jobId, config: config,
                     correlationId: correlationId,
-                    preferredServer: attempt == 0 ? initialServer : nil,
+                    preferredServer: pinnedServer,
+                    onServerSelected: { [weak self] server in
+                        self?.setPinnedServer(server, for: jobId)
+                    },
                     language: language,
                     recordingDurationSeconds: recordingDurationSeconds)
             } catch WhisperError.cancelled {
@@ -1252,6 +1287,7 @@ final class DictationViewModel: ObservableObject {
                 try await Task.sleep(nanoseconds: UInt64(
                     SharedConfig.Defaults.transcriptionAutoRetryDelaySeconds * 1_000_000_000))
                 attempt += 1
+                selectFreshServerBeforeNextAttempt = true
             }
         }
     }
@@ -1304,7 +1340,7 @@ final class DictationViewModel: ObservableObject {
         do {
             let text = try await transcribeWithAutoRetry(
                 audioURL: audioURL, jobId: jobId, config: config,
-                correlationId: jobId, initialServer: nil,
+                correlationId: jobId, initialServer: record.server,
                 language: SharedConfig.keyboardLanguage().dictationLanguageField,
                 recordingDurationSeconds: record.recordedDurationSeconds)
 
@@ -1335,7 +1371,9 @@ final class DictationViewModel: ObservableObject {
     /// phase transitions as a live dictation. The user sees the transcribing UI.
     func retryAsLiveDictation(jobId: UUID) async {
         activeID = jobId
+        selectedServer = nil
         if let record = FailedJobStore.shared.list().first(where: { $0.jobId == jobId }) {
+            selectedServer = record.server
             returnToIdleDeadline = makeReturnToIdleDeadline(
                 config: SharedConfig.load(),
                 recordingDurationSeconds: record.recordedDurationSeconds
@@ -1553,7 +1591,8 @@ final class DictationViewModel: ObservableObject {
                 recordedDurationSeconds: duration,
                 createdAt: Date(),
                 retryCount: 0,
-                lastRetriedAt: nil))
+                lastRetriedAt: nil,
+                server: streamClient == nil ? nil : selectedServer))
         }
 
         phase = .error(error)
