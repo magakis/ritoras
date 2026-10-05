@@ -161,7 +161,7 @@ actor AudioLevelMonitor {
             channels: 1,
             interleaved: false
         ) else {
-            FileLogger.shared.error(.audio, "could not create 16 kHz mono float32 format")
+            FileLogger.shared.logDurable(.error, .audio, "could not create 16 kHz mono float32 format")
             throw AudioLevelMonitorError.targetFormatUnavailable
         }
 
@@ -170,7 +170,7 @@ actor AudioLevelMonitor {
         // 4. Get the input node's NATIVE format (mirrors line 347)
         let nativeFormat = inputNode.outputFormat(forBus: 0)
         guard nativeFormat.sampleRate > 0 else {
-            FileLogger.shared.error(.audio, "audio input unavailable (no microphone route)")
+            FileLogger.shared.logDurable(.error, .audio, "audio input unavailable (no microphone route)")
             throw AudioLevelMonitorError.engineStartFailed(
                 NSError(domain: "AudioLevelMonitor", code: 1,
                         userInfo: [NSLocalizedDescriptionKey: "Audio input unavailable (no microphone route)"])

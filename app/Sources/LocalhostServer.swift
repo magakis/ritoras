@@ -402,7 +402,8 @@ final class LocalhostServer {
     /// Handles `POST /logs`: decodes a JSON array of `LogShipmentEntry` values
     /// and writes each to the container app's `FileLogger` with the original
     /// level, component, and message.
-    /// Returns 200 with `{"received": <count>}` on success, 400 on decode failure.
+    /// Queues persistence off the connection queue and returns 200 with
+    /// `{"received": <count>}`; returns 400 on decode failure.
     private func handlePostLogs(bodyData: Data) -> Data {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -417,7 +418,9 @@ final class LocalhostServer {
                 batch.append((level, component, entry.message, payload))
             }
             if !batch.isEmpty {
-                FileLogger.shared.logBatch(batch)
+                DispatchQueue.global(qos: .utility).async {
+                    FileLogger.shared.logBatch(batch)
+                }
             }
             return Self.makeJSONResponse(status: 200, body: ["received": entries.count])
         } catch {

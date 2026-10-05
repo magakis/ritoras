@@ -143,6 +143,20 @@ final class FileLogger {
 
     func log(_ level: LogLevel, _ component: LogComponent,
              _ message: String, payload: [String: Any]? = nil) {
+        writeLog(level, component, message, payload: payload, durable: false)
+    }
+
+    /// Runs the container app's LogStore insert transaction synchronously;
+    /// its commit completes before this method returns. Use only for
+    /// crash-critical checkpoints that must survive process death.
+    /// The keyboard extension retains its existing flat-file routing.
+    func logDurable(_ level: LogLevel, _ component: LogComponent,
+                    _ message: String, payload: [String: Any]? = nil) {
+        writeLog(level, component, message, payload: payload, durable: true)
+    }
+
+    private func writeLog(_ level: LogLevel, _ component: LogComponent,
+                          _ message: String, payload: [String: Any]?, durable: Bool) {
         if level == .debug, !verboseLoggingEnabled { return }
         let ts = dateFormatter.string(from: Date())
 
@@ -169,20 +183,17 @@ final class FileLogger {
 
         let line = jsonString + "\n"
 
-        // Phase 4: container app writes to LogStore ONLY.
+        // Container app writes to LogStore ONLY. Routine entries, including
+        // warn/error, are asynchronous; crash-critical entries opt into the
+        // synchronous insert/commit path through logDurable.
         // Keyboard extension writes flat-file ONLY.
         // DB stores originals unscrubbed. Scrubbing happens at export (copy/share)
         // in DebugLogView, controlled by the scrubPII toggle.
         if !Self.isKeyboardExtension {
-            if level == .warn || level == .error {
-                // Synchronous for crash survivability — guarantees the log is
-                // persisted before the process exits.
+            if durable {
                 LogStore.shared.insert(level, component, message, payload: payload, raw: jsonString)
             } else {
-                // Asynchronous to avoid blocking the main thread while the
-                // LogStore serial queue is busy with a read query. The serial
-                // queue preserves insert ordering regardless of which thread
-                // dispatched the work.
+                // Keep LogStore work off the caller, including network paths.
                 DispatchQueue.global(qos: .utility).async {
                     LogStore.shared.insert(level, component, message, payload: payload, raw: jsonString)
                 }

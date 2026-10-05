@@ -1385,7 +1385,7 @@ actor StreamingAudioRecorder {
             channels: 1,
             interleaved: false
         ) else {
-            FileLogger.shared.error(.audio, "CRASH-PROOF: Could not create 16kHz mono float32 audio format")
+            FileLogger.shared.logDurable(.error, .audio, "CRASH-PROOF: Could not create 16kHz mono float32 audio format")
             throw StreamingRecorderError.engineStartFailed(
                 NSError(domain: "StreamingAudioRecorder", code: 1,
                         userInfo: [NSLocalizedDescriptionKey: "Could not create 16kHz mono float32 audio format"])
@@ -1404,14 +1404,14 @@ actor StreamingAudioRecorder {
         // 4. Get the input node's NATIVE format
         let nativeFormat = inputNode.outputFormat(forBus: 0)
         guard nativeFormat.sampleRate > 0 else {
-            FileLogger.shared.error(.audio, "CRASH-PROOF: Audio input unavailable (no microphone route)")
+            FileLogger.shared.logDurable(.error, .audio, "CRASH-PROOF: Audio input unavailable (no microphone route)")
             throw StreamingRecorderError.engineStartFailed(
                 NSError(domain: "StreamingAudioRecorder", code: 2,
                         userInfo: [NSLocalizedDescriptionKey: "Audio input unavailable (no microphone route)"])
             )
         }
         guard nativeFormat.channelCount >= 1 else {
-            FileLogger.shared.error(.audio, "CRASH-PROOF: Audio input has no channels")
+            FileLogger.shared.logDurable(.error, .audio, "CRASH-PROOF: Audio input has no channels")
             throw StreamingRecorderError.nativeFormatUnavailable(
                 "Input node has \(nativeFormat.channelCount) channels"
             )

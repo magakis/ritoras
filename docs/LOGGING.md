@@ -17,6 +17,31 @@
 
 ---
 
+## Persistence and crash survival
+
+Log level describes severity, not persistence. In the container app, every
+enabled ordinary `FileLogger` call—including `.warn` and `.error`—queues its
+LogStore insert asynchronously on a utility queue. Routine entries therefore
+do not block their caller on SQLite, but an entry still queued when the process
+is killed may be lost.
+
+Use the `FileLogger.shared.logDurable` API only for crash-critical
+app-process checkpoints. It runs the same synchronous LogStore
+insert/commit path before returning, with the existing WAL and
+`synchronous=NORMAL` semantics. Durability is explicit; choosing `.warn` or
+`.error` alone does not make an app-process entry synchronous.
+
+The keyboard extension continues to bypass LogStore and write to its flat file
+only. Its `.warn` and `.error` calls synchronously append and call
+`FileHandle.synchronize()` for crash survival; `.debug` and `.info` remain
+asynchronous. Do not route keyboard logging through LogStore.
+
+`POST /logs` acknowledges a decoded batch after queueing its LogStore insert
+off the connection queue. Keyboard log shipping remains at-most-once; the
+endpoint does not add a retry or change delivery semantics.
+
+---
+
 ### `.debug` — Developer diagnostics
 
 **Log this when…** you are tracing transient or internal state that is useful only when actively debugging a specific issue. These calls are gated by `SharedConfig.verboseLoggingEnabled()` and never reach the user-facing log view unless verbose logging is enabled in Settings.
