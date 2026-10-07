@@ -90,8 +90,26 @@ final class DictationViewModel: ObservableObject {
 
     @Published var phase: DictationPhase = .recording {
         didSet {
-            updateStateSnapshot()                                    // publish intermediate states first (app-group)
-            storeTerminalResultIfNeeded()                            // publish terminal result — BEFORE the post
+            if isTerminalResult(oldValue), phase == .cancelled {
+                phase = oldValue
+                return
+            }
+            if earlyCancelledSessionID == activeID,
+               earlyCancelledSessionID != nil,
+               phase != .cancelled {
+                phase = .cancelled
+                return
+            }
+            if let activeID,
+               SharedConfig.pendingDictationCancel()?.id == activeID,
+               isActivePhase(oldValue),
+               isTerminalResult(phase) {
+                phase = oldValue
+                scheduleDurableCancellation(for: activeID)
+                return
+            }
+            let intermediatePublished = updateStateSnapshot()        // publish intermediate states first (app-group)
+            let terminalPublished = storeTerminalResultIfNeeded()    // publish terminal result — BEFORE the post
             switch phase {
             case .connecting, .recording, .transcribing:
                 if localhostServer != nil {
@@ -100,7 +118,9 @@ final class DictationViewModel: ObservableObject {
             default:
                 stopHealthCheckTimer()
             }
-            DarwinNotifier.post(SharedConfig.Defaults.darwinStateChangedNotificationName)  // LAST — only signal after data is visible
+            if intermediatePublished || terminalPublished {
+                DarwinNotifier.post(SharedConfig.Defaults.darwinStateChangedNotificationName)  // LAST — only signal after data is visible
+            }
         }
     }
     @Published private(set) var livePartial: String = ""
@@ -138,6 +158,9 @@ final class DictationViewModel: ObservableObject {
 
     private var recorder: AudioRecorder?
     private(set) var activeID: UUID?
+    private var earlyCancelledSessionID: UUID?
+    private var cancellationInProgressID: UUID?
+    private var scheduledDurableCancelID: UUID?
     /// Start of the current recording; @Published so the overlay badge can render
     /// live elapsed time. Deliberately has NO didSet — unlike `phase`, publishing
     /// this must not write IPC snapshots.
@@ -195,7 +218,10 @@ final class DictationViewModel: ObservableObject {
         let server = LocalhostServer(
             port: SharedConfig.Defaults.localhostServerPort,
             onStop:   { [weak self] in await self?.stop() },
-            onCancel: { [weak self] in await self?.cancel() },
+            onCancel: { [weak self] sessionID in
+                guard let self else { return }
+                await self.cancel(expectedID: sessionID)
+            },
             onState:  { [weak self] in self?.currentSnapshot() }
         )
 
@@ -264,7 +290,7 @@ final class DictationViewModel: ObservableObject {
     }
 
     /// Publishes intermediate states (connecting, recording, transcribing, cancelled) to app-group snapshot.
-    private func updateStateSnapshot() {
+    private func updateStateSnapshot() -> Bool {
         let payloadStatus: DictationPayload.Status?
         switch phase {
         case .connecting:
@@ -279,8 +305,9 @@ final class DictationViewModel: ObservableObject {
             payloadStatus = nil   // terminal results handled by storeTerminalResultIfNeeded
         }
         if let payloadStatus = payloadStatus {
-            publishSnapshot(status: payloadStatus)
+            return publishSnapshot(status: payloadStatus)
         }
+        return false
     }
 
     private func setPinnedServer(_ server: String?, for jobId: UUID) {
@@ -292,8 +319,9 @@ final class DictationViewModel: ObservableObject {
         selectedServer = server
         switch phase {
         case .connecting, .recording, .transcribing:
-            updateStateSnapshot()
-            DarwinNotifier.post(SharedConfig.Defaults.darwinStateChangedNotificationName)
+            if updateStateSnapshot() {
+                DarwinNotifier.post(SharedConfig.Defaults.darwinStateChangedNotificationName)
+            }
         case .done, .error, .cancelled:
             break
         }
@@ -301,8 +329,8 @@ final class DictationViewModel: ObservableObject {
 
     /// Captures terminal results (`.done`, `.error`) and publishes them
     /// through the app-group canonical snapshot.
-    private func storeTerminalResultIfNeeded() {
-        guard let id = activeID else { return }
+    private func storeTerminalResultIfNeeded() -> Bool {
+        guard let id = activeID else { return false }
         let snapshotStatus: DictationPayload.Status?
         let snapshotText: String?
         let snapshotError: String?
@@ -321,15 +349,22 @@ final class DictationViewModel: ObservableObject {
             snapshotError = nil
         }
         if let snapshotStatus = snapshotStatus {
-            publishSnapshot(status: snapshotStatus, text: snapshotText, errorMessage: snapshotError)
+            return publishSnapshot(status: snapshotStatus, text: snapshotText, errorMessage: snapshotError)
         }
+        return false
     }
 
     /// Publishes the current dictation state to the app-group canonical snapshot.
-    private func publishSnapshot(status: DictationPayload.Status, text: String? = nil, errorMessage: String? = nil) {
+    @discardableResult
+    private func publishSnapshot(status: DictationPayload.Status, text: String? = nil, errorMessage: String? = nil) -> Bool {
         guard let activeID = activeID else {
             FileLogger.shared.warn(.app, "publishSnapshot: no activeID, skipping")
-            return
+            return false
+        }
+        if isActiveSnapshotStatus(status),
+           SharedConfig.pendingDictationCancel()?.id == activeID {
+            scheduleDurableCancellation(for: activeID)
+            return false
         }
         snapshotRevision &+= 1
         let payload = DictationPayload(
@@ -356,6 +391,106 @@ final class DictationViewModel: ObservableObject {
                                           "rev": snapshotRevision,
                                           "id": String(activeID.uuidString.prefix(8))])
         SharedConfig.setDictationSnapshot(payload)
+        if status == .cancelled || status == .completed || status == .error {
+            SharedConfig.clearPendingDictationCancel(matching: activeID)
+        }
+        return true
+    }
+
+    func reconcileOnActivation() {
+        if let pendingCancel = SharedConfig.pendingDictationCancel(),
+           activeID == pendingCancel.id,
+           isActivePhase(phase) {
+            scheduleDurableCancellation(for: pendingCancel.id)
+        }
+        republishCurrentSnapshot()
+    }
+
+    private func republishCurrentSnapshot() {
+        if let activeID {
+            let published: Bool
+            switch phase {
+            case .connecting, .recording:
+                published = publishSnapshot(status: .recording)
+            case .transcribing:
+                published = publishSnapshot(status: .transcribing)
+            case .done(let text):
+                published = publishSnapshot(status: .completed, text: text)
+            case .error(let message):
+                published = publishSnapshot(status: .error, errorMessage: message)
+            case .cancelled:
+                published = publishSnapshot(status: .cancelled)
+            }
+            if published {
+                DarwinNotifier.post(SharedConfig.Defaults.darwinStateChangedNotificationName)
+            }
+            return
+        }
+
+        guard let payload = currentSnapshot() else { return }
+        let pendingCancelMatches = SharedConfig.pendingDictationCancel()?.id == payload.id
+        let publishCancelled = pendingCancelMatches && isActiveSnapshotStatus(payload.status)
+        let status = publishCancelled ? DictationPayload.Status.cancelled : payload.status
+        snapshotRevision = max(snapshotRevision, payload.revision ?? 0) &+ 1
+        let refreshedPayload = DictationPayload(
+            id: payload.id,
+            status: status,
+            text: publishCancelled ? nil : payload.text,
+            errorMessage: publishCancelled ? nil : payload.errorMessage,
+            returnToIdleDeadline: payload.returnToIdleDeadline,
+            server: payload.server,
+            timestamp: Date(),
+            revision: snapshotRevision
+        )
+        lastPayloadHolder.set(refreshedPayload)
+        SharedConfig.setSnapshotFile(refreshedPayload)
+        SharedConfig.setDictationSnapshot(refreshedPayload)
+        if status == .cancelled || status == .completed || status == .error {
+            SharedConfig.clearPendingDictationCancel(matching: payload.id)
+        }
+        DarwinNotifier.post(SharedConfig.Defaults.darwinStateChangedNotificationName)
+    }
+
+    private func isActivePhase(_ phase: DictationPhase) -> Bool {
+        switch phase {
+        case .connecting, .recording, .transcribing:
+            return true
+        case .done, .error, .cancelled:
+            return false
+        }
+    }
+
+    private func isActiveSnapshotStatus(_ status: DictationPayload.Status) -> Bool {
+        switch status {
+        case .recording, .transcribing:
+            return true
+        case .completed, .error, .cancelled:
+            return false
+        }
+    }
+
+    private func isTerminalResult(_ phase: DictationPhase) -> Bool {
+        switch phase {
+        case .done, .error:
+            return true
+        case .connecting, .recording, .transcribing, .cancelled:
+            return false
+        }
+    }
+
+    private func scheduleDurableCancellation(for id: UUID) {
+        guard cancellationInProgressID != id,
+              scheduledDurableCancelID != id else { return }
+        scheduledDurableCancelID = id
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.scheduledDurableCancelID == id {
+                    self.scheduledDurableCancelID = nil
+                }
+            }
+            await self.cancel(expectedID: id)
+        }
     }
 
     private func makeReturnToIdleDeadline(
@@ -376,11 +511,26 @@ final class DictationViewModel: ObservableObject {
         )
     }
 
+    private func shouldAbortStartingSession(_ id: UUID) async -> Bool {
+        guard activeID == id, earlyCancelledSessionID != id else { return true }
+        guard SharedConfig.pendingDictationCancel()?.id == id else { return false }
+        await cancel(expectedID: id)
+        return true
+    }
+
+    private func canContinueSession(_ id: UUID) -> Bool {
+        activeID == id
+            && cancellationInProgressID != id
+            && earlyCancelledSessionID != id
+            && SharedConfig.pendingDictationCancel()?.id != id
+    }
 
 
     func start(id: UUID) async {
         clearChunkReviews()
+        SharedConfig.clearPendingDictationCancel(exceptSessionID: id)
         activeID = id
+        earlyCancelledSessionID = nil
         returnToIdleDeadline = nil
         chunkAudioStore = ChunkAudioStore(sessionID: id)
         livePartial = ""
@@ -397,6 +547,7 @@ final class DictationViewModel: ObservableObject {
         vadTelemetryWriter = nil
         selectedServer = nil
         phase = .connecting
+        if await shouldAbortStartingSession(id) { return }
         FileLogger.shared.info(.transcription, "dictation connecting", payload: [
             "id": id.uuidString
         ])
@@ -438,6 +589,7 @@ final class DictationViewModel: ObservableObject {
                     continuation.resume(returning: allowed)
                 }
             }
+            if await shouldAbortStartingSession(id) { return }
             if !granted {
                 let message = "Microphone access denied. Enable it in Settings \u{2192} Ritoras."
                 phase = .error(message)
@@ -461,14 +613,22 @@ final class DictationViewModel: ObservableObject {
 
         switch mode {
         case .batch:
+            let newRecorder = AudioRecorder()
             do {
-                let newRecorder = AudioRecorder()
                 _ = try await newRecorder.startRecording(jobId: id)
+                if await shouldAbortStartingSession(id) {
+                    await newRecorder.cleanup()
+                    return
+                }
                 recorder = newRecorder
                 phase = .recording
                 recordingStartTime = Date()
                 UIApplication.shared.isIdleTimerDisabled = true
             } catch {
+                if await shouldAbortStartingSession(id) {
+                    await newRecorder.cleanup()
+                    return
+                }
                 let message = error.localizedDescription
                 phase = .error(message)
             }
@@ -485,6 +645,7 @@ final class DictationViewModel: ObservableObject {
             if let oldClient = streamClient {
                 await oldClient.disconnect()
             }
+            if await shouldAbortStartingSession(id) { return }
             streamClient = nil
 
             livePartial = ""
@@ -493,20 +654,21 @@ final class DictationViewModel: ObservableObject {
 
             let config = SharedConfig.load()
 
-            do {
-                let recorder = StreamingAudioRecorder()
-                streamRecorder = recorder
-                vadCalibrating = (SharedConfig.streamVadMode() == .calibrated)
+            let recorder = StreamingAudioRecorder()
+            streamRecorder = recorder
+            vadCalibrating = (SharedConfig.streamVadMode() == .calibrated)
 
-                let wavURL = RecordingStore.shared.streamWavURL(for: id)
-                let telemetryWriter: VADTelemetryFileWriter?
-                if SharedConfig.streamVadTelemetryEnabled(),
-                   let telemetryURL = RecordingStore.shared.streamTelemetryURL(for: id) {
-                    telemetryWriter = VADTelemetryFileWriter(url: telemetryURL, jobId: id)
-                } else {
-                    telemetryWriter = nil
-                }
-                vadTelemetryWriter = telemetryWriter
+            let wavURL = RecordingStore.shared.streamWavURL(for: id)
+            let telemetryWriter: VADTelemetryFileWriter?
+            if SharedConfig.streamVadTelemetryEnabled(),
+               let telemetryURL = RecordingStore.shared.streamTelemetryURL(for: id) {
+                telemetryWriter = VADTelemetryFileWriter(url: telemetryURL, jobId: id)
+            } else {
+                telemetryWriter = nil
+            }
+            vadTelemetryWriter = telemetryWriter
+
+            do {
                 try await recorder.start(
                     fileURL: wavURL,
                     onVADCalibration: { calibrating in
@@ -563,6 +725,10 @@ final class DictationViewModel: ObservableObject {
                     },
                     telemetry: telemetryWriter
                 )
+                if await shouldAbortStartingSession(id) {
+                    await recorder.stop()
+                    return
+                }
                 FileLogger.shared.info(.audio, "Stream: recorder started")
                 recordingStartTime = Date()
                 phase = .recording
@@ -576,6 +742,10 @@ final class DictationViewModel: ObservableObject {
                 UIApplication.shared.isIdleTimerDisabled = true
                 return
             } catch {
+                if await shouldAbortStartingSession(id) {
+                    await recorder.stop()
+                    return
+                }
                 FileLogger.shared.error(.transcription, "Stream start error",
                                         payload: ["error": error.localizedDescription])
                 vadTelemetryWriter?.recordOutcome("aborted")
@@ -787,6 +957,7 @@ final class DictationViewModel: ObservableObject {
             ])
 
             let audioURL = await recorder.stopRecording()
+            guard canContinueSession(id) else { return }
 
             guard let url = audioURL else {
                 UIApplication.shared.isIdleTimerDisabled = false
@@ -864,7 +1035,7 @@ final class DictationViewModel: ObservableObject {
                         recordingDurationSeconds: recordedDurationSeconds)
                     FileLogger.shared.debug(.network, "async transcription succeeded",
                                             payload: ["textLength": text.count])
-                    guard activeID == id else { self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                    guard self.canContinueSession(id) else { self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
 
                     let uploadElapsed = Date().timeIntervalSince(uploadT0) * 1000
                     FileLogger.shared.info(.transcription, "upload complete", payload: [
@@ -882,14 +1053,14 @@ final class DictationViewModel: ObservableObject {
                     vadTelemetryWriter?.recordOutcome("success")
                     phase = .done(text)
                 } catch WhisperError.cancelled {
-                    guard activeID == id else { self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                    guard self.canContinueSession(id) else { self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
                     // User cancelled — do not record as failure.
                     FileLogger.shared.debug(.app, "transcription cancelled",
                                             payload: ["jobId": id.uuidString])
                     vadTelemetryWriter?.recordOutcome("cancelled")
                     phase = .cancelled
                 } catch {
-                    guard activeID == id else { self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                    guard self.canContinueSession(id) else { self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
                     let message = error.localizedDescription
                     let failedElapsed = Date().timeIntervalSince(uploadT0) * 1000
                     FileLogger.shared.info(.transcription, "upload failed", payload: [
@@ -963,7 +1134,7 @@ final class DictationViewModel: ObservableObject {
             // Signal recording done and drain queue
             await sessionRecorder?.stop()
 
-            guard activeID == id else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+            guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
             vadState = nil
             lastVADPublishTime = nil
             lastPublishedVADState = nil
@@ -977,9 +1148,9 @@ final class DictationViewModel: ObservableObject {
                                         payload: ["timeoutSec": connectGraceTimeout])
                 while streamClient == nil && Date() < connectGraceDeadline {
                     try? await Task.sleep(nanoseconds: 200_000_000)
-                    guard activeID == id else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                    guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
                 }
-                guard activeID == id else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
 
                 let attachedDuringGrace = streamClient != nil
                 if !attachedDuringGrace {
@@ -1019,7 +1190,7 @@ final class DictationViewModel: ObservableObject {
                 queueDrained = await drainEvents.first(where: { _ in true }) ?? false
                 drainWaitTask.cancel()
                 drainTimeoutTask.cancel()
-                guard activeID == id else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
                 FileLogger.shared.info(.network, "Stream: backlog flushed",
                                        payload: ["depth": queueDepthAtStop,
                                                  "drained": queueDrained])
@@ -1034,6 +1205,7 @@ final class DictationViewModel: ObservableObject {
             if queueDrained && canStream {
                 do {
                     try await streamClient?.sendEnd()
+                    guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
                     FileLogger.shared.info(.network, "Stream: END sent, awaiting final from receive task",
                                            payload: ["id": String(id.uuidString.prefix(8))])
 
@@ -1043,7 +1215,7 @@ final class DictationViewModel: ObservableObject {
 
                     let text = try await receiveTask?.value ?? ""
 
-                    guard activeID == id else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                    guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
 
                     // A non-empty final from this session's receive task is valid by
                     // construction: receiveTask is session-scoped and activeID guards
@@ -1085,7 +1257,7 @@ final class DictationViewModel: ObservableObject {
                         phase = .done(text)
                     }
                 } catch WhisperError.cancelled {
-                    guard activeID == id else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                    guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
                     // User cancelled — do not record as failure.
                     vadTelemetryWriter?.recordOutcome("cancelled")
                     RecordingStore.shared.deleteStreamWav(for: id)
@@ -1093,7 +1265,7 @@ final class DictationViewModel: ObservableObject {
                                             payload: ["jobId": id.uuidString])
                     phase = .cancelled
                 } catch {
-                    guard activeID == id else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                    guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
                     handleStreamTerminalFailure(jobId: id, error: error.localizedDescription)
                 }
             } else {
@@ -1111,7 +1283,7 @@ final class DictationViewModel: ObservableObject {
             receiveTask = nil
 
             await streamClient?.disconnect()
-            guard activeID == id else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+            guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
             streamClient = nil
             streamRecorder = nil
             vadTelemetryWriter = nil
@@ -1616,13 +1788,22 @@ final class DictationViewModel: ObservableObject {
         }
     }
 
-    func cancel() async {
+    func cancel(expectedID: UUID? = nil) async {
+        guard let id = activeID,
+              expectedID == nil || expectedID == id,
+              cancellationInProgressID != id else { return }
+        cancellationInProgressID = id
+        defer {
+            if cancellationInProgressID == id {
+                cancellationInProgressID = nil
+            }
+        }
+
         FileLogger.shared.info(.transcription, "cancel: stream teardown")
         vadCalibrating = false
         vadState = nil
         lastVADPublishTime = nil
         lastPublishedVADState = nil
-        let id = activeID
         let sessionRecorder = streamRecorder
 
         // Keep the localhost /state listener alive for cancelGraceSeconds so a
@@ -1630,14 +1811,26 @@ final class DictationViewModel: ObservableObject {
         // snapshot (Darwin notifications are dropped while it is suspended).
         var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
         backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "DictationCancelGrace") {
-            FileLogger.shared.warn(.lifecycle, "DictationCancelGrace lease expired", payload: ["id": id.map { String($0.uuidString.prefix(8)) } ?? "nil"])
+            FileLogger.shared.warn(.lifecycle, "DictationCancelGrace lease expired", payload: ["id": String(id.uuidString.prefix(8))])
             self.endStopBackgroundTask(&backgroundTaskID, name: "DictationCancelGrace", dictationID: id)
         }
-        FileLogger.shared.info(.lifecycle, "DictationCancelGrace lease begin", payload: ["id": id.map { String($0.uuidString.prefix(8)) } ?? "nil"])
+        FileLogger.shared.info(.lifecycle, "DictationCancelGrace lease begin", payload: ["id": String(id.uuidString.prefix(8))])
         Task {
             try? await Task.sleep(nanoseconds: UInt64(
                 SharedConfig.Defaults.cancelGraceSeconds * 1_000_000_000))
             self.endStopBackgroundTask(&backgroundTaskID, name: "DictationCancelGrace", dictationID: id)
+        }
+
+        switch phase {
+        case .done, .error:
+            SharedConfig.clearPendingDictationCancel(matching: id)
+        default:
+            earlyCancelledSessionID = id
+            if phase != .cancelled {
+                vadTelemetryWriter?.recordOutcome("aborted")
+                FileLogger.shared.info(.transcription, "cancel: publishing cancelled snapshot to keyboard")
+                phase = .cancelled
+            }
         }
 
         chunkConsumerTask?.cancel()
@@ -1677,13 +1870,11 @@ final class DictationViewModel: ObservableObject {
         clearChunkReviews()
         if case .done = phase {
             FileLogger.shared.info(.transcription, "cancel: preserving .done from racing task, skipping cancelled publish")
+            SharedConfig.clearPendingDictationCancel(matching: id)
         } else if case .error = phase {
             FileLogger.shared.info(.transcription, "cancel: preserving .error from racing task, skipping cancelled publish")
-        } else {
-            if phase != .cancelled {
-                vadTelemetryWriter?.recordOutcome("aborted")
-            }
-            FileLogger.shared.info(.transcription, "cancel: publishing cancelled snapshot to keyboard")
+            SharedConfig.clearPendingDictationCancel(matching: id)
+        } else if phase != .cancelled {
             phase = .cancelled
         }
         vadTelemetryWriter = nil

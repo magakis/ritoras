@@ -16,6 +16,10 @@ enum LocalhostStateProbe {
 }
 
 enum LocalhostClient {
+    private struct CancelRequest: Encodable {
+        let id: UUID
+    }
+
     // MARK: - Session
 
     /// Low-latency URLSession tuned for localhost IPC from a keyboard extension.
@@ -142,24 +146,31 @@ enum LocalhostClient {
         await postCommand("/stop")
     }
 
-    /// Requests the container app to cancel the active dictation session via
+    /// Requests cancellation of the specified dictation session via
     /// `POST /cancel`. Returns `true` on any 2xx response, `false` on a
-    /// non-2xx response or any transport error (server dead, timeout).
-    /// Unlike `postLogs`, errors are NOT swallowed — the keyboard caller
-    /// needs to know the server is unreachable so it can fall back to a
-    /// local reset.
-    static func postCancel() async -> Bool {
-        await postCommand("/cancel")
+    /// non-2xx response or any transport error.
+    static func postCancel(sessionID: UUID) async -> Bool {
+        do {
+            let body = try JSONEncoder().encode(CancelRequest(id: sessionID))
+            return await postCommand("/cancel", body: body)
+        } catch {
+            FileLogger.shared.error(.network, "POST /cancel body encoding failed")
+            return false
+        }
     }
 
-    /// Sends an empty-body POST command to the localhost server and reports
-    /// whether the server accepted it. Uses the same low-latency ephemeral
-    /// session as `postLogs`.
-    private static func postCommand(_ path: String) async -> Bool {
+    /// Sends a POST command to the localhost server and reports whether the
+    /// server accepted it. Uses the same low-latency ephemeral session as
+    /// `postLogs`.
+    private static func postCommand(_ path: String, body: Data? = nil) async -> Bool {
         let url = URL(string: "http://127.0.0.1:\(SharedConfig.Defaults.localhostServerPort)")!
             .appendingPathComponent(path)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        if let body {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = body
+        }
         do {
             let (_, response) = try await activeSession.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else { return false }

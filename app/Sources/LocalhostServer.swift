@@ -6,6 +6,10 @@ import Network
 /// Lightweight HTTP/1.1 server on a localhost port that exposes health
 /// and log-shipping endpoints.
 final class LocalhostServer {
+    private struct CancelRequest: Decodable {
+        let id: UUID
+    }
+
     private let port: UInt16
     private let listenerLock = NSLock()
     private var _listener: NWListener?
@@ -15,7 +19,7 @@ final class LocalhostServer {
     }
     private let queue = DispatchQueue(label: "com.ritoras.localhostserver", qos: .utility)
     private let onStop: (() async -> Void)?
-    private let onCancel: (() async -> Void)?
+    private let onCancel: ((UUID) async -> Void)?
     private let onState: (() -> DictationPayload?)?
 
     // Listener health/restart state. All of these are guarded by `listenerLock`
@@ -56,7 +60,7 @@ final class LocalhostServer {
 
     private static let maxRequestSize = 65536
 
-    init(port: UInt16, onStop: (() async -> Void)? = nil, onCancel: (() async -> Void)? = nil, onState: (() -> DictationPayload?)? = nil) {
+    init(port: UInt16, onStop: (() async -> Void)? = nil, onCancel: ((UUID) async -> Void)? = nil, onState: (() -> DictationPayload?)? = nil) {
         self.port = port
         self.onStop = onStop
         self.onCancel = onCancel
@@ -357,7 +361,7 @@ final class LocalhostServer {
             } else if rawPath == "/stop" {
                 return handlePostStop()
             } else if rawPath == "/cancel" {
-                return handlePostCancel()
+                return handlePostCancel(bodyData: data[headerEndOffset...])
             } else {
                 return Self.makeJSONResponse(status: 404, body: ["error": "not found", "path": rawPath])
             }
@@ -445,16 +449,61 @@ final class LocalhostServer {
         return Self.makeJSONResponse(status: 202, body: ["status": "stopRequested"])
     }
 
-    /// Handles `POST /cancel`: asks the container app to cancel the active
-    /// dictation session. Fire-and-forget — returns 202 immediately; the
-    /// keyboard learns the outcome via the app-group snapshot pipeline.
-    private func handlePostCancel() -> Data {
-        FileLogger.shared.info(.network, "POST /cancel received", payload: ["id": onState?().map { String($0.id.uuidString.prefix(8)) } ?? "nil", "hasHandler": onCancel != nil])
+    /// Handles `POST /cancel`: resolves the command to one session before
+    /// scheduling teardown. Empty or malformed bodies retain compatibility with
+    /// older keyboards by targeting the current active session.
+    private func handlePostCancel(bodyData: Data) -> Data {
         guard let handler = onCancel else {
             return Self.makeJSONResponse(status: 503, body: ["error": "no handler"])
         }
-        Task { await handler() }
+
+        let requestedID = (try? JSONDecoder().decode(CancelRequest.self, from: bodyData))?.id
+        let recordID = SharedConfig.pendingDictationCancel()?.id
+        let currentPayload = onState?()
+        let activeSessionID = currentPayload.flatMap { payload -> UUID? in
+            switch payload.status {
+            case .recording, .transcribing:
+                return payload.id
+            case .completed, .error, .cancelled:
+                return nil
+            }
+        }
+
+        if let requestedID, let recordID, requestedID != recordID {
+            return cancelMismatchResponse(requestedID: requestedID,
+                                         recordID: recordID,
+                                         activeID: activeSessionID)
+        }
+
+        let targetID = recordID ?? requestedID ?? activeSessionID
+        if let targetID, let activeSessionID, targetID != activeSessionID {
+            return cancelMismatchResponse(requestedID: requestedID,
+                                         recordID: recordID,
+                                         activeID: activeSessionID)
+        }
+        guard let targetID else {
+            return Self.makeJSONResponse(status: 409, body: ["error": "no active session"])
+        }
+
+        FileLogger.shared.info(.network, "POST /cancel received", payload: [
+            "id": String(targetID.uuidString.prefix(8)),
+            "durable": recordID != nil
+        ])
+        Task { await handler(targetID) }
         return Self.makeJSONResponse(status: 202, body: ["status": "cancelRequested"])
+    }
+
+    private func cancelMismatchResponse(
+        requestedID: UUID?,
+        recordID: UUID?,
+        activeID: UUID?
+    ) -> Data {
+        FileLogger.shared.warn(.network, "POST /cancel session mismatch", payload: [
+            "request": requestedID.map { String($0.uuidString.prefix(8)) } ?? "nil",
+            "record": recordID.map { String($0.uuidString.prefix(8)) } ?? "nil",
+            "active": activeID.map { String($0.uuidString.prefix(8)) } ?? "nil"
+        ])
+        return Self.makeJSONResponse(status: 409, body: ["error": "cancel session mismatch"])
     }
 
     // MARK: - Response Helpers

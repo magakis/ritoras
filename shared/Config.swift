@@ -168,6 +168,7 @@ struct SharedConfig {
         static let darwinLearnedWordsChangedNotificationName = "com.ritoras.learnedWordsChanged"
         static let localhostServerPort: UInt16 = 47321
         static let dictationPayloadKey = "dictation.payload"
+        static let dictationCancelKey = "dictation.cancel"
         /// How long a terminal `.cancelled` payload stays in the localhost /state
         /// holder before the delayed clear (see DictationViewModel.cancel()).
         /// Must exceed the keyboard's catch-up window (seconds) so a suspended
@@ -1325,6 +1326,37 @@ struct SharedConfig {
     static func clearDictationSnapshot() {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return }
         defaults.removeObject(forKey: Defaults.dictationPayloadKey)
+    }
+
+    static func setPendingDictationCancel(_ id: UUID) {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return }
+        defaults.set([
+            "id": id.uuidString,
+            "timestamp": Date()
+        ], forKey: Defaults.dictationCancelKey)
+    }
+
+    static func pendingDictationCancel() -> (id: UUID, timestamp: Date)? {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId),
+              let record = defaults.dictionary(forKey: Defaults.dictationCancelKey),
+              let idString = record["id"] as? String,
+              let id = UUID(uuidString: idString),
+              let timestamp = record["timestamp"] as? Date else { return nil }
+        return (id, timestamp)
+    }
+
+    static func clearPendingDictationCancel(matching id: UUID) {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId),
+              pendingDictationCancel()?.id == id else { return }
+        defaults.removeObject(forKey: Defaults.dictationCancelKey)
+    }
+
+    static func clearPendingDictationCancel(exceptSessionID id: UUID) {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return }
+        guard pendingDictationCancel()?.id == id else {
+            defaults.removeObject(forKey: Defaults.dictationCancelKey)
+            return
+        }
     }
 
     // MARK: - Snapshot file channel (cfprefsd-bypass fast path)

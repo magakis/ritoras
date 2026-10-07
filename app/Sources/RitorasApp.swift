@@ -101,6 +101,7 @@ struct RitorasApp: App {
                 switch newPhase {
                 case .active:
                     phaseName = "active"
+                    dictationViewModel.reconcileOnActivation()
                     dictationViewModel.ensureLocalhostServerHealthy()
                 case .background:
                     phaseName = "background"

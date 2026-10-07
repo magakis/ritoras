@@ -34,9 +34,12 @@ and dictation stop/cancel commands:
   cross-process transport.
 - **`POST /logs`** — keyboard log shipping to the container app's `FileLogger`
   and `LogStore` SQLite database, surfaced in the Debug Log Viewer.
-- **`POST /stop`** and **`POST /cancel`** — fire-and-forget commands to stop or
-  cancel the active dictation session; outcomes arrive through the app-group
-  snapshot pipeline.
+- **`POST /stop`** — fire-and-forget command to stop the active dictation
+  session; outcomes arrive through the app-group snapshot pipeline.
+- **`POST /cancel`** — fire-and-forget command bound to a dictation session ID;
+  outcomes arrive through the app-group snapshot pipeline. The keyboard also
+  stores a defaults-backed cancel record so the app can honor cancellation when
+  the listener is unavailable while suspended.
 
 There is no `/result` or `/logs/ack` endpoint. Dictation snapshots and terminal
 results are primarily transported through app-group UserDefaults; `/state` is
@@ -112,6 +115,12 @@ The payload is stored in app-group UserDefaults under the single key
 `"dictation.payload"` by `SharedConfig.setDictationSnapshot(...)`. It is read by
 `SharedConfig.dictationSnapshot()`.
 
+The keyboard stores a pending cancellation as `{id, timestamp}` under
+`"dictation.cancel"`. The timestamp is diagnostic; session-ID matching controls
+whether the record can cancel a live dictation. The app clears stale records
+when a different session starts and honors a matching record on command receipt,
+app activation, or before publishing another in-progress snapshot.
+
 ---
 
 ## 4. State machines
@@ -125,6 +134,10 @@ idle → recording → transcribing → done (or error)
 Each phase transition writes a new `DictationPayload` snapshot via
 `publishSnapshot(status:)` → `SharedConfig.setDictationSnapshot(payload)`, then
 posts `com.ritoras.dictationStateChanged`.
+
+Cancellation publishes `.cancelled` to the snapshot file and UserDefaults
+before awaiting recorder/client teardown. On app activation, the current
+snapshot is republished after a matching durable cancel record is reconciled.
 
 ### Keyboard extension (`KeyboardState`)
 
@@ -227,7 +240,7 @@ The server listens on `127.0.0.1:47321` using Apple's Network framework
 | GET | `/state` | — | 200 with the current `DictationPayload`, or 204 with no body when no snapshot is available | In-memory snapshot fallback; not the canonical transport. |
 | POST | `/logs` | `{"entries":[LogShipmentEntry, ...]}` | 200 `{"received":N}`; 400 for an invalid JSON body | Keyboard ships buffered log entries. |
 | POST | `/stop` | — | 202 `{"status":"stopRequested"}`; 503 if no handler is installed | Accepted command runs asynchronously; result is delivered through the snapshot pipeline. |
-| POST | `/cancel` | — | 202 `{"status":"cancelRequested"}`; 503 if no handler is installed | Accepted command runs asynchronously; result is delivered through the snapshot pipeline. |
+| POST | `/cancel` | `{"id":"<session UUID>"}` | 202 `{"status":"cancelRequested"}`; 409 for a conflicting active session (or no target for an empty request); 503 if no handler is installed | A matching durable record is also checked. Empty or malformed bodies fall back to the current active session for older keyboard installs. |
 
 Unknown paths return 404; methods other than GET and POST return 405. All
 responses close the connection. The server binds to loopback only.
