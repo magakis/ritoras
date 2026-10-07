@@ -541,6 +541,10 @@ class KeyboardView: UIView {
     /// Called when the emoji panel's ABC button is tapped; the controller sets this to route through uiMode.
     var onReturnToLetters: (() -> Void)?
 
+    var emojiPanelDidCreate: ((EmojiPanelView) -> Void)?
+    var emojiSearchOverlayDidCreate: ((EmojiSearchOverlay) -> Void)?
+    var settingsPanelDidCreate: ((KeyboardSettingsPanel) -> Void)?
+
     var settingsTapped: (() -> Void)?
 
     // Subviews
@@ -573,6 +577,7 @@ class KeyboardView: UIView {
         if let v = _emojiPanelView { return v }
         let panel = EmojiPanelView(frame: .zero)
         panel.translatesAutoresizingMaskIntoConstraints = false
+        panel.isHidden = true
         panel.onSelect = { [weak self] emoji in
             guard let self = self else { return }
             self.delegate?.keyboardView(self, didPerform: .insertText(emoji))
@@ -586,6 +591,8 @@ class KeyboardView: UIView {
             self.delegate?.keyboardViewBackspaceDidEnd(self)
         }
         _emojiPanelView = panel
+        installEmojiPanel(panel)
+        emojiPanelDidCreate?(panel)
         return panel
     }
     /// Overlay for emoji search — visible only in .emojiSearch mode, above the
@@ -595,7 +602,10 @@ class KeyboardView: UIView {
         if let v = _emojiSearchOverlay { return v }
         let v = EmojiSearchOverlay()
         v.translatesAutoresizingMaskIntoConstraints = false
+        v.isHidden = true
         _emojiSearchOverlay = v
+        installEmojiSearchOverlay(v)
+        emojiSearchOverlayDidCreate?(v)
         return v
     }
     private var _bottomActionRow: UIView?
@@ -617,11 +627,13 @@ class KeyboardView: UIView {
     }
 
     private var _settingsPanel: KeyboardSettingsPanel?
-    var settingsPanel: KeyboardSettingsPanel {
+    private var settingsPanel: KeyboardSettingsPanel {
         if let v = _settingsPanel { return v }
         let v = KeyboardSettingsPanel()
         v.translatesAutoresizingMaskIntoConstraints = false
         _settingsPanel = v
+        installSettingsPanel(v)
+        settingsPanelDidCreate?(v)
         return v
     }
 
@@ -659,6 +671,7 @@ class KeyboardView: UIView {
     private var hasFullAccess = false
     private var currentShiftState: ShiftState = .lower
     private var currentLayoutMode: KeyboardLayoutMode = .letters
+    private var currentUIMode: UIMode = .letters
     private(set) var currentLanguage: KeyboardLanguage = .english
 
     /// The 2s cancel-progress ring on the mic button. Only populated while the
@@ -667,6 +680,8 @@ class KeyboardView: UIView {
 
     /// Height constraint for emojiSearchOverlay — 0 when hidden, overlayHeight when active.
     private var emojiSearchOverlayHeightConstraint: NSLayoutConstraint?
+    private let emojiSearchOffsetGuide = UILayoutGuide()
+    private var emojiSearchOffsetHeightConstraint: NSLayoutConstraint?
 
     // Suggestion lookup concurrency
     private let suggestionLookupQueue = DispatchQueue(
@@ -679,8 +694,13 @@ class KeyboardView: UIView {
 
     // MARK: - Initialization
 
-    override init(frame: CGRect) {
+    override convenience init(frame: CGRect) {
+        self.init(frame: frame, language: .english)
+    }
+
+    init(frame: CGRect, language: KeyboardLanguage) {
         super.init(frame: frame)
+        currentLanguage = language
         setupView()
     }
 
@@ -699,12 +719,6 @@ class KeyboardView: UIView {
 
         setupSuggestionBar()
         setupLetterRegion()
-        setupEmojiPanel()
-
-        addSubview(emojiSearchOverlay)
-        bringSubviewToFront(emojiSearchOverlay)
-
-        addSubview(settingsPanel)
 
         setupConstraints()
 
@@ -713,7 +727,6 @@ class KeyboardView: UIView {
 
         addSubview(accentPicker)
         bringSubviewToFront(accentPicker)
-        bringSubviewToFront(settingsPanel)
 
         rebuildKeyRows()
         apply(mode: .letters)
@@ -771,29 +784,19 @@ class KeyboardView: UIView {
         addSubview(bottomActionRow)
     }
 
-    private func setupEmojiPanel() {
-        // EmojiPanelView is lazily initialized. Just add it to the hierarchy.
-        // Its callbacks are wired in the lazy initializer.
-        addSubview(emojiPanelView)
-    }
-
     private func setupConstraints() {
-        let emojiPanelBottom = emojiPanelView.bottomAnchor.constraint(equalTo: bottomAnchor)
-        emojiPanelBottom.priority = .defaultHigh
-
-        // Create overlay height constraint (0 = hidden, overlayHeight when active)
-        emojiSearchOverlayHeightConstraint = emojiSearchOverlay.heightAnchor.constraint(equalToConstant: 0)
+        addLayoutGuide(emojiSearchOffsetGuide)
+        let emojiSearchOffsetHeight = emojiSearchOffsetGuide.heightAnchor.constraint(equalToConstant: 0)
+        emojiSearchOffsetHeightConstraint = emojiSearchOffsetHeight
 
         NSLayoutConstraint.activate([
-            // Emoji search overlay — pinned to the very top; 0 when inactive
-            emojiSearchOverlay.topAnchor.constraint(equalTo: topAnchor),
-            emojiSearchOverlay.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            emojiSearchOverlay.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            emojiSearchOverlayHeightConstraint!,
+            emojiSearchOffsetGuide.topAnchor.constraint(equalTo: topAnchor),
+            emojiSearchOffsetGuide.leadingAnchor.constraint(equalTo: leadingAnchor),
+            emojiSearchOffsetGuide.trailingAnchor.constraint(equalTo: trailingAnchor),
+            emojiSearchOffsetHeight,
 
-            // SuggestionBar — pinned to the overlay's bottom; when overlay height is 0
-            // this is equivalent to topAnchor, preserving the current layout.
-            suggestionBar.topAnchor.constraint(equalTo: emojiSearchOverlay.bottomAnchor, constant: 0),
+            // The guide stays at zero height until the lazily-created search overlay is shown.
+            suggestionBar.topAnchor.constraint(equalTo: emojiSearchOffsetGuide.bottomAnchor),
             suggestionBar.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             suggestionBar.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             suggestionBar.heightAnchor.constraint(equalToConstant: 36),
@@ -804,23 +807,61 @@ class KeyboardView: UIView {
             letterRegionContainer.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             letterRegionContainer.bottomAnchor.constraint(equalTo: bottomActionRow.topAnchor, constant: -6),
 
-            // Emoji panel — replaces suggestion bar + letter region in emoji mode
-            emojiPanelView.topAnchor.constraint(equalTo: topAnchor, constant: 0),
-            emojiPanelView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            emojiPanelView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
-            emojiPanelBottom,
-
             // Bottom action row (Row 4) — always visible, pinned to the bottom
             bottomActionRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
             bottomActionRow.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
             bottomActionRow.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
             bottomActionRow.heightAnchor.constraint(equalToConstant: 48),
-
-            settingsPanel.topAnchor.constraint(equalTo: topAnchor),
-            settingsPanel.leadingAnchor.constraint(equalTo: leadingAnchor),
-            settingsPanel.trailingAnchor.constraint(equalTo: trailingAnchor),
-            settingsPanel.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
+    }
+
+    private func installSettingsPanel(_ panel: KeyboardSettingsPanel) {
+        addSubview(panel)
+
+        NSLayoutConstraint.activate([
+            panel.topAnchor.constraint(equalTo: topAnchor),
+            panel.leadingAnchor.constraint(equalTo: leadingAnchor),
+            panel.trailingAnchor.constraint(equalTo: trailingAnchor),
+            panel.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    private func installEmojiPanel(_ panel: EmojiPanelView) {
+        if let overlay = _emojiSearchOverlay {
+            insertSubview(panel, belowSubview: overlay)
+        } else if let keyPreview = _keyPreview {
+            insertSubview(panel, belowSubview: keyPreview)
+        } else {
+            addSubview(panel)
+        }
+
+        let panelBottom = panel.bottomAnchor.constraint(equalTo: bottomAnchor)
+        panelBottom.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            panel.topAnchor.constraint(equalTo: topAnchor),
+            panel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            panel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            panelBottom,
+        ])
+    }
+
+    private func installEmojiSearchOverlay(_ overlay: EmojiSearchOverlay) {
+        addSubview(overlay)
+
+        let height = overlay.heightAnchor.constraint(equalToConstant: 0)
+        emojiSearchOverlayHeightConstraint = height
+        NSLayoutConstraint.activate([
+            overlay.topAnchor.constraint(equalTo: topAnchor),
+            overlay.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            overlay.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            height,
+        ])
+
+        bringSubviewToFront(keyPreview)
+        bringSubviewToFront(accentPicker)
+        if let settingsPanel = _settingsPanel {
+            bringSubviewToFront(settingsPanel)
+        }
     }
 
     // MARK: - Key Rows
@@ -859,7 +900,7 @@ class KeyboardView: UIView {
                     button.addGestureRecognizer(lp)
                 case .emoji:
                     emojiKeyButton = button
-                    if !emojiPanelView.isHidden {
+                    if currentUIMode == .emoji {
                         button.setTitle("ABC", for: .normal)
                         button.setImage(nil, for: .normal)
                     } else {
@@ -896,7 +937,7 @@ class KeyboardView: UIView {
                     guard let self = self else { return }
                     if highlighted {
                         guard case .insertText = kb.keyDefinition.action,
-                              self.emojiPanelView.isHidden,
+                              self.currentUIMode != .emoji,
                               // No plain preview while the accent picker is up —
                               // the picker already surfaced the key's variants.
                               self.accentPicker.isHidden else { return }
@@ -1150,7 +1191,7 @@ class KeyboardView: UIView {
         guard isUserInteractionEnabled, !isHidden, alpha > 0.01 else { return nil }
 
         // The settings panel covers the entire keyboard and owns all input while open.
-        if !settingsPanel.isHidden {
+        if let settingsPanel = _settingsPanel, !settingsPanel.isHidden {
             return super.hitTest(point, with: event)
         }
 
@@ -1221,12 +1262,13 @@ class KeyboardView: UIView {
     }
 
     func showSettingsPanel(activeLanguage: KeyboardLanguage) {
-        settingsPanel.show(activeLanguage: activeLanguage)
-        bringSubviewToFront(settingsPanel)
+        let panel = settingsPanel
+        panel.show(activeLanguage: activeLanguage)
+        bringSubviewToFront(panel)
     }
 
     func dismissSettingsPanel() {
-        settingsPanel.dismiss()
+        _settingsPanel?.dismiss()
     }
 
     func updateFullAccess(_ hasAccess: Bool) {
@@ -1304,6 +1346,7 @@ class KeyboardView: UIView {
     }
 
     func apply(mode: UIMode) {
+        currentUIMode = mode
         let inSearch         = (mode == .emojiSearch)
         let showEmojiPanel   = (mode == .emoji)
         let showLetters      = (mode == .letters || mode == .emojiSearch)
@@ -1320,9 +1363,22 @@ class KeyboardView: UIView {
         suggestionBar.isHidden = !showSuggestBar
         letterRegionContainer.isHidden = !showLetters
         bottomActionRow.isHidden = !showBottomRow
-        emojiPanelView.isHidden = !showEmojiPanel
-        emojiSearchOverlay.isHidden = !showOverlay
-        emojiSearchOverlayHeightConstraint?.constant = showOverlay ? EmojiSearchOverlay.overlayHeight : 0
+        if showEmojiPanel {
+            emojiPanelView.isHidden = false
+        } else {
+            _emojiPanelView?.isHidden = true
+        }
+        emojiSearchOffsetHeightConstraint?.constant = showOverlay ? EmojiSearchOverlay.overlayHeight : 0
+        if showOverlay {
+            let overlay = emojiSearchOverlay
+            overlay.isHidden = false
+            emojiSearchOverlayHeightConstraint?.constant = EmojiSearchOverlay.overlayHeight
+            overlay.activate()
+        } else if let overlay = _emojiSearchOverlay {
+            overlay.isHidden = true
+            emojiSearchOverlayHeightConstraint?.constant = 0
+            overlay.deactivate()
+        }
 
         if showEmojiPanel {
             emojiKeyButton?.setTitle("ABC", for: .normal)
@@ -1334,7 +1390,6 @@ class KeyboardView: UIView {
         }
 
         if inSearch {
-            emojiSearchOverlay.activate()
             // Defensive: ensure keyStack has rows (today this is a no-op since keyStack
             // is populated at startup, but protects against future regressions)
             if keyStack.arrangedSubviews.isEmpty {
@@ -1345,8 +1400,6 @@ class KeyboardView: UIView {
             // propagates fresh frames down to the KeyboardRowView instances.
             letterRegionContainer.setNeedsLayout()
             letterRegionContainer.layoutIfNeeded()
-        } else {
-            emojiSearchOverlay.deactivate()
         }
 
         if showEmojiPanel { reloadEmojiPanel() }

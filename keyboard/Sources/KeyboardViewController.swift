@@ -440,11 +440,9 @@ class KeyboardViewController: UIInputViewController {
     /// Called on appear (fresh cache) and on the settings-changed Darwin
     /// notification (after `settingsCache.refresh()`), on the main thread.
     ///
-    /// Also syncs the key grid to the persisted language. Without this, a
-    /// persisted Greek setting shows an English grid until the menu is used
-    /// (the grid defaults to `.english` at construction). `setLanguage` is a
-    /// no-op when the grid already matches, and only then resets to the
-    /// letters layout — correct for a genuine language change.
+    /// The key grid receives the persisted language at construction, so this
+    /// appearance-time call normally leaves it unchanged while still applying
+    /// the runtime language and prediction-stack settings below.
     private func applyLanguageSetting() {
         let language = settingsCache.language
         primaryLanguage = language.bcp47Tag
@@ -539,7 +537,7 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Setup
 
     private func setupKeyboardView() {
-        keyboardView = KeyboardView(frame: .zero)
+        keyboardView = KeyboardView(frame: .zero, language: settingsCache.language)
         keyboardView.translatesAutoresizingMaskIntoConstraints = false
         keyboardView.delegate = self
         view.addSubview(keyboardView)
@@ -551,44 +549,47 @@ class KeyboardViewController: UIInputViewController {
             keyboardView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
 
-        // Wire emoji panel search callbacks
-        keyboardView.emojiPanelView.onSearchActivate = { [weak self] in
-            guard let self = self else { return }
-            self.inputTarget = .emojiSearch
-            self.lastAutoCorrection = nil
-            self.uiMode = .emojiSearch
+        keyboardView.emojiPanelDidCreate = { [weak self] panel in
+            panel.onSearchActivate = { [weak self] in
+                guard let self = self else { return }
+                self.inputTarget = .emojiSearch
+                self.lastAutoCorrection = nil
+                self.uiMode = .emojiSearch
+            }
+
+            panel.onSearchDismiss = { [weak self] in
+                guard let self = self else { return }
+                self.inputTarget = .hostApp
+                self.keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
+                self.keyboardView.emojiPanelView.searchField.resignFirstResponder() // resign trigger field so textFieldDidBeginEditing re-fires on next tap
+                self.uiMode = .emoji
+            }
+
+            panel.onSearchReturn = { [weak self] in
+                guard let self = self else { return }
+                self.inputTarget = .hostApp
+                self.keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
+                self.keyboardView.emojiPanelView.searchField.resignFirstResponder() // resign trigger field so textFieldDidBeginEditing re-fires on next tap
+                self.uiMode = .emoji
+            }
         }
 
-        keyboardView.emojiPanelView.onSearchDismiss = { [weak self] in
-            guard let self = self else { return }
-            self.inputTarget = .hostApp
-            self.keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
-            self.keyboardView.emojiPanelView.searchField.resignFirstResponder() // resign trigger field so textFieldDidBeginEditing re-fires on next tap
-            self.uiMode = .emoji
-        }
+        keyboardView.emojiSearchOverlayDidCreate = { [weak self] overlay in
+            overlay.onSelect = { [weak self] emoji in
+                guard let self else { return }
+                // Insert directly into host document (NOT via insertTargeted, which would
+                // route into the search field since inputTarget == .emojiSearch).
+                self.textDocumentProxy.insertText(emoji)
+                // EmojiRecents.add is already called inside the overlay on tap.
+            }
 
-        keyboardView.emojiPanelView.onSearchReturn = { [weak self] in
-            guard let self = self else { return }
-            self.inputTarget = .hostApp
-            self.keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
-            self.keyboardView.emojiPanelView.searchField.resignFirstResponder() // resign trigger field so textFieldDidBeginEditing re-fires on next tap
-            self.uiMode = .emoji
-        }
-
-        // Wire emoji search overlay callbacks
-        keyboardView.emojiSearchOverlay.onSelect = { [weak self] emoji in
-            guard let self else { return }
-            // Insert directly into host document (NOT via insertTargeted, which would
-            // route into the search field since inputTarget == .emojiSearch).
-            self.textDocumentProxy.insertText(emoji)
-            // EmojiRecents.add is already called inside the overlay on tap.
-        }
-        keyboardView.emojiSearchOverlay.onDismiss = { [weak self] in
-            guard let self = self else { return }
-            self.inputTarget = .hostApp
-            self.keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
-            self.keyboardView.emojiPanelView.searchField.resignFirstResponder() // resign trigger field so textFieldDidBeginEditing re-fires on next tap
-            self.uiMode = .emoji
+            overlay.onDismiss = { [weak self] in
+                guard let self = self else { return }
+                self.inputTarget = .hostApp
+                self.keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
+                self.keyboardView.emojiPanelView.searchField.resignFirstResponder() // resign trigger field so textFieldDidBeginEditing re-fires on next tap
+                self.uiMode = .emoji
+            }
         }
 
         // Route emoji-panel ABC button dismissal through uiMode so toggle state stays in sync
@@ -599,11 +600,13 @@ class KeyboardViewController: UIInputViewController {
         keyboardView.settingsTapped = { [weak self] in
             self?.presentKeyboardSettingsPanel()
         }
-        keyboardView.settingsPanel.onDismiss = { [weak self] in
-            self?.keyboardView.dismissSettingsPanel()
-        }
-        keyboardView.settingsPanel.onLanguageChange = { [weak self] language in
-            self?.handleLanguageSelection(language)
+        keyboardView.settingsPanelDidCreate = { [weak self] panel in
+            panel.onDismiss = { [weak self] in
+                self?.keyboardView.dismissSettingsPanel()
+            }
+            panel.onLanguageChange = { [weak self] language in
+                self?.handleLanguageSelection(language)
+            }
         }
     }
 
@@ -613,10 +616,9 @@ class KeyboardViewController: UIInputViewController {
     private func handleLanguageSelection(_ language: KeyboardLanguage) {
         lastSigmaConvertedWord = nil  // a language switch closes the sigma revert window
         // Proceed when the selection differs from the grid OR the prediction
-        // stack. They are tracked independently: at launch the grid may already
-        // show the persisted language (see applyLanguageSetting's grid sync)
-        // while the stack is still English (lazy Greek build) — re-selecting
-        // that language must still swap the prediction stack.
+        // stack. They are tracked independently: at launch the grid already
+        // shows the persisted language while the stack may still be English
+        // (lazy Greek build) — re-selecting that language must still swap it.
         guard language != keyboardView.currentLanguage
             || language != SharedPredictionStack.shared.language else { return }
         SharedConfig.setKeyboardLanguage(language)
