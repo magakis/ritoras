@@ -216,10 +216,12 @@ class KeyboardViewController: UIInputViewController {
     /// that arrive after the user switched text fields.
     private var dictationTargetDocId: UUID? = nil
 
-    /// Dedup token: while a /stop or /cancel POST is in flight, ignore further
-    /// stop/cancel requests. Set synchronously (before the Task) so a rapid
-    /// double-tap is observed by the second call.
-    private var stopCancelRequestInFlight = false
+    /// Session ID retained after local cancellation so late snapshots cannot
+    /// restore recording state or insert a result.
+    private var locallyCancelledSessionID: String?
+
+    private var stopRequestInFlight = false
+    private var cancelRequestInFlight = false
 
     // Settings cache (refreshed by Darwin notification from container app)
     private let settingsCache = KeyboardSettingsCache()
@@ -697,6 +699,7 @@ class KeyboardViewController: UIInputViewController {
         consecutiveSessionEvidenceMiss = 0
 
         let id = UUID()
+        locallyCancelledSessionID = nil
         pendingRequestId = id
         FileLogger.shared.debug(.keyboard, "dictation start appgroup",
             payload: ["id": String(id.uuidString.prefix(8)),
@@ -989,6 +992,7 @@ class KeyboardViewController: UIInputViewController {
     /// the miss counter. Shared by the app-group (file + defaults) and the
     /// localhost /state fallback transports.
     private func applySnapshotPayload(_ payload: DictationPayload, source: String) {
+        guard !discardLocallyCancelledSnapshot(payload) else { return }
         if completedResultAwaitingFocusID == payload.id
             && (payload.status == .recording || payload.status == .transcribing) {
             FileLogger.shared.debug(.keyboard, "reject in-progress: completed retained",
@@ -1019,6 +1023,18 @@ class KeyboardViewController: UIInputViewController {
                                           "status": payload.status.rawValue,
                                           "rev": payload.revision ?? 0,
                                           "id": String(payload.id.uuidString.prefix(8))])
+    }
+
+    private func discardLocallyCancelledSnapshot(_ payload: DictationPayload) -> Bool {
+        guard locallyCancelledSessionID == payload.id.uuidString else { return false }
+        switch payload.status {
+        case .cancelled:
+            locallyCancelledSessionID = nil
+        case .completed, .error, .transcribing, .recording:
+            FileLogger.shared.warn(.keyboard, "ignored snapshot after local cancel",
+                                   payload: ["status": payload.status.rawValue])
+        }
+        return true
     }
 
     /// Conservatively-gated silent reset for a session the keyboard positively
@@ -1085,6 +1101,11 @@ class KeyboardViewController: UIInputViewController {
     /// (preventing silent hangs from empty-text results).
     @MainActor
     private func handleTerminalResult(id: UUID, text: String?, errorMessage: String?) {
+        guard locallyCancelledSessionID != id.uuidString else {
+            FileLogger.shared.warn(.keyboard, "ignored terminal result after local cancel",
+                                   payload: ["id": String(id.uuidString.prefix(8))])
+            return
+        }
         if let text, !text.isEmpty {
             guard let fieldId = safeDocumentIdentifier(), fieldId != Self.noFieldDocumentId else {
                 if pendingRequestId == id {
@@ -1187,6 +1208,7 @@ class KeyboardViewController: UIInputViewController {
                 clearStalePendingDictation()
                 return
             }
+            guard !discardLocallyCancelledSnapshot(payload) else { return }
             if completedResultAwaitingFocusID == id
                 && (payload.status == .recording || payload.status == .transcribing) {
                 FileLogger.shared.debug(.keyboard, "reject in-progress: completed retained",
@@ -1253,6 +1275,7 @@ class KeyboardViewController: UIInputViewController {
         if snapshotAlreadyReconciled || preservingCompletedResult {
             // The localhost response already reconciled the current request.
         } else if let payload = readSharedSnapshotForReappear(for: id) {
+            guard !discardLocallyCancelledSnapshot(payload) else { return }
             FileLogger.shared.info(.keyboard, "checkForPendingDictation snapshot",
                                    payload: ["status": payload.status.rawValue,
                                              "rev": payload.revision ?? 0])
@@ -1428,10 +1451,10 @@ class KeyboardViewController: UIInputViewController {
     /// happens here — the dots keep showing until the transcript lands.
     private func requestStop() {
         FileLogger.shared.info(.keyboard, "Mic: requesting stop via /stop", payload: ["id": pendingRequestId.map { String($0.uuidString.prefix(8)) } ?? "nil"])
-        guard !stopCancelRequestInFlight else { return }
-        stopCancelRequestInFlight = true
+        guard !stopRequestInFlight else { return }
+        stopRequestInFlight = true
         Task { @MainActor [weak self] in
-            defer { self?.stopCancelRequestInFlight = false }
+            defer { self?.stopRequestInFlight = false }
             let ok = await LocalhostClient.postStop()
             guard let self = self else { return }
             guard ok else {
@@ -1446,25 +1469,28 @@ class KeyboardViewController: UIInputViewController {
         }
     }
 
-    /// Requests the container app to cancel dictation via POST /cancel. The
-    /// app-group pipeline delivers `.cancelled` and resets the keyboard to idle.
+    /// Resets the keyboard immediately, then asks the container app to stop
+    /// via POST /cancel.
     private func requestCancel() {
+        guard !cancelRequestInFlight,
+              (state == .recording || state == .waiting) else { return }
+        guard let sessionID = pendingRequestId else {
+            cancelDictation()
+            return
+        }
+        cancelRequestInFlight = true
+        locallyCancelledSessionID = sessionID.uuidString
+        SharedConfig.setPendingDictationCancel(sessionID)
+        cancelDictation()
         FileLogger.shared.info(.keyboard, "Mic: requesting cancel via /cancel")
-        guard !stopCancelRequestInFlight else { return }
-        stopCancelRequestInFlight = true
         Task { @MainActor [weak self] in
-            defer { self?.stopCancelRequestInFlight = false }
-            let ok = await LocalhostClient.postCancel()
+            defer { self?.cancelRequestInFlight = false }
+            let ok = await LocalhostClient.postCancel(sessionID: sessionID)
             guard let self = self else { return }
             guard ok else {
-                // Only fall back if we're still actively dictating — a concurrent
-                // teardown (dismiss/cancel) may have already reset the state.
-                guard self.state == .recording || self.state == .waiting else { return }
-                FileLogger.shared.warn(.keyboard, "POST /cancel failed — local fallback cancel")
-                self.requestFallbackCancel()
+                FileLogger.shared.warn(.keyboard, "POST /cancel failed — keyboard remains idle")
                 return
             }
-            // Pipeline delivers .cancelled → refreshFromSharedState resets to idle.
         }
     }
 
@@ -1577,6 +1603,7 @@ class KeyboardViewController: UIInputViewController {
             FileLogger.shared.debug(.keyboard, "follow-me inbox empty")
             return
         }
+        guard !discardLocallyCancelledSnapshot(payload) else { return }
         let status: FollowMeDeliveryGate.TerminalStatus
         switch payload.status {
         case .completed: status = .completed
