@@ -187,8 +187,9 @@ class KeyboardViewController: UIInputViewController {
         /// payload when the first Darwin-driven refresh fires. Waiting one
         /// more cycle would miss the transient `.recording` phase.
         static let localhostFallbackMisses = 1
-        /// After this many consecutive misses, start /jobs server polling as
-        /// an emergency fallback (container app is not writing snapshots).
+        /// Start /jobs after this many polls without a fresh app-group revision.
+        /// A matching localhost payload is liveness evidence and resets the
+        /// streak; snapshot misses alone do not establish that the app is dead.
         static let serverPollMisses = 6
         /// After this many consecutive dead/no-session localhost probes while
         /// the keyboard is in `.recording`, treat the session as lost and reset
@@ -198,14 +199,13 @@ class KeyboardViewController: UIInputViewController {
         static let sessionLostMisses = 6
     }
 
-    /// Tracks consecutive snapshot misses (app-group read returned nil).
-    /// The localhost /state fallback fires after
-    /// `SnapshotThresholds.localhostFallbackMisses` miss(es); /jobs server
-    /// polling starts after `SnapshotThresholds.serverPollMisses`.
+    /// Tracks consecutive app-group reads with no fresh revision for this
+    /// session. A steady recording normally keeps one revision; matching
+    /// localhost /state evidence resets this streak before /jobs can start.
     private var consecutiveSnapshotMisses: Int = 0
     /// Tracks consecutive localhost /state probes that returned no session or
-    /// unreachable while the keyboard believed a recording was active. Reset on
-    /// any positive payload, on a fresh dictation, and on keyboard reappear.
+    /// unreachable while the keyboard believed a recording was active. Only
+    /// these outcomes count as session-loss evidence.
     private var consecutiveSessionEvidenceMiss: Int = 0
     /// Stored Task for refreshFromSharedState, cancelled on teardown and
     /// superseded on each new spawn to prevent interleaved concurrent executions.
@@ -957,14 +957,24 @@ class KeyboardViewController: UIInputViewController {
         if consecutiveSnapshotMisses >= SnapshotThresholds.localhostFallbackMisses {
             switch await LocalhostClient.probeState() {
             case .payload(let httpPayload):
-                if httpPayload.id == pendingRequestId,
-                   (httpPayload.revision ?? 0) > lastSeenSnapshotRevision {
-                    lastSeenSnapshotRevision = httpPayload.revision ?? 0
-                    applySnapshotPayload(httpPayload, source: "localhost")
+                if httpPayload.id == pendingRequestId {
+                    consecutiveSnapshotMisses = 0
+                    consecutiveSessionEvidenceMiss = 0
+                    if serverPollWorkItem != nil {
+                        serverPollWorkItem?.cancel()
+                        serverPollWorkItem = nil
+                        serverPollUnresponsiveCount = 0
+                    }
+
+                    let revision = httpPayload.revision ?? 0
+                    if revision > lastSeenSnapshotRevision {
+                        lastSeenSnapshotRevision = revision
+                        applySnapshotPayload(httpPayload, source: "localhost")
+                    }
                     return
                 }
-                // id-mismatched or stale-revision payload: fall through to the
-                // /jobs tier unchanged — do not broaden that behavior.
+                // A different-session payload is not liveness evidence, so it
+                // continues to the existing /jobs fallback.
             case .malformed:
                 // App is alive but its payload failed to decode — not miss
                 // evidence; fall through to the /jobs tier unchanged.
@@ -992,6 +1002,12 @@ class KeyboardViewController: UIInputViewController {
     /// the miss counter. Shared by the app-group (file + defaults) and the
     /// localhost /state fallback transports.
     private func applySnapshotPayload(_ payload: DictationPayload, source: String) {
+        if payload.status == .cancelled, payload.id != pendingRequestId {
+            FileLogger.shared.debug(.keyboard, "ignored cancelled snapshot for non-pending session",
+                                    payload: ["id": String(payload.id.uuidString.prefix(8)),
+                                              "pendingID": pendingRequestId.map { String($0.uuidString.prefix(8)) } ?? "nil"])
+            return
+        }
         guard !discardLocallyCancelledSnapshot(payload) else { return }
         if completedResultAwaitingFocusID == payload.id
             && (payload.status == .recording || payload.status == .transcribing) {
@@ -1073,8 +1089,8 @@ class KeyboardViewController: UIInputViewController {
     private func startSnapshotPolling() {
         stopSnapshotPolling()
         // Snapshot poll runs until the dictation resolves or the 900s dictation timeout fires.
-        // /jobs server polling starts only after 6 consecutive snapshot misses
-        // (container app is not writing snapshots).
+        // /jobs server polling starts after 6 polls without a fresh snapshot
+        // revision and without matching localhost liveness evidence.
         // First fire is at +0.2s to catch an in-flight terminal result quickly
         // after wake (viewDidAppear already did an immediate refresh), then
         // settles to the normal 0.5s cadence.
@@ -1450,13 +1466,15 @@ class KeyboardViewController: UIInputViewController {
     /// app-group pipeline delivers the terminal phase; no local state change
     /// happens here — the dots keep showing until the transcript lands.
     private func requestStop() {
-        FileLogger.shared.info(.keyboard, "Mic: requesting stop via /stop", payload: ["id": pendingRequestId.map { String($0.uuidString.prefix(8)) } ?? "nil"])
+        let sessionID = pendingRequestId
+        FileLogger.shared.info(.keyboard, "Mic: requesting stop via /stop", payload: ["id": sessionID.map { String($0.uuidString.prefix(8)) } ?? "nil"])
         guard !stopRequestInFlight else { return }
         stopRequestInFlight = true
         Task { @MainActor [weak self] in
             defer { self?.stopRequestInFlight = false }
             let ok = await LocalhostClient.postStop()
             guard let self = self else { return }
+            guard self.pendingRequestId == sessionID else { return }
             guard ok else {
                 // Only fall back if we're still actively dictating — a concurrent
                 // teardown (dismiss/cancel) may have already reset the state.

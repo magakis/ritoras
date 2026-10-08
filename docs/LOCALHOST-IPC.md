@@ -203,15 +203,21 @@ double-insertion from:
 ## 7. Emergency fallback — `/jobs/{id}` polling
 
 If the container app is killed mid-transcription before it can write the terminal
-snapshot to app-group UserDefaults, the keyboard falls back to polling the
+snapshot to app-group UserDefaults, and localhost `/state` cannot provide
+matching-session liveness evidence, the keyboard falls back to polling the
 Whisper server's `GET /jobs/{id}` endpoint.
 
 ### Trigger condition (6-miss threshold)
 
-The keyboard tracks consecutive app-group snapshot misses. The fallback starts
-**only after 6 consecutive misses** (~3 seconds at the 0.5 s poll interval),
-proving the container app is genuinely not writing. It does not fire
-unconditionally.
+The keyboard tracks app-group reads that have no fresh revision for the active
+session. The fallback threshold remains **6 consecutive misses** (~3 seconds at
+the 0.5 s poll interval), but misses alone do not prove that the container app
+is dead. During steady `.recording`, the app intentionally leaves the snapshot
+revision unchanged; a matching localhost `/state` payload at that same revision
+proves the app is alive, resets the miss streak, and stops any already-running
+`/jobs` poller. Thus normal long recordings do not escalate to `/jobs`. The
+fallback is intended for container-app death, when localhost also cannot return
+a matching session payload.
 
 ### Shared handler
 
