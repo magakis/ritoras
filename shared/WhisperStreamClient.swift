@@ -88,48 +88,56 @@ actor WhisperStreamClient {
         FileLogger.shared.debug(.network, "Stream: connecting",
                                payload: ["id": dictationID])
 
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            // Probe: send PING, wait for PONG
-            group.addTask {
-                do {
-                    try await newTask.send(.string(#"{"type":"PING"}"#))
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                // Probe: send PING, wait for PONG
+                group.addTask {
+                    do {
+                        try await newTask.send(.string(#"{"type":"PING"}"#))
 
-                    while true {
-                        switch try await newTask.receive() {
-                        case .string(let text):
-                            if text.contains("PONG") {
-                                FileLogger.shared.info(.network, "Connected (PONG received)",
-                                                       payload: ["id": self.dictationID])
-                                return
+                        while true {
+                            switch try await newTask.receive() {
+                            case .string(let text):
+                                if text.contains("PONG") {
+                                    FileLogger.shared.info(.network, "Connected (PONG received)",
+                                                           payload: ["id": self.dictationID])
+                                    return
+                                }
+                                // Unexpected message before PONG — ignore
+                                continue
+                            case .data:
+                                continue
+                            @unknown default:
+                                continue
                             }
-                            // Unexpected message before PONG — ignore
-                            continue
-                        case .data:
-                            continue
-                        @unknown default:
-                            continue
                         }
+                    } catch let error as WhisperError {
+                        throw error
+                    } catch {
+                        throw WhisperError.networkError(error)
                     }
-                } catch let error as WhisperError {
-                    throw error
-                } catch {
-                    throw WhisperError.networkError(error)
                 }
-            }
 
-            // Timeout guard
-            group.addTask {
-                try await Task.sleep(
-                    nanoseconds: UInt64(SharedConfig.Defaults.streamWsConnectTimeout * 1_000_000_000)
-                )
-                FileLogger.shared.debug(.network, "Connection timed out",
-                                       payload: ["id": self.dictationID,
-                                                 "timeout": SharedConfig.Defaults.streamWsConnectTimeout])
-                throw WhisperError.timeout
-            }
+                // Timeout guard
+                group.addTask {
+                    try await Task.sleep(
+                        nanoseconds: UInt64(SharedConfig.Defaults.streamWsConnectTimeout * 1_000_000_000)
+                    )
+                    FileLogger.shared.debug(.network, "Connection timed out",
+                                           payload: ["id": self.dictationID,
+                                                     "timeout": SharedConfig.Defaults.streamWsConnectTimeout])
+                    throw WhisperError.timeout
+                }
 
-            try await group.next()
-            group.cancelAll()
+                try await group.next()
+                group.cancelAll()
+            }
+        } catch {
+            newTask.cancel(with: .goingAway, reason: nil)
+            if task === newTask {
+                task = nil
+            }
+            throw error
         }
 
         lastActivityDate = Date()

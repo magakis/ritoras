@@ -606,8 +606,7 @@ enum WhisperClient {
         let httpT0 = Date()
         let (data, response): (Data, URLResponse)
         do {
-            let bodyData = try Data(contentsOf: bodyFileURL)
-            (data, response) = try await session.upload(for: request, from: bodyData)
+            (data, response) = try await session.upload(for: request, fromFile: bodyFileURL)
         } catch let error as URLError where error.code == .timedOut {
             throw WhisperError.timeout
         } catch {

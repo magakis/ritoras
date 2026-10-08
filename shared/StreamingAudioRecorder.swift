@@ -1373,6 +1373,17 @@ actor StreamingAudioRecorder {
             throw AudioRecorder.AudioRecorderError.invalidSessionConfiguration(error)
         }
 
+        var startCompleted = false
+        defer {
+            if !startCompleted {
+                teardownEngine()
+                self.onChunk = nil
+                self.onVADState = nil
+                isRecording = false
+                AudioSession.deactivate()
+            }
+        }
+
         self.onChunk = onChunk
         self.onVADState = onVADState
         self.telemetryFlushable = telemetry as? VADTelemetryFlushable
@@ -1492,10 +1503,6 @@ actor StreamingAudioRecorder {
         do {
             try engine.start()
         } catch {
-            teardownEngine()
-            self.onChunk = nil
-            self.onVADState = nil
-            AudioSession.deactivate()
             throw StreamingRecorderError.engineStartFailed(error)
         }
 
@@ -1536,6 +1543,7 @@ actor StreamingAudioRecorder {
         if vadGateConfig.mode == .calibrated {
             FileLogger.shared.debug(.audio, "VAD: calibration start")
         }
+        startCompleted = true
     }
 
     // MARK: - Process Tap Buffer
