@@ -552,7 +552,7 @@ polling), which was complex and redundant. Phase 6B collapsed this into a
 |---|---|
 | Three-channel fallback chain (localhost → clipboard → server polling) | **Single canonical channel:** app-group UserDefaults |
 | `/state` and `/result` localhost endpoints | Localhost serves `/health` and `/logs` only |
-| Clipboard transport (`org.ritoras.dictation` UTI on `UIPasteboard.general`) | **Removed** |
+| Clipboard-based dictation transport | **Removed** |
 | `POST /dictation_result` + `GET /dictation_result/latest` | **Removed** (client-side) |
 | `com.ritoras.dictationCompleted` notification | **Deleted** (was premature) |
 | Wall-clock timestamp dedup (`ritoras_last_ts`) | **Deleted** — now id-based (`ritoras_last_pid`) |

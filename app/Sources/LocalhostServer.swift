@@ -11,6 +11,7 @@ final class LocalhostServer {
     }
 
     private let port: UInt16
+    private let authorizationToken: String
     private let listenerLock = NSLock()
     private var _listener: NWListener?
     private var listener: NWListener? {
@@ -36,6 +37,7 @@ final class LocalhostServer {
     /// deterministically; otherwise cancelling the listener orphans them and
     /// the keyboard's URLSession continuation may resume twice (SIGTRAP).
     private var activeConnections: [NWConnection] = []
+    private var hasLoggedAuthenticationRejection = false
 
     /// The port the listener is actually bound to. Equals `port` when a fixed
     /// port was given; differs when port 0 was passed (OS-assigned).
@@ -59,9 +61,12 @@ final class LocalhostServer {
     }
 
     private static let maxRequestSize = 65536
+    private static let maxActiveConnections = 16
+    private static let idleConnectionTimeout: TimeInterval = 30
 
     init(port: UInt16, onStop: (() async -> Void)? = nil, onCancel: ((UUID) async -> Void)? = nil, onState: (() -> DictationPayload?)? = nil) {
         self.port = port
+        self.authorizationToken = SharedConfig.prepareLocalhostAuthorizationToken()
         self.onStop = onStop
         self.onCancel = onCancel
         self.onState = onState
@@ -211,9 +216,11 @@ final class LocalhostServer {
 
     // MARK: - Connection Handling
 
-    private func registerConnection(_ connection: NWConnection) {
+    private func registerConnection(_ connection: NWConnection) -> Bool {
         listenerLock.lock(); defer { listenerLock.unlock() }
+        guard activeConnections.count < Self.maxActiveConnections else { return false }
         activeConnections.append(connection)
+        return true
     }
 
     private func unregisterConnection(_ connection: NWConnection) {
@@ -227,18 +234,51 @@ final class LocalhostServer {
             label: "com.ritoras.localhostserver.conn.\(connectionTag)",
             qos: .utility
         )
-        connection.start(queue: connQueue)
+        guard registerConnection(connection) else {
+            connection.cancel()
+            FileLogger.shared.debug(.network, "LocalhostServer: connection cap reached")
+            return
+        }
 
-        registerConnection(connection)
+        connection.start(queue: connQueue)
         FileLogger.shared.debug(.network, "LocalhostServer: connection accepted", payload: ["connection": connectionTag])
 
         var requestData = Data()
+        var isClosed = false
+        var authorizationChecked = false
+        var idleTimeoutWorkItem: DispatchWorkItem?
+
+        func resetIdleTimeout() {
+            idleTimeoutWorkItem?.cancel()
+            let timeoutWorkItem = DispatchWorkItem { [weak self] in
+                guard let self, !isClosed else { return }
+                isClosed = true
+                self.unregisterConnection(connection)
+                FileLogger.shared.debug(.network, "LocalhostServer: idle connection timed out",
+                                        payload: ["connection": connectionTag])
+                connection.cancel()
+            }
+            idleTimeoutWorkItem = timeoutWorkItem
+            connQueue.asyncAfter(
+                deadline: .now() + Self.idleConnectionTimeout,
+                execute: timeoutWorkItem
+            )
+        }
+
+        func send(_ response: Data) {
+            guard !isClosed else { return }
+            isClosed = true
+            idleTimeoutWorkItem?.cancel()
+            idleTimeoutWorkItem = nil
+            self.sendResponse(response, on: connection, connectionTag: connectionTag)
+        }
 
         func readNext() {
             let remaining = Self.maxRequestSize - requestData.count
             guard remaining > 0 else {
-                let response = handleRequest(data: requestData, connectionTag: connectionTag)
-                sendResponse(response, on: connection, connectionTag: connectionTag)
+                if let response = handleRequest(data: requestData, connectionTag: connectionTag) {
+                    send(response)
+                }
                 return
             }
 
@@ -246,6 +286,10 @@ final class LocalhostServer {
                 guard let self = self else { return }
 
                 if let error = error {
+                    guard !isClosed else { return }
+                    isClosed = true
+                    idleTimeoutWorkItem?.cancel()
+                    idleTimeoutWorkItem = nil
                     FileLogger.shared.debug(.network, "LocalhostServer: receive error",
                                            payload: ["error": error.localizedDescription])
                     self.unregisterConnection(connection)
@@ -256,19 +300,34 @@ final class LocalhostServer {
 
                 if let data = data {
                     requestData.append(data)
+                    if !data.isEmpty { resetIdleTimeout() }
+                }
+
+                if !authorizationChecked, Self.findHeaderEnd(requestData) != nil {
+                    authorizationChecked = true
+                    if let response = self.handleRequest(
+                        data: requestData,
+                        connectionTag: connectionTag,
+                        authenticateOnly: true
+                    ) {
+                        send(response)
+                        return
+                    }
                 }
 
                 // Body-completeness check: if headers are done and we have enough
                 // body bytes, process the request. Otherwise keep reading.
                 if Self.isRequestComplete(requestData) || isComplete || requestData.count >= Self.maxRequestSize {
-                    let response = self.handleRequest(data: requestData, connectionTag: connectionTag)
-                    self.sendResponse(response, on: connection, connectionTag: connectionTag)
+                    if let response = self.handleRequest(data: requestData, connectionTag: connectionTag) {
+                        send(response)
+                    }
                 } else {
                     readNext()
                 }
             }
         }
 
+        resetIdleTimeout()
         readNext()
     }
 
@@ -327,7 +386,11 @@ final class LocalhostServer {
 
     // MARK: - Request Handling
 
-    private func handleRequest(data: Data, connectionTag: String) -> Data {
+    private func handleRequest(
+        data: Data,
+        connectionTag: String,
+        authenticateOnly: Bool = false
+    ) -> Data? {
         // Locate header terminator via findHeaderEnd (works on raw Data)
         guard let headerEndOffset = Self.findHeaderEnd(data) else {
             return Self.makeJSONResponse(status: 400, body: ["error": "Bad Request", "detail": "Missing header terminator"])
@@ -340,6 +403,12 @@ final class LocalhostServer {
         }
 
         let lines = headerStr.components(separatedBy: "\r\n")
+
+        guard Self.headerValue(named: "Authorization", in: lines) == "Bearer \(authorizationToken)" else {
+            logAuthenticationRejection(connectionTag: connectionTag)
+            return Self.makeJSONResponse(status: 401, body: ["error": "unauthorized"])
+        }
+        guard !authenticateOnly else { return nil }
 
         // Parse request line: METHOD path HTTP/1.1
         guard let requestLine = lines.first else {
@@ -372,6 +441,33 @@ final class LocalhostServer {
         }
 
         return handleRoute(rawPath)
+    }
+
+    private func logAuthenticationRejection(connectionTag: String) {
+        listenerLock.lock()
+        let isFirstRejection = !hasLoggedAuthenticationRejection
+        hasLoggedAuthenticationRejection = true
+        listenerLock.unlock()
+
+        if isFirstRejection {
+            FileLogger.shared.warn(.network, "LocalhostServer: unauthorized request",
+                                   payload: ["connection": connectionTag])
+        } else {
+            FileLogger.shared.debug(.network, "LocalhostServer: unauthorized request",
+                                    payload: ["connection": connectionTag])
+        }
+    }
+
+    private static func headerValue(named name: String, in lines: [String]) -> String? {
+        for line in lines.dropFirst() {
+            let parts = line.split(separator: ":", maxSplits: 1)
+            guard parts.count == 2,
+                  parts[0].trimmingCharacters(in: .whitespaces).lowercased() == name.lowercased() else {
+                continue
+            }
+            return parts[1].trimmingCharacters(in: .whitespaces)
+        }
+        return nil
     }
 
     // MARK: - Routing
@@ -469,13 +565,18 @@ final class LocalhostServer {
             }
         }
 
-        if let requestedID, let recordID, requestedID != recordID {
+        let requestedIDMatchesActive = requestedID != nil && requestedID == activeSessionID
+        if requestedIDMatchesActive {
+            if let recordID, recordID != requestedID {
+                SharedConfig.clearPendingDictationCancel(matching: recordID)
+            }
+        } else if let requestedID, let recordID, requestedID != recordID {
             return cancelMismatchResponse(requestedID: requestedID,
                                          recordID: recordID,
                                          activeID: activeSessionID)
         }
 
-        let targetID = recordID ?? requestedID ?? activeSessionID
+        let targetID = requestedIDMatchesActive ? requestedID : recordID ?? requestedID ?? activeSessionID
         if let targetID, let activeSessionID, targetID != activeSessionID {
             return cancelMismatchResponse(requestedID: requestedID,
                                          recordID: recordID,
@@ -534,6 +635,7 @@ final class LocalhostServer {
         case 400: statusLine = "HTTP/1.1 400 Bad Request"
         case 404: statusLine = "HTTP/1.1 404 Not Found"
         case 405: statusLine = "HTTP/1.1 405 Method Not Allowed"
+        case 401: statusLine = "HTTP/1.1 401 Unauthorized"
         case 503: statusLine = "HTTP/1.1 503 Service Unavailable"
         default:  statusLine = "HTTP/1.1 \(status)"
         }

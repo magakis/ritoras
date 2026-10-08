@@ -167,6 +167,10 @@ struct SharedConfig {
         static let learnedWordsPasteboardType = "com.ritoras.learnedwords"
         static let darwinLearnedWordsChangedNotificationName = "com.ritoras.learnedWordsChanged"
         static let localhostServerPort: UInt16 = 47321
+        static let localhostAuthTokenKey = "localhost.authToken"
+        /// Shared by the app and keyboard when SideStore cannot expose the app group.
+        static let localhostFallbackAuthToken =
+            "55c65d1b44753f3d86f279b14f1731ff11f301fe1a05cdcd51c2038def38b781"
         static let dictationPayloadKey = "dictation.payload"
         static let dictationCancelKey = "dictation.cancel"
         /// How long a terminal `.cancelled` payload stays in the localhost /state
@@ -1357,6 +1361,35 @@ struct SharedConfig {
             defaults.removeObject(forKey: Defaults.dictationCancelKey)
             return
         }
+    }
+
+    /// Creates and publishes the localhost token for this container-app launch.
+    /// SideStore's unavailable app-group container uses the shared build token so
+    /// localhost IPC remains usable when no cross-process storage is available.
+    static func prepareLocalhostAuthorizationToken() -> String {
+        guard AppGroupResolver.shared.containerAvailable,
+              let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.localhostFallbackAuthToken
+        }
+
+        var generator = SystemRandomNumberGenerator()
+        let token = (0..<16).map { _ in
+            String(format: "%02x", UInt8.random(in: 0...255, using: &generator))
+        }.joined()
+        defaults.set(token, forKey: Defaults.localhostAuthTokenKey)
+        return token
+    }
+
+    /// Resolves the localhost token from the shared suite, or uses the same
+    /// build-time fallback as the server when the app-group container is absent.
+    static func localhostAuthorizationToken() -> String {
+        guard AppGroupResolver.shared.containerAvailable,
+              let defaults = UserDefaults(suiteName: Defaults.appGroupId),
+              let token = defaults.string(forKey: Defaults.localhostAuthTokenKey),
+              !token.isEmpty else {
+            return Defaults.localhostFallbackAuthToken
+        }
+        return token
     }
 
     // MARK: - Snapshot file channel (cfprefsd-bypass fast path)

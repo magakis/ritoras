@@ -51,6 +51,26 @@ enum LocalhostClient {
         _testSession ?? session
     }
 
+    private static func authorizedRequest(from request: URLRequest) -> URLRequest {
+        var request = request
+        request.setValue(
+            "Bearer \(SharedConfig.localhostAuthorizationToken())",
+            forHTTPHeaderField: "Authorization"
+        )
+        return request
+    }
+
+    private static func authorizedData(for request: URLRequest) async throws -> (Data, URLResponse) {
+        let firstResponse = try await activeSession.data(for: authorizedRequest(from: request))
+        guard (firstResponse.1 as? HTTPURLResponse)?.statusCode == 401 else {
+            return firstResponse
+        }
+
+        // The app may have relaunched with a fresh per-launch token since the
+        // keyboard last resolved the app-group value.
+        return try await activeSession.data(for: authorizedRequest(from: request))
+    }
+
     // MARK: - Port
 
     private static var baseURL: URL {
@@ -69,7 +89,7 @@ enum LocalhostClient {
         request.httpMethod = "GET"
 
         do {
-            let (_, response) = try await activeSession.data(for: request)
+            let (_, response) = try await authorizedData(for: request)
             guard let httpResponse = response as? HTTPURLResponse else { return false }
             return httpResponse.statusCode == 200
         } catch {
@@ -92,7 +112,7 @@ enum LocalhostClient {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         do {
-            let (data, response) = try await activeSession.data(for: request)
+            let (data, response) = try await authorizedData(for: request)
             guard let httpResponse = response as? HTTPURLResponse else { return .unreachable }
             switch httpResponse.statusCode {
             case 200:
@@ -130,7 +150,7 @@ enum LocalhostClient {
             encoder.dateEncodingStrategy = .iso8601
             let body = try encoder.encode(["entries": entries])
             request.httpBody = body
-            _ = try await activeSession.data(for: request)
+            _ = try await authorizedData(for: request)
         } catch {
             // Swallow — log shipping is best-effort
         }
@@ -172,7 +192,7 @@ enum LocalhostClient {
             request.httpBody = body
         }
         do {
-            let (_, response) = try await activeSession.data(for: request)
+            let (_, response) = try await authorizedData(for: request)
             guard let httpResponse = response as? HTTPURLResponse else { return false }
             let success = httpResponse.statusCode >= 200 && httpResponse.statusCode < 300
             if !success {

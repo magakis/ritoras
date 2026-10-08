@@ -957,7 +957,12 @@ final class DictationViewModel: ObservableObject {
             ])
 
             let audioURL = await recorder.stopRecording()
-            guard canContinueSession(id) else { return }
+            guard canContinueSession(id) else {
+                if SharedConfig.pendingDictationCancel()?.id == id {
+                    await cancel(expectedID: id)
+                }
+                return
+            }
 
             guard let url = audioURL else {
                 UIApplication.shared.isIdleTimerDisabled = false
@@ -1134,7 +1139,13 @@ final class DictationViewModel: ObservableObject {
             // Signal recording done and drain queue
             await sessionRecorder?.stop()
 
-            guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+            guard canContinueSession(id) else {
+                endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id)
+                if SharedConfig.pendingDictationCancel()?.id == id {
+                    await cancel(expectedID: id)
+                }
+                return
+            }
             vadState = nil
             lastVADPublishTime = nil
             lastPublishedVADState = nil
@@ -1330,7 +1341,6 @@ final class DictationViewModel: ObservableObject {
 
         do {
             let text = try await transcribeSavedAudio(jobId: jobId)
-            handleRetrySuccess(text: text, jobId: jobId)
             return text
         } catch is RetryAlreadyInFlight {
             // Skip — a concurrent retry for this job is already in flight.
@@ -1346,25 +1356,6 @@ final class DictationViewModel: ObservableObject {
     }
 
     // MARK: - Retry Helpers
-
-    /// Handles a successful retry: delivers the transcript to the clipboard.
-    /// History persistence and audio/record cleanup happen inside
-    /// `transcribeSavedAudio`.
-    private func handleRetrySuccess(text: String, jobId: UUID) {
-        // Deliver to clipboard — write directly since activeID is nil during recovery.
-        var payload: [String: Any] = [
-            "source": "ritoras",
-            "id": jobId.uuidString,
-            "status": "completed",
-            "text": text,
-            "timestamp": Date().timeIntervalSince1970,
-        ]
-        if let jsonData = try? JSONSerialization.data(withJSONObject: payload) {
-            UIPasteboard.general.setItems([
-                ["org.ritoras.dictation": jsonData, "public.utf8-plain-text": text]
-            ], options: [:])
-        }
-    }
 
     /// Handles a failed retry: logs the error and updates the record's
     /// errorMessage so RecoveryView / DictationView shows the latest error.

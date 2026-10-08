@@ -340,9 +340,17 @@ are available to the keyboard regardless of the container app's foreground state
   keyboard ultimately times out after 60 s.
 
 - **No SSL/TLS:** Localhost connections (health, state, commands, and log
-  shipping) are plain HTTP.
-  This is acceptable because the loopback interface is not accessible to other
-  processes without root, and iOS's ATS does not apply to `127.0.0.1`.
+  shipping) are plain HTTP, and iOS's ATS does not apply to `127.0.0.1`.
+  Loopback is reachable by other co-installed apps, so every route requires a
+  bearer token in the `Authorization` header. When `AppGroupResolver` confirms
+  the shared container is available, the app generates a fresh 128-bit token
+  for each server launch and publishes it through app-group UserDefaults for
+  the keyboard to read. Under SideStore, where the container is unavailable,
+  both targets use the same build-time fallback token so localhost IPC remains
+  functional instead of rejecting every request. This token check is access
+  control, not transport confidentiality; localhost HTTP is not encrypted.
+- **Connection bounds:** The server closes a connection after 30 seconds without
+  received data and accepts at most 16 active connections at once.
 
 - **`extensionContext.open()` fragility:** The keyboard extension opens the
   container app via `extensionContext.open(ritoras://dictate?id=...)`. This API
