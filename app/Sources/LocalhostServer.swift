@@ -655,29 +655,4 @@ final class LocalhostServer {
         return data
     }
 
-    // MARK: - URL Parsing
-
-    private struct URLQueryItem {
-        let name: String
-        let value: String?
-    }
-
-    /// Splits a request path into the base path and parsed query parameters.
-    private static func parsePath(_ path: String) -> (path: String, query: [URLQueryItem]?) {
-        guard let questionIdx = path.firstIndex(of: "?") else {
-            return (path, nil)
-        }
-        let basePath = String(path[..<questionIdx])
-        let queryStr = String(path[path.index(after: questionIdx)...])
-
-        let items = queryStr.split(separator: "&").compactMap { pair -> URLQueryItem? in
-            let parts = pair.split(separator: "=", maxSplits: 1)
-            let name = String(parts[0])
-            let value = parts.count > 1
-                ? (String(parts[1]).removingPercentEncoding ?? String(parts[1]))
-                : nil
-            return URLQueryItem(name: name, value: value)
-        }
-        return (basePath, items.isEmpty ? nil : items)
-    }
 }
