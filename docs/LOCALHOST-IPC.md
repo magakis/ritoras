@@ -254,8 +254,9 @@ responses close the connection. The server binds to loopback only.
 ### Curl examples
 
 ```bash
-curl http://127.0.0.1:47321/health
+curl -H "Authorization: Bearer <TOKEN>" http://127.0.0.1:47321/health
 # → {"status":"ok","port":47321}
+# Without Authorization, the server responds 401 and closes the connection.
 ```
 
 ---
@@ -347,8 +348,11 @@ are available to the keyboard regardless of the container app's foreground state
   for each server launch and publishes it through app-group UserDefaults for
   the keyboard to read. Under SideStore, where the container is unavailable,
   both targets use the same build-time fallback token so localhost IPC remains
-  functional instead of rejecting every request. This token check is access
-  control, not transport confidentiality; localhost HTTP is not encrypted.
+  functional instead of rejecting every request. Anyone with access to the
+  source or shipped IPA can recover it; it filters uninvited co-installed apps
+  but does not isolate against a holder of the artifact. This token check is
+  access control, not transport confidentiality; localhost HTTP is not
+  encrypted.
 - **Connection bounds:** The server closes a connection after 30 seconds without
   received data and accepts at most 16 active connections at once.
 
@@ -370,7 +374,8 @@ are available to the keyboard regardless of the container app's foreground state
 ### Test the health endpoint from the simulator host
 
 ```bash
-curl http://127.0.0.1:47321/health
+curl -H "Authorization: Bearer <TOKEN>" http://127.0.0.1:47321/health
+# Without Authorization, the server responds 401 and closes the connection.
 ```
 
 If the server is running, this returns `{"status":"ok","port":47321}`. If the

@@ -963,6 +963,8 @@ class KeyboardViewController: UIInputViewController {
                     if serverPollWorkItem != nil {
                         serverPollWorkItem?.cancel()
                         serverPollWorkItem = nil
+                        currentPollTask?.cancel()
+                        currentPollTask = nil
                         serverPollUnresponsiveCount = 0
                     }
 
@@ -1787,7 +1789,9 @@ class KeyboardViewController: UIInputViewController {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
 
             DispatchQueue.main.async {
-                guard self.completedResultAwaitingFocusID != id else { return }
+                guard self.pendingRequestId == id,
+                      self.serverPollWorkItem != nil,
+                      self.completedResultAwaitingFocusID != id else { return }
 
                 // 404 — job not found yet; keep polling.
                 if statusCode == 404 {
