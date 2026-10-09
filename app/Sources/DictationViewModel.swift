@@ -113,6 +113,7 @@ final class DictationViewModel: ObservableObject {
                 scheduleDurableCancellation(for: activeID)
                 return
             }
+            updateServerProbeRefreshTimer()
             let intermediatePublished = updateStateSnapshot()        // publish intermediate states first (app-group)
             let terminalPublished = storeTerminalResultIfNeeded()    // publish terminal result — BEFORE the post
             switch phase {
@@ -151,6 +152,10 @@ final class DictationViewModel: ObservableObject {
     /// is caught even when the app stays foregrounded (no scenePhase transition).
     private var healthCheckTimer: Timer?
     private static let healthCheckInterval: TimeInterval = 10.0
+    private var serverProbeRefreshTimer: Timer?
+    private var serverProbeRefreshTask: Task<Void, Never>?
+    private var serverProbeRefreshTaskID: UUID?
+    private var sceneIsActive = false
 
     /// Locked holder of the latest published snapshot, readable from the
     /// localhost server's background conn_queue without touching @MainActor state.
@@ -184,7 +189,8 @@ final class DictationViewModel: ObservableObject {
     private var lastPublishedVADState: StreamingVADFrameState?
 
     private var selectedServer: String?
-    private var serverSelectionTask: Task<String?, Never>?
+    private var serverSelectionTask: Task<ServerSelectionResult, Never>?
+    private var streamConnectGraceSessionID: UUID?
 
     // MARK: - Stream Chunk Queue
 
@@ -292,6 +298,73 @@ final class DictationViewModel: ObservableObject {
     private func stopHealthCheckTimer() {
         healthCheckTimer?.invalidate()
         healthCheckTimer = nil
+    }
+
+    func setSceneActive(_ isActive: Bool) {
+        sceneIsActive = isActive
+        updateServerProbeRefreshTimer()
+    }
+
+    private func isServerProbeRefreshEligible() -> Bool {
+        sceneIsActive || (activeID != nil && isActivePhase(phase))
+    }
+
+    private func updateServerProbeRefreshTimer() {
+        guard isServerProbeRefreshEligible() else {
+            serverProbeRefreshTimer?.invalidate()
+            serverProbeRefreshTimer = nil
+            serverProbeRefreshTaskID = nil
+            serverProbeRefreshTask?.cancel()
+            serverProbeRefreshTask = nil
+            return
+        }
+
+        guard serverProbeRefreshTimer == nil else { return }
+        serverProbeRefreshTimer = Timer.scheduledTimer(
+            withTimeInterval: SharedConfig.Defaults.serverProbeRefreshIntervalSeconds,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshServerProbeRanking()
+            }
+        }
+    }
+
+    private func refreshServerProbeRanking() {
+        guard isServerProbeRefreshEligible() else {
+            FileLogger.shared.debug(.network, "server selection refresher tick skipped", payload: [
+                "reason": "scene-inactive-and-no-active-dictation"
+            ])
+            return
+        }
+        guard serverProbeRefreshTask == nil else { return }
+        let servers = SharedConfig.load().servers
+        let refreshID = UUID()
+        serverProbeRefreshTaskID = refreshID
+        FileLogger.shared.debug(.network, "server selection refresher tick", payload: [
+            "serverCount": servers.count,
+            "sceneActive": sceneIsActive,
+            "dictationActive": activeID != nil && isActivePhase(phase)
+        ])
+
+        serverProbeRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.serverProbeRefreshTaskID == refreshID {
+                    self.serverProbeRefreshTaskID = nil
+                    self.serverProbeRefreshTask = nil
+                }
+            }
+
+            let selection = await WhisperClient.refreshServerRanking(servers: servers)
+            guard !Task.isCancelled,
+                  self.serverProbeRefreshTaskID == refreshID,
+                  let server = selection.server,
+                  selection.modelLoaded == false else { return }
+            Task.detached(priority: .utility) {
+                await WhisperClient.warmup(serverURL: server)
+            }
+        }
     }
 
     /// Publishes intermediate states (connecting, recording, transcribing, cancelled) to app-group snapshot.
@@ -530,9 +603,22 @@ final class DictationViewModel: ObservableObject {
             && SharedConfig.pendingDictationCancel()?.id != id
     }
 
+    private func canAttemptStreamConnection(
+        sessionID: UUID,
+        recorder: StreamingAudioRecorder
+    ) -> Bool {
+        guard !Task.isCancelled,
+              canContinueSession(sessionID),
+              streamRecorder === recorder else { return false }
+        return phase == .recording
+            || (phase == .transcribing && streamConnectGraceSessionID == sessionID)
+    }
 
     func start(id: UUID) async {
         clearChunkReviews()
+        serverSelectionTask?.cancel()
+        serverSelectionTask = nil
+        streamConnectGraceSessionID = nil
         SharedConfig.clearPendingDictationCancel(exceptSessionID: id)
         activeID = id
         earlyCancelledSessionID = nil
@@ -557,26 +643,38 @@ final class DictationViewModel: ObservableObject {
             "id": id.uuidString
         ])
 
-        // Kick off parallel health probe — runs in background while mic
-        // permission is checked and recording starts.
+        let mode = SharedConfig.dictationMode()
+
+        // Selection runs while microphone permission and recording setup proceed.
         let probeConfig = SharedConfig.load()
         serverSelectionTask = Task { [weak self] in
-            let selected = await WhisperClient.selectFirstHealthyServer(servers: probeConfig.servers)
+            let selection: ServerSelectionResult
+            if mode == .stream {
+                selection = await WhisperClient.selectStreamServer(servers: probeConfig.servers)
+            } else {
+                let selected = await WhisperClient.selectFirstHealthyServer(servers: probeConfig.servers)
+                selection = ServerSelectionResult(
+                    server: selected,
+                    modelLoaded: nil,
+                    usedPinnedServerPreflight: false
+                )
+            }
             await MainActor.run {
                 guard let self, self.activeID == id else { return }
-                self.setPinnedServer(selected, for: id)
+                self.setPinnedServer(selection.server, for: id)
             }
-            return selected
+            return selection
         }
 
-        let mode = SharedConfig.dictationMode()
         // Fire-and-forget model warm-up: batch mode only connects to the server
         // AFTER recording stops, so pre-load the engine now — the ~5 s load
         // overlaps with the user's speech. Stream mode already loads at WS connect.
         if mode != .stream {
             let selectionTask = serverSelectionTask
             Task.detached(priority: .utility) {
-                guard let selected = await selectionTask?.value, !selected.isEmpty else { return }
+                guard let selection = await selectionTask?.value,
+                      let selected = selection.server,
+                      !selected.isEmpty else { return }
                 await WhisperClient.warmup(serverURL: selected)
             }
         }
@@ -634,6 +732,8 @@ final class DictationViewModel: ObservableObject {
                     await newRecorder.cleanup()
                     return
                 }
+                serverSelectionTask?.cancel()
+                serverSelectionTask = nil
                 let message = error.localizedDescription
                 phase = .error(message)
             }
@@ -751,6 +851,8 @@ final class DictationViewModel: ObservableObject {
                     await recorder.stop()
                     return
                 }
+                serverSelectionTask?.cancel()
+                serverSelectionTask = nil
                 FileLogger.shared.error(.transcription, "Stream start error",
                                         payload: ["error": error.localizedDescription])
                 vadTelemetryWriter?.recordOutcome("aborted")
@@ -784,7 +886,8 @@ final class DictationViewModel: ObservableObject {
         recorder: StreamingAudioRecorder,
         servers: [String]
     ) async {
-        let probeResult = await serverSelectionTask?.value
+        let selection = await serverSelectionTask?.value
+        let probeResult = selection?.server
         let trimmedServers = servers
             .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
             .filter { !$0.isEmpty }
@@ -792,7 +895,7 @@ final class DictationViewModel: ObservableObject {
         let orderedServers: [String]
         if let selected = probeResult {
             let base = selected.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            if !base.isEmpty, servers.contains(selected) {
+            if !base.isEmpty, trimmedServers.contains(base) {
                 orderedServers = [base] + trimmedServers.filter { $0 != base }
             } else {
                 orderedServers = trimmedServers
@@ -801,10 +904,13 @@ final class DictationViewModel: ObservableObject {
             orderedServers = trimmedServers
         }
 
+        guard canAttemptStreamConnection(sessionID: sessionID, recorder: recorder) else { return }
+
         FileLogger.shared.info(.network, "Stream: server candidate order", payload: [
             "jobId": sessionID.uuidString,
             "server": orderedServers.first ?? "none",
-            "candidates": orderedServers
+            "candidates": orderedServers,
+            "pinnedServerPreflight": selection?.usedPinnedServerPreflight ?? false
         ])
 
         guard !orderedServers.isEmpty else {
@@ -820,8 +926,16 @@ final class DictationViewModel: ObservableObject {
             round += 1
             var attemptedCount = 0
             for server in orderedServers {
-                guard !Task.isCancelled else { return }
-                guard activeID == sessionID, streamRecorder === recorder, phase == .recording else { return }
+                guard canAttemptStreamConnection(sessionID: sessionID, recorder: recorder) else { return }
+                guard await WhisperClient.serverCircuitAllowsConnection(server) else {
+                    FileLogger.shared.debug(.network, "Stream: server skipped by breaker", payload: [
+                        "jobId": sessionID.uuidString,
+                        "server": server,
+                        "round": round
+                    ])
+                    continue
+                }
+                guard canAttemptStreamConnection(sessionID: sessionID, recorder: recorder) else { return }
 
                 let attemptStart = Date()
                 attemptedCount += 1
@@ -855,7 +969,7 @@ final class DictationViewModel: ObservableObject {
                                                      "attempt": attemptNumber,
                                                      "round": round,
                                                      "elapsed_ms": elapsed])
-                    guard !Task.isCancelled else {
+                    guard canAttemptStreamConnection(sessionID: sessionID, recorder: recorder) else {
                         FileLogger.shared.debug(.network, "Stream: connected client discarded as stale",
                                                 payload: ["jobId": sessionID.uuidString,
                                                           "server": server,
@@ -909,12 +1023,8 @@ final class DictationViewModel: ObservableObject {
         recorder: StreamingAudioRecorder,
         serverURL: String
     ) async {
-        // Accept .transcribing for an in-flight connection while stop() waits
-        // through the configured connect-grace window; identity checks and a nil
-        // client still protect this session.
-        guard activeID == sessionID,
-              streamRecorder === recorder,
-              (phase == .recording || phase == .transcribing),
+        // Accept a late client only while stop() is explicitly waiting for it.
+        guard canAttemptStreamConnection(sessionID: sessionID, recorder: recorder),
               streamClient == nil else {
             FileLogger.shared.debug(.network, "Stream: connected client discarded as stale",
                                     payload: ["jobId": sessionID.uuidString,
@@ -1073,7 +1183,8 @@ final class DictationViewModel: ObservableObject {
                     // during recording, so this is ~0s on the happy path. If no server was
                     // found, pass nil below so routeTranscription performs a fresh probe and
                     // fast connection failures are retried instead of aborting before upload.
-                    let chosenServer = await serverSelectionTask?.value
+                    let selection = await serverSelectionTask?.value
+                    let chosenServer = selection?.server
                     serverSelectionTask = nil
 
                     FileLogger.shared.info(.transcription, "upload start", payload: [
@@ -1183,6 +1294,7 @@ final class DictationViewModel: ObservableObject {
                 config: SharedConfig.load(),
                 recordingDurationSeconds: recordedDurationMs / 1000
             )
+            streamConnectGraceSessionID = streamClient == nil ? id : nil
             phase = .transcribing
             UIApplication.shared.isIdleTimerDisabled = false
 
@@ -1195,6 +1307,9 @@ final class DictationViewModel: ObservableObject {
 
             // Signal recording done and drain queue
             await sessionRecorder?.stop()
+            if streamClient != nil, streamConnectGraceSessionID == id {
+                streamConnectGraceSessionID = nil
+            }
 
             guard canContinueSession(id) else {
                 endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id)
@@ -1229,6 +1344,8 @@ final class DictationViewModel: ObservableObject {
                 let attachedDuringGrace = streamClient != nil
                 if !attachedDuringGrace {
                     streamConnectTask?.cancel()
+                    serverSelectionTask?.cancel()
+                    serverSelectionTask = nil
                 }
                 streamConnectTask = nil
                 let graceElapsedMs = Date().timeIntervalSince(connectGraceStart) * 1000
@@ -1243,6 +1360,7 @@ final class DictationViewModel: ObservableObject {
                     "outcome": attachedDuringGrace ? "attached" : "grace_exhausted",
                     "elapsed_ms": graceElapsedMs
                 ])
+                streamConnectGraceSessionID = nil
             }
 
             let canStream = streamClient != nil
@@ -1927,6 +2045,9 @@ final class DictationViewModel: ObservableObject {
               expectedID == nil || expectedID == id,
               cancellationInProgressID != id else { return }
         cancellationInProgressID = id
+        serverSelectionTask?.cancel()
+        serverSelectionTask = nil
+        streamConnectGraceSessionID = nil
         defer {
             if cancellationInProgressID == id {
                 cancellationInProgressID = nil
@@ -1992,8 +2113,6 @@ final class DictationViewModel: ObservableObject {
         guard activeID == id else { return }
         recorder = nil
 
-        serverSelectionTask?.cancel()
-        serverSelectionTask = nil
         selectedServer = nil
 
         guard activeID == id else { return }
@@ -2030,5 +2149,7 @@ final class DictationViewModel: ObservableObject {
 
     deinit {
         healthCheckTimer?.invalidate()
+        serverProbeRefreshTimer?.invalidate()
+        serverProbeRefreshTask?.cancel()
     }
 }

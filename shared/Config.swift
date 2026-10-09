@@ -485,9 +485,19 @@ struct SharedConfig {
         /// resolves an actual server; it is not a durable user preference.
         static let selectedServerKey = "selectedServer"
 
-        /// Per-server health-probe timeout. 5s balances false-negative risk on slow
+        /// Per-server health-probe timeout. 3s balances false-negative risk on slow
         /// LANs/Tailscale against the user's failure-tolerance for offline servers.
         static let serverProbeTimeoutSeconds: TimeInterval = 3.0
+        /// Maximum time a selection round waits before ranking the probes received so far.
+        static let serverProbeRoundDeadlineSeconds: TimeInterval = 0.5
+        /// Short authority check for the persisted best server at stream start.
+        static let serverProbePreflightDeadlineSeconds: TimeInterval = 0.5
+        /// Consecutive transport failures before opening a per-server circuit breaker.
+        static let serverProbeBreakerFailureThreshold: Int = 3
+        /// How long a server remains skipped after its circuit breaker opens.
+        static let serverProbeBreakerCooldownSeconds: TimeInterval = 600
+        /// Foreground / active-session server status refresh cadence.
+        static let serverProbeRefreshIntervalSeconds: TimeInterval = 15
         /// Maximum number of fast connection-failure attempts for one transcription.
         static let transcriptionAutoRetryMaxAttempts: Int = 3
         /// Delay between fast connection-failure transcription attempts.

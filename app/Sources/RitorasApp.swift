@@ -42,6 +42,7 @@ struct RitorasApp: App {
             .environmentObject(settings)
             .environmentObject(dictationViewModel)
             .task {
+                dictationViewModel.setSceneActive(scenePhase == .active)
                 // Request microphone permission from the container app.
                 // The keyboard extension CANNOT show this dialog without being dismissed.
                 if AVAudioSession.sharedInstance().recordPermission == .undetermined {
@@ -97,6 +98,7 @@ struct RitorasApp: App {
                 }
             }
             .onChange(of: scenePhase) { newPhase in
+                dictationViewModel.setSceneActive(newPhase == .active)
                 let phaseName: String
                 switch newPhase {
                 case .active:

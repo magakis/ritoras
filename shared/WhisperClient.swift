@@ -109,12 +109,22 @@ private struct ServerStatusResponse: Decodable {
     }
 }
 
+/// Keeps request failures distinct from deadline-driven probe cancellation.
+private enum ServerProbeCompletion: Sendable {
+    case response
+    case transportFailure
+    case invalidURL
+    case cancelled
+    case roundDeadlineCutoff
+}
+
 private struct ServerProbeOutcome: Sendable {
     let server: String
     let configuredIndex: Int
     let statusCode: Int?
     let modelLoaded: Bool?
     let roundTripTimeMilliseconds: Double
+    let completion: ServerProbeCompletion
 
     var isAuthenticated: Bool {
         guard let statusCode else { return false }
@@ -124,6 +134,209 @@ private struct ServerProbeOutcome: Sendable {
     var receivedResponse: Bool {
         statusCode != nil
     }
+
+    var isResponse: Bool {
+        if case .response = completion { return true }
+        return false
+    }
+}
+
+struct ServerSelectionResult: Sendable {
+    let server: String?
+    let modelLoaded: Bool?
+    let usedPinnedServerPreflight: Bool
+}
+
+private struct PersistedServerRankingEntry: Codable, Sendable {
+    let server: String
+    let modelLoaded: Bool?
+}
+
+private struct PersistedServerRanking: Codable, Sendable {
+    let timestamp: Date
+    let entries: [PersistedServerRankingEntry]
+}
+
+private struct ServerCircuitBreakerRecord: Codable, Sendable {
+    var consecutiveFailures: Int
+    var openUntil: Date?
+}
+
+private enum ServerProbeStateDefaults {
+    static let rankingKey = "ritoras.serverProbe.ranking.v1"
+    static let circuitBreakersKey = "ritoras.serverProbe.breakers.v1"
+}
+
+private enum ServerProbeStart: Sendable {
+    case ready
+    case halfOpen
+    case skipped(reason: String, openUntil: Date?)
+}
+
+private enum ServerProbeBreakerTransition: Sendable {
+    case opened(failures: Int, until: Date)
+    case reopened(failures: Int, until: Date)
+    case closed
+}
+
+private actor ServerProbeState {
+    static let shared = ServerProbeState()
+
+    private var breakerRecords: [String: ServerCircuitBreakerRecord] = [:]
+    private var halfOpenServers: Set<String> = []
+
+    private init() {
+        if let data = UserDefaults.standard.data(forKey: ServerProbeStateDefaults.circuitBreakersKey) {
+            do {
+                breakerRecords = try JSONDecoder().decode([String: ServerCircuitBreakerRecord].self, from: data)
+            } catch {
+                FileLogger.shared.warn(.network, "server breaker state decode failed", payload: [
+                    "error": error.localizedDescription
+                ])
+            }
+        }
+    }
+
+    func persistedBestServer(configuredServers: Set<String>) -> String? {
+        guard let data = UserDefaults.standard.data(forKey: ServerProbeStateDefaults.rankingKey) else { return nil }
+        do {
+            let ranking = try JSONDecoder().decode(PersistedServerRanking.self, from: data)
+            return ranking.entries.first(where: { configuredServers.contains($0.server) })?.server
+        } catch {
+            FileLogger.shared.warn(.network, "server ranking decode failed", payload: [
+                "error": error.localizedDescription
+            ])
+            return nil
+        }
+    }
+
+    func persistedRankingEntries() -> [PersistedServerRankingEntry] {
+        guard let data = UserDefaults.standard.data(forKey: ServerProbeStateDefaults.rankingKey) else { return [] }
+        do {
+            return try JSONDecoder().decode(PersistedServerRanking.self, from: data).entries
+        } catch {
+            FileLogger.shared.warn(.network, "server ranking decode failed", payload: [
+                "error": error.localizedDescription
+            ])
+            return []
+        }
+    }
+
+    func beginProbe(server: String) -> ServerProbeStart {
+        let breaker = breakerRecords[server]
+        if let openUntil = breaker?.openUntil, openUntil > Date() {
+            return .skipped(reason: "cooldown", openUntil: openUntil)
+        }
+
+        if breaker?.openUntil != nil {
+            guard !halfOpenServers.contains(server) else {
+                return .skipped(reason: "half-open-in-flight", openUntil: breaker?.openUntil)
+            }
+            halfOpenServers.insert(server)
+            return .halfOpen
+        }
+        return .ready
+    }
+
+    func finishProbe(
+        server: String,
+        completion: ServerProbeCompletion
+    ) -> ServerProbeBreakerTransition? {
+        let wasHalfOpen = halfOpenServers.remove(server) != nil
+
+        var breaker = breakerRecords[server] ?? ServerCircuitBreakerRecord(
+            consecutiveFailures: 0,
+            openUntil: nil
+        )
+        switch completion {
+        case .roundDeadlineCutoff, .cancelled, .invalidURL:
+            return nil
+        case .transportFailure:
+            if !wasHalfOpen, let openUntil = breaker.openUntil, openUntil > Date() {
+                return nil
+            }
+            breaker.consecutiveFailures += 1
+            if wasHalfOpen || breaker.consecutiveFailures >= SharedConfig.Defaults.serverProbeBreakerFailureThreshold {
+                let until = Date().addingTimeInterval(SharedConfig.Defaults.serverProbeBreakerCooldownSeconds)
+                breaker.consecutiveFailures = max(
+                    breaker.consecutiveFailures,
+                    SharedConfig.Defaults.serverProbeBreakerFailureThreshold
+                )
+                breaker.openUntil = until
+                breakerRecords[server] = breaker
+                persistBreakers()
+                return wasHalfOpen
+                    ? .reopened(failures: breaker.consecutiveFailures, until: until)
+                    : .opened(failures: breaker.consecutiveFailures, until: until)
+            }
+            breakerRecords[server] = breaker
+            persistBreakers()
+            return nil
+        case .response:
+            let recovered = breaker.consecutiveFailures > 0 || breaker.openUntil != nil
+            breaker.consecutiveFailures = 0
+            breaker.openUntil = nil
+            breakerRecords[server] = breaker
+            persistBreakers()
+            return recovered ? .closed : nil
+        }
+    }
+
+    func canConnect(server: String) -> Bool {
+        breakerRecords[server]?.openUntil == nil
+    }
+
+    func persistRanking(entries: [PersistedServerRankingEntry], timestamp: Date) {
+        guard !Task.isCancelled else {
+            FileLogger.shared.debug(.network, "server ranking persistence skipped after cancellation")
+            return
+        }
+        let ranking = PersistedServerRanking(timestamp: timestamp, entries: entries)
+        do {
+            let data = try JSONEncoder().encode(ranking)
+            guard !Task.isCancelled else {
+                FileLogger.shared.debug(.network, "server ranking persistence skipped after cancellation")
+                return
+            }
+            UserDefaults.standard.set(data, forKey: ServerProbeStateDefaults.rankingKey)
+        } catch {
+            FileLogger.shared.warn(.network, "server ranking persistence failed", payload: [
+                "error": error.localizedDescription
+            ])
+        }
+    }
+
+    private func persistBreakers() {
+        do {
+            let data = try JSONEncoder().encode(breakerRecords)
+            UserDefaults.standard.set(data, forKey: ServerProbeStateDefaults.circuitBreakersKey)
+        } catch {
+            FileLogger.shared.warn(.network, "server breaker state persistence failed", payload: [
+                "error": error.localizedDescription
+            ])
+        }
+    }
+}
+
+private struct ServerProbeCandidate: Sendable {
+    let server: String
+    let configuredIndex: Int
+}
+
+private struct ServerProbeRound: Sendable {
+    let selection: ServerSelectionResult
+    let outcomes: [String: ServerProbeOutcome]
+    let orderedServers: [String]
+    let responderCount: Int
+    let authenticatedResponderCount: Int
+    let deadlineExpired: Bool
+    let elapsedMilliseconds: Double
+}
+
+private enum ServerProbeRoundEvent: Sendable {
+    case probe(ServerProbeOutcome)
+    case deadline
+    case timerCancelled
 }
 
 // MARK: - Client
@@ -200,9 +413,8 @@ enum WhisperClient {
     /// async endpoint.
     ///
     /// When `preferredServer` is nil, all servers are probed concurrently.
-    /// Authenticated 2xx responders rank above non-2xx responders; within each
-    /// group, configured order breaks ties after the applicable score. Unreachable
-    /// candidates are ineligible.
+    /// Only authenticated 2xx responders are eligible; among them, loaded
+    /// models, lower RTT, then configured order determine preference.
     /// `onServerSelected` runs on the main actor after the actual submit server is resolved.
     static func routeTranscription(
         audioURL: URL,
@@ -332,64 +544,393 @@ enum WhisperClient {
         }
     }
 
-    /// Probes every configured server with authenticated GET /status and waits
-    /// for all probes to finish. Ranks authenticated 2xx responders above
-    /// non-2xx responders. Within 2xx, prefers a loaded model, lower RTT, then
-    /// configured order; non-2xx responders use configured order. Unreachable
-    /// candidates are ineligible; returns nil when none respond.
+    /// Probes configured servers concurrently and ranks authenticated 2xx
+    /// responses received before the round deadline. Prefers a loaded model,
+    /// lower RTT, then configured order.
     /// - Parameters:
     ///   - servers: Candidate server URLs in configured order.
     ///   - timeout: Per-server probe timeout (default from SharedConfig.Defaults).
-    /// - Returns: The highest-ranked server, or nil if all probes fail without a response.
+    /// - Returns: The highest-ranked authenticated server, or nil if none respond in time.
     static func selectFirstHealthyServer(
         servers: [String],
         timeout: TimeInterval = SharedConfig.Defaults.serverProbeTimeoutSeconds
     ) async -> String? {
+        let round = await probeServerRound(
+            servers: servers,
+            timeout: timeout,
+            deadline: SharedConfig.Defaults.serverProbeRoundDeadlineSeconds,
+            purpose: "selection"
+        )
+        logServerSelection(round, purpose: "selection")
+        if let server = round.selection.server, round.selection.modelLoaded == false {
+            Task {
+                await Self.warmup(serverURL: server)
+            }
+        }
+        return round.selection.server
+    }
+
+    /// Verifies the persisted best server before starting the full stream
+    /// selection round. A warm preflight result is authoritative for this start.
+    static func selectStreamServer(servers: [String]) async -> ServerSelectionResult {
+        let normalizedServers = servers.map(Self.normalizedServerURL).filter { !$0.isEmpty }
+        let configuredServers = Set(normalizedServers)
+        let preflightStartedAt = ProcessInfo.processInfo.systemUptime
+        guard let pinnedServer = await ServerProbeState.shared.persistedBestServer(
+            configuredServers: configuredServers
+        ) else {
+            FileLogger.shared.debug(.network, "server selection preflight", payload: [
+                "result": "miss",
+                "reason": "no-valid-persisted-ranking",
+                "elapsed_ms": max(0, (ProcessInfo.processInfo.systemUptime - preflightStartedAt) * 1000)
+            ])
+            let round = await probeServerRound(
+                servers: servers,
+                timeout: SharedConfig.Defaults.serverProbeTimeoutSeconds,
+                deadline: SharedConfig.Defaults.serverProbeRoundDeadlineSeconds,
+                purpose: "stream-selection"
+            )
+            logServerSelection(round, purpose: "stream-selection")
+            warmColdSelection(round.selection, excluding: nil)
+            return round.selection
+        }
+
+        let preflight = await probeServerRound(
+            servers: servers,
+            probeOnlyServers: [pinnedServer],
+            timeout: SharedConfig.Defaults.serverProbeTimeoutSeconds,
+            deadline: SharedConfig.Defaults.serverProbePreflightDeadlineSeconds,
+            purpose: "preflight"
+        )
+        guard !Task.isCancelled else {
+            return ServerSelectionResult(server: nil, modelLoaded: nil, usedPinnedServerPreflight: false)
+        }
+
+        let preflightOutcome = preflight.outcomes[pinnedServer]
+        let preflightHit = preflightOutcome?.statusCode == 200
+            && preflightOutcome?.isAuthenticated == true
+            && preflightOutcome?.modelLoaded == true
+        let preflightReason: String
+        if preflightHit {
+            preflightReason = "warm"
+        } else if preflightOutcome?.modelLoaded == false {
+            preflightReason = "cold"
+        } else if preflightOutcome == nil {
+            preflightReason = "unreachable-or-slow"
+        } else {
+            preflightReason = "not-authenticated-warm-200"
+        }
+        FileLogger.shared.debug(.network, "server selection preflight", payload: [
+            "server": pinnedServer,
+            "result": preflightHit ? "hit" : "miss",
+            "reason": preflightReason,
+            "elapsed_ms": preflight.elapsedMilliseconds
+        ])
+
+        if preflightHit {
+            let selection = ServerSelectionResult(
+                server: pinnedServer,
+                modelLoaded: true,
+                usedPinnedServerPreflight: true
+            )
+            FileLogger.shared.info(.network, "server selection pinned-server connect-direct", payload: [
+                "server": pinnedServer,
+                "elapsed_ms": preflight.elapsedMilliseconds
+            ])
+            FileLogger.shared.info(.network, "server selection", payload: [
+                "selected": pinnedServer,
+                "candidates": preflight.orderedServers,
+                "reason": "pinned-server-preflight",
+                "elapsed_ms": preflight.elapsedMilliseconds
+            ])
+            return selection
+        }
+
+        if preflightOutcome?.modelLoaded == false {
+            Task.detached(priority: .utility) {
+                await Self.warmup(serverURL: pinnedServer)
+            }
+        }
+
+        let round = await probeServerRound(
+            servers: servers,
+            timeout: SharedConfig.Defaults.serverProbeTimeoutSeconds,
+            deadline: SharedConfig.Defaults.serverProbeRoundDeadlineSeconds,
+            purpose: "stream-selection"
+        )
+        logServerSelection(round, purpose: "stream-selection")
+        warmColdSelection(round.selection, excluding: preflightOutcome?.modelLoaded == false ? pinnedServer : nil)
+        return round.selection
+    }
+
+    /// Runs the same bounded round used by selection and persists its ranking.
+    /// The app refresher handles warming a cold winner.
+    static func refreshServerRanking(servers: [String]) async -> ServerSelectionResult {
+        let round = await probeServerRound(
+            servers: servers,
+            timeout: SharedConfig.Defaults.serverProbeTimeoutSeconds,
+            deadline: SharedConfig.Defaults.serverProbeRoundDeadlineSeconds,
+            purpose: "refresh"
+        )
+        logServerSelection(round, purpose: "refresh")
+        return round.selection
+    }
+
+    /// Whether the connection loop should avoid a server until its half-open
+    /// status probe succeeds.
+    static func serverCircuitAllowsConnection(_ server: String) async -> Bool {
+        await ServerProbeState.shared.canConnect(server: normalizedServerURL(server))
+    }
+
+    private static func probeServerRound(
+        servers: [String],
+        probeOnlyServers: Set<String>? = nil,
+        timeout: TimeInterval,
+        deadline: TimeInterval,
+        purpose: String
+    ) async -> ServerProbeRound {
+        let roundStart = ProcessInfo.processInfo.systemUptime
+        let previousRanking = await ServerProbeState.shared.persistedRankingEntries()
+        var previousPositions: [String: Int] = [:]
+        var previousModelLoaded: [String: Bool] = [:]
+        for (index, entry) in previousRanking.enumerated() {
+            if previousPositions[entry.server] == nil {
+                previousPositions[entry.server] = index
+            }
+            if let modelLoaded = entry.modelLoaded {
+                previousModelLoaded[entry.server] = modelLoaded
+            }
+        }
         let candidates = servers.enumerated().compactMap { entry -> (index: Int, server: String)? in
-            let server = entry.element.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let server = normalizedServerURL(entry.element)
             guard !server.isEmpty else { return nil }
             return (index: entry.offset, server: server)
         }
-        guard !candidates.isEmpty else { return nil }
+        let probeCandidates = candidates.filter { candidate in
+            probeOnlyServers.map { $0.contains(candidate.server) } ?? true
+        }
 
-        let probeTasks = candidates.map { candidate in
-            Task.detached(priority: .utility) {
-                await Self.probeServerStatus(
-                    serverURL: candidate.server,
-                    configuredIndex: candidate.index,
-                    timeout: timeout
+        var activeCandidates: [ServerProbeCandidate] = []
+        for candidate in probeCandidates {
+            guard !Task.isCancelled else { break }
+            switch await ServerProbeState.shared.beginProbe(server: candidate.server) {
+            case .ready:
+                activeCandidates.append(ServerProbeCandidate(
+                    server: candidate.server,
+                    configuredIndex: candidate.index
+                ))
+            case .halfOpen:
+                activeCandidates.append(ServerProbeCandidate(
+                    server: candidate.server,
+                    configuredIndex: candidate.index
+                ))
+                FileLogger.shared.debug(.network, "server breaker half-open", payload: [
+                    "server": candidate.server
+                ])
+            case .skipped(let reason, let openUntil):
+                var payload: [String: Any] = ["server": candidate.server, "reason": reason]
+                if let openUntil {
+                    payload["cooldown_remaining_sec"] = max(0, openUntil.timeIntervalSinceNow)
+                }
+                FileLogger.shared.debug(.network, "server breaker skip", payload: payload)
+            }
+        }
+
+        if Task.isCancelled {
+            for candidate in activeCandidates {
+                _ = await ServerProbeState.shared.finishProbe(
+                    server: candidate.server,
+                    completion: .cancelled
                 )
             }
-        }
-        var outcomes: [ServerProbeOutcome] = []
-        outcomes.reserveCapacity(probeTasks.count)
-        for probeTask in probeTasks {
-            outcomes.append(await probeTask.value)
-        }
-        guard !Task.isCancelled else { return nil }
-
-        let respondingOutcomes = outcomes.filter(\.receivedResponse)
-        guard !respondingOutcomes.isEmpty else {
-            FileLogger.shared.info(.network, "server selection", payload: [
-                "selected": "none",
-                "candidates": candidates.map(\.server)
-            ])
-            return nil
+            return emptyProbeRound(servers: candidates.map(\.server), startedAt: roundStart)
         }
 
-        let winner = respondingOutcomes.min(by: Self.ranksBefore)
-        let selected = winner?.server
-        if let winner, winner.isAuthenticated, winner.modelLoaded == false {
-            Task {
-                await Self.warmup(serverURL: winner.server)
+        var outcomes: [String: ServerProbeOutcome] = [:]
+        var completedServers: Set<String> = []
+        var deadlineExpired = false
+        if !activeCandidates.isEmpty {
+            let deadlineNanoseconds = UInt64(max(0.001, deadline) * 1_000_000_000)
+            await withTaskGroup(of: ServerProbeRoundEvent.self) { group in
+                for candidate in activeCandidates {
+                    group.addTask {
+                        .probe(await probeServerStatus(
+                            serverURL: candidate.server,
+                            configuredIndex: candidate.configuredIndex,
+                            timeout: timeout
+                        ))
+                    }
+                }
+                group.addTask {
+                    do {
+                        try await Task.sleep(nanoseconds: deadlineNanoseconds)
+                        return .deadline
+                    } catch {
+                        return .timerCancelled
+                    }
+                }
+
+                var completedProbeCount = 0
+                while let event = await group.next() {
+                    switch event {
+                    case .probe(let outcome):
+                        completedProbeCount += 1
+                        completedServers.insert(outcome.server)
+                        let exceededDeadline = outcome.roundTripTimeMilliseconds > deadline * 1000
+                        if exceededDeadline {
+                            deadlineExpired = true
+                        }
+                        let breakerCompletion: ServerProbeCompletion
+                        if Task.isCancelled {
+                            breakerCompletion = .cancelled
+                        } else if deadlineExpired, case .cancelled = outcome.completion {
+                            breakerCompletion = .roundDeadlineCutoff
+                        } else {
+                            breakerCompletion = outcome.completion
+                        }
+                        let transition = await ServerProbeState.shared.finishProbe(
+                            server: outcome.server,
+                            completion: breakerCompletion
+                        )
+                        logBreakerTransition(transition, server: outcome.server)
+                        if case .roundDeadlineCutoff = breakerCompletion {
+                            FileLogger.shared.debug(.network, "server status probe excluded at round deadline", payload: [
+                                "server": outcome.server,
+                                "elapsed_ms": outcome.roundTripTimeMilliseconds
+                            ])
+                        }
+                        if !Task.isCancelled && !exceededDeadline && outcome.isResponse {
+                            outcomes[outcome.server] = outcome
+                        }
+                        if completedProbeCount == activeCandidates.count {
+                            group.cancelAll()
+                        }
+                    case .deadline:
+                        guard completedProbeCount < activeCandidates.count else { continue }
+                        deadlineExpired = true
+                        group.cancelAll()
+                    case .timerCancelled:
+                        break
+                    }
+                }
             }
         }
 
-        FileLogger.shared.info(.network, "server selection", payload: [
-            "selected": selected ?? "none",
-            "candidates": candidates.map(\.server)
+        if Task.isCancelled {
+            for candidate in activeCandidates where !completedServers.contains(candidate.server) {
+                _ = await ServerProbeState.shared.finishProbe(
+                    server: candidate.server,
+                    completion: .cancelled
+                )
+            }
+            return emptyProbeRound(servers: candidates.map(\.server), startedAt: roundStart)
+        }
+
+        if deadlineExpired {
+            FileLogger.shared.debug(.network, "server selection round deadline expired", payload: [
+                "round": purpose,
+                "deadline_ms": deadline * 1000,
+                "responders": outcomes.values.filter(\.receivedResponse).count,
+                "authenticatedResponders": outcomes.values.filter(\.isAuthenticated).count,
+                "candidateCount": activeCandidates.count
+            ])
+        }
+
+        let respondingOutcomes = outcomes.values.sorted(by: ranksBefore)
+        let nonRespondingCandidates = candidates.filter { outcomes[$0.server] == nil }.sorted { lhs, rhs in
+            let lhsPosition = previousPositions[lhs.server] ?? Int.max
+            let rhsPosition = previousPositions[rhs.server] ?? Int.max
+            return lhsPosition == rhsPosition
+                ? lhs.index < rhs.index
+                : lhsPosition < rhsPosition
+        }
+        let winner = outcomes.values.filter(\.isAuthenticated).min(by: ranksBefore)
+        let rankingEntries = respondingOutcomes.map {
+            PersistedServerRankingEntry(server: $0.server, modelLoaded: $0.modelLoaded)
+        } + nonRespondingCandidates.map { candidate in
+            PersistedServerRankingEntry(
+                server: candidate.server,
+                modelLoaded: previousModelLoaded[candidate.server]
+            )
+        }
+        guard !Task.isCancelled else {
+            return emptyProbeRound(servers: candidates.map(\.server), startedAt: roundStart)
+        }
+        await ServerProbeState.shared.persistRanking(entries: rankingEntries, timestamp: Date())
+        guard !Task.isCancelled else {
+            return emptyProbeRound(servers: candidates.map(\.server), startedAt: roundStart)
+        }
+
+        return ServerProbeRound(
+            selection: ServerSelectionResult(
+                server: winner?.server,
+                modelLoaded: winner?.modelLoaded,
+                usedPinnedServerPreflight: false
+            ),
+            outcomes: outcomes,
+            orderedServers: rankingEntries.map(\.server),
+            responderCount: outcomes.values.filter(\.receivedResponse).count,
+            authenticatedResponderCount: outcomes.values.filter(\.isAuthenticated).count,
+            deadlineExpired: deadlineExpired,
+            elapsedMilliseconds: max(0, (ProcessInfo.processInfo.systemUptime - roundStart) * 1000)
+        )
+    }
+
+    private static func emptyProbeRound(servers: [String], startedAt: TimeInterval) -> ServerProbeRound {
+        ServerProbeRound(
+            selection: ServerSelectionResult(server: nil, modelLoaded: nil, usedPinnedServerPreflight: false),
+            outcomes: [:],
+            orderedServers: servers,
+            responderCount: 0,
+            authenticatedResponderCount: 0,
+            deadlineExpired: false,
+            elapsedMilliseconds: max(0, (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+        )
+    }
+
+    private static func logServerSelection(_ round: ServerProbeRound, purpose: String) {
+        let level: LogLevel = purpose == "refresh" ? .debug : .info
+        FileLogger.shared.log(level, .network, "server selection", payload: [
+            "selected": round.selection.server ?? "none",
+            "candidates": round.orderedServers,
+            "round": purpose,
+            "responders": round.responderCount,
+            "authenticatedResponders": round.authenticatedResponderCount,
+            "deadlineExpired": round.deadlineExpired,
+            "elapsed_ms": round.elapsedMilliseconds
         ])
-        return selected
+    }
+
+    private static func logBreakerTransition(
+        _ transition: ServerProbeBreakerTransition?,
+        server: String
+    ) {
+        guard let transition else { return }
+        switch transition {
+        case .opened(let failures, let until):
+            FileLogger.shared.warn(.network, "server breaker open", payload: [
+                "server": server,
+                "consecutiveFailures": failures,
+                "cooldown_until": until.timeIntervalSince1970
+            ])
+        case .reopened(let failures, let until):
+            FileLogger.shared.warn(.network, "server breaker re-opened", payload: [
+                "server": server,
+                "consecutiveFailures": failures,
+                "cooldown_until": until.timeIntervalSince1970
+            ])
+        case .closed:
+            FileLogger.shared.info(.network, "server breaker closed", payload: ["server": server])
+        }
+    }
+
+    private static func warmColdSelection(_ selection: ServerSelectionResult, excluding: String?) {
+        guard let server = selection.server,
+              selection.modelLoaded == false,
+              server != excluding else { return }
+        Task.detached(priority: .utility) {
+            await Self.warmup(serverURL: server)
+        }
     }
 
     private static func probeServerStatus(
@@ -404,7 +945,8 @@ enum WhisperClient {
                 configuredIndex: configuredIndex,
                 statusCode: nil,
                 modelLoaded: nil,
-                roundTripTimeMilliseconds: 0
+                roundTripTimeMilliseconds: 0,
+                completion: .invalidURL
             )
             FileLogger.shared.debug(.network, "server status probe failed", payload: [
                 "server": serverURL,
@@ -429,12 +971,21 @@ enum WhisperClient {
                 statusPayload = nil
             }
             let elapsedMilliseconds = max(0, (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+            let completion: ServerProbeCompletion
+            if Task.isCancelled {
+                completion = .cancelled
+            } else if statusCode == nil {
+                completion = .transportFailure
+            } else {
+                completion = .response
+            }
             let outcome = ServerProbeOutcome(
                 server: serverURL,
                 configuredIndex: configuredIndex,
                 statusCode: statusCode,
                 modelLoaded: statusPayload?.modelLoaded,
-                roundTripTimeMilliseconds: elapsedMilliseconds
+                roundTripTimeMilliseconds: elapsedMilliseconds,
+                completion: completion
             )
             var payload: [String: Any] = [
                 "server": serverURL,
@@ -451,19 +1002,32 @@ enum WhisperClient {
             return outcome
         } catch {
             let elapsedMilliseconds = max(0, (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
-            FileLogger.shared.debug(.network, "server status probe failed", payload: [
-                "server": serverURL,
-                "elapsed_ms": elapsedMilliseconds,
-                "error": error.localizedDescription
-            ])
+            let cancelled = Task.isCancelled || (error as? URLError)?.code == .cancelled
+            if cancelled {
+                FileLogger.shared.debug(.network, "server status probe cancelled", payload: [
+                    "server": serverURL,
+                    "elapsed_ms": elapsedMilliseconds
+                ])
+            } else {
+                FileLogger.shared.debug(.network, "server status probe failed", payload: [
+                    "server": serverURL,
+                    "elapsed_ms": elapsedMilliseconds,
+                    "error": error.localizedDescription
+                ])
+            }
             return ServerProbeOutcome(
                 server: serverURL,
                 configuredIndex: configuredIndex,
                 statusCode: nil,
                 modelLoaded: nil,
-                roundTripTimeMilliseconds: elapsedMilliseconds
+                roundTripTimeMilliseconds: elapsedMilliseconds,
+                completion: cancelled ? .cancelled : .transportFailure
             )
         }
+    }
+
+    private static func normalizedServerURL(_ server: String) -> String {
+        server.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
     private static func ranksBefore(_ lhs: ServerProbeOutcome, _ rhs: ServerProbeOutcome) -> Bool {
@@ -690,7 +1254,7 @@ enum WhisperClient {
         ])
 
         // 1. Pick a server — use preferredServer if available and valid, otherwise
-        //    probe candidates in parallel and rank the completed outcomes.
+        //    probe candidates in parallel and rank responses within the round deadline.
         let serverURL: String
         if let preferredServer, config.servers.contains(preferredServer) {
             serverURL = preferredServer
