@@ -135,6 +135,8 @@ final class DictationViewModel: ObservableObject {
     @Published private(set) var vadState: StreamingVADFrameState?
     @Published private(set) var chunkDispatchCount = 0
     @Published private(set) var chunkReviews: [ChunkReviewRecord] = []
+    @Published private(set) var fallbackNotice: String?
+    @Published private(set) var currentResultUsedSavedAudioFallback = false
 
     // MARK: - Localhost Server (Phase 1)
 
@@ -623,6 +625,8 @@ final class DictationViewModel: ObservableObject {
         activeID = id
         earlyCancelledSessionID = nil
         returnToIdleDeadline = nil
+        fallbackNotice = nil
+        currentResultUsedSavedAudioFallback = false
         chunkAudioStore = ChunkAudioStore(sessionID: id)
         livePartial = ""
         vadState = nil
@@ -1413,8 +1417,10 @@ final class DictationViewModel: ObservableObject {
             let uploadT0 = Date()
 
             if queueDrained && canStream {
+                var didSendEndSuccessfully = false
                 do {
                     try await streamClient?.sendEnd()
+                    didSendEndSuccessfully = true
                     guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
                     FileLogger.shared.info(.network, "Stream: END sent, awaiting final from receive task",
                                            payload: ["jobId": id.uuidString,
@@ -1477,7 +1483,14 @@ final class DictationViewModel: ObservableObject {
                     phase = .cancelled
                 } catch {
                     guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
-                    handleStreamTerminalFailure(jobId: id, error: error.localizedDescription)
+                    let errorMessage = error.localizedDescription
+                    if didSendEndSuccessfully, !errorMessage.contains("send failed") {
+                        await recoverFromStreamTerminalFailure(
+                            jobId: id,
+                            error: errorMessage)
+                    } else {
+                        handleStreamTerminalFailure(jobId: id, error: errorMessage)
+                    }
                 }
             } else {
                 FileLogger.shared.debug(.network, "Stream: END not sent", payload: [
@@ -1679,7 +1692,10 @@ final class DictationViewModel: ObservableObject {
     /// entrypoint, and on success cleans up the audio file + failed-job record.
     /// Returns the transcribed text on success; throws on failure. Does NOT touch
     /// `phase` or `activeID` — callers own delivery.
-    private func transcribeSavedAudio(jobId: UUID) async throws -> String {
+    private func transcribeSavedAudio(
+        jobId: UUID,
+        recoveredViaFallback: Bool? = nil
+    ) async throws -> String {
         // Idempotency guard — prevent concurrent retries of the same job.
         // This stops programmatic retry loops dead regardless of their source.
         retryLock.lock()
@@ -1733,7 +1749,9 @@ final class DictationViewModel: ObservableObject {
                 recordingDurationSeconds: record.recordedDurationSeconds)
 
             // Add to persistent text history.
-            TranscriptionHistory.shared.add(text: text)
+            TranscriptionHistory.shared.add(
+                text: text,
+                recoveredViaFallback: recoveredViaFallback)
 
             // Clean up — delete audio file first, then remove the record.
             try? FileManager.default.removeItem(at: audioURL)
@@ -1760,6 +1778,8 @@ final class DictationViewModel: ObservableObject {
     func retryAsLiveDictation(jobId: UUID) async {
         activeID = jobId
         selectedServer = nil
+        fallbackNotice = nil
+        currentResultUsedSavedAudioFallback = false
         if let record = FailedJobStore.shared.list().first(where: { $0.jobId == jobId }) {
             selectedServer = record.server
             returnToIdleDeadline = makeReturnToIdleDeadline(
@@ -1957,12 +1977,78 @@ final class DictationViewModel: ObservableObject {
         }
     }
 
-    /// Consolidated terminal failure handler for stream dictation. Preserves the
-    /// WAV file in FailedJobStore, then delivers the error via the same multi-channel
-    /// path as a normal result (app-group snapshot + Darwin notification +
-    /// phase transition) per the retry-delivery-parity requirement.
+    /// Preserves failed stream audio, then delivers the error through the normal
+    /// terminal-result path.
     private func handleStreamTerminalFailure(jobId: UUID, error: String) {
-        guard activeID == jobId else { return }
+        guard let failure = preserveStreamFailure(jobId: jobId, error: error) else { return }
+        deliverStreamTerminalFailure(error: error, payload: failure.payload)
+    }
+
+    /// Uses the saved-audio retry path only after END was sent and the final-frame
+    /// await failed. The record is persisted before that retry can begin.
+    private func recoverFromStreamTerminalFailure(jobId: UUID, error: String) async {
+        guard let failure = preserveStreamFailure(jobId: jobId, error: error) else { return }
+        guard failure.classification == "terminal", failure.wavExists else {
+            deliverStreamTerminalFailure(error: error, payload: failure.payload)
+            return
+        }
+
+        fallbackNotice = "Stream ended unexpectedly. Recovering your recording…"
+        FileLogger.shared.warn(.transcription, "Stream terminal error; retrying saved audio", payload: [
+            "jobId": jobId.uuidString,
+            "error": error
+        ])
+
+        do {
+            let text = try await transcribeSavedAudio(
+                jobId: jobId,
+                recoveredViaFallback: true)
+            guard canContinueSession(jobId) else {
+                if activeID == jobId {
+                    fallbackNotice = nil
+                }
+                return
+            }
+            fallbackNotice = nil
+            currentResultUsedSavedAudioFallback = true
+            FileLogger.shared.info(.transcription, "Stream transcription recovered from saved audio", payload: [
+                "jobId": jobId.uuidString
+            ])
+            phase = .done(text)
+        } catch is RetryAlreadyInFlight {
+            return
+        } catch WhisperError.cancelled {
+            guard canContinueSession(jobId) else {
+                if activeID == jobId {
+                    fallbackNotice = nil
+                }
+                return
+            }
+            fallbackNotice = nil
+            vadTelemetryWriter?.recordOutcome("cancelled")
+            phase = .cancelled
+        } catch let fallbackError {
+            guard canContinueSession(jobId) else {
+                if activeID == jobId {
+                    fallbackNotice = nil
+                }
+                return
+            }
+            fallbackNotice = nil
+            FileLogger.shared.warn(.transcription, "Stream saved-audio fallback exhausted", payload: [
+                "jobId": jobId.uuidString,
+                "streamError": error,
+                "fallbackError": fallbackError.localizedDescription
+            ])
+            deliverStreamTerminalFailure(error: error, payload: failure.payload)
+        }
+    }
+
+    private func preserveStreamFailure(
+        jobId: UUID,
+        error: String
+    ) -> (classification: String, wavExists: Bool, payload: [String: Any])? {
+        guard activeID == jobId else { return nil }
         let classification = error.contains("send failed") ? "send" : "terminal"
 
         vadTelemetryWriter?.recordOutcome("stream-failed")
@@ -2017,8 +2103,12 @@ final class DictationViewModel: ObservableObject {
         if let wavSizeError {
             failurePayload["wavSizeError"] = String(wavSizeError.prefix(160))
         }
-        FileLogger.shared.error(.transcription, "Stream failure classified", payload: failurePayload)
 
+        return (classification, wavExists, failurePayload)
+    }
+
+    private func deliverStreamTerminalFailure(error: String, payload: [String: Any]) {
+        FileLogger.shared.error(.transcription, "Stream failure classified", payload: payload)
         phase = .error(error)
     }
 
