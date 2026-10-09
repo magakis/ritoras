@@ -3,7 +3,6 @@ import AVFoundation
 @main
 struct RitorasApp: App {
     @StateObject private var settings = AppSettings.shared
-    @AppStorage("onboardingCompleted") private var onboardingCompleted = false
     @StateObject private var dictationViewModel = DictationViewModel()
     @State private var dictationRequest: DictationRequest?
     @Environment(\.scenePhase) private var scenePhase
@@ -30,14 +29,8 @@ struct RitorasApp: App {
 
     var body: some Scene {
         WindowGroup {
-            Group {
-                if onboardingCompleted {
-                    NavigationStack {
-                        SettingsView()
-                    }
-                } else {
-                    OnboardingView(onboardingCompleted: $onboardingCompleted)
-                }
+            NavigationStack {
+                SettingsView()
             }
             .environmentObject(settings)
             .environmentObject(dictationViewModel)
