@@ -8,12 +8,14 @@ import UIKit
 /// @unchecked Sendable because all access is serialized via internal NSLock.
 final class ChunkSendQueue: @unchecked Sendable {
     private var chunks: [(UInt32, [Float])] = []
+    private var producedChunks = 0
     private var recordingActive = false
     private let lock = NSLock()
 
     func enqueue(id: UInt32, samples: [Float]) {
         lock.lock(); defer { lock.unlock() }
         chunks.append((id, samples))
+        producedChunks += 1
     }
 
     func dequeue() -> (UInt32, [Float])? {
@@ -24,6 +26,7 @@ final class ChunkSendQueue: @unchecked Sendable {
 
     var isEmpty: Bool { lock.lock(); defer { lock.unlock() }; return chunks.isEmpty }
     var depth: Int { lock.lock(); defer { lock.unlock() }; return chunks.count }
+    var producedCount: Int { lock.lock(); defer { lock.unlock() }; return producedChunks }
     var isRecordingActive: Bool { lock.lock(); defer { lock.unlock() }; return recordingActive }
 
     func setRecordingActive(_ value: Bool) {
@@ -35,12 +38,14 @@ final class ChunkSendQueue: @unchecked Sendable {
     func resetForNewRecording() {
         lock.lock(); defer { lock.unlock() }
         chunks.removeAll()
+        producedChunks = 0
     }
 
     /// Full reset including recordingActive (used by cancel).
     func clearAll() {
         lock.lock(); defer { lock.unlock() }
         chunks.removeAll()
+        producedChunks = 0
         recordingActive = false
     }
 }
@@ -796,13 +801,21 @@ final class DictationViewModel: ObservableObject {
             orderedServers = trimmedServers
         }
 
+        FileLogger.shared.info(.network, "Stream: server candidate order", payload: [
+            "jobId": sessionID.uuidString,
+            "server": orderedServers.first ?? "none",
+            "candidates": orderedServers
+        ])
+
         guard !orderedServers.isEmpty else {
-            FileLogger.shared.warn(.network, "Stream: no configured servers")
+            FileLogger.shared.warn(.network, "Stream: no configured servers",
+                                   payload: ["jobId": sessionID.uuidString, "server": "none"])
             return
         }
 
         var retryDelay: TimeInterval = 1.0
         var round = 0
+        var attemptNumber = 0
         while true {
             round += 1
             var attemptedCount = 0
@@ -812,18 +825,43 @@ final class DictationViewModel: ObservableObject {
 
                 let attemptStart = Date()
                 attemptedCount += 1
+                attemptNumber += 1
+                FileLogger.shared.debug(.network, "Stream: connect attempt", payload: [
+                    "jobId": sessionID.uuidString,
+                    "server": server,
+                    "attempt": attemptNumber,
+                    "round": round
+                ])
                 guard let candidate = WhisperStreamClient(baseURL: server, dictationID: sessionID) else {
                     let elapsed = Date().timeIntervalSince(attemptStart) * 1000
                     FileLogger.shared.debug(.network, "Stream: invalid server URL",
-                                            payload: ["server": server,
+                                            payload: ["jobId": sessionID.uuidString,
+                                                      "server": server,
                                                       "outcome": "failed",
-                                                      "latencyMs": elapsed])
+                                                      "attempt": attemptNumber,
+                                                      "round": round,
+                                                      "elapsed_ms": elapsed,
+                                                      "error": "Invalid server URL"])
                     continue
                 }
 
                 do {
                     try await candidate.connect()
+                    let elapsed = Date().timeIntervalSince(attemptStart) * 1000
+                    FileLogger.shared.info(.network, "Stream: server connect succeeded",
+                                           payload: ["jobId": sessionID.uuidString,
+                                                     "server": server,
+                                                     "outcome": "connected",
+                                                     "attempt": attemptNumber,
+                                                     "round": round,
+                                                     "elapsed_ms": elapsed])
                     guard !Task.isCancelled else {
+                        FileLogger.shared.debug(.network, "Stream: connected client discarded as stale",
+                                                payload: ["jobId": sessionID.uuidString,
+                                                          "server": server,
+                                                          "outcome": "discarded_as_stale",
+                                                          "attempt": attemptNumber,
+                                                          "round": round])
                         await candidate.disconnect()
                         return
                     }
@@ -833,28 +871,30 @@ final class DictationViewModel: ObservableObject {
                         }
                     }
                     setPinnedServer(server, for: sessionID)
-                    let elapsed = Date().timeIntervalSince(attemptStart) * 1000
-                    FileLogger.shared.debug(.network, "Stream: server connect succeeded",
-                                            payload: ["id": String(sessionID.uuidString.prefix(8)), "server": server,
-                                                      "outcome": "connected",
-                                                      "latencyMs": elapsed])
-                    await beginStreamingSession(client: candidate, sessionID: sessionID, recorder: recorder)
+                    await beginStreamingSession(
+                        client: candidate,
+                        sessionID: sessionID,
+                        recorder: recorder,
+                        serverURL: server)
                     return
                 } catch {
                     let elapsed = Date().timeIntervalSince(attemptStart) * 1000
                     FileLogger.shared.debug(.network, "Stream: server connect failed",
-                                            payload: ["id": String(sessionID.uuidString.prefix(8)), "server": server,
+                                            payload: ["jobId": sessionID.uuidString,
+                                                      "server": server,
                                                       "outcome": "failed",
-                                                      "latencyMs": elapsed,
-                                                      "error": error.localizedDescription,
-                                                      "attempt": attemptedCount,
+                                                      "elapsed_ms": elapsed,
+                                                      "error": String(error.localizedDescription.prefix(160)),
+                                                      "attempt": attemptNumber,
                                                       "round": round])
                     await candidate.disconnect()
                 }
             }
 
             FileLogger.shared.debug(.network, "Stream: connect round failed",
-                                    payload: ["id": String(sessionID.uuidString.prefix(8)), "round": round,
+                                    payload: ["jobId": sessionID.uuidString,
+                                              "server": orderedServers.first ?? "none",
+                                              "round": round,
                                               "attemptedCount": attemptedCount,
                                               "nextBackoffSeconds": retryDelay])
             try? await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
@@ -866,7 +906,8 @@ final class DictationViewModel: ObservableObject {
     private func beginStreamingSession(
         client: WhisperStreamClient,
         sessionID: UUID,
-        recorder: StreamingAudioRecorder
+        recorder: StreamingAudioRecorder,
+        serverURL: String
     ) async {
         // Accept .transcribing for an in-flight connection while stop() waits
         // through the configured connect-grace window; identity checks and a nil
@@ -875,6 +916,13 @@ final class DictationViewModel: ObservableObject {
               streamRecorder === recorder,
               (phase == .recording || phase == .transcribing),
               streamClient == nil else {
+            FileLogger.shared.debug(.network, "Stream: connected client discarded as stale",
+                                    payload: ["jobId": sessionID.uuidString,
+                                              "server": serverURL,
+                                              "outcome": "discarded_as_stale",
+                                              "activeSession": activeID == sessionID,
+                                              "recorderCurrent": streamRecorder === recorder,
+                                              "clientAlreadyAttached": streamClient != nil])
             await client.disconnect()
             return
         }
@@ -934,7 +982,9 @@ final class DictationViewModel: ObservableObject {
             Date().timeIntervalSince($0)
         } ?? 0
         FileLogger.shared.info(.network, "Stream: WebSocket connected",
-                               payload: ["backlogChunks": chunkSendQueue.depth,
+                               payload: ["jobId": sessionID.uuidString,
+                                         "server": serverURL,
+                                         "backlogChunks": chunkSendQueue.depth,
                                          "sinceRecordingStartSec": sinceRecordingStartSec])
     }
 
@@ -1114,7 +1164,14 @@ final class DictationViewModel: ObservableObject {
 
             guard let id = activeID else { return }
             let sessionRecorder = streamRecorder
-            let queueDepthAtStop = chunkSendQueue.depth
+            let clientAttachedAtStop = streamClient != nil
+            var connectGraceEntered = false
+            var connectGraceElapsedMs: Double?
+            FileLogger.shared.info(.network, "Stream: stop entered", payload: [
+                "jobId": id.uuidString,
+                "server": selectedServer ?? "none",
+                "clientAttachedAtStop": clientAttachedAtStop
+            ])
 
             let recordedDurationMs = recordingStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? 0
             FileLogger.shared.info(.transcription, "dictation stop (user requested)", payload: [
@@ -1150,13 +1207,19 @@ final class DictationViewModel: ObservableObject {
             lastVADPublishTime = nil
             lastPublishedVADState = nil
             chunkSendQueue.setRecordingActive(false)
+            let queueDepthAtStop = chunkSendQueue.depth
 
             if streamClient == nil {
+                connectGraceEntered = true
                 let connectGraceStart = Date()
                 let connectGraceTimeout = SharedConfig.Defaults.streamWsConnectTimeout
                 let connectGraceDeadline = connectGraceStart.addingTimeInterval(connectGraceTimeout)
-                FileLogger.shared.debug(.network, "Stream: waiting for connect during stop",
-                                        payload: ["timeoutSec": connectGraceTimeout])
+                FileLogger.shared.debug(.network, "Stream: connect grace started", payload: [
+                    "jobId": id.uuidString,
+                    "server": selectedServer ?? "none",
+                    "clientAttachedAtStop": clientAttachedAtStop,
+                    "timeout_sec": connectGraceTimeout
+                ])
                 while streamClient == nil && Date() < connectGraceDeadline {
                     try? await Task.sleep(nanoseconds: 200_000_000)
                     guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
@@ -1168,16 +1231,27 @@ final class DictationViewModel: ObservableObject {
                     streamConnectTask?.cancel()
                 }
                 streamConnectTask = nil
-                FileLogger.shared.debug(.network, "Stream: connect grace finished",
-                                        payload: ["attached": attachedDuringGrace,
-                                                  "elapsedMs": Date().timeIntervalSince(connectGraceStart) * 1000])
+                let graceElapsedMs = Date().timeIntervalSince(connectGraceStart) * 1000
+                connectGraceElapsedMs = graceElapsedMs
+                FileLogger.shared.log(attachedDuringGrace ? .info : .warn, .network,
+                                      "Stream: connect grace finished", payload: [
+                    "jobId": id.uuidString,
+                    "server": selectedServer ?? "none",
+                    "clientAttachedAtStop": clientAttachedAtStop,
+                    "graceEntered": true,
+                    "lateConnectionAttached": attachedDuringGrace,
+                    "outcome": attachedDuringGrace ? "attached" : "grace_exhausted",
+                    "elapsed_ms": graceElapsedMs
+                ])
             }
 
             let canStream = streamClient != nil
             var queueDrained = false
+            var queueDrainElapsedMs: Double?
             if canStream, let consumerTask = chunkConsumerTask {
                 guard activeID == id else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
 
+                let drainStart = Date()
                 let (drainEvents, drainContinuation) = AsyncStream<Bool>.makeStream()
                 let drainWaitTask = Task {
                     await consumerTask.value
@@ -1202,9 +1276,16 @@ final class DictationViewModel: ObservableObject {
                 drainWaitTask.cancel()
                 drainTimeoutTask.cancel()
                 guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
-                FileLogger.shared.info(.network, "Stream: backlog flushed",
-                                       payload: ["depth": queueDepthAtStop,
-                                                 "drained": queueDrained])
+                let drainElapsedMs = Date().timeIntervalSince(drainStart) * 1000
+                queueDrainElapsedMs = drainElapsedMs
+                FileLogger.shared.log(queueDrained ? .info : .warn, .network,
+                                      "Stream: backlog flushed", payload: [
+                    "jobId": id.uuidString,
+                    "server": selectedServer ?? "none",
+                    "depth": queueDepthAtStop,
+                    "drained": queueDrained,
+                    "elapsed_ms": drainElapsedMs
+                ])
             }
 
             guard activeID == id else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
@@ -1218,7 +1299,8 @@ final class DictationViewModel: ObservableObject {
                     try await streamClient?.sendEnd()
                     guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
                     FileLogger.shared.info(.network, "Stream: END sent, awaiting final from receive task",
-                                           payload: ["id": String(id.uuidString.prefix(8))])
+                                           payload: ["jobId": id.uuidString,
+                                                     "server": selectedServer ?? "none"])
 
                     FileLogger.shared.info(.transcription, "upload start", payload: [
                         "id": id.uuidString
@@ -1280,6 +1362,14 @@ final class DictationViewModel: ObservableObject {
                     handleStreamTerminalFailure(jobId: id, error: error.localizedDescription)
                 }
             } else {
+                FileLogger.shared.debug(.network, "Stream: END not sent", payload: [
+                    "jobId": id.uuidString,
+                    "server": selectedServer ?? "none",
+                    "sent": false,
+                    "result": "skipped",
+                    "reason": canStream ? "queue_drain_failed" : "no_client",
+                    "timestamp_ms": Date().timeIntervalSince1970 * 1000
+                ])
                 let message = canStream
                     ? "stream send failed — recording preserved for retry"
                     : "Could not connect to the server in time — recording preserved for retry"
@@ -1300,16 +1390,28 @@ final class DictationViewModel: ObservableObject {
             vadTelemetryWriter = nil
             chunkSentAt.removeAll()
 
-            FileLogger.shared.info(.network, "Stream: stop summary", payload: [
+            let producedChunks = chunkSendQueue.producedCount
+            let droppedOrOverflowedChunks = max(producedChunks - chunksSentThisSession, 0)
+            var stopSummary: [String: Any] = [
                 "id": id.uuidString,
+                "jobId": id.uuidString,
+                "server": selectedServer ?? "none",
                 "recordedDurationMs": recordedDurationMs,
+                "chunksProduced": producedChunks,
                 "chunksSent": chunksSentThisSession,
+                "chunksDroppedOrOverflowed": droppedOrOverflowedChunks,
                 "connectOutcome": canStream ? "connected" : "failed",
+                "clientAttachedAtStop": clientAttachedAtStop,
+                "connectGraceEntered": connectGraceEntered,
                 "queueDepthAtStop": queueDepthAtStop,
+                "queueDrainAttempted": queueDrainElapsedMs != nil,
                 "queueDrained": queueDrained,
                 "firstChunkSentMs": streamOffsetMs(from: firstChunkSentAt),
                 "firstPartialMs": streamOffsetMs(from: firstPartialReceivedAt)
-            ])
+            ]
+            stopSummary["connect_grace_elapsed_ms"] = connectGraceElapsedMs.map { $0 as Any } ?? NSNull()
+            stopSummary["queue_drain_elapsed_ms"] = queueDrainElapsedMs.map { $0 as Any } ?? NSNull()
+            FileLogger.shared.info(.network, "Stream: stop summary", payload: stopSummary)
         }
     }
 
@@ -1501,6 +1603,11 @@ final class DictationViewModel: ObservableObject {
 
         let config = SharedConfig.load()
         do {
+            FileLogger.shared.info(.network, "retry: preferred server from failed-job record", payload: [
+                "jobId": jobId.uuidString,
+                "server": record.server ?? "none",
+                "preferredServerSource": "failed-job-record"
+            ])
             let text = try await transcribeWithAutoRetry(
                 audioURL: audioURL, jobId: jobId, config: config,
                 correlationId: jobId, initialServer: record.server,
@@ -1738,13 +1845,29 @@ final class DictationViewModel: ObservableObject {
     /// phase transition) per the retry-delivery-parity requirement.
     private func handleStreamTerminalFailure(jobId: UUID, error: String) {
         guard activeID == jobId else { return }
-        FileLogger.shared.error(.transcription, "Stream failure classified", payload: ["id": String(jobId.uuidString.prefix(8)), "classification": error.contains("send failed") ? "send" : "terminal", "reason": String(error.prefix(120))])
+        let classification = error.contains("send failed") ? "send" : "terminal"
 
         vadTelemetryWriter?.recordOutcome("stream-failed")
 
         let wavURL = RecordingStore.shared.streamWavURL(for: jobId)
         let wavExists = wavURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        let wavSizeBytes: UInt64?
+        let wavSizeError: String?
+        if wavExists, let wavURL {
+            do {
+                let attributes = try FileManager.default.attributesOfItem(atPath: wavURL.path)
+                wavSizeBytes = attributes[.size] as? UInt64
+                wavSizeError = nil
+            } catch {
+                wavSizeBytes = nil
+                wavSizeError = error.localizedDescription
+            }
+        } else {
+            wavSizeBytes = nil
+            wavSizeError = nil
+        }
         let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
+        let savedServer = streamClient == nil ? nil : selectedServer
 
         if wavExists, let url = wavURL {
             FailedJobStore.shared.append(FailedJobRecord(
@@ -1755,8 +1878,28 @@ final class DictationViewModel: ObservableObject {
                 createdAt: Date(),
                 retryCount: 0,
                 lastRetriedAt: nil,
-                server: streamClient == nil ? nil : selectedServer))
+                server: savedServer))
         }
+
+        var failurePayload: [String: Any] = [
+            "jobId": jobId.uuidString,
+            "server": selectedServer ?? "none",
+            "classification": classification,
+            "reason": String(error.prefix(120)),
+            "savedServer": savedServer ?? "none",
+            "recordSaved": wavExists,
+            "wavPath": wavURL?.path ?? "none",
+            "wavExists": wavExists
+        ]
+        if let wavSizeBytes {
+            failurePayload["wavSizeBytes"] = wavSizeBytes
+        } else {
+            failurePayload["wavSizeBytes"] = NSNull()
+        }
+        if let wavSizeError {
+            failurePayload["wavSizeError"] = String(wavSizeError.prefix(160))
+        }
+        FileLogger.shared.error(.transcription, "Stream failure classified", payload: failurePayload)
 
         phase = .error(error)
     }

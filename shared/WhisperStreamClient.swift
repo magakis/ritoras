@@ -40,6 +40,7 @@ actor WhisperStreamClient {
     /// treated as evidence that the connection is alive, so this stays fresh while
     /// the server processes a long final.
     private var lastActivityDate: Date = .distantPast
+    private var endSentAt: Date?
 
     // MARK: - Initialization
 
@@ -53,7 +54,7 @@ actor WhisperStreamClient {
     ///   `"http://192.168.1.100:5000"`.
     /// - Returns: `nil` if the base URL cannot be parsed into a valid WebSocket URL.
     init?(baseURL: String, dictationID: UUID) {
-        self.dictationID = String(dictationID.uuidString.prefix(8))
+        self.dictationID = dictationID.uuidString
         var urlString = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 
         // Rewrite scheme: http → ws, https → wss
@@ -86,7 +87,7 @@ actor WhisperStreamClient {
         newTask.resume()
 
         FileLogger.shared.debug(.network, "Stream: connecting",
-                               payload: ["id": dictationID])
+                               payload: ["jobId": dictationID, "server": url.absoluteString])
 
         do {
             try await withThrowingTaskGroup(of: Void.self) { group in
@@ -100,7 +101,8 @@ actor WhisperStreamClient {
                             case .string(let text):
                                 if text.contains("PONG") {
                                     FileLogger.shared.info(.network, "Connected (PONG received)",
-                                                           payload: ["id": self.dictationID])
+                                                           payload: ["jobId": self.dictationID,
+                                                                     "server": self.url.absoluteString])
                                     return
                                 }
                                 // Unexpected message before PONG — ignore
@@ -193,11 +195,40 @@ actor WhisperStreamClient {
     /// `{"type":"END"}`.  The server will drain the worker and
     /// respond with a `final` transcription.
     func sendEnd() async throws {
+        let timestamp = Date()
         guard let task = task else {
+            FileLogger.shared.debug(.network, "Stream: END send result", payload: [
+                "jobId": dictationID,
+                "server": url.absoluteString,
+                "sent": false,
+                "result": "failed",
+                "timestamp_ms": timestamp.timeIntervalSince1970 * 1000,
+                "error": "WebSocket is not connected"
+            ])
             throw WhisperError.networkError(URLError(.notConnectedToInternet))
         }
-        try await task.send(.string(#"{"type":"END"}"#))
-        FileLogger.shared.info(.network, "Stream: END sent", payload: ["id": dictationID])
+        do {
+            try await task.send(.string(#"{"type":"END"}"#))
+            let sentAt = Date()
+            endSentAt = sentAt
+            FileLogger.shared.info(.network, "Stream: END send result", payload: [
+                "jobId": dictationID,
+                "server": url.absoluteString,
+                "sent": true,
+                "result": "sent",
+                "timestamp_ms": sentAt.timeIntervalSince1970 * 1000
+            ])
+        } catch {
+            FileLogger.shared.debug(.network, "Stream: END send result", payload: [
+                "jobId": dictationID,
+                "server": url.absoluteString,
+                "sent": false,
+                "result": "failed",
+                "timestamp_ms": timestamp.timeIntervalSince1970 * 1000,
+                "error": String(error.localizedDescription.prefix(160))
+            ])
+            throw error
+        }
     }
 
     /// Sends a keepalive ping (`{"type":"PING"}`).  The server's
@@ -243,6 +274,31 @@ actor WhisperStreamClient {
     func receiveMessages(
         onPartial: @escaping @Sendable (String) -> Void,
         onChunkResult: (@Sendable (UInt32, String) async -> Void)? = nil
+    ) async throws -> String {
+        do {
+            let transcription = try await receiveMessagesLoop(
+                onPartial: onPartial,
+                onChunkResult: onChunkResult)
+            let completedNormally = !Task.isCancelled
+            logReceiveTaskExit(
+                reason: completedNormally ? "normal_completion" : "cancellation",
+                finalFrameReceived: completedNormally,
+                serverErrorFrameReceived: false)
+            return transcription
+        } catch {
+            let reason = isReceiveCancellation(error) ? "cancellation" : "error"
+            logReceiveTaskExit(
+                reason: reason,
+                finalFrameReceived: false,
+                serverErrorFrameReceived: isServerErrorFrame(error),
+                error: error.localizedDescription)
+            throw error
+        }
+    }
+
+    private func receiveMessagesLoop(
+        onPartial: @escaping @Sendable (String) -> Void,
+        onChunkResult: (@Sendable (UInt32, String) async -> Void)?
     ) async throws -> String {
         guard let task = task else {
             throw WhisperError.networkError(URLError(.notConnectedToInternet))
@@ -290,14 +346,24 @@ actor WhisperStreamClient {
                                 case "final":
                                     let msg = try JSONDecoder().decode(
                                         StreamFinal.self, from: data)
+                                    let elapsedSinceEndMs = await self.elapsedSinceEndMs()
                                     if let chunkId = msg.chunk_id {
                                         await onChunkResult?(chunkId, msg.transcription)
                                     }
+                                    var payload: [String: Any] = [
+                                        "jobId": self.dictationID,
+                                        "server": self.url.absoluteString,
+                                        "preview": String(msg.transcription.prefix(60)),
+                                        "length": msg.transcription.count,
+                                        "chunkId": msg.chunk_id as Any
+                                    ]
+                                    if let elapsedSinceEndMs {
+                                        payload["elapsed_since_end_ms"] = elapsedSinceEndMs
+                                    } else {
+                                        payload["elapsed_since_end_ms"] = NSNull()
+                                    }
                                     FileLogger.shared.info(.network, "Received final",
-                                                           payload: ["id": self.dictationID,
-                                                                     "preview": String(msg.transcription.prefix(60)),
-                                                                      "length": msg.transcription.count,
-                                                                      "chunkId": msg.chunk_id as Any])
+                                                           payload: payload)
                                     return msg.transcription
 
                                 case "PONG":
@@ -308,9 +374,19 @@ actor WhisperStreamClient {
                                 case "error":
                                     let msg = try JSONDecoder().decode(
                                         StreamError.self, from: data)
+                                    let elapsedSinceEndMs = await self.elapsedSinceEndMs()
+                                    var payload: [String: Any] = [
+                                        "jobId": self.dictationID,
+                                        "server": self.url.absoluteString,
+                                        "reason": String(msg.message.prefix(120))
+                                    ]
+                                    if let elapsedSinceEndMs {
+                                        payload["elapsed_since_end_ms"] = elapsedSinceEndMs
+                                    } else {
+                                        payload["elapsed_since_end_ms"] = NSNull()
+                                    }
                                     FileLogger.shared.error(.network, "Stream: server error",
-                                                            payload: ["id": self.dictationID,
-                                                                      "reason": String(msg.message.prefix(120))])
+                                                            payload: payload)
                                     throw WhisperError.httpError(0, msg.message)
 
                                 default:
@@ -376,6 +452,68 @@ actor WhisperStreamClient {
             group.cancelAll()
             return result
         }
+    }
+
+    private func elapsedSinceEndMs() -> Double? {
+        guard let endSentAt else { return nil }
+        return Date().timeIntervalSince(endSentAt) * 1000
+    }
+
+    private func logReceiveTaskExit(
+        reason: String,
+        finalFrameReceived: Bool,
+        serverErrorFrameReceived: Bool,
+        error: String? = nil
+    ) {
+        var payload: [String: Any] = [
+            "jobId": dictationID,
+            "server": url.absoluteString,
+            "reason": reason,
+            "endSent": endSentAt != nil,
+            "finalFrameReceived": finalFrameReceived,
+            "serverErrorFrameReceived": serverErrorFrameReceived
+        ]
+        if let elapsedSinceEndMs = elapsedSinceEndMs() {
+            payload["elapsed_since_end_ms"] = elapsedSinceEndMs
+        } else {
+            payload["elapsed_since_end_ms"] = NSNull()
+        }
+        if let error {
+            payload["error"] = String(error.prefix(160))
+        }
+        FileLogger.shared.log(reason == "error" ? .debug : .info,
+                              .network,
+                              "Stream: receive task exited",
+                              payload: payload)
+    }
+
+    private func isServerErrorFrame(_ error: Error) -> Bool {
+        guard let whisperError = error as? WhisperError,
+              case .httpError = whisperError else {
+            return false
+        }
+        return true
+    }
+
+    private func isReceiveCancellation(_ error: Error) -> Bool {
+        if Task.isCancelled || error is CancellationError {
+            return true
+        }
+        if let urlError = error as? URLError, urlError.code == .cancelled {
+            return true
+        }
+        if let whisperError = error as? WhisperError {
+            switch whisperError {
+            case .cancelled:
+                return true
+            case .networkError(let underlying):
+                return underlying is CancellationError
+                    || (underlying as? URLError)?.code == .cancelled
+            default:
+                return false
+            }
+        }
+        return false
     }
 
     // MARK: - Disconnection
