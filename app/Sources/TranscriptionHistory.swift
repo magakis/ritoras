@@ -4,6 +4,7 @@ struct TranscriptionEntry: Identifiable, Codable {
     let id: UUID
     let text: String
     let timestamp: Date
+    let recoveredViaFallback: Bool?
 }
 
 class TranscriptionHistory: ObservableObject {
@@ -17,8 +18,12 @@ class TranscriptionHistory: ObservableObject {
         load()
     }
 
-    func add(text: String) {
-        let entry = TranscriptionEntry(id: UUID(), text: text, timestamp: Date())
+    func add(text: String, recoveredViaFallback: Bool? = nil) {
+        let entry = TranscriptionEntry(
+            id: UUID(),
+            text: text,
+            timestamp: Date(),
+            recoveredViaFallback: recoveredViaFallback)
         entries.insert(entry, at: 0)
         if entries.count > maxEntries {
             entries = Array(entries.prefix(maxEntries))

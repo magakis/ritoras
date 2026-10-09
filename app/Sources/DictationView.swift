@@ -243,6 +243,13 @@ struct DictationView: View {
             Text("Processing your recording")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
+
+            if let fallbackNotice = viewModel.fallbackNotice {
+                Text(fallbackNotice)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+            }
         }
     }
 
@@ -250,7 +257,10 @@ struct DictationView: View {
 
     private func doneContent(text: String) -> some View {
         VStack(spacing: 24) {
-            TranscriptionResultView(text: text) {
+            TranscriptionResultView(
+                text: text,
+                recoveredViaFallback: viewModel.currentResultUsedSavedAudioFallback
+            ) {
                 dismiss()
             }
 

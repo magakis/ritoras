@@ -17,6 +17,11 @@ struct HistoryView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(entry.text)
                                     .font(.body)
+                                if entry.recoveredViaFallback == true {
+                                    Text("Recovered from a stream failure using saved audio.")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
                                 Text(entry.timestamp, style: .date)
                                     .font(.caption)
                                     .foregroundColor(.secondary)

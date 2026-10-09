@@ -7,6 +7,7 @@ import UIKit
 /// Copy Text + Done actions.
 struct TranscriptionResultView: View {
     let text: String
+    var recoveredViaFallback = false
     var onDismiss: () -> Void
 
     var body: some View {
@@ -18,6 +19,13 @@ struct TranscriptionResultView: View {
             Text("Done!")
                 .font(.largeTitle)
                 .fontWeight(.bold)
+
+            if recoveredViaFallback {
+                Text("Recovered from a stream failure using saved audio.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+            }
 
             ScrollView {
                 Text(text)
