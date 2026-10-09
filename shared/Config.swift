@@ -331,9 +331,11 @@ struct SharedConfig {
         /// PING→PONG immediately, so this detects a dead server without false-timing-out
         /// a long transcription.
         static let streamHealthCheckInterval: TimeInterval = 5.0
-        /// Consecutive health-check intervals with no activity (PONG or partial) before
-        /// declaring the stream dead. 12 × 5s ≈ 60s tolerance for transient latency.
-        static let streamMaxMissedPongs: Int = 12
+        /// Consecutive health-check intervals without liveness evidence before timeout.
+        /// While recording, PONGs or partials reset the count because partials are
+        /// legitimate activity; after END, only PONGs reset it because the complete WAV
+        /// is preserved client-side, making an aggressive timeout safe. 3 × 5s ≈ 15s.
+        static let streamMaxMissedPongs: Int = 3
 
         /// Backoff intervals (seconds) between chunk send retries.
         /// The last value is the cap for all subsequent retries.

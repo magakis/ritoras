@@ -35,11 +35,10 @@ actor WhisperStreamClient {
     /// Periodic keepalive task that sends app-level PING frames while connected.
     private var keepaliveTask: Task<Void, Never>?
 
-    /// Last evidence the server is alive (PONG or partial received). Updated by the
-    /// receive loop; read by the liveness monitor. A PONG or partial response is
-    /// treated as evidence that the connection is alive, so this stays fresh while
-    /// the server processes a long final.
+    /// Last PONG or partial received; used as liveness evidence only while recording.
     private var lastActivityDate: Date = .distantPast
+    /// PONG-only liveness evidence, used after END has been sent.
+    private var lastPongDate: Date = .distantPast
     private var endSentAt: Date?
 
     // MARK: - Initialization
@@ -210,7 +209,9 @@ actor WhisperStreamClient {
         do {
             try await task.send(.string(#"{"type":"END"}"#))
             let sentAt = Date()
-            endSentAt = sentAt
+            if endSentAt == nil {
+                endSentAt = sentAt
+            }
             FileLogger.shared.info(.network, "Stream: END send result", payload: [
                 "jobId": dictationID,
                 "server": url.absoluteString,
@@ -242,12 +243,22 @@ actor WhisperStreamClient {
         FileLogger.shared.debug(.network, "Sent PING")
     }
 
-    /// Records that the server is alive. Called when a PONG or partial arrives.
+    /// Records activity that keeps the stream alive while recording.
     private func touchActivity() { lastActivityDate = Date() }
 
-    /// Seconds since the last sign of server life.
-    private func secondsSinceLastActivity() -> TimeInterval {
-        Date().timeIntervalSince(lastActivityDate)
+    /// Records a PONG for both recording and post-END liveness checks.
+    private func touchPong() {
+        lastPongDate = Date()
+        touchActivity()
+    }
+
+    /// Returns time since the evidence appropriate to the current stream phase.
+    private func livenessStatus() -> (endSent: Bool, secondsSinceEvidence: TimeInterval) {
+        let now = Date()
+        if let endSentAt {
+            return (true, now.timeIntervalSince(max(endSentAt, lastPongDate)))
+        }
+        return (false, now.timeIntervalSince(lastActivityDate))
     }
 
     // MARK: - Receiving
@@ -368,7 +379,7 @@ actor WhisperStreamClient {
 
                                 case "PONG":
                                     FileLogger.shared.debug(.network, "Received PONG")
-                                    await self.touchActivity()
+                                    await self.touchPong()
                                     continue
 
                                 case "error":
@@ -421,10 +432,8 @@ actor WhisperStreamClient {
                 }
             }
 
-            // Liveness monitor — replaces the hard wall-clock timeout. Sends PING every
-            // streamHealthCheckInterval and declares timeout only after streamMaxMissedPongs
-            // consecutive silent intervals. A busy server answers PING→PONG immediately, so
-            // this distinguishes "transcribing" (PONGs flow) from "dead" (silent).
+            // While recording, partials or PONGs count as activity. After END, only PONGs
+            // count because no more partials are expected.
             group.addTask { [self] in
                 let interval = SharedConfig.Defaults.streamHealthCheckInterval
                 let maxMissed = SharedConfig.Defaults.streamMaxMissedPongs
@@ -435,10 +444,16 @@ actor WhisperStreamClient {
                         return ""   // cancelled (final arrived / group torn down)
                     }
                     try? await self.sendPing()  // solicit a PONG
-                    let stale = await self.secondsSinceLastActivity()
-                    if stale > interval * Double(maxMissed) {
-                        FileLogger.shared.warn(.network, "Stream liveness: no activity, declaring timeout",
-                                               payload: ["id": self.dictationID, "staleSec": stale, "interval": interval, "maxMissedPongs": maxMissed])
+                    let status = await self.livenessStatus()
+                    if status.secondsSinceEvidence >= interval * Double(maxMissed) {
+                        let missingEvidence = status.endSent ? "PONG" : "activity"
+                        FileLogger.shared.warn(.network,
+                                               "Stream liveness: no \(missingEvidence), declaring timeout",
+                                               payload: ["id": self.dictationID,
+                                                         "staleSec": status.secondsSinceEvidence,
+                                                         "interval": interval,
+                                                         "maxMissedPongs": maxMissed,
+                                                         "endSent": status.endSent])
                         throw WhisperError.timeout
                     }
                 }
