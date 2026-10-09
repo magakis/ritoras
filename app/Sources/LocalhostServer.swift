@@ -490,11 +490,126 @@ final class LocalhostServer {
             return Self.makeJSONResponse(status: 200, body: payload)
 
         default:
-            return Self.makeJSONResponse(status: 404, body: [
-                "error": "not found",
-                "path": rawPath
+            let targetParts = rawPath.split(separator: "?", maxSplits: 1,
+                                            omittingEmptySubsequences: false)
+            guard let targetPath = targetParts.first,
+                  String(targetPath) == "/logs/export" else {
+                return Self.makeJSONResponse(status: 404, body: [
+                    "error": "not found",
+                    "path": rawPath
+                ])
+            }
+            let query: [String: String]
+            if targetParts.count == 2, let rawQuery = targetParts.last {
+                query = Self.parseQueryParameters(String(rawQuery))
+            } else {
+                query = [:]
+            }
+            return handleGetLogExport(query: query)
+        }
+    }
+
+    private static func parseQueryParameters(_ rawQuery: String) -> [String: String] {
+        var parameters: [String: String] = [:]
+        for pair in rawQuery.split(separator: "&", omittingEmptySubsequences: false) {
+            let separator = pair.firstIndex(of: "=")
+            let rawName = separator.map { String(pair[..<$0]) } ?? String(pair)
+            let rawValue = separator.map { String(pair[pair.index(after: $0)...]) } ?? ""
+            guard let name = rawName.removingPercentEncoding,
+                  let value = rawValue.removingPercentEncoding else {
+                continue
+            }
+            parameters[name] = value
+        }
+        return parameters
+    }
+
+    // MARK: - GET /logs/export
+
+    private func handleGetLogExport(query: [String: String]) -> Data {
+        guard let rawSinceNs = query["sinceNs"] else {
+            return Self.makeJSONResponse(status: 400, body: [
+                "error": "Missing required query parameter: sinceNs"
             ])
         }
+        guard let sinceNs = Int64(rawSinceNs) else {
+            return Self.makeJSONResponse(status: 400, body: [
+                "error": "sinceNs must be an integer Unix nanosecond timestamp"
+            ])
+        }
+        guard let rawUntilNs = query["untilNs"] else {
+            return Self.makeJSONResponse(status: 400, body: [
+                "error": "Missing required query parameter: untilNs"
+            ])
+        }
+        guard let untilNs = Int64(rawUntilNs) else {
+            return Self.makeJSONResponse(status: 400, body: [
+                "error": "untilNs must be an integer Unix nanosecond timestamp"
+            ])
+        }
+        guard sinceNs <= untilNs else {
+            return Self.makeJSONResponse(status: 400, body: [
+                "error": "sinceNs must be less than or equal to untilNs"
+            ])
+        }
+
+        if query["countOnly"] == "1" {
+            do {
+                let result = try LogStore.shared.rangeCountAndRawBytes(
+                    sinceNs: sinceNs,
+                    untilNs: untilNs
+                )
+                return Self.makeJSONResponse(status: 200, body: [
+                    "sinceNs": sinceNs,
+                    "untilNs": untilNs,
+                    "count": result.count,
+                    "estimatedBytes": result.estimatedBytes
+                ])
+            } catch {
+                return Self.makeJSONResponse(status: 500, body: [
+                    "error": "Failed to query log export estimate"
+                ])
+            }
+        }
+
+        let lines: [LogLine]
+        do {
+            lines = try LogStore.shared.exportRange(sinceNs: sinceNs, untilNs: untilNs)
+        } catch {
+            return Self.makeJSONResponse(status: 500, body: [
+                "error": "Failed to query log export"
+            ])
+        }
+        let dateFormatter = ISO8601DateFormatter()
+        dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let entries: [[String: Any]] = lines.map { line in
+            var entry: [String: Any] = [
+                "id": line.id,
+                "raw": line.raw
+            ]
+            if let timestamp = line.timestamp {
+                entry["timestamp"] = dateFormatter.string(from: timestamp)
+            }
+            if let level = line.level {
+                entry["level"] = level.rawValue
+            }
+            if let component = line.component {
+                entry["component"] = component.rawValue
+            }
+            if let message = line.message {
+                entry["message"] = message
+            }
+            if let payload = line.payload {
+                entry["payload"] = payload
+            }
+            return entry
+        }
+        return Self.makeJSONResponse(status: 200, body: [
+            "sinceNs": sinceNs,
+            "untilNs": untilNs,
+            "count": entries.count,
+            "entries": entries
+        ])
     }
 
     // MARK: - POST /logs

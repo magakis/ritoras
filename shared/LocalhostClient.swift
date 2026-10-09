@@ -15,6 +15,130 @@ enum LocalhostStateProbe {
     case unreachable
 }
 
+struct LocalhostLogExportEstimate: Decodable, Sendable {
+    let sinceNs: Int64
+    let untilNs: Int64
+    let count: Int
+    let estimatedBytes: Int64
+}
+
+struct LocalhostLogExportResponse: Decodable, Sendable {
+    let sinceNs: Int64
+    let untilNs: Int64
+    let count: Int
+    let entries: [LocalhostLogExportEntry]
+}
+
+struct LocalhostLogExportEntry: Decodable, Sendable {
+    let id: Int64
+    let raw: String
+    let timestamp: String?
+    let level: String?
+    let component: String?
+    let message: String?
+    let payload: [String: LocalhostLogExportValue]?
+}
+
+indirect enum LocalhostLogExportValue: Decodable, Sendable {
+    case object([String: LocalhostLogExportValue])
+    case array([LocalhostLogExportValue])
+    case string(String)
+    case number(String)
+    case bool(Bool)
+    case null
+
+    init(from decoder: Decoder) throws {
+        if let container = try? decoder.container(keyedBy: DynamicCodingKey.self) {
+            var object: [String: LocalhostLogExportValue] = [:]
+            for key in container.allKeys {
+                object[key.stringValue] = try container.decode(
+                    LocalhostLogExportValue.self,
+                    forKey: key
+                )
+            }
+            self = .object(object)
+            return
+        }
+
+        if var container = try? decoder.unkeyedContainer() {
+            var array: [LocalhostLogExportValue] = []
+            while !container.isAtEnd {
+                array.append(try container.decode(LocalhostLogExportValue.self))
+            }
+            self = .array(array)
+            return
+        }
+
+        let container = try decoder.singleValueContainer()
+        if try container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? container.decode(Int64.self) {
+            self = .number(String(value))
+        } else if let value = try? container.decode(Double.self) {
+            self = .number(String(value))
+        } else {
+            self = .string(try container.decode(String.self))
+        }
+    }
+
+    var readableText: String {
+        switch self {
+        case .object(let values):
+            let fields = values.keys.sorted().compactMap { key in
+                values[key].map { "\(key): \($0.readableText)" }
+            }
+            return "{\(fields.joined(separator: ", "))}"
+        case .array(let values):
+            return "[\(values.map(\.readableText).joined(separator: ", "))]"
+        case .string(let value):
+            return value
+        case .number(let value):
+            return value
+        case .bool(let value):
+            return value ? "true" : "false"
+        case .null:
+            return "null"
+        }
+    }
+}
+
+private struct DynamicCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
+    }
+}
+
+enum LocalhostLogExportError: LocalizedError {
+    case invalidURL
+    case invalidResponse
+    case httpStatus(Int)
+    case decoding(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL:
+            return "Couldn't construct the localhost log export URL."
+        case .invalidResponse:
+            return "The localhost log server returned an invalid response."
+        case .httpStatus(let status):
+            return "The localhost log server returned HTTP \(status)."
+        case .decoding(let reason):
+            return "Couldn't decode the localhost log export response: \(reason)"
+        }
+    }
+}
+
 enum LocalhostClient {
     private struct CancelRequest: Encodable {
         let id: UUID
@@ -43,6 +167,18 @@ enum LocalhostClient {
         return URLSession(configuration: config)
     }()
 
+    /// Export responses can contain several megabytes, so they use a longer
+    /// resource timeout than the low-latency keyboard IPC session.
+    private static let logExportSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.waitsForConnectivity = false
+        config.timeoutIntervalForRequest = 30.0
+        config.timeoutIntervalForResource = 300.0
+        config.httpShouldUsePipelining = false
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config)
+    }()
+
     /// Override for unit tests (URLProtocol mock injection).
     /// When non-nil, all requests use this session instead of the default.
     static var _testSession: URLSession?
@@ -61,14 +197,19 @@ enum LocalhostClient {
     }
 
     private static func authorizedData(for request: URLRequest) async throws -> (Data, URLResponse) {
-        let firstResponse = try await activeSession.data(for: authorizedRequest(from: request))
+        try await authorizedData(for: request, using: activeSession)
+    }
+
+    private static func authorizedData(for request: URLRequest,
+                                       using session: URLSession) async throws -> (Data, URLResponse) {
+        let firstResponse = try await session.data(for: authorizedRequest(from: request))
         guard (firstResponse.1 as? HTTPURLResponse)?.statusCode == 401 else {
             return firstResponse
         }
 
         // The app may have relaunched with a fresh per-launch token since the
         // keyboard last resolved the app-group value.
-        return try await activeSession.data(for: authorizedRequest(from: request))
+        return try await session.data(for: authorizedRequest(from: request))
     }
 
     // MARK: - Port
@@ -133,6 +274,70 @@ enum LocalhostClient {
             FileLogger.shared.debug(.network, "GET /state transport error", payload: ["error": error.localizedDescription])
             return .unreachable
         }
+    }
+
+    /// Counts log entries in an inclusive timestamp range without fetching
+    /// their contents.
+    static func countLogExport(sinceNs: Int64,
+                               untilNs: Int64) async throws -> LocalhostLogExportEstimate {
+        let data = try await fetchLogExportData(
+            sinceNs: sinceNs,
+            untilNs: untilNs,
+            countOnly: true
+        )
+        do {
+            return try JSONDecoder().decode(LocalhostLogExportEstimate.self, from: data)
+        } catch {
+            throw LocalhostLogExportError.decoding(error.localizedDescription)
+        }
+    }
+
+    /// Fetches every log entry in an inclusive timestamp range in one request.
+    static func exportLogs(sinceNs: Int64,
+                           untilNs: Int64) async throws -> LocalhostLogExportResponse {
+        let data = try await fetchLogExportData(
+            sinceNs: sinceNs,
+            untilNs: untilNs,
+            countOnly: false
+        )
+        do {
+            return try JSONDecoder().decode(LocalhostLogExportResponse.self, from: data)
+        } catch {
+            throw LocalhostLogExportError.decoding(error.localizedDescription)
+        }
+    }
+
+    private static func fetchLogExportData(sinceNs: Int64,
+                                           untilNs: Int64,
+                                           countOnly: Bool) async throws -> Data {
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = "127.0.0.1"
+        components.port = Int(SharedConfig.Defaults.localhostServerPort)
+        components.path = "/logs/export"
+        var queryItems = [
+            URLQueryItem(name: "sinceNs", value: String(sinceNs)),
+            URLQueryItem(name: "untilNs", value: String(untilNs))
+        ]
+        if countOnly {
+            queryItems.append(URLQueryItem(name: "countOnly", value: "1"))
+        }
+        components.queryItems = queryItems
+        guard let url = components.url else {
+            throw LocalhostLogExportError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        let session = _testSession ?? logExportSession
+        let (data, response) = try await authorizedData(for: request, using: session)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LocalhostLogExportError.invalidResponse
+        }
+        guard httpResponse.statusCode == 200 else {
+            throw LocalhostLogExportError.httpStatus(httpResponse.statusCode)
+        }
+        return data
     }
 
     /// Ships an array of log entries to the localhost server's `POST /logs`

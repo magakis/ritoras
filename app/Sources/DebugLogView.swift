@@ -1,6 +1,53 @@
 import SwiftUI
 import UIKit
 
+private final class PendingLogExportCleanupRegistry: @unchecked Sendable {
+    private enum Lifecycle {
+        case creating
+        case shared
+        case cleanupReady
+    }
+
+    static let shared = PendingLogExportCleanupRegistry()
+
+    private let lock = NSLock()
+    private var entries: [URL: Lifecycle] = [:]
+
+    func register(_ url: URL) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries[url] = .creating
+    }
+
+    func markShared(_ url: URL) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries[url] = .shared
+    }
+
+    func markCleanupReady(_ url: URL) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries[url] = .cleanupReady
+    }
+
+    func unregister(_ url: URL) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries.removeValue(forKey: url)
+    }
+
+    func cleanupReadyURLs() -> [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries.reduce(into: [URL]()) { urls, entry in
+            if case .cleanupReady = entry.value {
+                urls.append(entry.key)
+            }
+        }
+    }
+}
+
 // MARK: - Level Filter
 
 private enum LevelFilter: String, CaseIterable {
@@ -55,6 +102,50 @@ private enum TimeRangeFilter: String, CaseIterable {
     case fiveMin = "5m"
     case oneHour = "1h"
     case all = "All"
+    case custom = "Custom"
+}
+
+private struct CustomDateRange: Equatable {
+    var start: Date
+    var end: Date
+}
+
+// Keep picker bounds inside the range representable as Int64 Unix nanoseconds.
+private enum CustomLogDateLimits {
+    static let earliest = Date(
+        timeIntervalSince1970: TimeInterval(Int64.min + 1_000_000_000) / 1_000_000_000
+    )
+    static let latest = Date(
+        timeIntervalSince1970: TimeInterval(Int64.max - 1_000_000_000) / 1_000_000_000
+    )
+}
+
+private struct CustomLogExportRequest: Sendable {
+    let sinceNs: Int64
+    let untilNs: Int64
+    let generation: Int
+    let scrubPII: Bool
+}
+
+private struct LargeCustomLogExportConfirmation {
+    let request: CustomLogExportRequest
+    let estimate: LocalhostLogExportEstimate
+}
+
+private enum CustomLogExportThresholds {
+    static let entryCount = 10_000
+    static let estimatedBytes: Int64 = 5 * 1024 * 1024
+}
+
+private enum CustomLogExportError: LocalizedError {
+    case serverUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .serverUnavailable:
+            return "The localhost log server could not be started. Reopen the app and try again."
+        }
+    }
 }
 
 // MARK: - Delete Action
@@ -142,6 +233,7 @@ private func daySeparatorView(for date: Date) -> some View {
 // MARK: - Debug Log View
 
 struct DebugLogView: View {
+    @EnvironmentObject private var dictationViewModel: DictationViewModel
     @State private var lines: [LogLine] = []
     @State private var diagnostics: [String] = []
     @State private var selectedIDs: Set<Int> = []
@@ -149,6 +241,11 @@ struct DebugLogView: View {
     @State private var componentFilter: ComponentFilter = .all
     @State private var searchText: String = ""
     @State private var timeRange: TimeRangeFilter = .all
+    @State private var customDateRange = CustomDateRange(
+        start: Date().addingTimeInterval(-3600),
+        end: Date()
+    )
+    @State private var didInitializeCustomDateRange = false
     @State private var scrubPII = true
     @State private var crashReports: [MetricReport] = []
 
@@ -169,6 +266,13 @@ struct DebugLogView: View {
     @State private var refreshGeneration = 0
     @State private var isLoading = false
     @State private var isViewVisible = false
+    @State private var isExportingCustomRange = false
+    @State private var pendingLargeExport: LargeCustomLogExportConfirmation?
+    @State private var showLargeExportConfirmation = false
+    @State private var rangeExportURL: URL?
+    @State private var isRangeExportSheetPresented = false
+    @State private var showExportError = false
+    @State private var exportErrorMessage = ""
     private let pageSize = 50
 
     private var selectedOrFilteredLines: [LogLine] {
@@ -179,6 +283,7 @@ struct DebugLogView: View {
         VStack(spacing: 0) {
             levelFilter
             componentTimeFilter
+            customRangeControls
             searchField
             if !selectedIDs.isEmpty || !expandedKeys.isEmpty {
                 statusBanner
@@ -244,10 +349,34 @@ struct DebugLogView: View {
         } message: {
             Text("Select what to delete. Deleted data cannot be recovered.")
         }
+        .alert("Log Export Failed", isPresented: $showExportError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(exportErrorMessage)
+        }
+        .sheet(isPresented: $isRangeExportSheetPresented, onDismiss: cleanupRangeExportFile) {
+            if let url = rangeExportURL {
+                ActivityShareSheet(items: [url])
+            }
+        }
         .onChange(of: searchText) { _, _ in refresh() }
         .onChange(of: selectedFilter) { _, _ in refresh() }
         .onChange(of: componentFilter) { _, _ in refresh() }
-        .onChange(of: timeRange) { _, _ in refresh() }
+        .onChange(of: timeRange) { _, newValue in
+            if newValue == .custom && !didInitializeCustomDateRange {
+                let now = Date()
+                customDateRange = CustomDateRange(
+                    start: now.addingTimeInterval(-3600),
+                    end: now
+                )
+                didInitializeCustomDateRange = true
+            } else {
+                refresh()
+            }
+        }
+        .onChange(of: customDateRange) { _, _ in
+            if timeRange == .custom { refresh() }
+        }
         .onChange(of: scrubPII) { _, _ in updateShareText() }
         .onChange(of: expandedKeys) { _, newKeys in
             if newKeys.isEmpty { refreshGuard() }
@@ -261,10 +390,12 @@ struct DebugLogView: View {
         }
         .onAppear {
             isViewVisible = true
+            drainPendingCustomLogExportFiles()
             refresh()
         }
         .onDisappear {
             isViewVisible = false
+            if !isRangeExportSheetPresented { cleanupRangeExportFile() }
         }
         .overlay(alignment: .bottom) {
             if showDeleteFeedback {
@@ -308,6 +439,84 @@ struct DebugLogView: View {
         }
         .padding(.horizontal)
         .padding(.bottom, 4)
+    }
+
+    private var customRangeControls: some View {
+        Group {
+            if timeRange == .custom {
+                VStack(spacing: 6) {
+                    HStack(spacing: 8) {
+                        DatePicker(
+                            "Start",
+                            selection: customStartDateBinding,
+                            in: CustomLogDateLimits.earliest...customDateRange.end,
+                            displayedComponents: [.date, .hourAndMinute]
+                        )
+                        DatePicker(
+                            "End",
+                            selection: customEndDateBinding,
+                            in: customDateRange.start...CustomLogDateLimits.latest,
+                            displayedComponents: [.date, .hourAndMinute]
+                        )
+                    }
+                    .datePickerStyle(.compact)
+
+                    HStack {
+                        Spacer()
+                        Button(action: beginCustomRangeExport) {
+                            HStack(spacing: 6) {
+                                if isExportingCustomRange {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                } else {
+                                    Image(systemName: "square.and.arrow.up")
+                                }
+                                Text(isExportingCustomRange ? "Exporting…" : "Export Range")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(isExportingCustomRange || isRangeExportSheetPresented)
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.bottom, 4)
+            }
+        }
+        .confirmationDialog(
+            "Large Log Export",
+            isPresented: $showLargeExportConfirmation,
+            titleVisibility: .visible
+        ) {
+            if let pendingLargeExport {
+                Button("Export \(pendingLargeExport.estimate.count) Entries") {
+                    confirmLargeCustomExport()
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingLargeExport = nil
+            }
+        } message: {
+            if let pendingLargeExport {
+                Text(
+                    "This range contains \(pendingLargeExport.estimate.count) entries and is estimated at "
+                        + "\(pendingLargeExport.estimate.estimatedBytes) bytes. Continue?"
+                )
+            }
+        }
+    }
+
+    private var customStartDateBinding: Binding<Date> {
+        Binding(
+            get: { customDateRange.start },
+            set: { customDateRange.start = $0 }
+        )
+    }
+
+    private var customEndDateBinding: Binding<Date> {
+        Binding(
+            get: { customDateRange.end },
+            set: { customDateRange.end = $0 }
+        )
     }
 
     private var searchField: some View {
@@ -608,7 +817,7 @@ struct DebugLogView: View {
     private func refresh() {
         let levels = levelFilterToSet()
         let components = componentFilterToSet()
-        let since = timeRangeToSinceNs()
+        let bounds = timeRangeToBounds()
         let search = searchText.isEmpty ? nil : searchText
         let piiScrub = scrubPII
 
@@ -621,12 +830,14 @@ struct DebugLogView: View {
                 limit: pageSize,
                 levels: levels,
                 components: components,
-                sinceNs: since,
+                sinceNs: bounds.sinceNs,
+                untilNs: bounds.untilNs,
                 search: search)
             let newCount = LogStore.shared.count(
                 levels: levels,
                 components: components,
-                sinceNs: since,
+                sinceNs: bounds.sinceNs,
+                untilNs: bounds.untilNs,
                 search: search)
             let newDiagnostics = LogStore.shared.recentDiagnostics()
             let newCrashReports = MetricKitSubscriber.loadReports()
@@ -658,14 +869,232 @@ struct DebugLogView: View {
         cachedShareText = scrubPII ? LogScrubber.scrub(rawText) : rawText
     }
 
+    @MainActor
+    private func beginCustomRangeExport() {
+        guard !isExportingCustomRange, !isRangeExportSheetPresented, timeRange == .custom else { return }
+        drainPendingCustomLogExportFiles()
+        if rangeExportURL != nil { cleanupRangeExportFile() }
+        guard rangeExportURL == nil else { return }
+        let bounds = timeRangeToBounds()
+        guard let sinceNs = bounds.sinceNs, let untilNs = bounds.untilNs else { return }
+
+        let request = CustomLogExportRequest(
+            sinceNs: sinceNs,
+            untilNs: untilNs,
+            generation: refreshGeneration,
+            scrubPII: scrubPII
+        )
+        isExportingCustomRange = true
+        FileLogger.shared.info(.app, "Custom log export started")
+        Task { await countAndMaybeExportCustomRange(request) }
+    }
+
+    @MainActor
+    private func countAndMaybeExportCustomRange(_ request: CustomLogExportRequest) async {
+        defer { isExportingCustomRange = false }
+
+        do {
+            guard isCurrentCustomExport(request) else { return }
+            try await ensureLocalhostServerIsAvailable(for: request)
+            guard isCurrentCustomExport(request) else { return }
+
+            let estimate = try await LocalhostClient.countLogExport(
+                sinceNs: request.sinceNs,
+                untilNs: request.untilNs
+            )
+            guard isCurrentCustomExport(request) else { return }
+
+            if estimate.count > CustomLogExportThresholds.entryCount
+                || estimate.estimatedBytes > CustomLogExportThresholds.estimatedBytes {
+                pendingLargeExport = LargeCustomLogExportConfirmation(
+                    request: request,
+                    estimate: estimate
+                )
+                showLargeExportConfirmation = true
+                return
+            }
+
+            try await fetchAndShareCustomRange(request)
+        } catch {
+            guard isCurrentCustomExport(request) else { return }
+            showCustomExportError(error)
+        }
+    }
+
+    @MainActor
+    private func confirmLargeCustomExport() {
+        guard let pending = pendingLargeExport else { return }
+        pendingLargeExport = nil
+        guard isCurrentCustomExport(pending.request), !isExportingCustomRange else { return }
+
+        isExportingCustomRange = true
+        Task { await exportConfirmedLargeRange(pending.request) }
+    }
+
+    @MainActor
+    private func exportConfirmedLargeRange(_ request: CustomLogExportRequest) async {
+        defer { isExportingCustomRange = false }
+
+        do {
+            guard isCurrentCustomExport(request) else { return }
+            try await ensureLocalhostServerIsAvailable(for: request)
+            guard isCurrentCustomExport(request) else { return }
+            try await fetchAndShareCustomRange(request)
+        } catch {
+            guard isCurrentCustomExport(request) else { return }
+            showCustomExportError(error)
+        }
+    }
+
+    @MainActor
+    private func ensureLocalhostServerIsAvailable(for request: CustomLogExportRequest) async throws {
+        let initiallyHealthy = await LocalhostClient.healthCheck()
+        guard isCurrentCustomExport(request) else { return }
+        guard !initiallyHealthy else { return }
+
+        // Reuse the DictationViewModel-owned listener; a second server instance
+        // would compete for the same localhost port.
+        dictationViewModel.startLocalhostServer()
+        for attempt in 0..<5 {
+            let isHealthy = await LocalhostClient.healthCheck()
+            guard isCurrentCustomExport(request) else { return }
+            if isHealthy { return }
+            if attempt < 4 {
+                try await Task.sleep(nanoseconds: 200_000_000)
+                guard isCurrentCustomExport(request) else { return }
+            }
+        }
+        throw CustomLogExportError.serverUnavailable
+    }
+
+    @MainActor
+    private func fetchAndShareCustomRange(_ request: CustomLogExportRequest) async throws {
+        guard isCurrentCustomExport(request) else { return }
+
+        let response = try await LocalhostClient.exportLogs(
+            sinceNs: request.sinceNs,
+            untilNs: request.untilNs
+        )
+        guard isCurrentCustomExport(request) else { return }
+
+        let entries = response.entries
+        let shouldScrubPII = request.scrubPII
+        let url = try await Task.detached(priority: .userInitiated) {
+            try Self.writeCustomLogExport(entries: entries, scrubPII: shouldScrubPII)
+        }.value
+
+        guard isCurrentCustomExport(request) else {
+            PendingLogExportCleanupRegistry.shared.markCleanupReady(url)
+            rangeExportURL = url
+            cleanupRangeExportFile()
+            return
+        }
+
+        rangeExportURL = url
+        PendingLogExportCleanupRegistry.shared.markShared(url)
+        isRangeExportSheetPresented = true
+        FileLogger.shared.info(.app, "Custom log export completed",
+                               payload: ["count": response.count])
+    }
+
+    @MainActor
+    private func isCurrentCustomExport(_ request: CustomLogExportRequest) -> Bool {
+        isViewVisible && request.generation == refreshGeneration
+    }
+
+    @MainActor
+    private func showCustomExportError(_ error: Error) {
+        FileLogger.shared.error(.app, "Custom log export failed",
+                                payload: ["error": error.localizedDescription])
+        exportErrorMessage = error.localizedDescription
+        showExportError = true
+    }
+
+    nonisolated private static func writeCustomLogExport(entries: [LocalhostLogExportEntry],
+                                                         scrubPII: Bool) throws -> URL {
+        let text = entries.map(Self.formatCustomLogExportEntry).joined(separator: "\n")
+        let shareText = scrubPII ? LogScrubber.scrub(text) : text
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
+        let filename = "ritoras-log-export-\(formatter.string(from: Date()))-\(UUID().uuidString).txt"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+        // Keep creation ineligible for drains until writing and handoff finish.
+        PendingLogExportCleanupRegistry.shared.register(url)
+        do {
+            try shareText.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            PendingLogExportCleanupRegistry.shared.markCleanupReady(url)
+            throw error
+        }
+        return url
+    }
+
+    nonisolated private static func formatCustomLogExportEntry(_ entry: LocalhostLogExportEntry) -> String {
+        let timestamp = entry.timestamp ?? "—"
+        let level = entry.level.map { "[\($0.uppercased())]" } ?? "[—]"
+        let component = entry.component.map { "[\($0)]" } ?? "[—]"
+        let message: String
+        if let structuredMessage = entry.message, !structuredMessage.isEmpty {
+            message = structuredMessage
+        } else {
+            message = entry.raw
+        }
+
+        var lines = ["\(timestamp) \(level) \(component) \(message)"]
+        if let payload = entry.payload {
+            for key in payload.keys.sorted() {
+                if let value = payload[key] {
+                    lines.append("  \(key): \(value.readableText)")
+                }
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    @MainActor
+    private func cleanupRangeExportFile() {
+        guard let url = rangeExportURL else { return }
+        PendingLogExportCleanupRegistry.shared.markCleanupReady(url)
+        guard removeCustomLogExportFile(at: url, alertOnFailure: true) else { return }
+        rangeExportURL = nil
+    }
+
+    @MainActor
+    private func drainPendingCustomLogExportFiles() {
+        for url in PendingLogExportCleanupRegistry.shared.cleanupReadyURLs() {
+            _ = removeCustomLogExportFile(at: url, alertOnFailure: false)
+        }
+    }
+
+    @MainActor
+    private func removeCustomLogExportFile(at url: URL, alertOnFailure: Bool) -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            PendingLogExportCleanupRegistry.shared.unregister(url)
+            return true
+        }
+        do {
+            try FileManager.default.removeItem(at: url)
+            PendingLogExportCleanupRegistry.shared.unregister(url)
+            return true
+        } catch {
+            PendingLogExportCleanupRegistry.shared.markCleanupReady(url)
+            FileLogger.shared.warn(.app, "Custom log export file cleanup failed",
+                                   payload: ["error": error.localizedDescription])
+            if alertOnFailure { showCustomExportError(error) }
+            return false
+        }
+    }
+
     private func executeDelete(_ action: DeleteAction) {
         do {
             switch action {
             case .visible:
+                let bounds = timeRangeToBounds()
                 let count = try LogStore.shared.deleteFiltered(
                     levels: levelFilterToSet(),
                     components: componentFilterToSet(),
-                    sinceNs: timeRangeToSinceNs(),
+                    sinceNs: bounds.sinceNs,
+                    untilNs: bounds.untilNs,
                     search: searchText.isEmpty ? nil : searchText)
                 showDeleteFeedback(text: "Deleted \(count) logs", isError: false)
             case .olderThan1Day:
@@ -734,7 +1163,7 @@ struct DebugLogView: View {
         }
         let levels = levelFilterToSet()
         let components = componentFilterToSet()
-        let since = timeRangeToSinceNs()
+        let bounds = timeRangeToBounds()
         let search = searchText.isEmpty ? nil : searchText
         let piiScrub = scrubPII
 
@@ -743,7 +1172,8 @@ struct DebugLogView: View {
                 limit: pageSize, beforeId: before,
                 levels: levels,
                 components: components,
-                sinceNs: since,
+                sinceNs: bounds.sinceNs,
+                untilNs: bounds.untilNs,
                 search: search)
             guard !more.isEmpty else {
                 DispatchQueue.main.async {
@@ -767,7 +1197,7 @@ struct DebugLogView: View {
         guard let newest = newestSeenId else { refresh(); return }
         let levels = levelFilterToSet()
         let components = componentFilterToSet()
-        let since = timeRangeToSinceNs()
+        let bounds = timeRangeToBounds()
         let search = searchText.isEmpty ? nil : searchText
         let piiScrub = scrubPII
 
@@ -779,14 +1209,16 @@ struct DebugLogView: View {
                 limit: pageSize,
                 levels: levels,
                 components: components,
-                sinceNs: since,
+                sinceNs: bounds.sinceNs,
+                untilNs: bounds.untilNs,
                 afterId: newest,
                 search: search)
 
             let newCount: Int? = newer.isEmpty ? nil : LogStore.shared.count(
                 levels: levels,
                 components: components,
-                sinceNs: since,
+                sinceNs: bounds.sinceNs,
+                untilNs: bounds.untilNs,
                 search: search)
 
             DispatchQueue.main.async {
@@ -823,14 +1255,19 @@ struct DebugLogView: View {
         }
     }
 
-    private func timeRangeToSinceNs() -> Int64? {
+    private func timeRangeToBounds() -> (sinceNs: Int64?, untilNs: Int64?) {
         switch timeRange {
         case .fiveMin:
-            return Int64((Date().timeIntervalSince1970 - 300) * 1_000_000_000)
+            return (Int64((Date().timeIntervalSince1970 - 300) * 1_000_000_000), nil)
         case .oneHour:
-            return Int64((Date().timeIntervalSince1970 - 3600) * 1_000_000_000)
+            return (Int64((Date().timeIntervalSince1970 - 3600) * 1_000_000_000), nil)
         case .all:
-            return nil
+            return (nil, nil)
+        case .custom:
+            return (
+                Int64(customDateRange.start.timeIntervalSince1970 * 1_000_000_000),
+                Int64(customDateRange.end.timeIntervalSince1970 * 1_000_000_000)
+            )
         }
     }
 

@@ -532,16 +532,17 @@ final class LogStore {
                 levels: Set<LogLevel>? = nil,
                 components: Set<LogComponent>? = nil,
                 sinceNs: Int64? = nil,
+                untilNs: Int64? = nil,
                 afterId: Int64? = nil,
                 search: String? = nil) -> [LogLine] {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
             return _recent(limit: limit, beforeId: beforeId, levels: levels,
-                           components: components, sinceNs: sinceNs,
+                           components: components, sinceNs: sinceNs, untilNs: untilNs,
                            afterId: afterId, search: search)
         } else {
             return queue.sync {
                 self._recent(limit: limit, beforeId: beforeId, levels: levels,
-                             components: components, sinceNs: sinceNs,
+                             components: components, sinceNs: sinceNs, untilNs: untilNs,
                              afterId: afterId, search: search)
             }
         }
@@ -551,6 +552,7 @@ final class LogStore {
                          levels: Set<LogLevel>? = nil,
                          components: Set<LogComponent>? = nil,
                          sinceNs: Int64? = nil,
+                         untilNs: Int64? = nil,
                          afterId: Int64? = nil,
                          search: String? = nil) -> [LogLine] {
         ensureOpen()
@@ -589,6 +591,10 @@ final class LogStore {
             sql += " AND ts_ns >= ?"
             params.append(.int64(sinceNs))
         }
+        if let untilNs = untilNs {
+            sql += " AND ts_ns <= ?"
+            params.append(.int64(untilNs))
+        }
         if let search = search, !search.isEmpty {
             let sanitized = sanitizeFTS5(search)
             sql += " AND id IN (SELECT rowid FROM log_fts WHERE message MATCH ?)"
@@ -598,15 +604,15 @@ final class LogStore {
         sql += " ORDER BY id DESC LIMIT ?"
         params.append(.int(Int32(limit)))
 
-        return executeRecentQuery(db: db, sql: sql, params: params)
+        return executeLogLineQuery(db: db, sql: sql, params: params)
     }
 
     /// Executes the built SQL and returns LogLine objects.
-    private func executeRecentQuery(db: OpaquePointer, sql: String,
-                                    params: [QueryParam]) -> [LogLine] {
+    private func executeLogLineQuery(db: OpaquePointer, sql: String,
+                                     params: [QueryParam]) -> [LogLine] {
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt = stmt else {
-            recordDiagnostic("recent prepare failed: \(String(cString: sqlite3_errmsg(db)))")
+            recordDiagnostic("log query prepare failed: \(String(cString: sqlite3_errmsg(db)))")
             return []
         }
         defer { sqlite3_finalize(stmt) }
@@ -628,51 +634,103 @@ final class LogStore {
         // Collect results
         var results: [LogLine] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            let rowId = sqlite3_column_int64(stmt, 0)
-            let tsNs = sqlite3_column_int64(stmt, 1)
-            let levelInt = sqlite3_column_int(stmt, 2)
-            let componentStr: String = {
-                guard let cStr = sqlite3_column_text(stmt, 3) else { return "" }
-                return String(cString: cStr)
-            }()
-            let message: String = {
-                guard let cStr = sqlite3_column_text(stmt, 4) else { return "" }
-                return String(cString: cStr)
-            }()
-            let payloadStr: String? = {
-                guard sqlite3_column_type(stmt, 5) != SQLITE_NULL,
-                      let cStr = sqlite3_column_text(stmt, 5) else { return nil }
-                return String(cString: cStr)
-            }()
-            let raw: String = {
-                guard let cStr = sqlite3_column_text(stmt, 6) else { return "" }
-                return String(cString: cStr)
-            }()
-
-            let level = Self.levelFromInt(levelInt)
-            let component = LogComponent(rawValue: componentStr)
-            let timestamp = Date(timeIntervalSince1970: TimeInterval(tsNs) / 1_000_000_000)
-
-            let payload: [String: Any]? = payloadStr.flatMap { str in
-                guard let data = str.data(using: .utf8),
-                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                else { return nil }
-                return obj
-            }
-
-            results.append(LogLine(
-                id: Int(rowId),
-                raw: raw,
-                level: level,
-                component: component,
-                timestamp: timestamp,
-                message: message,
-                payload: payload,
-                rowId: rowId
-            ))
+            results.append(logLine(from: stmt))
         }
 
         return results
+    }
+
+    private func logLine(from stmt: OpaquePointer) -> LogLine {
+        let rowId = sqlite3_column_int64(stmt, 0)
+        let tsNs = sqlite3_column_int64(stmt, 1)
+        let levelInt = sqlite3_column_int(stmt, 2)
+        let componentStr: String = {
+            guard let cStr = sqlite3_column_text(stmt, 3) else { return "" }
+            return String(cString: cStr)
+        }()
+        let message: String = {
+            guard let cStr = sqlite3_column_text(stmt, 4) else { return "" }
+            return String(cString: cStr)
+        }()
+        let payloadStr: String? = {
+            guard sqlite3_column_type(stmt, 5) != SQLITE_NULL,
+                  let cStr = sqlite3_column_text(stmt, 5) else { return nil }
+            return String(cString: cStr)
+        }()
+        let raw: String = {
+            guard let cStr = sqlite3_column_text(stmt, 6) else { return "" }
+            return String(cString: cStr)
+        }()
+
+        let level = Self.levelFromInt(levelInt)
+        let component = LogComponent(rawValue: componentStr)
+        let timestamp = Date(timeIntervalSince1970: TimeInterval(tsNs) / 1_000_000_000)
+
+        let payload: [String: Any]? = payloadStr.flatMap { str in
+            guard let data = str.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return nil }
+            return obj
+        }
+
+        return LogLine(
+            id: Int(rowId),
+            raw: raw,
+            level: level,
+            component: component,
+            timestamp: timestamp,
+            message: message,
+            payload: payload,
+            rowId: rowId
+        )
+    }
+
+    /// Returns every log line in the inclusive timestamp range, oldest first.
+    func exportRange(sinceNs: Int64, untilNs: Int64) throws -> [LogLine] {
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            return try _exportRange(sinceNs: sinceNs, untilNs: untilNs)
+        } else {
+            return try queue.sync {
+                try self._exportRange(sinceNs: sinceNs, untilNs: untilNs)
+            }
+        }
+    }
+
+    private func _exportRange(sinceNs: Int64, untilNs: Int64) throws -> [LogLine] {
+        ensureOpen()
+        guard let db = db else {
+            throw LogStoreError.openFailed("SQLite database connection is unavailable")
+        }
+
+        let sql = """
+        SELECT id, ts_ns, level, component, message, payload_json, raw
+        FROM log
+        WHERE ts_ns >= ? AND ts_ns <= ?
+        ORDER BY ts_ns ASC, id ASC
+        """
+        var stmt: OpaquePointer?
+        let prepareCode = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        guard prepareCode == SQLITE_OK, let preparedStatement = stmt else {
+            let error = exportQueryError("range export prepare", db: db, code: prepareCode)
+            if let stmt { sqlite3_finalize(stmt) }
+            throw error
+        }
+        defer { sqlite3_finalize(preparedStatement) }
+
+        try bindExportRange(sinceNs: sinceNs, untilNs: untilNs,
+                            to: preparedStatement, db: db)
+
+        var results: [LogLine] = []
+        while true {
+            let stepCode = sqlite3_step(preparedStatement)
+            if stepCode == SQLITE_ROW {
+                results.append(logLine(from: preparedStatement))
+            } else if stepCode == SQLITE_DONE {
+                return results
+            } else {
+                throw exportQueryError("range export step", db: db, code: stepCode)
+            }
+        }
     }
 
     // MARK: - Query: Count
@@ -681,14 +739,15 @@ final class LogStore {
     func count(levels: Set<LogLevel>? = nil,
                components: Set<LogComponent>? = nil,
                sinceNs: Int64? = nil,
+               untilNs: Int64? = nil,
                search: String? = nil) -> Int {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
             return _count(levels: levels, components: components,
-                          sinceNs: sinceNs, search: search)
+                          sinceNs: sinceNs, untilNs: untilNs, search: search)
         } else {
             return queue.sync {
                 self._count(levels: levels, components: components,
-                            sinceNs: sinceNs, search: search)
+                            sinceNs: sinceNs, untilNs: untilNs, search: search)
             }
         }
     }
@@ -696,6 +755,7 @@ final class LogStore {
     private func _count(levels: Set<LogLevel>? = nil,
                         components: Set<LogComponent>? = nil,
                         sinceNs: Int64? = nil,
+                        untilNs: Int64? = nil,
                         search: String? = nil) -> Int {
         ensureOpen()
         guard let db = db else { return 0 }
@@ -720,6 +780,10 @@ final class LogStore {
         if let sinceNs = sinceNs {
             sql += " AND ts_ns >= ?"
             params.append(.int64(sinceNs))
+        }
+        if let untilNs = untilNs {
+            sql += " AND ts_ns <= ?"
+            params.append(.int64(untilNs))
         }
         if let search = search, !search.isEmpty {
             let sanitized = sanitizeFTS5(search)
@@ -749,6 +813,79 @@ final class LogStore {
 
         guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
         return Int(sqlite3_column_int64(stmt, 0))
+    }
+
+    /// Returns the entry count and summed raw-line UTF-8 bytes for an inclusive range.
+    func rangeCountAndRawBytes(sinceNs: Int64,
+                               untilNs: Int64) throws -> (count: Int, estimatedBytes: Int64) {
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            return try _rangeCountAndRawBytes(sinceNs: sinceNs, untilNs: untilNs)
+        } else {
+            return try queue.sync {
+                try self._rangeCountAndRawBytes(sinceNs: sinceNs, untilNs: untilNs)
+            }
+        }
+    }
+
+    private func _rangeCountAndRawBytes(sinceNs: Int64,
+                                        untilNs: Int64) throws -> (count: Int, estimatedBytes: Int64) {
+        ensureOpen()
+        guard let db = db else {
+            throw LogStoreError.openFailed("SQLite database connection is unavailable")
+        }
+
+        let sql = """
+        SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(raw AS BLOB))), 0)
+        FROM log
+        WHERE ts_ns >= ? AND ts_ns <= ?
+        """
+        var stmt: OpaquePointer?
+        let prepareCode = sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        guard prepareCode == SQLITE_OK, let preparedStatement = stmt else {
+            let error = exportQueryError("range count prepare", db: db, code: prepareCode)
+            if let stmt { sqlite3_finalize(stmt) }
+            throw error
+        }
+        defer { sqlite3_finalize(preparedStatement) }
+
+        try bindExportRange(sinceNs: sinceNs, untilNs: untilNs,
+                            to: preparedStatement, db: db)
+
+        let rowCode = sqlite3_step(preparedStatement)
+        guard rowCode == SQLITE_ROW else {
+            throw exportQueryError("range count step", db: db, code: rowCode)
+        }
+        let result = (
+            count: Int(sqlite3_column_int64(preparedStatement, 0)),
+            estimatedBytes: sqlite3_column_int64(preparedStatement, 1)
+        )
+        let completionCode = sqlite3_step(preparedStatement)
+        guard completionCode == SQLITE_DONE else {
+            throw exportQueryError("range count completion", db: db, code: completionCode)
+        }
+        return result
+    }
+
+    private func bindExportRange(sinceNs: Int64,
+                                 untilNs: Int64,
+                                 to stmt: OpaquePointer,
+                                 db: OpaquePointer) throws {
+        let lowerBoundCode = sqlite3_bind_int64(stmt, 1, sinceNs)
+        guard lowerBoundCode == SQLITE_OK else {
+            throw exportQueryError("range lower-bound bind", db: db, code: lowerBoundCode)
+        }
+        let upperBoundCode = sqlite3_bind_int64(stmt, 2, untilNs)
+        guard upperBoundCode == SQLITE_OK else {
+            throw exportQueryError("range upper-bound bind", db: db, code: upperBoundCode)
+        }
+    }
+
+    private func exportQueryError(_ operation: String,
+                                  db: OpaquePointer,
+                                  code: Int32) -> LogStoreError {
+        LogStoreError.executeFailed(
+            "\(operation) failed (\(code)): \(String(cString: sqlite3_errmsg(db)))"
+        )
     }
 
     // MARK: - Clear
@@ -827,14 +964,15 @@ final class LogStore {
     func deleteFiltered(levels: Set<LogLevel>? = nil,
                         components: Set<LogComponent>? = nil,
                         sinceNs: Int64? = nil,
+                        untilNs: Int64? = nil,
                         search: String? = nil) throws -> Int {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
             return try _deleteFiltered(levels: levels, components: components,
-                                       sinceNs: sinceNs, search: search)
+                                       sinceNs: sinceNs, untilNs: untilNs, search: search)
         } else {
             return try queue.sync {
                 try self._deleteFiltered(levels: levels, components: components,
-                                         sinceNs: sinceNs, search: search)
+                                         sinceNs: sinceNs, untilNs: untilNs, search: search)
             }
         }
     }
@@ -842,6 +980,7 @@ final class LogStore {
     private func _deleteFiltered(levels: Set<LogLevel>? = nil,
                                   components: Set<LogComponent>? = nil,
                                   sinceNs: Int64? = nil,
+                                  untilNs: Int64? = nil,
                                   search: String? = nil) throws -> Int {
         ensureOpen()
         guard let db = db else { return 0 }
@@ -866,6 +1005,10 @@ final class LogStore {
         if let sinceNs = sinceNs {
             sql += " AND ts_ns >= ?"
             params.append(.int64(sinceNs))
+        }
+        if let untilNs = untilNs {
+            sql += " AND ts_ns <= ?"
+            params.append(.int64(untilNs))
         }
         if let search = search, !search.isEmpty {
             let sanitized = sanitizeFTS5(search)
