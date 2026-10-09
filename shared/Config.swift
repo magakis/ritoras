@@ -178,8 +178,6 @@ struct SharedConfig {
         /// Must exceed the keyboard's catch-up window (seconds) so a suspended
         /// keyboard can still fetch it on return.
         static let terminalStateRetentionSeconds: TimeInterval = 120
-        static let followMeWindowSecondsKey = "followMeWindowSeconds"
-        static let followMeWindowSecondsDefault: Int = 120
         /// Background-task lifetime keeping the localhost listener serving /state
         /// after cancel(). Unlike stop(), cancel() has no transcription to finish;
         /// the grace window lets a suspended keyboard return and fetch the
@@ -222,15 +220,9 @@ struct SharedConfig {
         static let streamVadSpeechRmsDefault: Float = 0.025
         static let streamVadModeKey = "streamVadMode"
         static let streamVadModeDefault = "adaptive"
-        static let streamVadCalibrationMsKey = "streamVadCalibrationMs"
-        static let streamVadCalibrationMsDefault: Int = 1500
-        static let streamVadCalibratedOffsetDbKey = "streamVadCalibratedOffsetDb"
-        static let streamVadCalibratedOffsetDbDefault: Double = 10.0
         static let streamVadAdaptiveDeltaDbKey = "streamVadAdaptiveDeltaDb"
         static let streamVadAdaptiveDeltaDbDefault: Double = 10.0
         static let streamVadAdaptiveDeltaDbOverrideKey = "streamVadAdaptiveDeltaDbOverride"
-        static let streamVadAdaptationSpeedKey = "streamVadAdaptationSpeed"
-        static let streamVadAdaptationSpeedDefault: Double = 1.0
         static let streamVadAdaptiveSilenceDeltaDbKey = "streamVadAdaptiveSilenceDeltaDb"
         static let streamVadAdaptiveSilenceDeltaDbDefault: Double = 3.0
         static let streamVadAbsoluteSpeechFloorDbKey = "streamVadAbsoluteSpeechFloorDb"
@@ -751,57 +743,19 @@ struct SharedConfig {
             ?? Defaults.streamVadSpeechRmsDefault
     }
 
-    /// Reads the follow-me dictation delivery window from the App Group.
-    static func followMeWindowSeconds() -> Int {
-        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return Defaults.followMeWindowSecondsDefault
-        }
-        return (defaults.object(forKey: Defaults.followMeWindowSecondsKey) as? Int)
-            ?? Defaults.followMeWindowSecondsDefault
-    }
-
     /// Reads the streaming VAD mode from the App Group.
     /// Used by the keyboard extension, which cannot link `AppSettings`.
-    /// Returns `.staticMode` when the App Group is unavailable, the key is unset,
+    /// Returns `.adaptive` when the App Group is unavailable, the key is unset,
     /// or the stored value is invalid.
     static func streamVadMode() -> VADMode {
+        let fallbackMode = VADMode(rawValue: Defaults.streamVadModeDefault) ?? .adaptive
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return VADMode(rawValue: Defaults.streamVadModeDefault) ?? .staticMode
+            return fallbackMode
         }
         guard let raw = defaults.string(forKey: Defaults.streamVadModeKey) else {
-            return VADMode(rawValue: Defaults.streamVadModeDefault) ?? .staticMode
+            return fallbackMode
         }
-        return VADMode(rawValue: raw)
-            ?? (VADMode(rawValue: Defaults.streamVadModeDefault) ?? .staticMode)
-    }
-
-    /// Reads the streaming VAD calibration window (ms) from the App Group.
-    static func streamVadCalibrationMs() -> Int {
-        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return Defaults.streamVadCalibrationMsDefault
-        }
-        return (defaults.object(forKey: Defaults.streamVadCalibrationMsKey) as? Int)
-            ?? Defaults.streamVadCalibrationMsDefault
-    }
-
-    /// Reads the calibrated VAD threshold offset (dB) from the App Group.
-    static func streamVadCalibratedOffsetDb() -> Double {
-        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return Defaults.streamVadCalibratedOffsetDbDefault
-        }
-        return (defaults.object(forKey: Defaults.streamVadCalibratedOffsetDbKey) as? Double)
-            ?? Defaults.streamVadCalibratedOffsetDbDefault
-    }
-
-    /// Reads the adaptive floor adaptation speed multiplier from the App Group.
-    static func streamVadAdaptationSpeed() -> Double {
-        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return Defaults.streamVadAdaptationSpeedDefault
-        }
-        let value = (defaults.object(
-            forKey: Defaults.streamVadAdaptationSpeedKey
-        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadAdaptationSpeedDefault
-        return value.isFinite ? min(max(value, 0.5), 4.0) : Defaults.streamVadAdaptationSpeedDefault
+        return VADMode(rawValue: raw) ?? fallbackMode
     }
 
     /// Reads the adaptive silence delta (dB) from the App Group.

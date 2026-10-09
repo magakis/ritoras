@@ -34,9 +34,6 @@ struct VADSettingsView: View {
             .onChange(of: settings.streamVadSensitivityProfile) { _, _ in
                 rebuildTesterGate()
             }
-            .onChange(of: settings.streamVadAdaptationSpeed) { _, _ in
-                rebuildTesterGate()
-            }
     }
 
     private var formContent: some View {
@@ -116,7 +113,6 @@ struct VADSettingsView: View {
             analysisLevelReadings
             levelReadings
             thresholdReadings
-            fallbackStatus
             monitoringPrompt
         }
     }
@@ -136,7 +132,6 @@ struct VADSettingsView: View {
             floorMarker(width: width)
             thresholdMarker(width: width)
             peakMarker(width: width)
-            calibrationOverlay
         }
     }
 
@@ -156,14 +151,11 @@ struct VADSettingsView: View {
         }
     }
 
-    @ViewBuilder
     private func thresholdMarker(width: CGFloat) -> some View {
-        if !tester.calibrating {
-            Rectangle()
-                .fill(Color.orange)
-                .frame(width: 2)
-                .offset(x: meterOffset(db: tester.thresholdDb, width: width))
-        }
+        Rectangle()
+            .fill(Color.orange)
+            .frame(width: 2)
+            .offset(x: meterOffset(db: tester.thresholdDb, width: width))
     }
 
     private func peakMarker(width: CGFloat) -> some View {
@@ -171,17 +163,6 @@ struct VADSettingsView: View {
             .fill(Color.blue)
             .frame(width: 2)
             .offset(x: CGFloat(min(tester.peakRms / meterFullScale, 1.0)) * width)
-    }
-
-    @ViewBuilder
-    private var calibrationOverlay: some View {
-        if tester.calibrating {
-            Text("Measuring… (\(Int(tester.calibrationElapsedMs.rounded())) / \(SharedConfig.streamVadCalibrationMs()) ms)")
-                .font(.caption2)
-                .foregroundColor(.primary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 4))
-        }
     }
 
     private func meterOffset(db: Double, width: CGFloat) -> CGFloat {
@@ -224,15 +205,6 @@ struct VADSettingsView: View {
     }
 
     @ViewBuilder
-    private var fallbackStatus: some View {
-        if tester.usedFallback {
-            Text("adaptive fallback")
-                .font(.caption)
-                .foregroundColor(.orange)
-        }
-    }
-
-    @ViewBuilder
     private var monitoringPrompt: some View {
         if tester.isMonitoring && tester.currentRms < 0.001 {
             Text("Speak into the microphone to see levels.")
@@ -252,13 +224,6 @@ struct VADSettingsView: View {
 
     private var advancedDisclosure: some View {
         DisclosureGroup("Advanced") {
-            Section {
-                adaptationSpeedRow
-            } header: {
-                Text("Noise floor")
-            } footer: {
-                Text("How quickly the noise floor adapts to your room. 1.0× is balanced.")
-            }
             diagnosticsSection
         }
     }
@@ -266,13 +231,13 @@ struct VADSettingsView: View {
     private var normalSection: some View {
         Section {
             Picker("Sensitivity", selection: $settings.streamVadSensitivityProfile) {
-                Text("Automatic").tag(VADSensitivityProfile.automatic)
-                Text("Quiet Voice").tag(VADSensitivityProfile.quietVoice)
-                Text("Noisy Environment").tag(VADSensitivityProfile.noisyEnvironment)
+                Text("Quiet").tag(VADSensitivityProfile.quietVoice)
+                Text("Normal").tag(VADSensitivityProfile.automatic)
+                Text("Noisy").tag(VADSensitivityProfile.noisyEnvironment)
             }
             silenceDurationRow
         } header: {
-            Text("Normal")
+            Text("Basics")
         } footer: {
             Text("Sensitivity adjusts voice detection for your environment. Silence duration controls how long the VAD listens in silence before closing the utterance. 700 ms is the default; 450 ms is the minimum.")
         }
@@ -312,8 +277,6 @@ struct VADSettingsView: View {
                     switch mode {
                     case .staticMode:
                         Text("Static").tag(mode)
-                    case .calibrated:
-                        Text("Calibrated").tag(mode)
                     case .adaptive:
                         Text("Adaptive").tag(mode)
                     }
@@ -335,8 +298,6 @@ struct VADSettingsView: View {
         switch settings.streamVadMode {
         case .staticMode:
             Text("One fixed level bar. Retune it when your environment changes.")
-        case .calibrated:
-            Text("Start talking whenever you like — the measurement ignores speech and needs no quiet period. It reads the quiet quarter of the first moments of each dictation. Raise Δ if chunks fire on noise; if you talk through the whole window it switches to adaptive tracking automatically.")
         case .adaptive:
             Text("Seeds the noise floor from the quietest tenth of the first second, then tracks it continuously. Δ is how far above the floor speech must be — lower it for whispering (try 6–8). Best hands-off choice across environments.")
         }
@@ -364,12 +325,10 @@ struct VADSettingsView: View {
         tester.rebuildGate(using: VADGateConfig(
             mode: SharedConfig.streamVadMode(),
             staticRms: SharedConfig.streamVadSpeechRms(),
-            calibrationMs: SharedConfig.streamVadCalibrationMs(),
-            calibratedOffsetDb: SharedConfig.streamVadCalibratedOffsetDb(),
             adaptiveDeltaDb: SharedConfig.streamVadAdaptiveDeltaDb(),
             adaptiveContinuationDeltaDb: SharedConfig.streamVadAdaptiveContinuationDeltaDb(),
             adaptiveAbsoluteSpeechFloorDb: SharedConfig.streamVadAbsoluteSpeechFloorDb(),
-            adaptiveRiseSpeedMultiplier: settings.streamVadAdaptationSpeed,
+            adaptiveRiseSpeedMultiplier: 1.0,
             adaptiveSilenceDeltaDb: SharedConfig.streamVadAdaptiveSilenceDeltaDb(),
             adaptiveStaleFloorSeconds: SharedConfig.streamVadStaleFloorSeconds(),
             adaptiveFallTauSeconds: SharedConfig.streamVadFallTauSeconds(),
@@ -550,8 +509,6 @@ struct VADSettingsView: View {
             ("sensitivity", SharedConfig.streamVadSensitivityProfile().rawValue),
             ("pause", SharedConfig.streamVadPauseProfile().rawValue),
             ("staticRms", "\(SharedConfig.streamVadSpeechRms())"),
-            ("calibration", "\(SharedConfig.streamVadCalibrationMs())ms"),
-            ("calibratedOffset", "\(SharedConfig.streamVadCalibratedOffsetDb())dB"),
             ("endpointSilence", "\(SharedConfig.streamVadSilenceMs())ms"),
             ("onset", "\(SharedConfig.streamVadOnsetMs())ms"),
             ("endEvidence", "\(SharedConfig.streamVadEndEvidenceMs())ms"),
@@ -560,7 +517,7 @@ struct VADSettingsView: View {
             ("preRoll", "\(SharedConfig.streamVadPreRollMs())ms"),
             ("minSpeech", "\(SharedConfig.streamVadMinSpeechMs())ms"),
             ("minChunk", "\(SharedConfig.streamVadMinChunkMs())ms"),
-            ("adaptationSpeed", "\(SharedConfig.streamVadAdaptationSpeed())"),
+            ("adaptationSpeed", "1.0"),
             ("dynamicSpread", "\(SharedConfig.streamVadDynamicsSpreadDb())dB"),
             ("flatSpread", "\(SharedConfig.streamVadFlatSpreadDb())dB"),
             ("adaptiveDelta", "\(SharedConfig.streamVadAdaptiveDeltaDb())dB"),
@@ -575,17 +532,5 @@ struct VADSettingsView: View {
             ("analysisHpfCutoff", "\(SharedConfig.Defaults.streamVadHpfCutoffHzDefault)Hz"),
             ("measurementMode", SharedConfig.audioMeasurementModeEnabled() ? "ON" : "OFF")
         ]
-    }
-
-    private var adaptationSpeedRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Floor Adaptation Speed")
-                Spacer()
-                Text("\(settings.streamVadAdaptationSpeed, specifier: "%.1f")×")
-                    .foregroundColor(.secondary)
-            }
-            Slider(value: $settings.streamVadAdaptationSpeed, in: 0.5...4.0, step: 0.5)
-        }
     }
 }

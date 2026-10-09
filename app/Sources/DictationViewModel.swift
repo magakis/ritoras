@@ -131,7 +131,6 @@ final class DictationViewModel: ObservableObject {
     }
     @Published private(set) var livePartial: String = ""
     @Published private(set) var activeModeLabel: String = ""
-    @Published private(set) var vadCalibrating = false
     @Published private(set) var vadState: StreamingVADFrameState?
     @Published private(set) var chunkDispatchCount = 0
     @Published private(set) var chunkReviews: [ChunkReviewRecord] = []
@@ -765,7 +764,6 @@ final class DictationViewModel: ObservableObject {
 
             let recorder = StreamingAudioRecorder()
             streamRecorder = recorder
-            vadCalibrating = (SharedConfig.streamVadMode() == .calibrated)
 
             let wavURL = RecordingStore.shared.streamWavURL(for: id)
             let telemetryWriter: VADTelemetryFileWriter?
@@ -780,11 +778,6 @@ final class DictationViewModel: ObservableObject {
             do {
                 try await recorder.start(
                     fileURL: wavURL,
-                    onVADCalibration: { calibrating in
-                        Task { @MainActor [weak self] in
-                            self?.vadCalibrating = calibrating
-                        }
-                    },
                     onChunk: { [chunkQueue = self.chunkSendQueue,
                                 audioStore = self.chunkAudioStore] chunkId, samples in
                         FileLogger.shared.debug(.audio, "Stream: chunk produced",
@@ -867,7 +860,6 @@ final class DictationViewModel: ObservableObject {
                 streamClient = nil
                 streamRecorder = nil
                 vadTelemetryWriter = nil
-                vadCalibrating = false
                 vadState = nil
                 lastVADPublishTime = nil
                 lastPublishedVADState = nil
@@ -1103,7 +1095,6 @@ final class DictationViewModel: ObservableObject {
     }
 
     func stop() async {
-        vadCalibrating = false
         vadState = nil
         lastVADPublishTime = nil
         lastPublishedVADState = nil
@@ -2145,7 +2136,6 @@ final class DictationViewModel: ObservableObject {
         }
 
         FileLogger.shared.info(.transcription, "cancel: stream teardown")
-        vadCalibrating = false
         vadState = nil
         lastVADPublishTime = nil
         lastPublishedVADState = nil

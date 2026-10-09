@@ -6,7 +6,6 @@ import os
 
 enum VADMode: String, CaseIterable {
     case staticMode = "static"
-    case calibrated = "calibrated"
     case adaptive = "adaptive"
 }
 
@@ -20,8 +19,6 @@ enum VADEvidence: String {
 struct VADGateConfig {
     let mode: VADMode
     let staticRms: Float
-    let calibrationMs: Int
-    let calibratedOffsetDb: Double
     let adaptiveDeltaDb: Double
     let adaptiveContinuationDeltaDb: Double
     let adaptiveAbsoluteSpeechFloorDb: Double
@@ -46,8 +43,6 @@ struct VADGateConfig {
     init(
         mode: VADMode,
         staticRms: Float,
-        calibrationMs: Int,
-        calibratedOffsetDb: Double,
         adaptiveDeltaDb: Double,
         adaptiveContinuationDeltaDb: Double,
         adaptiveAbsoluteSpeechFloorDb: Double,
@@ -71,8 +66,6 @@ struct VADGateConfig {
     ) {
         self.mode = mode
         self.staticRms = staticRms
-        self.calibrationMs = calibrationMs
-        self.calibratedOffsetDb = calibratedOffsetDb
         self.adaptiveDeltaDb = adaptiveDeltaDb
         self.adaptiveContinuationDeltaDb = adaptiveContinuationDeltaDb
         self.adaptiveAbsoluteSpeechFloorDb = adaptiveAbsoluteSpeechFloorDb
@@ -104,21 +97,12 @@ struct VADGateOutput {
     let silenceThresholdDb: Double
     let floorDb: Double?
     let floorConverged: Bool
-    let calibrating: Bool
-    let usedFallback: Bool
-    let retroactiveSpeechMs: Double
-    let trailingSilenceMs: Double?
     let dynamicsSpreadDb: Double?
     let shortSpreadDb: Double?
     let isLoudRegime: Bool
 }
 
 final class VADThresholdGate: @unchecked Sendable {
-    private struct CalibrationFrame {
-        let db: Double
-        let duration: Double
-    }
-
     // Fixed algorithm constants. They are intentionally not user-facing settings.
     static let adaptiveEndPendingWindDispersionDb = 6.0
     // Telemetry puts normal/quiet dictation floors around -35…-55 dB and genuinely
@@ -126,7 +110,6 @@ final class VADThresholdGate: @unchecked Sendable {
     // its p10 and can pass the strict loud rule while bounded noise wobble cannot.
     static let loudFloorRegimeDb = -35.0
     static let adaptiveImplausibleSpeechSeconds = 8.0
-    static let calibrationLeadingTrimDb = 12.0
     private static let staticContinuationOffsetDb = 4.0
     private static let staticSilenceOffsetDb = 6.0
     private static let elevatedRiseDbPerSecond = 12.0
@@ -138,11 +121,9 @@ final class VADThresholdGate: @unchecked Sendable {
     private static let adaptiveRollingWindowCapacity = 256
     private static let floorMinDb = -80.0
     private static let floorMaxDb = -20.0
-    private static let calibrationQuartile = 0.25
-    private static let quietBandDb = 6.0
     private static let adaptiveRollingPercentile = 0.1
     private static let adaptiveFloorMovementEpsilonDb = 1e-6
-    private static let calibrationCompletionEpsilon = 1e-9
+    private static let timeBoundaryEpsilon = 1e-9
 
     private let config: VADGateConfig
     var loudRegimeEnabled: Bool { config.loudRegimeEnabled }
@@ -159,18 +140,12 @@ final class VADThresholdGate: @unchecked Sendable {
     private let effectiveLoudContinuationDeltaDb: Double
     private let effectiveLoudSilenceDeltaDb: Double
     private var behaviorMode: VADMode
-    private var calibrationFinished = false
-    private var calibrationElapsed = 0.0
-    private var calibrationFrames: [CalibrationFrame] = []
     private var adaptiveRefinementElapsed = 0.0
     private var adaptiveRefinementComplete: Bool
     private var coldStartSpeechShapedNow = false
     private var coldStartConverged = false
     private var floorDb: Double?
     private var thresholdDb: Double
-    private var usedFallback = false
-    private var pendingRetroactiveSpeechMs = 0.0
-    private var pendingTrailingSilenceMs: Double?
     private var pendingReanchorEvent = false
     private var hasLoggedReanchorRefusal = false
     private var hasRefusedReanchorSinceLastAcceptance = false
@@ -260,15 +235,10 @@ final class VADThresholdGate: @unchecked Sendable {
                 : initialThresholdDb - Self.staticSilenceOffsetDb,
             floorDb: initialFloorDb,
             floorConverged: false,
-            calibrating: config.mode == .calibrated,
-            usedFallback: false,
-            retroactiveSpeechMs: 0,
-            trailingSilenceMs: nil,
             dynamicsSpreadDb: nil,
             shortSpreadDb: nil,
             isLoudRegime: false
         )
-        calibrationFrames.reserveCapacity(36)
         adaptiveRollingDbs = Array(repeating: 0, count: Self.adaptiveRollingWindowCapacity)
         adaptiveRollingDurations = Array(repeating: 0, count: Self.adaptiveRollingWindowCapacity)
     }
@@ -280,11 +250,6 @@ final class VADThresholdGate: @unchecked Sendable {
         switch behaviorMode {
         case .staticMode:
             return processStatic(frameDb: frameDb)
-        case .calibrated:
-            if !calibrationFinished {
-                return processCalibration(frameDb: frameDb, frameDuration: frameDuration)
-            }
-            return processCalibrated(frameDb: frameDb)
         case .adaptive:
             return processAdaptive(frameDb: frameDb, frameDuration: frameDuration)
         }
@@ -373,101 +338,7 @@ final class VADThresholdGate: @unchecked Sendable {
             thresholdDb: thresholdDb,
             continuationThresholdDb: levels.continuationThresholdDb,
             silenceThresholdDb: levels.silenceThresholdDb,
-            floorDb: nil,
-            calibrating: false,
-            retroactiveSpeechMs: 0,
-            trailingSilenceMs: nil
-        )
-    }
-
-    private func processCalibration(frameDb: Double, frameDuration: Double) -> VADGateOutput {
-        calibrationFrames.append(CalibrationFrame(db: frameDb, duration: frameDuration))
-        calibrationElapsed += frameDuration
-        // Tolerate the representation error from summing frame durations such
-        // as ten 0.1-second frames without changing the elapsed-time boundary.
-        if calibrationElapsed + Self.calibrationCompletionEpsilon >= Double(config.calibrationMs) / 1000.0 {
-            finishCalibration()
-        }
-
-        // Every frame in the window is held as non-speech. The threshold is only
-        // reported for diagnostics; the calibrated floor remains nil until the
-        // window has ended. The running Q1 gives a stable interim value after the
-        // first frame, while the existing threshold is the empty-window fallback.
-        return emit(
-            evidence: .silence,
-            isSpeech: false,
-            thresholdDb: calibrationThresholdDb(),
-            continuationThresholdDb: calibrationThresholdDb() - Self.staticContinuationOffsetDb,
-            silenceThresholdDb: calibrationThresholdDb() - Self.staticSilenceOffsetDb,
-            floorDb: nil,
-            calibrating: true,
-            retroactiveSpeechMs: 0,
-            trailingSilenceMs: nil
-        )
-    }
-
-    private func finishCalibration() {
-        let q1 = calibrationQ1()
-        let referenceThreshold = q1 + config.calibratedOffsetDb
-        var quietCount = 0
-        for frame in calibrationFrames where frame.db <= q1 + Self.quietBandDb {
-            quietCount += 1
-        }
-
-        var retroactiveSpeechSeconds = 0.0
-        for frame in calibrationFrames where frame.db >= referenceThreshold {
-            retroactiveSpeechSeconds += frame.duration
-        }
-
-        var trailingSilenceSeconds = 0.0
-        for frame in calibrationFrames.reversed() {
-            guard frame.db < referenceThreshold else { break }
-            trailingSilenceSeconds += frame.duration
-        }
-        pendingRetroactiveSpeechMs = retroactiveSpeechSeconds * 1000.0
-        pendingTrailingSilenceMs = trailingSilenceSeconds * 1000.0
-
-        let minimumQuietFrames = max(3, calibrationFrames.count / 3)
-        if quietCount >= minimumQuietFrames {
-            thresholdDb = referenceThreshold
-            floorDb = nil
-            behaviorMode = .calibrated
-        } else {
-            // A contaminated window starts Adaptive from its measured Q1 rather
-            // than collecting a second seed window, so calibration cannot gate
-            // away speech that occurred during the first window.
-            let seededFloor = clampFloor(q1)
-            floorDb = seededFloor
-            // Diagnostic seed only: classification starts in processAdaptive(),
-            // which obtains all three thresholds from adaptiveThresholds(floor:).
-            thresholdDb = adaptiveThresholds(floor: seededFloor).strong
-            adaptiveRefinementElapsed = 0
-            adaptiveRefinementComplete = true
-            coldStartConverged = true
-            behaviorMode = .adaptive
-            usedFallback = true
-        }
-        calibrationFinished = true
-    }
-
-    private func processCalibrated(frameDb: Double) -> VADGateOutput {
-        let levels = classify(
-            frameDb: frameDb,
-            strongThresholdDb: thresholdDb,
-            continuationThresholdDb: thresholdDb - Self.staticContinuationOffsetDb,
-            silenceThresholdDb: thresholdDb - Self.staticSilenceOffsetDb
-        )
-        let (retroactiveSpeechMs, trailingSilenceMs) = takeRetroactiveCredit()
-        return emit(
-            evidence: levels.evidence,
-            isSpeech: levels.evidence == .strong,
-            thresholdDb: thresholdDb,
-            continuationThresholdDb: levels.continuationThresholdDb,
-            silenceThresholdDb: levels.silenceThresholdDb,
-            floorDb: nil,
-            calibrating: false,
-            retroactiveSpeechMs: retroactiveSpeechMs,
-            trailingSilenceMs: trailingSilenceMs
+            floorDb: nil
         )
     }
 
@@ -521,7 +392,7 @@ final class VADThresholdGate: @unchecked Sendable {
         } else {
             elapsedSinceSilenceEvidence += max(0, frameDuration)
             let elapsedSinceSilenceEvidenceWithEpsilon = elapsedSinceSilenceEvidence
-                + Self.calibrationCompletionEpsilon
+                + Self.timeBoundaryEpsilon
             let viaIdle = lastKnownMachineIsIdle
                 && elapsedSinceSilenceEvidenceWithEpsilon >= effectiveStaleFloorSeconds
             let flatSignal = dispersionDb < effectiveFlatSpreadDb
@@ -574,7 +445,6 @@ final class VADThresholdGate: @unchecked Sendable {
             }
         }
         let evidence = dynamicsGatedEvidence(levels.evidence, dispersionDb: dispersionDb)
-        let (retroactiveSpeechMs, trailingSilenceMs) = takeRetroactiveCredit()
         return emit(
             evidence: evidence,
             isSpeech: evidence == .strong || evidence == .continuing,
@@ -583,9 +453,6 @@ final class VADThresholdGate: @unchecked Sendable {
             silenceThresholdDb: levels.silenceThresholdDb,
             floorDb: floorDb,
             floorConverged: coldStartConverged,
-            calibrating: false,
-            retroactiveSpeechMs: retroactiveSpeechMs,
-            trailingSilenceMs: trailingSilenceMs,
             dynamicsSpreadDb: config.adaptiveDynamicsEnabled ? dispersionDb : nil,
             shortSpreadDb: shortSpreadDb
         )
@@ -631,7 +498,7 @@ final class VADThresholdGate: @unchecked Sendable {
                 floorDb = Self.floorMinDb
             }
         }
-        let refinementCapReached = adaptiveRefinementElapsed + Self.calibrationCompletionEpsilon
+        let refinementCapReached = adaptiveRefinementElapsed + Self.timeBoundaryEpsilon
             >= 2 * Self.adaptiveMinRefinementDuration
         if refinementCapReached, !coldStartConverged {
             let forcedSeedDb = rollingPercentile
@@ -663,7 +530,6 @@ final class VADThresholdGate: @unchecked Sendable {
             dispersionDb: shortSpreadDb ?? dispersionDb
         )
         let isSpeech = evidence == .strong || evidence == .continuing
-        let (retroactiveSpeechMs, trailingSilenceMs) = takeRetroactiveCredit()
         return emit(
             evidence: evidence,
             isSpeech: isSpeech,
@@ -672,9 +538,6 @@ final class VADThresholdGate: @unchecked Sendable {
             silenceThresholdDb: levels.silenceThresholdDb,
             floorDb: currentFloor,
             floorConverged: coldStartConverged,
-            calibrating: false,
-            retroactiveSpeechMs: retroactiveSpeechMs,
-            trailingSilenceMs: trailingSilenceMs,
             dynamicsSpreadDb: config.adaptiveDynamicsEnabled ? dispersionDb : nil,
             shortSpreadDb: shortSpreadDb
         )
@@ -785,8 +648,8 @@ final class VADThresholdGate: @unchecked Sendable {
         refreshAdaptiveOutput()
     }
 
-    /// Resets adaptive tracking or calibration after an audio-route change.
-    func recalibrateFloor() {
+    /// Resets adaptive tracking after an audio-route change.
+    func resetFloorAfterRouteChange() {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         isLoudRegime = false
@@ -800,44 +663,24 @@ final class VADThresholdGate: @unchecked Sendable {
             coldStartSpeechShapedNow = false
             coldStartConverged = false
             floorDb = Self.floorMinDb
-        case .calibrated:
-            behaviorMode = .calibrated
-            calibrationFinished = false
-            calibrationElapsed = 0
-            calibrationFrames.removeAll(keepingCapacity: true)
-            pendingRetroactiveSpeechMs = 0
-            pendingTrailingSilenceMs = nil
-            floorDb = nil
-            adaptiveRefinementElapsed = 0
-            adaptiveRefinementComplete = false
         case .staticMode:
             return
         }
-        let resetAdaptiveThresholds = config.mode == .adaptive
-            ? adaptiveThresholds(floor: Self.floorMinDb)
-            : nil
-        thresholdDb = resetAdaptiveThresholds?.strong
-            ?? Double(AudioMath.dbFromRms(config.staticRms))
+        let resetAdaptiveThresholds = adaptiveThresholds(floor: Self.floorMinDb)
+        thresholdDb = resetAdaptiveThresholds.strong
         elapsedSinceSilenceEvidence = 0
         pendingReanchorEvent = false
         hasRefusedReanchorSinceLastAcceptance = false
         speechCeilingDb = nil
         resetAdaptiveRollingWindow()
-        usedFallback = false
         lastOutput = VADGateOutput(
             isSpeech: false,
             evidence: .silence,
             thresholdDb: thresholdDb,
-            continuationThresholdDb: resetAdaptiveThresholds?.continuation
-                ?? thresholdDb - Self.staticContinuationOffsetDb,
-            silenceThresholdDb: resetAdaptiveThresholds?.silence
-                ?? thresholdDb - Self.staticSilenceOffsetDb,
+            continuationThresholdDb: resetAdaptiveThresholds.continuation,
+            silenceThresholdDb: resetAdaptiveThresholds.silence,
             floorDb: floorDb,
             floorConverged: false,
-            calibrating: config.mode == .calibrated,
-            usedFallback: false,
-            retroactiveSpeechMs: 0,
-            trailingSilenceMs: nil,
             dynamicsSpreadDb: nil,
             shortSpreadDb: nil,
             isLoudRegime: false
@@ -988,10 +831,6 @@ final class VADThresholdGate: @unchecked Sendable {
             silenceThresholdDb: thresholds.silence,
             floorDb: floorDb,
             floorConverged: coldStartConverged,
-            calibrating: lastOutput.calibrating,
-            usedFallback: usedFallback,
-            retroactiveSpeechMs: lastOutput.retroactiveSpeechMs,
-            trailingSilenceMs: lastOutput.trailingSilenceMs,
             dynamicsSpreadDb: lastOutput.dynamicsSpreadDb,
             shortSpreadDb: lastOutput.shortSpreadDb,
             isLoudRegime: isLoudRegime
@@ -1045,43 +884,8 @@ final class VADThresholdGate: @unchecked Sendable {
         return (evidence, strongThresholdDb, continuationThresholdDb, silenceThresholdDb)
     }
 
-    private func calibrationQ1() -> Double {
-        var dbs: [Double] = []
-        dbs.reserveCapacity(calibrationFrames.count)
-        for frame in calibrationFrames {
-            dbs.append(frame.db)
-        }
-        let sortedDbs = dbs.sorted()
-        let medianDb = percentile(sortedDbs, percentile: 0.5)
-        var leadingTrimCount = 0
-        while leadingTrimCount < dbs.count,
-              dbs[leadingTrimCount] < medianDb - Self.calibrationLeadingTrimDb {
-            leadingTrimCount += 1
-        }
-        let q1Dbs = dbs.count - leadingTrimCount >= 3
-            ? Array(dbs.dropFirst(leadingTrimCount))
-            : dbs
-        let sortedQ1Dbs = q1Dbs.sorted()
-        let index = Int(Self.calibrationQuartile * Double(sortedQ1Dbs.count - 1))
-        return sortedQ1Dbs[index]
-    }
-
-    private func calibrationThresholdDb() -> Double {
-        guard !calibrationFrames.isEmpty else {
-            return thresholdDb
-        }
-        return calibrationQ1() + config.calibratedOffsetDb
-    }
-
     private func clampFloor(_ floor: Double) -> Double {
         min(max(floor, Self.floorMinDb), Self.floorMaxDb)
-    }
-
-    private func takeRetroactiveCredit() -> (Double, Double?) {
-        let credit = (pendingRetroactiveSpeechMs, pendingTrailingSilenceMs)
-        pendingRetroactiveSpeechMs = 0
-        pendingTrailingSilenceMs = nil
-        return credit
     }
 
     private func emit(
@@ -1092,9 +896,6 @@ final class VADThresholdGate: @unchecked Sendable {
         silenceThresholdDb: Double,
         floorDb: Double?,
         floorConverged: Bool = false,
-        calibrating: Bool,
-        retroactiveSpeechMs: Double,
-        trailingSilenceMs: Double?,
         dynamicsSpreadDb: Double? = nil,
         shortSpreadDb: Double? = nil,
         isLoudRegime: Bool? = nil
@@ -1107,10 +908,6 @@ final class VADThresholdGate: @unchecked Sendable {
             silenceThresholdDb: silenceThresholdDb,
             floorDb: floorDb,
             floorConverged: floorConverged,
-            calibrating: calibrating,
-            usedFallback: usedFallback,
-            retroactiveSpeechMs: retroactiveSpeechMs,
-            trailingSilenceMs: trailingSilenceMs,
             dynamicsSpreadDb: dynamicsSpreadDb,
             shortSpreadDb: shortSpreadDb,
             isLoudRegime: isLoudRegime ?? self.isLoudRegime

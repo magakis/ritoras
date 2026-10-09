@@ -378,9 +378,6 @@ export function makeRecorderHarness({
         && (endpointEvidence === 'continuing' || endpointEvidence === 'ambiguous')) {
         endpointEvidence = 'silence';
       }
-      if (output.retroactiveSpeechMs > 0) {
-        this.speechSamples += output.retroactiveSpeechMs * 16;
-      }
       if (output.isSpeech) this.speechSamples += frameSamples;
 
       let decision = { type: 'none' };

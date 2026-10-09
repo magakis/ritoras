@@ -67,61 +67,6 @@ function eventsOf(scenario, kind) {
 }
 
 describe('session-start head buffer', () => {
-  it('preserves quiet speech hidden during calibrated VAD startup', () => {
-    const scenario = makeScenario({
-      // This test preserves the historical >2.5 s retention behavior, not the new default.
-      headBufferSamples: 6000 * SAMPLES_PER_MS,
-      gateConfig: {
-        ...USER_GATE_CONFIG,
-        mode: 'calibrated',
-        calibrationMs: 1500,
-        calibratedOffsetDb: 10,
-      },
-    });
-    runDbTimeline(scenario, [
-      { seconds: 0.5, db: -54 },
-      { seconds: 2.5, db: -50 },
-      { seconds: 1.5, db: -35 },
-      { seconds: 3.5, db: -54 },
-    ]);
-
-    const starts = eventsOf(scenario, 'start_utterance');
-    const emits = eventsOf(scenario, 'emit');
-    assert.strictEqual(emits.length, 1);
-    assert.strictEqual(starts.length, 1);
-    // With 10 ms frames, calibration is 50 ambient + 100 quiet-speech frames:
-    // Q1 is -54 dB, so the successful calibration threshold is -44 dB.
-    assert.strictEqual(scenario.harness.gate.usedFallback, false);
-    assert.strictEqual(scenario.harness.gate.thresholdDb, -44);
-    // Real-world immediate speech during calibration can drag Q1 to speech
-    // level, placing the threshold above it. Here the quiet segment falls below
-    // the strong/continuing bands (at the exact silence boundary), so only loud
-    // speech onsets; the session head preserves the otherwise-lost first sentence.
-    const startTimeMs = starts[0].timeSeconds * 1000;
-    assert.ok(Math.abs(startTimeMs - 3070) <= EPSILON_MS);
-    assert.ok(
-      Math.abs(
-        scenario.harness.headPrependedAtOnset / SAMPLES_PER_MS - (startTimeMs - 500),
-      ) <= EPSILON_MS,
-    );
-    assert.ok(
-      scenario.harness.headPrependedAtOnset
-        >= 1500 * SAMPLES_PER_MS - EPSILON_MS * SAMPLES_PER_MS,
-    );
-    const emittedMs = emits[0].n / SAMPLES_PER_MS;
-    const utteranceFromLoudOnsetMs = (emits[0].timeSeconds - 3.0) * 1000;
-    assert.ok(emittedMs >= startTimeMs - EPSILON_MS);
-    assert.ok(emittedMs >= 3000 - EPSILON_MS);
-    assert.ok(
-      emittedMs >= scenario.harness.headPrependedAtOnset / SAMPLES_PER_MS
-        + (emits[0].timeSeconds - starts[0].timeSeconds) * 1000
-        - EPSILON_MS,
-    );
-    assert.ok(emittedMs <= 3000 + utteranceFromLoudOnsetMs + EPSILON_MS);
-    // Without the head, the chunk would begin at onset - 500 ms, losing the
-    // quiet sentence that did not start an utterance.
-  });
-
   it('holds the three-second hesitation until post-speech endpoint silence', () => {
     const scenario = makeScenario({
       // This exercises retaining the full three-second hesitation, not the new 2.5 s default.
@@ -263,14 +208,12 @@ describe('session-start head buffer', () => {
     assert.strictEqual(scenario.harness.headPrependedAtOnset, 500 * SAMPLES_PER_MS);
   });
 
-  it('stops trimming at speech that begins one second into the retained head', () => {
+  it('stops trimming at quiet audio above the adaptive silence threshold', () => {
     const scenario = makeScenario({
       endpointSilenceMs: 700,
       gateConfig: {
         ...USER_GATE_CONFIG,
-        mode: 'calibrated',
-        calibrationMs: 1500,
-        calibratedOffsetDb: 10,
+        adaptiveSilenceDeltaDb: 1,
       },
     });
     runSeconds(scenario, 2.5, () => -54);

@@ -5,8 +5,7 @@ struct SilenceProgressIndicator: View {
     let chunkDispatchCount: Int
 
     private var silenceProgress: Double {
-        guard !state.calibrating,
-              state.endpointState == "endPending",
+        guard state.endpointState == "endPending",
               state.evidence == "silence",
               state.silenceTargetMs > 0 else {
             return 0
@@ -16,10 +15,6 @@ struct SilenceProgressIndicator: View {
     }
 
     private var stateLabel: String {
-        if state.calibrating {
-            return "Measuring…"
-        }
-
         switch state.endpointState {
         case "idle":
             return "Listening"
@@ -35,7 +30,7 @@ struct SilenceProgressIndicator: View {
     }
 
     private var stateTextColor: Color {
-        if state.calibrating || state.endpointState == "idle" {
+        if state.endpointState == "idle" {
             return .secondary
         }
         if state.endpointState == "endPending" {

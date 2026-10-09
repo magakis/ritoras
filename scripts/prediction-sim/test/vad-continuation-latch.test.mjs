@@ -349,20 +349,17 @@ describe('sustained continuing onset latch regime split', () => {
     assert.strictEqual(harness.endpoint.state, 'speechActive');
   });
 
-  it('latches continuing evidence after contaminated calibration seeds a converged floor', () => {
+  it('latches continuing evidence from a converged adaptive floor', () => {
     const harness = makeRecorderHarness({
       gateConfig: {
-        mode: 'calibrated',
-        calibrationMs: 120,
+        mode: 'adaptive',
         adaptiveAbsoluteSpeechFloorDb: -80,
         loudRegimeEnabled: false,
       },
     });
-    for (let i = 0; i < 12; i++) {
-      harness.drive(i < 3 ? -30 : -21);
-    }
-    assert.strictEqual(harness.gate.coldStartConverged, true);
-    assert.notStrictEqual(harness.gate.behaviorMode, 'calibrated');
+    harness.gate.floorDb = -30;
+    harness.gate.coldStartConverged = true;
+    harness.gate.adaptiveRefinementComplete = true;
     harness.gate.updateFloorTracking = () => {};
 
     // The latch qualifies at 1.5 s (frame 150); that frame contributes 10 ms

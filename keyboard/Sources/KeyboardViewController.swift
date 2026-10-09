@@ -1638,15 +1638,17 @@ class KeyboardViewController: UIInputViewController {
             : consumedPayloadIDs)
         let fieldId = safeDocumentIdentifier()
         let hasRealField = fieldId != nil && fieldId != Self.noFieldDocumentId
+        // Preserve the former default now that the delivery window is no longer tunable.
+        let deliveryWindowSeconds = 120
         let decision = FollowMeDeliveryGate.decide(
             id: payload.id, status: status, terminalAt: payload.timestamp, now: Date(),
-            windowSeconds: SharedConfig.followMeWindowSeconds(), consumedIDs: ring.ids,
+            windowSeconds: deliveryWindowSeconds, consumedIDs: ring.ids,
             matchesPendingRequest: pendingRequestId == payload.id,
             hasRealField: hasRealField)
         FileLogger.shared.debug(.keyboard, "follow-me decision", payload: [
             "id": String(payload.id.uuidString.prefix(8)), "verdict": String(describing: decision),
             "ageSec": Int(Date().timeIntervalSince(payload.timestamp)),
-            "windowSec": Int(SharedConfig.followMeWindowSeconds()),
+            "windowSec": deliveryWindowSeconds,
             "pendingMatch": pendingRequestId == payload.id
         ])
         switch decision {

@@ -30,8 +30,8 @@ enum AudioSession {
     /// The audio-measurement toggle routes all recording paths (batch, stream,
     /// and tester) through `.measurement`, which strips iOS's hidden AGC/HPF
     /// for stable levels. This changes the absolute level scale, so static
-    /// thresholds may need retuning; it pairs best with calibrated or adaptive
-    /// VAD modes.
+    /// thresholds may need retuning; adaptive VAD adjusts to the new level
+    /// scale automatically.
     ///
     /// **Ordering:** `setCategory` → `setActive(true)`, then construct
     /// `AVAudioRecorder` / start the engine. Activating the session before the

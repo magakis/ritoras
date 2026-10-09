@@ -244,8 +244,8 @@ function rawConfigFromTelemetry(config) {
 
 export function normalizeConfig(rawConfig = {}) {
   const raw = { ...DEFAULT_SESSION_CONFIG, ...(rawConfig ?? {}) };
-  if (!['static', 'calibrated', 'adaptive'].includes(raw.mode)) {
-    throw new Error(`mode must be static, calibrated, or adaptive; got ${raw.mode}`);
+  if (!['static', 'adaptive'].includes(raw.mode)) {
+    throw new Error(`mode must be static or adaptive; got ${raw.mode}`);
   }
 
   const gateConfig = makeVadGateConfig({

@@ -135,7 +135,6 @@ struct StreamingVADFrameState: Sendable {
     let continuationThresholdDb: Double
     let silenceThresholdDb: Double
     let floorDb: Double?
-    let calibrating: Bool
     let accumulatedSilenceMs: Double
     let silenceTargetMs: Double
     let utteranceDurationMs: Double
@@ -235,9 +234,6 @@ private final class VADContext: @unchecked Sendable {
     var speechSamples: Int = 0
     var chunkId: UInt32 = 0
     private var sessionElapsedSamples = 0
-    var onCalibrationChange: ((Bool) -> Void)?
-    private var wasCalibrating: Bool
-    private var didLogFallback = false
     private var diagnosticElapsed = 0.0
     private var lastFrameDb = 0.0
     private var pendingEmissionSummary: EmissionSummary?
@@ -304,7 +300,6 @@ private final class VADContext: @unchecked Sendable {
         self.analysisHpf = analysisHpfEnabled
             ? VADHighPassFilter(cutoffHz: analysisHpfCutoffHz)
             : nil
-        self.wasCalibrating = gateConfig.mode == .calibrated
         self.preRollBuffer = SampleRingBuffer(capacity: max(effectivePreRollSamples, effectiveLoudPreRollSamples))
         let sessionHeadBufferSamples = SharedConfig.Defaults.sessionHeadBufferMsDefault * 16
         self.sessionHeadBufferSamples = sessionHeadBufferSamples
@@ -316,12 +311,6 @@ private final class VADContext: @unchecked Sendable {
         if let accumulatorSpillURL {
             try? FileManager.default.removeItem(at: accumulatorSpillURL)
         }
-    }
-
-    func setCalibrationChangeHandler(_ handler: ((Bool) -> Void)?) {
-        os_unfair_lock_lock(&unfairLock)
-        defer { os_unfair_lock_unlock(&unfairLock) }
-        onCalibrationChange = handler
     }
 
     func setTelemetrySink(_ sink: VADTelemetrySink?) {
@@ -375,11 +364,11 @@ private final class VADContext: @unchecked Sendable {
         analysisHpf?.reset()
     }
 
-    func recalibrateAfterRouteChange() {
+    func resetAfterRouteChange() {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         analysisHpf?.reset()
-        gate.recalibrateFloor()
+        gate.resetFloorAfterRouteChange()
         utteranceQuietestStrongDb = nil
         sawReanchorDuringUtterance = false
         sustainedContinuingMs = 0
@@ -405,7 +394,6 @@ private final class VADContext: @unchecked Sendable {
             continuationThresholdDb: gateSnapshot.continuationThresholdDb,
             silenceThresholdDb: gateSnapshot.silenceThresholdDb,
             floorDb: gateSnapshot.floorDb,
-            calibrating: gateSnapshot.calibrating,
             accumulatedSilenceMs: Double(endpoint.accumulatedSilenceSamples) / 16.0,
             silenceTargetMs: Double(silenceThresholdSamples) / 16.0,
             utteranceDurationMs: Double(endpoint.utteranceDurationSamples) / 16.0,
@@ -495,33 +483,6 @@ private final class VADContext: @unchecked Sendable {
         var telemetryDecision: StreamingEndpointDecision = .none
         var telemetryDecisionSilenceSamples = endpoint.accumulatedSilenceSamples
         var telemetryFrameRecorded = false
-
-        if out.usedFallback && !didLogFallback {
-            didLogFallback = true
-            var payload: [String: Any] = ["thresholdDb": out.thresholdDb]
-            if let floorDb = out.floorDb {
-                payload["floorDb"] = floorDb
-            }
-            FileLogger.shared.warn(.audio, "VAD: calibration contaminated — adaptive fallback",
-                                   payload: payload)
-        }
-
-        if wasCalibrating && !out.calibrating {
-            var payload: [String: Any] = ["thresholdDb": out.thresholdDb]
-            if let floorDb = out.floorDb {
-                payload["floorDb"] = floorDb
-            }
-            FileLogger.shared.info(.audio, "VAD: calibration complete", payload: payload)
-            onCalibrationChange?(false)
-        }
-        wasCalibrating = out.calibrating
-
-        if out.retroactiveSpeechMs > 0 {
-            speechSamples += Int(out.retroactiveSpeechMs * 16.0)
-        }
-        if let trailingSilenceMs = out.trailingSilenceMs {
-            silenceSamples = Int(trailingSilenceMs * 16.0)
-        }
 
         if out.isSpeech {
             speechSamples += frameLength
@@ -1287,12 +1248,10 @@ actor StreamingAudioRecorder {
         let vadGateConfig = VADGateConfig(
             mode: SharedConfig.streamVadMode(),
             staticRms: SharedConfig.streamVadSpeechRms(),
-            calibrationMs: SharedConfig.streamVadCalibrationMs(),
-            calibratedOffsetDb: SharedConfig.streamVadCalibratedOffsetDb(),
             adaptiveDeltaDb: SharedConfig.streamVadAdaptiveDeltaDb(),
             adaptiveContinuationDeltaDb: SharedConfig.streamVadAdaptiveContinuationDeltaDb(),
             adaptiveAbsoluteSpeechFloorDb: SharedConfig.streamVadAbsoluteSpeechFloorDb(),
-            adaptiveRiseSpeedMultiplier: SharedConfig.streamVadAdaptationSpeed(),
+            adaptiveRiseSpeedMultiplier: 1.0,
             adaptiveSilenceDeltaDb: SharedConfig.streamVadAdaptiveSilenceDeltaDb(),
             adaptiveStaleFloorSeconds: SharedConfig.streamVadStaleFloorSeconds(),
             adaptiveFallTauSeconds: SharedConfig.streamVadFallTauSeconds(),
@@ -1335,8 +1294,6 @@ actor StreamingAudioRecorder {
 
     /// Begins streaming audio capture.
     ///
-    /// - Parameter onVADCalibration: Called when calibrated VAD finishes its
-    ///   calibration window. The argument is the current calibration state.
     /// - Parameter onChunk: Called on vadQueue for each detected speech
     ///   segment. The first argument is a monotonically increasing chunk ID
     ///   (starting at 0); the second is float32 PCM samples at 16 kHz mono.
@@ -1348,7 +1305,7 @@ actor StreamingAudioRecorder {
     ///   if mic access is unavailable; `AudioRecorder.AudioRecorderError.invalidSessionConfiguration`
     ///   if session setup fails; `StreamingRecorderError.engineStartFailed` if
     ///   the audio engine cannot start.
-    func start(fileURL: URL? = nil, onVADCalibration: ((Bool) -> Void)? = nil, onChunk: @escaping ChunkHandler, onVADState: ((StreamingVADFrameState) -> Void)? = nil, telemetry: VADTelemetrySink? = nil) async throws {
+    func start(fileURL: URL? = nil, onChunk: @escaping ChunkHandler, onVADState: ((StreamingVADFrameState) -> Void)? = nil, telemetry: VADTelemetrySink? = nil) async throws {
         guard !isRecording else {
             throw StreamingRecorderError.alreadyStreaming
         }
@@ -1432,7 +1389,6 @@ actor StreamingAudioRecorder {
         let handler = onChunk
         let stateHandler = onVADState
         let vad = self.vad
-        vad.setCalibrationChangeHandler(onVADCalibration)
         let vadQueue = self.vadQueue
         let telemetryFlushable = self.telemetryFlushable
         let converterHolder = self.converterHolder
@@ -1516,7 +1472,7 @@ actor StreamingAudioRecorder {
             object: AVAudioSession.sharedInstance(),
             queue: nil
         ) { _ in
-            vad.recalibrateAfterRouteChange()
+            vad.resetAfterRouteChange()
         }
 
         var startedPayload: [String: Any] = [
@@ -1533,16 +1489,10 @@ actor StreamingAudioRecorder {
         switch vadGateConfig.mode {
         case .staticMode:
             break
-        case .calibrated:
-            startedPayload["calibrationMs"] = vadGateConfig.calibrationMs
-            startedPayload["offsetDb"] = vadGateConfig.calibratedOffsetDb
         case .adaptive:
             startedPayload["deltaDb"] = vadGateConfig.adaptiveDeltaDb
         }
         FileLogger.shared.info(.audio, "Started", payload: startedPayload)
-        if vadGateConfig.mode == .calibrated {
-            FileLogger.shared.debug(.audio, "VAD: calibration start")
-        }
         startCompleted = true
     }
 

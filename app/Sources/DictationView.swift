@@ -159,13 +159,6 @@ struct DictationView: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 2)
                     .background(.tertiary, in: Capsule())
-
-                if viewModel.vadCalibrating {
-                    Text("Measuring ambient noise — you can start talking")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.leading)
-                }
             }
 
             if let state = viewModel.vadState {

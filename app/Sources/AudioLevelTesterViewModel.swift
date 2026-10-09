@@ -11,10 +11,7 @@ final class AudioLevelTesterViewModel: ObservableObject {
     @Published private(set) var continuationThresholdDb: Double = Double(AudioMath.dbFromRms(SharedConfig.streamVadSpeechRms())) - 4.0
     @Published private(set) var silenceThresholdDb: Double = Double(AudioMath.dbFromRms(SharedConfig.streamVadSpeechRms())) - 6.0
     @Published private(set) var floorDb: Double?
-    @Published private(set) var calibrating = false
     @Published private(set) var isSpeech = false
-    @Published private(set) var usedFallback = false
-    @Published private(set) var calibrationElapsedMs: Double = 0
     @Published private(set) var isMonitoring = false
     @Published private(set) var permissionDenied = false
 
@@ -108,20 +105,9 @@ final class AudioLevelTesterViewModel: ObservableObject {
                     self.continuationThresholdDb = effectiveOutput.continuationThresholdDb
                     self.silenceThresholdDb = effectiveOutput.silenceThresholdDb
                     self.floorDb = effectiveOutput.floorDb
-                    self.calibrating = effectiveOutput.calibrating
                     self.isSpeech = self.endpointMachineEnabled
                         ? endpoint.state == .speechActive || endpoint.state == .endPending
                         : effectiveOutput.isSpeech
-                    self.usedFallback = effectiveOutput.usedFallback
-                    if effectiveOutput.calibrating {
-                        let calibrationMs = Double(SharedConfig.streamVadCalibrationMs())
-                        self.calibrationElapsedMs = min(
-                            self.calibrationElapsedMs + frameDuration * 1000.0,
-                            calibrationMs
-                        )
-                    } else {
-                        self.calibrationElapsedMs = 0
-                    }
                 }
             }
             // Re-check: if stop() ran during the await, token is stale
@@ -132,8 +118,6 @@ final class AudioLevelTesterViewModel: ObservableObject {
                 continuationThresholdDb = output.continuationThresholdDb
                 silenceThresholdDb = output.silenceThresholdDb
                 floorDb = output.floorDb
-                calibrating = output.calibrating
-                usedFallback = output.usedFallback
             }
         } catch {
             guard sessionToken == token else { return }
@@ -157,10 +141,7 @@ final class AudioLevelTesterViewModel: ObservableObject {
         continuationThresholdDb = 0
         silenceThresholdDb = 0
         floorDb = nil
-        calibrating = false
         isSpeech = false
-        usedFallback = false
-        calibrationElapsedMs = 0
     }
 
     func recheckPermission() async {
@@ -173,12 +154,10 @@ final class AudioLevelTesterViewModel: ObservableObject {
         rebuildGate(using: VADGateConfig(
             mode: SharedConfig.streamVadMode(),
             staticRms: SharedConfig.streamVadSpeechRms(),
-            calibrationMs: SharedConfig.streamVadCalibrationMs(),
-            calibratedOffsetDb: SharedConfig.streamVadCalibratedOffsetDb(),
             adaptiveDeltaDb: SharedConfig.streamVadAdaptiveDeltaDb(),
             adaptiveContinuationDeltaDb: SharedConfig.streamVadAdaptiveContinuationDeltaDb(),
             adaptiveAbsoluteSpeechFloorDb: SharedConfig.streamVadAbsoluteSpeechFloorDb(),
-            adaptiveRiseSpeedMultiplier: SharedConfig.streamVadAdaptationSpeed(),
+            adaptiveRiseSpeedMultiplier: 1.0,
             adaptiveSilenceDeltaDb: SharedConfig.streamVadAdaptiveSilenceDeltaDb(),
             adaptiveStaleFloorSeconds: SharedConfig.streamVadStaleFloorSeconds(),
             adaptiveFallTauSeconds: SharedConfig.streamVadFallTauSeconds(),
@@ -208,10 +187,7 @@ final class AudioLevelTesterViewModel: ObservableObject {
         continuationThresholdDb = output?.continuationThresholdDb ?? 0
         silenceThresholdDb = output?.silenceThresholdDb ?? 0
         floorDb = output?.floorDb
-        calibrating = isMonitoring && (output?.calibrating ?? false)
         isSpeech = false
-        usedFallback = false
-        calibrationElapsedMs = 0
     }
 
     func openSystemSettings() {

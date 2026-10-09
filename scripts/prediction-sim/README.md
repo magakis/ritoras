@@ -46,7 +46,7 @@ fusion tests use a **bigram-count proxy** (zero dependencies): bigram log-probab
 derived from a public corpus, used as a stand-in for KenLM's trigram scores. This
 gives directional test coverage (does the fusion formula behave correctly given a
 score function?) but NOT exact numerical fidelity to production KenLM. Final
-calibration of α and the thresholds is confirmed on-device via `ritoras-ios-debugging`.
+tuning of α and the thresholds is confirmed on-device via `ritoras-ios-debugging`.
 
 ## Keeping the port in sync
 
