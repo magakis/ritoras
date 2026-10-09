@@ -2,7 +2,6 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
-    @State private var showOnboarding = false
     @State private var isEditingServers = false
     @State private var isEditingAPIKey = false
     @State private var apiKeyDraft: String = ""
@@ -46,16 +45,6 @@ struct SettingsView: View {
             infoSection
         }
         .navigationTitle("Ritoras Settings")
-        .toolbar {
-            ToolbarItem(placement: .navigationBarLeading) {
-                Button(action: { showOnboarding = true }) {
-                    Image(systemName: "questionmark.circle")
-                }
-            }
-        }
-        .sheet(isPresented: $showOnboarding) {
-            OnboardingView(onboardingCompleted: .constant(true))
-        }
     }
 
     // MARK: - Server Section
@@ -194,18 +183,6 @@ struct SettingsView: View {
             }
             .pickerStyle(.segmented)
 
-            Stepper(value: Binding(
-                get: { settings.followMeWindowSeconds },
-                set: { settings.followMeWindowSeconds = min(max($0, 15), 600) }
-            ), in: 15...600) {
-                HStack {
-                    Text("Follow-Me Window")
-                    Spacer()
-                    Text("\(settings.followMeWindowSeconds) s")
-                        .foregroundColor(.secondary)
-                }
-            }
-
             if settings.dictationMode == .stream {
                 NavigationLink("Streaming VAD") {
                     VADSettingsView()
@@ -214,7 +191,7 @@ struct SettingsView: View {
         } header: {
             Text("Dictation")
         } footer: {
-            Text("Batch records the whole clip then transcribes (most reliable). Stream transcribes live as you pause — faster feedback, needs a stable connection. Streaming VAD settings only affect Stream mode. How long a completed dictation waits to be pasted into the next field you focus.")
+            Text("Batch records the whole clip then transcribes (most reliable). Stream transcribes live as you pause — faster feedback, needs a stable connection. Streaming VAD settings only affect Stream mode.")
         }
     }
 
@@ -272,6 +249,9 @@ struct SettingsView: View {
             NavigationLink("Debug Log") {
                 DebugLogView()
             }
+            NavigationLink("Raw Log File") {
+                RawLogFileView()
+            }
         } header: {
             Text("Diagnostics")
         } footer: {
@@ -290,9 +270,6 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .textSelection(.enabled)
-            }
-            Button("Show Onboarding Again") {
-                showOnboarding = true
             }
             HStack {
                 Text("Version")
