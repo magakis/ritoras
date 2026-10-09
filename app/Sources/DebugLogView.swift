@@ -645,10 +645,6 @@ struct DebugLogView: View {
                 }
             }
             .pickerStyle(.segmented)
-
-            Text(scrubPII ? "PII scrubbed" : "PII: OFF")
-                .font(.caption2)
-                .foregroundColor(scrubPII ? .green : .orange)
         }
         .padding(.horizontal)
         .padding(.bottom, 4)
@@ -664,7 +660,7 @@ struct DebugLogView: View {
         Group {
             if timeRange == .custom {
                 VStack(spacing: 6) {
-                    HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
                         DatePicker(
                             "Start",
                             selection: customStartDateBinding,
@@ -679,6 +675,8 @@ struct DebugLogView: View {
                         )
                     }
                     .datePickerStyle(.compact)
+                    .font(.subheadline)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                     HStack {
                         Spacer()
