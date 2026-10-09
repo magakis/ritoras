@@ -1,6 +1,22 @@
 import SwiftUI
 import UIKit
 
+// MARK: - Category Filter
+
+private extension LogComponent {
+    static let allCases: [LogComponent] = [
+        .keyboard,
+        .app,
+        .transcription,
+        .audio,
+        .dictionary,
+        .prediction,
+        .network,
+        .settings,
+        .lifecycle
+    ]
+}
+
 private final class PendingLogExportCleanupRegistry: @unchecked Sendable {
     private enum Lifecycle {
         case creating
@@ -64,34 +80,6 @@ private enum LevelFilter: String, CaseIterable {
         case .info:  return .info
         case .warn:  return .warn
         case .error: return .error
-        }
-    }
-}
-
-// MARK: - Component Filter
-
-private enum ComponentFilter: String, CaseIterable {
-    case all = "All"
-    case keyboard = "Keyboard"
-    case app = "ContainerApp"
-    case transcription = "Transcription"
-    case audio = "Audio"
-    case dictionary = "Dictionary"
-    case network = "Network"
-    case settings = "Settings"
-    case lifecycle = "Lifecycle"
-
-    var logComponent: LogComponent? {
-        switch self {
-        case .all:           return nil
-        case .keyboard:      return .keyboard
-        case .app:           return .app
-        case .transcription: return .transcription
-        case .audio:         return .audio
-        case .dictionary:    return .dictionary
-        case .network:       return .network
-        case .settings:      return .settings
-        case .lifecycle:     return .lifecycle
         }
     }
 }
@@ -238,7 +226,8 @@ struct DebugLogView: View {
     @State private var diagnostics: [String] = []
     @State private var selectedIDs: Set<Int> = []
     @State private var selectedFilter: LevelFilter = .all
-    @State private var componentFilter: ComponentFilter = .all
+    @State private var selectedComponents: Set<LogComponent> = Set(LogComponent.allCases)
+    @State private var isCategoryFilterPresented = false
     @State private var searchText: String = ""
     @State private var timeRange: TimeRangeFilter = .all
     @State private var customDateRange = CustomDateRange(
@@ -282,7 +271,7 @@ struct DebugLogView: View {
     var body: some View {
         VStack(spacing: 0) {
             levelFilter
-            componentTimeFilter
+            categoryTimeFilter
             customRangeControls
             searchField
             if !selectedIDs.isEmpty || !expandedKeys.isEmpty {
@@ -298,7 +287,11 @@ struct DebugLogView: View {
                 } else {
                     VStack {
                         Spacer()
-                        Text("No log entries yet")
+                        Text(
+                            selectedComponents.isEmpty
+                                ? "No categories selected"
+                                : "No log entries yet"
+                        )
                             .foregroundColor(.secondary)
                         Spacer()
                     }
@@ -361,7 +354,7 @@ struct DebugLogView: View {
         }
         .onChange(of: searchText) { _, _ in refresh() }
         .onChange(of: selectedFilter) { _, _ in refresh() }
-        .onChange(of: componentFilter) { _, _ in refresh() }
+        .onChange(of: selectedComponents) { _, _ in refresh() }
         .onChange(of: timeRange) { _, newValue in
             if newValue == .custom && !didInitializeCustomDateRange {
                 let now = Date()
@@ -417,14 +410,25 @@ struct DebugLogView: View {
         .padding(.bottom, 4)
     }
 
-    private var componentTimeFilter: some View {
+    private var categoryTimeFilter: some View {
         HStack(spacing: 8) {
-            Picker("Component", selection: $componentFilter) {
-                ForEach(ComponentFilter.allCases, id: \.self) { filter in
-                    Text(filter.rawValue).tag(filter)
+            Button {
+                isCategoryFilterPresented = true
+            } label: {
+                HStack(spacing: 4) {
+                    Text(categoryFilterSummary)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.caption2)
                 }
             }
-            .pickerStyle(.menu)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .accessibilityLabel("Categories")
+            .accessibilityValue(categoryFilterSummary)
+            .sheet(isPresented: $isCategoryFilterPresented) {
+                CategoryFilterSheet(selectedComponents: $selectedComponents)
+            }
 
             Picker("Time", selection: $timeRange) {
                 ForEach(TimeRangeFilter.allCases, id: \.self) { filter in
@@ -439,6 +443,12 @@ struct DebugLogView: View {
         }
         .padding(.horizontal)
         .padding(.bottom, 4)
+    }
+
+    private var categoryFilterSummary: String {
+        selectedComponents.count == LogComponent.allCases.count
+            ? "All Categories"
+            : "\(selectedComponents.count) Categories"
     }
 
     private var customRangeControls: some View {
@@ -815,8 +825,14 @@ struct DebugLogView: View {
     }
 
     private func refresh() {
+        let componentSelection = selectedComponents
+        guard !componentSelection.isEmpty else {
+            clearFilteredLogResults()
+            return
+        }
+
         let levels = levelFilterToSet()
-        let components = componentFilterToSet()
+        let components = componentsForQuery(componentSelection)
         let bounds = timeRangeToBounds()
         let search = searchText.isEmpty ? nil : searchText
         let piiScrub = scrubPII
@@ -1089,14 +1105,18 @@ struct DebugLogView: View {
         do {
             switch action {
             case .visible:
-                let bounds = timeRangeToBounds()
-                let count = try LogStore.shared.deleteFiltered(
-                    levels: levelFilterToSet(),
-                    components: componentFilterToSet(),
-                    sinceNs: bounds.sinceNs,
-                    untilNs: bounds.untilNs,
-                    search: searchText.isEmpty ? nil : searchText)
-                showDeleteFeedback(text: "Deleted \(count) logs", isError: false)
+                if selectedComponents.isEmpty {
+                    showDeleteFeedback(text: "Deleted 0 logs", isError: false)
+                } else {
+                    let bounds = timeRangeToBounds()
+                    let count = try LogStore.shared.deleteFiltered(
+                        levels: levelFilterToSet(),
+                        components: componentsForQuery(selectedComponents),
+                        sinceNs: bounds.sinceNs,
+                        untilNs: bounds.untilNs,
+                        search: searchText.isEmpty ? nil : searchText)
+                    showDeleteFeedback(text: "Deleted \(count) logs", isError: false)
+                }
             case .olderThan1Day:
                 let cutoff = Int64((Date().addingTimeInterval(-86400)).timeIntervalSince1970 * 1_000_000_000)
                 let count = try LogStore.shared.deleteOlderThan(tsNs: cutoff)
@@ -1155,17 +1175,24 @@ struct DebugLogView: View {
     // MARK: - Pagination
 
     private func loadMore() {
+        let componentSelection = selectedComponents
+        guard !componentSelection.isEmpty else {
+            clearFilteredLogResults()
+            return
+        }
         guard !isLoadingMore else { return }
+        guard !isLoading else { return }
         isLoadingMore = true
         guard let before = oldestLoadedId else {
             isLoadingMore = false
             return
         }
         let levels = levelFilterToSet()
-        let components = componentFilterToSet()
+        let components = componentsForQuery(componentSelection)
         let bounds = timeRangeToBounds()
         let search = searchText.isEmpty ? nil : searchText
         let piiScrub = scrubPII
+        let gen = refreshGeneration
 
         DispatchQueue.global(qos: .userInitiated).async {
             let more = LogStore.shared.recent(
@@ -1178,14 +1205,16 @@ struct DebugLogView: View {
             guard !more.isEmpty else {
                 DispatchQueue.main.async {
                     isLoadingMore = false
+                    guard gen == refreshGeneration else { return }
                 }
                 return
             }
 
             DispatchQueue.main.async {
+                isLoadingMore = false
+                guard gen == refreshGeneration else { return }
                 lines.append(contentsOf: more)
                 oldestLoadedId = more.last?.rowId
-                isLoadingMore = false
 
                 let rawText = lines.map(\.raw).joined(separator: "\n")
                 cachedShareText = piiScrub ? LogScrubber.scrub(rawText) : rawText
@@ -1194,9 +1223,14 @@ struct DebugLogView: View {
     }
 
     private func incrementalRefresh() {
+        let componentSelection = selectedComponents
+        guard !componentSelection.isEmpty else {
+            clearFilteredLogResults()
+            return
+        }
         guard let newest = newestSeenId else { refresh(); return }
         let levels = levelFilterToSet()
-        let components = componentFilterToSet()
+        let components = componentsForQuery(componentSelection)
         let bounds = timeRangeToBounds()
         let search = searchText.isEmpty ? nil : searchText
         let piiScrub = scrubPII
@@ -1248,11 +1282,18 @@ struct DebugLogView: View {
         }
     }
 
-    private func componentFilterToSet() -> Set<LogComponent>? {
-        switch componentFilter {
-        case .all:   return nil
-        default:     return [componentFilter.logComponent!]
-        }
+    private func componentsForQuery(_ selection: Set<LogComponent>) -> Set<LogComponent>? {
+        selection.count == LogComponent.allCases.count ? nil : selection
+    }
+
+    private func clearFilteredLogResults() {
+        refreshGeneration += 1
+        lines = []
+        newestSeenId = nil
+        oldestLoadedId = nil
+        totalCount = 0
+        cachedShareText = ""
+        isLoading = false
     }
 
     private func timeRangeToBounds() -> (sinceNs: Int64?, untilNs: Int64?) {
@@ -1279,6 +1320,66 @@ struct DebugLogView: View {
         case "hang":  return .orange
         default:      return .secondary
         }
+    }
+}
+
+private struct CategoryFilterSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var selectedComponents: Set<LogComponent>
+
+    private var allCategoriesSelected: Bool {
+        selectedComponents.count == LogComponent.allCases.count
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Button {
+                    if allCategoriesSelected {
+                        selectedComponents.removeAll()
+                    } else {
+                        selectedComponents = Set(LogComponent.allCases)
+                    }
+                } label: {
+                    categoryRow(title: "All", isSelected: allCategoriesSelected)
+                }
+                .buttonStyle(.plain)
+
+                ForEach(LogComponent.allCases, id: \.self) { component in
+                    Button {
+                        if selectedComponents.contains(component) {
+                            selectedComponents.remove(component)
+                        } else {
+                            selectedComponents.insert(component)
+                        }
+                    } label: {
+                        categoryRow(
+                            title: component.rawValue,
+                            isSelected: selectedComponents.contains(component)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .navigationTitle("Categories")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func categoryRow(title: String, isSelected: Bool) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: isSelected ? "checkmark.square.fill" : "square")
+                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+            Text(title)
+            Spacer()
+        }
+        .contentShape(Rectangle())
+        .accessibilityValue(isSelected ? "Selected" : "Not selected")
     }
 }
 
