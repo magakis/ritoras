@@ -1,4 +1,33 @@
+import Dispatch
 import Foundation
+
+// Strict, zero-leeway DispatchSourceTimers avoid the background timer
+// coalescing that can defer Task.sleep wakeups. One-shot sources are rearmed
+// after each tick completes, preserving delay-after-send cadence, and their
+// owners cancel them on teardown.
+private func makeStrictStreamTimer(
+    after interval: TimeInterval,
+    handler: @escaping @Sendable () -> Void
+) -> DispatchSourceTimer {
+    let timer = DispatchSource.makeTimerSource(
+        flags: .strict,
+        queue: DispatchQueue.global(qos: .userInitiated)
+    )
+    scheduleStrictStreamTimer(timer, after: interval)
+    timer.setEventHandler(handler: handler)
+    return timer
+}
+
+private func scheduleStrictStreamTimer(
+    _ timer: DispatchSourceTimer,
+    after interval: TimeInterval
+) {
+    let intervalNanoseconds = Int(interval * 1_000_000_000)
+    timer.schedule(
+        deadline: .now() + .nanoseconds(intervalNanoseconds),
+        leeway: .nanoseconds(0)
+    )
+}
 
 // MARK: - Streaming Whisper Client
 //
@@ -32,14 +61,12 @@ actor WhisperStreamClient {
     /// Shared URLSession (no custom delegate needed).
     private let session: URLSession = .shared
 
-    /// Periodic keepalive task that sends app-level PING frames while connected.
-    private var keepaliveTask: Task<Void, Never>?
+    /// One-shot timer rearmed after each successful keepalive send.
+    private var keepaliveTimer: DispatchSourceTimer?
+    private var keepaliveTimerID: UUID?
 
-    /// Last PONG or partial received; used as liveness evidence only while recording.
-    private var lastActivityDate: Date = .distantPast
-    /// PONG-only liveness evidence, used after END has been sent.
-    private var lastPongDate: Date = .distantPast
-    private var endSentAt: Date?
+    /// Pure timestamp accounting for tiered liveness and bounded upload pauses.
+    private var livenessEvaluator = StreamLivenessEvaluator()
 
     // MARK: - Initialization
 
@@ -79,6 +106,7 @@ actor WhisperStreamClient {
     /// - Throws: `WhisperError.networkError` if the transport reports
     ///   a connection failure.
     func connect() async throws {
+        stopKeepaliveTimer()
         var request = URLRequest(url: url)
         WhisperClient.applyAuth(to: &request)
         let newTask = session.webSocketTask(with: request)
@@ -141,20 +169,48 @@ actor WhisperStreamClient {
             throw error
         }
 
-        lastActivityDate = Date()
+        livenessEvaluator.recordConnected(at: Date())
 
-        // Start the periodic keepalive loop. It must stay under nginx idle
-        // (~60s) and the server's 600s recv timeout.
-        keepaliveTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(SharedConfig.Defaults.streamKeepaliveIntervalSeconds * 1_000_000_000))
-                guard let self else { break }
-                do { try await self.sendPing() }
-                catch { await self.forceClose(); break }
-            }
-        }
+        startKeepaliveTimer()
         FileLogger.shared.debug(.network, "Keepalive loop started",
                                payload: ["interval": SharedConfig.Defaults.streamKeepaliveIntervalSeconds])
+    }
+
+    private func startKeepaliveTimer() {
+        stopKeepaliveTimer()
+        let timerID = UUID()
+        let interval = SharedConfig.Defaults.streamKeepaliveIntervalSeconds
+        let timer = makeStrictStreamTimer(after: interval) { [weak self] in
+            Task { [weak self] in
+                await self?.keepaliveTimerFired(timerID: timerID)
+            }
+        }
+        keepaliveTimerID = timerID
+        keepaliveTimer = timer
+        timer.resume()
+    }
+
+    private func keepaliveTimerFired(timerID: UUID) async {
+        guard keepaliveTimerID == timerID else { return }
+        do {
+            try await sendPing()
+        } catch {
+            guard keepaliveTimerID == timerID else { return }
+            forceClose()
+            return
+        }
+
+        guard keepaliveTimerID == timerID, let keepaliveTimer else { return }
+        scheduleStrictStreamTimer(
+            keepaliveTimer,
+            after: SharedConfig.Defaults.streamKeepaliveIntervalSeconds
+        )
+    }
+
+    private func stopKeepaliveTimer() {
+        keepaliveTimerID = nil
+        keepaliveTimer?.cancel()
+        keepaliveTimer = nil
     }
 
     // MARK: - Sending
@@ -184,6 +240,13 @@ actor WhisperStreamClient {
         // float32 PCM samples (little-endian on ARM64, matching numpy default)
         samples.withUnsafeBytes { data.append(contentsOf: $0) }
 
+        let windowEvents = livenessEvaluator.recordFrameEnqueued(
+            bytes: data.count,
+            at: Date(),
+            minimumBytes: SharedConfig.Defaults.streamUploadWindowMinimumBytes,
+            maxAge: SharedConfig.Defaults.streamUploadWindowMaxAgeSeconds)
+        logUploadWindowEvents(windowEvents, bytes: data.count)
+
         try await task.send(.data(data))
 
         FileLogger.shared.debug(.network, "Sent chunk",
@@ -209,9 +272,10 @@ actor WhisperStreamClient {
         do {
             try await task.send(.string(#"{"type":"END"}"#))
             let sentAt = Date()
-            if endSentAt == nil {
-                endSentAt = sentAt
-            }
+            let windowEvents = livenessEvaluator.recordEndSent(
+                at: sentAt,
+                maxAge: SharedConfig.Defaults.streamUploadWindowMaxAgeSeconds)
+            logUploadWindowEvents(windowEvents)
             FileLogger.shared.info(.network, "Stream: END send result", payload: [
                 "jobId": dictationID,
                 "server": url.absoluteString,
@@ -243,22 +307,64 @@ actor WhisperStreamClient {
         FileLogger.shared.debug(.network, "Sent PING")
     }
 
-    /// Records activity that keeps the stream alive while recording.
-    private func touchActivity() { lastActivityDate = Date() }
+    /// Records a partial that keeps the stream alive only before END.
+    private func touchActivity() {
+        let windowEvents = livenessEvaluator.recordPartialReceived(
+            at: Date(),
+            maxAge: SharedConfig.Defaults.streamUploadWindowMaxAgeSeconds)
+        logUploadWindowEvents(windowEvents)
+    }
 
     /// Records a PONG for both recording and post-END liveness checks.
     private func touchPong() {
-        lastPongDate = Date()
-        touchActivity()
+        let windowEvents = livenessEvaluator.recordPongReceived(
+            at: Date(),
+            maxAge: SharedConfig.Defaults.streamUploadWindowMaxAgeSeconds)
+        logUploadWindowEvents(windowEvents)
     }
 
-    /// Returns time since the evidence appropriate to the current stream phase.
-    private func livenessStatus() -> (endSent: Bool, secondsSinceEvidence: TimeInterval) {
-        let now = Date()
-        if let endSentAt {
-            return (true, now.timeIntervalSince(max(endSentAt, lastPongDate)))
+    /// Records a final frame as post-END evidence for closing an upload window.
+    private func touchFinal() {
+        let windowEvents = livenessEvaluator.recordFinalReceived(
+            at: Date(),
+            maxAge: SharedConfig.Defaults.streamUploadWindowMaxAgeSeconds)
+        logUploadWindowEvents(windowEvents)
+    }
+
+    /// Returns staleness after accounting for upload time using wall-clock dates.
+    private func livenessStatus() -> StreamLivenessEvaluator.Evaluation {
+        let status = livenessEvaluator.evaluate(
+            at: Date(),
+            interval: SharedConfig.Defaults.streamHealthCheckInterval,
+            maxMissedPongs: SharedConfig.Defaults.streamMaxMissedPongs,
+            maxUploadWindowAge: SharedConfig.Defaults.streamUploadWindowMaxAgeSeconds)
+        logUploadWindowEvents(status.windowEvents)
+        return status
+    }
+
+    private func logUploadWindowEvents(
+        _ events: StreamLivenessEvaluator.WindowEvents,
+        bytes: Int? = nil
+    ) {
+        if events.lapsed {
+            FileLogger.shared.debug(.network, "Upload window lapsed", payload: [
+                "maxAgeSec": SharedConfig.Defaults.streamUploadWindowMaxAgeSeconds
+            ])
         }
-        return (false, now.timeIntervalSince(lastActivityDate))
+        if events.closed {
+            FileLogger.shared.debug(.network, "Upload window closed", payload: [
+                "reason": "inbound_evidence"
+            ])
+        }
+        if events.opened {
+            var payload: [String: Any] = [
+                "maxAgeSec": SharedConfig.Defaults.streamUploadWindowMaxAgeSeconds
+            ]
+            if let bytes {
+                payload["bytes"] = bytes
+            }
+            FileLogger.shared.debug(.network, "Upload window opened", payload: payload)
+        }
     }
 
     // MARK: - Receiving
@@ -339,6 +445,7 @@ actor WhisperStreamClient {
                                 case "partial":
                                     let msg = try JSONDecoder().decode(
                                         StreamPartial.self, from: data)
+                                    await self.touchActivity()
                                     if let chunkId = msg.chunk_id {
                                         await onChunkResult?(chunkId, msg.transcription)
                                     } else {
@@ -352,11 +459,11 @@ actor WhisperStreamClient {
                                                                       "length": accumulated.count,
                                                                       "chunkId": msg.chunk_id as Any])
                                     onPartial(accumulated)
-                                    await self.touchActivity()
 
                                 case "final":
                                     let msg = try JSONDecoder().decode(
                                         StreamFinal.self, from: data)
+                                    await self.touchFinal()
                                     let elapsedSinceEndMs = await self.elapsedSinceEndMs()
                                     if let chunkId = msg.chunk_id {
                                         await onChunkResult?(chunkId, msg.transcription)
@@ -437,27 +544,43 @@ actor WhisperStreamClient {
             group.addTask { [self] in
                 let interval = SharedConfig.Defaults.streamHealthCheckInterval
                 let maxMissed = SharedConfig.Defaults.streamMaxMissedPongs
-                while !Task.isCancelled {
-                    do {
-                        try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
-                    } catch {
-                        return ""   // cancelled (final arrived / group torn down)
-                    }
-                    try? await self.sendPing()  // solicit a PONG
-                    let status = await self.livenessStatus()
-                    if status.secondsSinceEvidence >= interval * Double(maxMissed) {
-                        let missingEvidence = status.endSent ? "PONG" : "activity"
-                        FileLogger.shared.warn(.network,
-                                               "Stream liveness: no \(missingEvidence), declaring timeout",
-                                               payload: ["id": self.dictationID,
-                                                         "staleSec": status.secondsSinceEvidence,
-                                                         "interval": interval,
-                                                         "maxMissedPongs": maxMissed,
-                                                         "endSent": status.endSent])
-                        throw WhisperError.timeout
+                let (ticks, tickContinuation) = AsyncStream<Void>.makeStream(
+                    bufferingPolicy: .bufferingNewest(1)
+                )
+                let timer = makeStrictStreamTimer(after: interval) { [weak self] in
+                    Task { [weak self] in
+                        await self?.yieldLivenessTick(to: tickContinuation)
                     }
                 }
-                return ""
+                timer.resume()
+                defer {
+                    timer.cancel()
+                    tickContinuation.finish()
+                }
+
+                return try await withTaskCancellationHandler {
+                    for await _ in ticks {
+                        guard !Task.isCancelled else { return "" }
+                        try? await self.sendPing()  // solicit a PONG
+                        let status = await self.livenessStatus()
+                        if status.shouldTimeout {
+                            let missingEvidence = status.endSent ? "PONG" : "activity"
+                            FileLogger.shared.warn(.network,
+                                                   "Stream liveness: no \(missingEvidence), declaring timeout",
+                                                   payload: ["id": self.dictationID,
+                                                             "staleSec": status.secondsSinceEvidence,
+                                                             "interval": interval,
+                                                             "maxMissedPongs": maxMissed,
+                                                             "endSent": status.endSent])
+                            throw WhisperError.timeout
+                        }
+                        scheduleStrictStreamTimer(timer, after: interval)
+                    }
+                    return ""
+                } onCancel: {
+                    timer.cancel()
+                    tickContinuation.finish()
+                }
             }
 
             guard let result = try await group.next() else {
@@ -469,9 +592,12 @@ actor WhisperStreamClient {
         }
     }
 
+    private func yieldLivenessTick(to continuation: AsyncStream<Void>.Continuation) {
+        continuation.yield(())
+    }
+
     private func elapsedSinceEndMs() -> Double? {
-        guard let endSentAt else { return nil }
-        return Date().timeIntervalSince(endSentAt) * 1000
+        livenessEvaluator.elapsedSinceEndMs(at: Date())
     }
 
     private func logReceiveTaskExit(
@@ -484,7 +610,7 @@ actor WhisperStreamClient {
             "jobId": dictationID,
             "server": url.absoluteString,
             "reason": reason,
-            "endSent": endSentAt != nil,
+            "endSent": livenessEvaluator.hasSentEnd,
             "finalFrameReceived": finalFrameReceived,
             "serverErrorFrameReceived": serverErrorFrameReceived
         ]
@@ -531,12 +657,191 @@ actor WhisperStreamClient {
         return false
     }
 
+    private struct StreamLivenessEvaluator {
+        struct WindowEvents {
+            var opened = false
+            var closed = false
+            var lapsed = false
+        }
+
+        struct Evaluation {
+            let endSent: Bool
+            let receivedFinal: Bool
+            let secondsSinceEvidence: TimeInterval
+            let shouldTimeout: Bool
+            let windowOpen: Bool
+            let windowEvents: WindowEvents
+        }
+
+        private var lastActivityDate: Date = .distantPast
+        private var lastPongDate: Date = .distantPast
+        private var lastFinalDate: Date?
+        private var endSentAt: Date?
+        private var receivedFinal = false
+        private var uploadWindowOpenedAt: Date?
+        /// A lapse cannot be renewed by sends alone; tier-appropriate evidence clears this.
+        private var uploadWindowReopenBlocked = false
+        /// Cumulative pause credit and the portion already preceding current evidence.
+        private var completedUploadPauseSeconds: TimeInterval = 0
+        private var uploadPauseCreditAtEvidence: TimeInterval = 0
+
+        var hasSentEnd: Bool { endSentAt != nil }
+
+        func elapsedSinceEndMs(at now: Date) -> Double? {
+            guard let endSentAt else { return nil }
+            return now.timeIntervalSince(endSentAt) * 1000
+        }
+
+        mutating func recordConnected(at date: Date) {
+            lastActivityDate = date
+            uploadPauseCreditAtEvidence = completedUploadPauseSeconds
+        }
+
+        mutating func recordFrameEnqueued(
+            bytes: Int,
+            at date: Date,
+            minimumBytes: Int,
+            maxAge: TimeInterval
+        ) -> WindowEvents {
+            var events = WindowEvents()
+            events.lapsed = expireUploadWindowIfNeeded(at: date, maxAge: maxAge)
+            guard bytes >= minimumBytes,
+                  uploadWindowOpenedAt == nil,
+                  !uploadWindowReopenBlocked,
+                  !receivedFinal else { return events }
+            uploadWindowOpenedAt = date
+            events.opened = true
+            return events
+        }
+
+        mutating func recordEndSent(at date: Date, maxAge: TimeInterval) -> WindowEvents {
+            var events = WindowEvents()
+            events.lapsed = expireUploadWindowIfNeeded(at: date, maxAge: maxAge)
+            guard endSentAt == nil else { return events }
+            endSentAt = date
+            uploadPauseCreditAtEvidence = completedUploadPauseSeconds
+            return events
+        }
+
+        mutating func recordPartialReceived(at date: Date, maxAge: TimeInterval) -> WindowEvents {
+            var events = WindowEvents()
+            events.lapsed = expireUploadWindowIfNeeded(at: date, maxAge: maxAge)
+            let closesWindow = endSentAt == nil && closeUploadWindow(at: date, maxAge: maxAge)
+            lastActivityDate = date
+            guard endSentAt == nil else { return events }
+            uploadPauseCreditAtEvidence = completedUploadPauseSeconds
+            uploadWindowReopenBlocked = false
+            events.closed = closesWindow
+            return events
+        }
+
+        mutating func recordPongReceived(at date: Date, maxAge: TimeInterval) -> WindowEvents {
+            var events = WindowEvents()
+            events.lapsed = expireUploadWindowIfNeeded(at: date, maxAge: maxAge)
+            events.closed = closeUploadWindow(at: date, maxAge: maxAge)
+            lastPongDate = date
+            lastActivityDate = date
+            uploadPauseCreditAtEvidence = completedUploadPauseSeconds
+            uploadWindowReopenBlocked = false
+            return events
+        }
+
+        mutating func recordFinalReceived(at date: Date, maxAge: TimeInterval) -> WindowEvents {
+            var events = WindowEvents()
+            events.lapsed = expireUploadWindowIfNeeded(at: date, maxAge: maxAge)
+            receivedFinal = true
+            if endSentAt != nil {
+                events.closed = closeUploadWindow(at: date, maxAge: maxAge)
+                uploadWindowReopenBlocked = false
+            }
+            lastFinalDate = date
+            // Keep cumulative pause credit; rebase its contribution at final evidence.
+            uploadPauseCreditAtEvidence = completedUploadPauseSeconds
+            return events
+        }
+
+        mutating func evaluate(
+            at now: Date,
+            interval: TimeInterval,
+            maxMissedPongs: Int,
+            maxUploadWindowAge: TimeInterval
+        ) -> Evaluation {
+            var events = WindowEvents()
+            events.lapsed = expireUploadWindowIfNeeded(at: now, maxAge: maxUploadWindowAge)
+            let evidenceDate = currentEvidenceDate
+            let secondsSinceEvidence = max(
+                0,
+                now.timeIntervalSince(evidenceDate)
+                    - (completedUploadPauseSeconds - uploadPauseCreditAtEvidence)
+                    - currentUploadPauseSeconds(
+                        at: now,
+                        evidenceDate: evidenceDate,
+                        maxAge: maxUploadWindowAge)
+            )
+            return Evaluation(
+                endSent: endSentAt != nil,
+                receivedFinal: receivedFinal,
+                secondsSinceEvidence: secondsSinceEvidence,
+                shouldTimeout: !receivedFinal
+                    && secondsSinceEvidence >= interval * Double(maxMissedPongs),
+                windowOpen: uploadWindowOpenedAt != nil,
+                windowEvents: events)
+        }
+
+        private var currentEvidenceDate: Date {
+            if let endSentAt {
+                return max(endSentAt, max(lastPongDate, lastFinalDate ?? .distantPast))
+            }
+            return lastActivityDate
+        }
+
+        private mutating func closeUploadWindow(at date: Date, maxAge: TimeInterval) -> Bool {
+            guard let openedAt = uploadWindowOpenedAt else { return false }
+            let pausedUntil = min(date, openedAt.addingTimeInterval(maxAge))
+            let pausedFrom = max(openedAt, currentEvidenceDate)
+            if pausedUntil > pausedFrom {
+                completedUploadPauseSeconds += pausedUntil.timeIntervalSince(pausedFrom)
+            }
+            uploadWindowOpenedAt = nil
+            return true
+        }
+
+        private mutating func expireUploadWindowIfNeeded(
+            at now: Date,
+            maxAge: TimeInterval
+        ) -> Bool {
+            guard let openedAt = uploadWindowOpenedAt else { return false }
+            let deadline = openedAt.addingTimeInterval(maxAge)
+            guard now >= deadline else { return false }
+
+            let pausedFrom = max(openedAt, currentEvidenceDate)
+            if deadline > pausedFrom {
+                completedUploadPauseSeconds += deadline.timeIntervalSince(pausedFrom)
+            }
+            uploadWindowOpenedAt = nil
+            uploadWindowReopenBlocked = true
+            return true
+        }
+
+        private func currentUploadPauseSeconds(
+            at now: Date,
+            evidenceDate: Date,
+            maxAge: TimeInterval
+        ) -> TimeInterval {
+            guard let openedAt = uploadWindowOpenedAt else { return 0 }
+            let pausedFrom = max(openedAt, evidenceDate)
+            let pausedUntil = min(now, openedAt.addingTimeInterval(maxAge))
+            return max(0, pausedUntil.timeIntervalSince(pausedFrom))
+        }
+    }
+
     // MARK: - Disconnection
 
     /// Forcefully tears down the transport so that any in-flight
     /// `send()`/`receive()` calls fail immediately rather than waiting
     /// for `streamFinalTimeout`.
     private func forceClose() {
+        stopKeepaliveTimer()
         task?.cancel(with: .goingAway, reason: nil)
         FileLogger.shared.info(.network, "Force-close: transport cancelled")
     }
@@ -546,8 +851,7 @@ actor WhisperStreamClient {
     /// It is safe to call this method even if the client is not currently
     /// connected; it becomes a no-op.
     func disconnect() async {
-        keepaliveTask?.cancel()
-        keepaliveTask = nil
+        stopKeepaliveTimer()
         // Cancel any in-flight receive/send operations and close.
         task?.cancel(with: .goingAway, reason: nil)
         task = nil

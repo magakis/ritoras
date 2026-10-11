@@ -1,4 +1,4 @@
-// Pure-logic JS port of SharedConfig.AsyncTranscription and WhisperError retry rules.
+// Pure-logic JS port of SharedConfig timeouts and WhisperError retry rules.
 // Kept in sync per AGENTS.md -> Test policy.
 
 export const DEFAULT_TIMEOUT_SECONDS = 20;
@@ -11,8 +11,9 @@ export const SERVER_PROBE_TIMEOUT_SECONDS = 3;
 export const TRANSCRIPTION_FAST_FAIL_WINDOW_SECONDS = 5;
 export const STREAM_WS_CONNECT_TIMEOUT_SECONDS = 32;
 export const STREAM_FINAL_TIMEOUT_SECONDS = 120;
+// Shared stream-liveness defaults; stream-liveness.mjs imports these values.
 export const STREAM_HEALTH_CHECK_INTERVAL_SECONDS = 5;
-export const STREAM_MAX_MISSED_PONGS = 12;
+export const STREAM_MAX_MISSED_PONGS = 3;
 export const STREAM_LIVENESS_SILENCE_WINDOW_SECONDS = STREAM_HEALTH_CHECK_INTERVAL_SECONDS
   * STREAM_MAX_MISSED_PONGS;
 

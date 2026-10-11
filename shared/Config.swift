@@ -328,6 +328,13 @@ struct SharedConfig {
         /// legitimate activity; after END, only PONGs reset it because the complete WAV
         /// is preserved client-side, making an aggressive timeout safe. 3 × 5s ≈ 15s.
         static let streamMaxMissedPongs: Int = 3
+        /// Only unusually large audio frames open an upload-aware liveness window.
+        /// The 1,291,664-byte incident frame is above this threshold with room for
+        /// larger monolithic chunks while ordinary small frames remain unprotected.
+        static let streamUploadWindowMinimumBytes: Int = 1_000_000
+        /// Bounds one upload pause. The observed cellular transit took ~13s; 30s
+        /// gives it more than 2× margin while still limiting a wedged link.
+        static let streamUploadWindowMaxAgeSeconds: TimeInterval = 30.0
 
         /// Backoff intervals (seconds) between chunk send retries.
         /// The last value is the cap for all subsequent retries.

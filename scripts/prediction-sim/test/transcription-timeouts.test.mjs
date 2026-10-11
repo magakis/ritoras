@@ -66,14 +66,14 @@ describe('streaming transcription timeouts', () => {
     assert.strictEqual(STREAM_FINAL_TIMEOUT_SECONDS, 120);
   });
 
-  it('derives the 60-second liveness window from the ping cadence and missed intervals', () => {
+  it('derives the 15-second liveness window from the ping cadence and missed intervals', () => {
     assert.strictEqual(STREAM_HEALTH_CHECK_INTERVAL_SECONDS, 5);
-    assert.strictEqual(STREAM_MAX_MISSED_PONGS, 12);
+    assert.strictEqual(STREAM_MAX_MISSED_PONGS, 3);
     assert.strictEqual(
       STREAM_LIVENESS_SILENCE_WINDOW_SECONDS,
       STREAM_HEALTH_CHECK_INTERVAL_SECONDS * STREAM_MAX_MISSED_PONGS,
     );
-    assert.strictEqual(STREAM_LIVENESS_SILENCE_WINDOW_SECONDS, 60);
+    assert.strictEqual(STREAM_LIVENESS_SILENCE_WINDOW_SECONDS, 15);
   });
 });
 
