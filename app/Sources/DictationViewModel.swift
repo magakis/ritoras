@@ -1294,10 +1294,23 @@ final class DictationViewModel: ObservableObject {
             UIApplication.shared.isIdleTimerDisabled = false
 
             var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
-            FileLogger.shared.info(.lifecycle, "WhisperTranscription lease begin", payload: ["id": String(id.uuidString.prefix(8))])
             backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "WhisperTranscription") {
                 FileLogger.shared.warn(.lifecycle, "WhisperTranscription lease expired", payload: ["id": String(id.uuidString.prefix(8))])
                 self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id)
+            }
+            FileLogger.shared.log(
+                backgroundTaskID == .invalid ? .warn : .info,
+                .lifecycle,
+                "WhisperTranscription lease begin",
+                payload: ["id": String(id.uuidString.prefix(8)),
+                          "active": backgroundTaskID != .invalid]
+            )
+            defer {
+                endStopBackgroundTask(
+                    &backgroundTaskID,
+                    name: "WhisperTranscription",
+                    dictationID: id
+                )
             }
 
             // Signal recording done and drain queue
@@ -1307,7 +1320,6 @@ final class DictationViewModel: ObservableObject {
             }
 
             guard canContinueSession(id) else {
-                endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id)
                 if SharedConfig.pendingDictationCancel()?.id == id {
                     await cancel(expectedID: id)
                 }
@@ -1332,9 +1344,9 @@ final class DictationViewModel: ObservableObject {
                 ])
                 while streamClient == nil && Date() < connectGraceDeadline {
                     try? await Task.sleep(nanoseconds: 200_000_000)
-                    guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                    guard canContinueSession(id) else { return }
                 }
-                guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                guard canContinueSession(id) else { return }
 
                 let attachedDuringGrace = streamClient != nil
                 if !attachedDuringGrace {
@@ -1362,7 +1374,7 @@ final class DictationViewModel: ObservableObject {
             var queueDrained = false
             var queueDrainElapsedMs: Double?
             if canStream, let consumerTask = chunkConsumerTask {
-                guard activeID == id else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                guard activeID == id else { return }
 
                 let drainStart = Date()
                 let (drainEvents, drainContinuation) = AsyncStream<Bool>.makeStream()
@@ -1382,13 +1394,12 @@ final class DictationViewModel: ObservableObject {
                 guard activeID == id else {
                     drainWaitTask.cancel()
                     drainTimeoutTask.cancel()
-                    endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id)
                     return
                 }
                 queueDrained = await drainEvents.first(where: { _ in true }) ?? false
                 drainWaitTask.cancel()
                 drainTimeoutTask.cancel()
-                guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                guard canContinueSession(id) else { return }
                 let drainElapsedMs = Date().timeIntervalSince(drainStart) * 1000
                 queueDrainElapsedMs = drainElapsedMs
                 FileLogger.shared.log(queueDrained ? .info : .warn, .network,
@@ -1401,7 +1412,7 @@ final class DictationViewModel: ObservableObject {
                 ])
             }
 
-            guard activeID == id else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+            guard activeID == id else { return }
             chunkConsumerTask?.cancel()
             chunkConsumerTask = nil
 
@@ -1412,7 +1423,7 @@ final class DictationViewModel: ObservableObject {
                 do {
                     try await streamClient?.sendEnd()
                     didSendEndSuccessfully = true
-                    guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                    guard canContinueSession(id) else { return }
                     FileLogger.shared.info(.network, "Stream: END sent, awaiting final from receive task",
                                            payload: ["jobId": id.uuidString,
                                                      "server": selectedServer ?? "none"])
@@ -1423,7 +1434,7 @@ final class DictationViewModel: ObservableObject {
 
                     let text = try await receiveTask?.value ?? ""
 
-                    guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                    guard canContinueSession(id) else { return }
 
                     // A non-empty final from this session's receive task is valid by
                     // construction: receiveTask is session-scoped and activeID guards
@@ -1455,7 +1466,7 @@ final class DictationViewModel: ObservableObject {
                                                payload: ["preview": String(text.prefix(60)),
                                                          "length": text.count])
 
-                        guard activeID == id else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                        guard activeID == id else { return }
 
                         TranscriptionHistory.shared.add(text: text)
                         RecordingStore.shared.deleteStreamWav(for: id)
@@ -1465,7 +1476,7 @@ final class DictationViewModel: ObservableObject {
                         phase = .done(text)
                     }
                 } catch WhisperError.cancelled {
-                    guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                    guard canContinueSession(id) else { return }
                     // User cancelled — do not record as failure.
                     vadTelemetryWriter?.recordOutcome("cancelled")
                     RecordingStore.shared.deleteStreamWav(for: id)
@@ -1473,7 +1484,7 @@ final class DictationViewModel: ObservableObject {
                                             payload: ["jobId": id.uuidString])
                     phase = .cancelled
                 } catch {
-                    guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                    guard canContinueSession(id) else { return }
                     let errorMessage = error.localizedDescription
                     if didSendEndSuccessfully, !errorMessage.contains("send failed") {
                         await recoverFromStreamTerminalFailure(
@@ -1498,15 +1509,11 @@ final class DictationViewModel: ObservableObject {
                 handleStreamTerminalFailure(jobId: id, error: message)
             }
 
-            if backgroundTaskID != .invalid {
-                endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id)
-            }
-
             receiveTask?.cancel()
             receiveTask = nil
 
             await streamClient?.disconnect()
-            guard canContinueSession(id) else { endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+            guard canContinueSession(id) else { return }
             streamClient = nil
             streamRecorder = nil
             vadTelemetryWriter = nil
