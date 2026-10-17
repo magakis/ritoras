@@ -171,6 +171,9 @@ final class DictationViewModel: ObservableObject {
     private(set) var activeID: UUID?
     private var earlyCancelledSessionID: UUID?
     private var cancellationInProgressID: UUID?
+    private var cancellationTasks: [UUID: Task<Void, Never>] = [:]
+    private var isStartInProgress = false
+    private var queuedStartContinuations: [CheckedContinuation<Void, Never>] = []
     private var scheduledDurableCancelID: UUID?
     /// Start of the current recording; @Published so the overlay badge can render
     /// live elapsed time. Deliberately has NO didSet — unlike `phase`, publishing
@@ -617,6 +620,37 @@ final class DictationViewModel: ObservableObject {
     }
 
     func start(id: UUID) async {
+        await acquireStartSlot()
+        defer { releaseStartSlot() }
+        guard !Task.isCancelled else { return }
+        await performStart(id: id)
+    }
+
+    private func acquireStartSlot() async {
+        guard isStartInProgress else {
+            isStartInProgress = true
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            queuedStartContinuations.append(continuation)
+        }
+    }
+
+    private func releaseStartSlot() {
+        if queuedStartContinuations.isEmpty {
+            isStartInProgress = false
+        } else {
+            queuedStartContinuations.removeFirst().resume()
+        }
+    }
+
+    private func performStart(id: UUID) async {
+        if let priorID = activeID {
+            FileLogger.shared.info(.transcription, "start: awaiting prior session teardown")
+            await cancel(expectedID: priorID)
+        }
+
         clearChunkReviews()
         serverSelectionTask?.cancel()
         serverSelectionTask = nil
@@ -2171,8 +2205,24 @@ final class DictationViewModel: ObservableObject {
 
     func cancel(expectedID: UUID? = nil) async {
         guard let id = activeID,
-              expectedID == nil || expectedID == id,
-              cancellationInProgressID != id else { return }
+              expectedID == nil || expectedID == id else { return }
+
+        if let cancellationTask = cancellationTasks[id] {
+            await cancellationTask.value
+            return
+        }
+
+        let cancellationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.cancellationTasks[id] = nil }
+            await self.performCancellation(for: id)
+        }
+        cancellationTasks[id] = cancellationTask
+        await cancellationTask.value
+    }
+
+    private func performCancellation(for id: UUID) async {
+        guard activeID == id, cancellationInProgressID != id else { return }
         cancellationInProgressID = id
         serverSelectionTask?.cancel()
         serverSelectionTask = nil
