@@ -42,6 +42,30 @@ function endingRiseProbe(seedDb, plateauDb, peakDb) {
 }
 
 describe('VADThresholdGate', () => {
+  it('reports early quiet-seed priming completion exactly once', () => {
+    const gate = new VADThresholdGate(config({
+      mode: 'adaptive',
+      primingQuietSeedSeconds: 0.03,
+    }));
+    const outputs = Array.from({ length: 100 }, () => gate.process(-70, 0.01));
+    const completions = outputs.filter(output => output.didCompletePriming);
+    assert.equal(completions.length, 1);
+    assert.equal(completions[0].primingEndedAtCap, false);
+    assert.ok(completions[0].primingDurationSeconds < 0.45);
+    assert.equal(outputs.at(-1).primingDurationSeconds, completions[0].primingDurationSeconds);
+  });
+
+  it('completes unquiet priming at the configured cap exactly once', () => {
+    const gate = new VADThresholdGate(config({ mode: 'adaptive', adaptiveDynamicsEnabled: false }));
+    const outputs = [];
+    for (let i = 0; i < 60; i++) outputs.push(gate.process(-30, 0.01));
+    const completion = outputs.find(output => output.didCompletePriming);
+    assert.ok(completion);
+    assert.equal(completion.primingEndedAtCap, true);
+    assert.equal(completion.primingDurationSeconds, 0.45);
+    assert.equal(outputs.filter(output => output.didCompletePriming).length, 1);
+  });
+
   describe('AudioMath mirror and static mode', () => {
     it('converts RMS to dB and back without a zero-input NaN', () => {
       assert.ok(Math.abs(dbFromRms(0.025) - -32.0412) < 0.01);

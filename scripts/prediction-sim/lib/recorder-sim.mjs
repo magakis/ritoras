@@ -11,6 +11,10 @@ const DEFAULT_FRAME_MS = 10;
 const DEFAULT_ENDPOINT_SILENCE_MS = 3000;
 const DEFAULT_MAX_NOISE_SAMPLES = 6 * 16000;
 const DEFAULT_HEAD_BUFFER_SAMPLES = 2500 * 16;
+export const VAD_MAX_CHUNK_SAMPLES = 30 * 16000;
+export const VAD_SPLIT_SEARCH_SAMPLES = 3 * 16000;
+export const VAD_MIN_SILENCE_AT_SPLIT_SAMPLES = 100 * 16;
+export const VAD_POST_ROLL_SAMPLES = 400 * 16;
 
 function makeGate(partial = {}) {
   return new VADThresholdGate(makeVadGateConfig({
@@ -56,6 +60,10 @@ function makeSessionConfig(harness) {
     minSpeechMs: harness.minSpeechSamples / 16,
     minChunkMs: harness.minChunkSamples / 16,
     maxNoiseSec: harness.maxNoiseSamples / 16000,
+    maxChunkMs: harness.maxChunkSamples / 16,
+    splitSearchWindowMs: harness.splitSearchSamples / 16,
+    minSilenceAtSplitMs: harness.minimumSplitSilenceSamples / 16,
+    postRollMs: harness.postRollSamples / 16,
     analysisHpfEnabled: false,
     analysisHpfCutoffHz: 100,
     loudRegimeEnabled: gate.config.loudRegimeEnabled,
@@ -111,8 +119,9 @@ export function makeRecorderHarness({
 } = {}) {
   const recorderFrameDuration = frameMs / 1000;
   const endpoint = makeEndpoint(endpointSilenceMs, endpointConfig);
+  const gate = makeGate(gateConfig);
   const harness = {
-    gate: makeGate(gateConfig),
+    gate,
     endpoint,
     endpointMachineEnabled,
     silenceThresholdSamples: endpoint.configuration.endpointSilenceSamples,
@@ -142,7 +151,18 @@ export function makeRecorderHarness({
     terminatorActivationCount: 0,
     latchMissingDynamicsWitnessCount: 0,
     maxNoiseSamples,
+    maxChunkSamples: recorderConfig.maxChunkSamples ?? VAD_MAX_CHUNK_SAMPLES,
+    spillThresholdSamples: recorderConfig.spillThresholdSamples ?? 1_048_576,
+    spilledSampleCount: 0,
+    spillOccurred: false,
+    splitSearchSamples: recorderConfig.splitSearchSamples ?? VAD_SPLIT_SEARCH_SAMPLES,
+    minimumSplitSilenceSamples: recorderConfig.minimumSplitSilenceSamples ?? VAD_MIN_SILENCE_AT_SPLIT_SAMPLES,
+    postRollSamples: recorderConfig.postRollSamples ?? VAD_POST_ROLL_SAMPLES,
+    splitEnergyFrames: [],
+    splitEnergySamples: 0,
+    contiguousTrailingSilenceSamples: 0,
     chunkCount: 0,
+    emittedSampleCount: 0,
     nextChunkId: 0,
     frameSequence: 0,
     reanchorEventCount: 0,
@@ -170,10 +190,17 @@ export function makeRecorderHarness({
     quietLatchStartFloorDb: null,
     quietLatchCoverageMs: 0,
     sawReanchorDuringUtterance: false,
+    primingComplete: gate.snapshot.floorDb === null,
     sessionConfig: null,
 
     emitEvent(event) {
       if (typeof onEvent === 'function') onEvent(event);
+    },
+
+    resetAfterRouteChange() {
+      this.gate.resetFloorAfterRouteChange();
+      this.primingComplete = this.gate.snapshot.floorDb === null;
+      this.contiguousTrailingSilenceSamples = 0;
     },
 
     recordFrame(output, previousState, decision, decisionSilenceSamples, frameDb, frameDuration) {
@@ -204,10 +231,49 @@ export function makeRecorderHarness({
       return record;
     },
 
+    seedChunkFromPreRoll(frameSamples, output, softOnset = false) {
+      if (this.headLive) {
+        const trimmedSamples = this.headTrimSamples();
+        this.accumulatorSamples = this.headSamples - trimmedSamples;
+        this.headPrependedAtOnset = this.accumulatorSamples;
+        this.chunkStartSessionSamples = this.sessionElapsedSamples
+          - this.headSamples + trimmedSamples;
+      } else {
+        let requestedPreRollMs = output.isLoudRegime
+          ? Math.max(this.endpoint.configuration.preRollSamples / 16, this.loudPreRollMs)
+          : this.endpoint.configuration.preRollSamples / 16;
+        if (softOnset && this.softOnsetPreRollEnabled) {
+          requestedPreRollMs = Math.max(requestedPreRollMs, this.softOnsetPreRollMs);
+        }
+        const requestedPreRollSamples = Math.round(requestedPreRollMs * 16);
+        const preRollSamples = Math.min(requestedPreRollSamples, this.postHeadPreRollSamples);
+        this.accumulatorSamples = preRollSamples;
+        this.chunkStartSessionSamples = this.sessionElapsedSamples - frameSamples - preRollSamples;
+        this.postHeadPreRollSamples = 0;
+      }
+    },
+
     drive(frameDb, frameDuration = recorderFrameDuration) {
       const frameSamples = Math.round(frameDuration * 16000);
       this.sessionElapsedSamples += frameSamples;
+      const primingWasComplete = this.primingComplete;
       const output = this.gate.process(frameDb, frameDuration);
+      const completedPrimingNow = output.didCompletePriming;
+      this.primingComplete ||= completedPrimingNow;
+      if (completedPrimingNow) {
+        this.emitEvent({
+          t: 'ev',
+          k: 'priming_complete',
+          r: output.primingEndedAtCap ? 'duration_cap' : 'quiet_floor_seed',
+          tm: output.primingDurationSeconds * 1000,
+        });
+      }
+      if (!primingWasComplete && !this.headLive) {
+        this.postHeadPreRollSamples = Math.min(
+          this.endpoint.configuration.preRollSamples,
+          this.postHeadPreRollSamples + frameSamples,
+        );
+      }
       if (this.endpointMachineEnabled && this.headLive) {
         this.headSamples = Math.min(
           this.headSamples + frameSamples,
@@ -379,18 +445,31 @@ export function makeRecorderHarness({
         endpointEvidence = 'silence';
       }
       if (output.isSpeech) this.speechSamples += frameSamples;
+      if (this.endpointMachineEnabled) {
+        this.contiguousTrailingSilenceSamples = endpointEvidence === 'silence'
+          ? this.contiguousTrailingSilenceSamples + frameSamples
+          : 0;
+      } else {
+        this.contiguousTrailingSilenceSamples = output.isSpeech
+          ? 0
+          : this.contiguousTrailingSilenceSamples + frameSamples;
+      }
 
       let decision = { type: 'none' };
       let discarded = false;
       let decisionSilenceSamples = this.silenceSamples;
       if (this.endpointMachineEnabled) {
+        const silenceBeforeDecision = this.endpoint.accumulatedSilenceSamples;
         decision = this.endpoint.process(endpointEvidence, frameSamples);
         if (this.flatTerminatorActive && this.endpoint.state === 'idle') {
           this.flatFrameStreakMs = 0;
           this.flatFrameStreakStartTime = null;
           this.flatTerminatorActive = false;
         }
-        decisionSilenceSamples = this.endpoint.accumulatedSilenceSamples;
+        decisionSilenceSamples = decision.type === 'finalizeUtterance'
+          && endpointEvidence === 'silence'
+          ? silenceBeforeDecision + frameSamples
+          : this.endpoint.accumulatedSilenceSamples;
         this.gate.updateFloorTracking(
           frameDb,
           frameDuration,
@@ -400,31 +479,20 @@ export function makeRecorderHarness({
           this.quietRiseCapWitnessDb,
         );
 
-        if (decision.type === 'startUtterance') {
+        const synthesizedStartNow = completedPrimingNow
+          && this.accumulatorSamples === 0
+          && (this.endpoint.state !== 'idle' || decision.type === 'finalizeUtterance');
+        if (synthesizedStartNow) {
+          this.seedChunkFromPreRoll(frameSamples, output,
+            latchedContinuingOnset && !output.isLoudRegime);
+        }
+        if (decision.type === 'startUtterance' && this.primingComplete) {
           this.utteranceQuietestStrongDb = null;
           const softOnset = this.quietLatchWitnessEnabled
             && latchedContinuingOnset
             && !output.isLoudRegime;
-          if (this.headLive) {
-            const trimmedSamples = this.headTrimSamples();
-            this.accumulatorSamples = this.headSamples - trimmedSamples;
-            this.headPrependedAtOnset = this.headSamples - trimmedSamples;
-            this.chunkStartSessionSamples = this.sessionElapsedSamples
-              - this.headSamples + trimmedSamples;
-          } else {
-            let requestedPreRollMs = output.isLoudRegime
-              ? Math.max(this.endpoint.configuration.preRollSamples / 16, this.loudPreRollMs)
-              : this.endpoint.configuration.preRollSamples / 16;
-            if (softOnset && this.softOnsetPreRollEnabled) {
-              requestedPreRollMs = Math.max(requestedPreRollMs, this.softOnsetPreRollMs);
-            }
-            const requestedPreRollSamples = Math.round(requestedPreRollMs * 16);
-            const preRollSamples = Math.min(requestedPreRollSamples, this.postHeadPreRollSamples);
-            this.accumulatorSamples = preRollSamples + frameSamples;
-            this.chunkStartSessionSamples = this.sessionElapsedSamples
-              - frameSamples - preRollSamples;
-            this.postHeadPreRollSamples = 0;
-          }
+          this.seedChunkFromPreRoll(frameSamples, output, softOnset);
+          if (!this.headLive) this.accumulatorSamples += frameSamples;
           this.sustainedContinuingMs = 0;
           this.streakStartFloorDb = null;
           this.streakPeakDb = null;
@@ -432,9 +500,20 @@ export function makeRecorderHarness({
           this.sustainedContinuingOnsetLatched = false;
           this.resetQuietLatchWindow();
           this.silenceSamples = 0;
-        } else if (decision.type === 'continueUtterance'
-          || decision.type === 'finalizeUtterance') {
-          this.accumulatorSamples += frameSamples;
+        } else if (this.primingComplete && (decision.type === 'continueUtterance'
+          || decision.type === 'finalizeUtterance')) {
+          if (!synthesizedStartNow) this.accumulatorSamples += frameSamples;
+        }
+        if (this.primingComplete && this.accumulatorSamples > 0
+          && decision.type !== 'startUtterance') {
+          this.splitEnergyFrames.push({
+            samples: frameSamples,
+            low: output.evidence === 'silence' || frameDb < output.silenceThresholdDb,
+          });
+          this.splitEnergySamples += frameSamples;
+          while (this.splitEnergySamples > this.splitSearchSamples && this.splitEnergyFrames.length > 0) {
+            this.splitEnergySamples -= this.splitEnergyFrames.shift().samples;
+          }
         }
         if (adaptivePath && output.evidence === 'strong' && this.endpoint.state !== 'idle') {
           this.utteranceQuietestStrongDb = Math.min(
@@ -489,7 +568,7 @@ export function makeRecorderHarness({
         frameDuration,
       );
 
-      if (decision.type === 'startUtterance') {
+      if (decision.type === 'startUtterance' && this.primingComplete) {
         this.emitEvent({
           t: 'ev',
           k: 'start_utterance',
@@ -501,12 +580,28 @@ export function makeRecorderHarness({
       }
 
       if (decision.type === 'finalizeUtterance') {
-        this.emittedTotalMs = this.accumulatorSamples / 16;
-        const totalSamples = this.accumulatorSamples;
+        if (!this.primingComplete && this.accumulatorSamples === 0) {
+          this.emitEvent({ t: 'ev', k: 'discard', r: 'priming_window' });
+          this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
+          this.gate.noteUtteranceEnded(this.utteranceQuietestStrongDb);
+          this.utteranceQuietestStrongDb = null;
+          this.speechSamples = 0;
+          return { output, decision, frameRecord: null, discarded: true };
+        }
+        const rawTotalSamples = this.accumulatorSamples;
+        this.lastUntrimmedEmitSampleCount = rawTotalSamples;
+        const trailingSilenceSamples = Math.min(this.contiguousTrailingSilenceSamples, rawTotalSamples);
+        const trimsPostRoll = decision.type === 'finalizeUtterance' && decision.kind !== 'stop';
+        const totalSamples = trimsPostRoll
+          ? rawTotalSamples - Math.max(0, trailingSilenceSamples - this.postRollSamples)
+          : rawTotalSamples;
+        this.emittedTotalMs = totalSamples / 16;
         const speechMs = this.speechSamples / 16;
         if (this.accumulatorSamples < this.minChunkSamples
           || this.speechSamples < this.minSpeechSamples) {
           this.accumulatorSamples = 0;
+          this.splitEnergyFrames.length = 0;
+          this.splitEnergySamples = 0;
           this.chunkStartSessionSamples = null;
           this.speechSamples = 0;
           this.silenceSamples = 0;
@@ -523,6 +618,7 @@ export function makeRecorderHarness({
           const chunkId = this.nextChunkId;
           this.nextChunkId += 1;
           this.chunkCount += 1;
+          this.emittedSampleCount += totalSamples;
           this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
           this.gate.noteUtteranceEnded(this.utteranceQuietestStrongDb);
           this.emitEvent({
@@ -555,7 +651,67 @@ export function makeRecorderHarness({
         }
       }
 
-      if (!this.headLive && decision.type !== 'startUtterance') {
+      if (this.endpointMachineEnabled && decision.type !== 'finalizeUtterance'
+        && this.accumulatorSamples >= this.maxChunkSamples) {
+        let gapSamples = 0;
+        let samplesAfterGap = 0;
+        let qualifyingGapTailSamples = null;
+        for (let index = this.splitEnergyFrames.length - 1; index >= 0; index -= 1) {
+          const indexedFrame = this.splitEnergyFrames[index];
+          if (indexedFrame.low) {
+            gapSamples += indexedFrame.samples;
+            if (gapSamples >= this.minimumSplitSilenceSamples) {
+              qualifyingGapTailSamples = samplesAfterGap;
+              break;
+            }
+          } else {
+            samplesAfterGap += gapSamples + indexedFrame.samples;
+            gapSamples = 0;
+          }
+        }
+        const hasGap = qualifyingGapTailSamples !== null;
+        const reason = hasGap ? 'split_gap' : 'split_hardcut';
+        const requestedSplitSamples = hasGap
+          ? this.accumulatorSamples - qualifyingGapTailSamples
+          : this.maxChunkSamples;
+        const splitSamples = Math.min(requestedSplitSamples, this.maxChunkSamples);
+        if ((this.accumulatorSamples > this.maxChunkSamples || hasGap)
+          && splitSamples > 0 && splitSamples <= this.accumulatorSamples) {
+          const splitWasSpilled = this.accumulatorSamples > this.spillThresholdSamples;
+          const chunkId = this.nextChunkId++;
+          const startSamples = this.chunkStartSessionSamples
+            ?? (this.sessionElapsedSamples - this.accumulatorSamples);
+          this.emitEvent({
+            t: 'ev', k: 'split', id: chunkId, n: splitSamples, r: reason,
+            s0: startSamples / 16, s1: (startSamples + splitSamples) / 16,
+            es: this.endpoint.state,
+            boundaryOffsetSamples: splitSamples,
+            gapSamples: hasGap ? gapSamples : 0,
+            spilled: splitWasSpilled,
+          });
+          this.emitEvent({
+            t: 'ev', k: 'emit', id: chunkId, n: splitSamples, r: reason,
+            sm: this.speechSamples / 16, tm: splitSamples / 16,
+            s0: startSamples / 16, s1: (startSamples + splitSamples) / 16,
+            es: this.endpoint.state,
+          });
+          this.chunkCount += 1;
+          this.emittedSampleCount += splitSamples;
+          const carriedSamples = this.accumulatorSamples - splitSamples;
+          this.accumulatorSamples = carriedSamples;
+          this.contiguousTrailingSilenceSamples = Math.min(
+            this.contiguousTrailingSilenceSamples,
+            carriedSamples,
+          );
+          if (splitWasSpilled) this.spillOccurred = true;
+          this.chunkStartSessionSamples = startSamples + splitSamples;
+          this.splitEnergyFrames.length = 0;
+          this.splitEnergySamples = 0;
+          this.postHeadPreRollSamples = 0;
+        }
+      }
+
+      if (primingWasComplete && !this.headLive && decision.type !== 'startUtterance') {
         if (decision.type === 'finalizeUtterance' || discarded) {
           this.postHeadPreRollSamples = 0;
         } else if (previousState === 'idle' || previousState === 'onsetPending') {
@@ -572,6 +728,9 @@ export function makeRecorderHarness({
           this.postHeadPreRollSamples = 0;
         }
       }
+
+      this.spilledSampleCount = Math.max(0, this.accumulatorSamples - this.spillThresholdSamples);
+      this.spillOccurred ||= this.spilledSampleCount > 0;
 
       return {
         output,
@@ -702,7 +861,7 @@ export function makeRecorderHarness({
         ?? (this.sessionElapsedSamples - sampleCount)) / 16;
       const endMs = startMs + sampleCount / 16;
       const reason = sampleCount === 0
-        ? 'empty'
+        ? (this.primingComplete ? 'empty' : 'priming_window')
         : this.speechSamples < this.minSpeechSamples ? 'below_minimums' : 'flush';
       if (this.endpointMachineEnabled) this.endpoint.forceFinalize('stop');
       this.emitEvent({
@@ -716,6 +875,7 @@ export function makeRecorderHarness({
         s1: endMs,
         es: decisionTimeEndpointState,
       });
+      if (!this.primingComplete && sampleCount === 0) return { type: 'none' };
       if (sampleCount === 0) return { type: 'none' };
       if (this.speechSamples < this.minSpeechSamples) {
         this.accumulatorSamples = 0;
@@ -727,6 +887,7 @@ export function makeRecorderHarness({
       const chunkId = this.nextChunkId;
       this.nextChunkId += 1;
       this.chunkCount += 1;
+      this.emittedSampleCount += sampleCount;
       this.emittedTotalMs = sampleCount / 16;
       this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
       this.gate.noteUtteranceEnded(this.utteranceQuietestStrongDb);

@@ -39,6 +39,8 @@ struct VADGateConfig {
     let loudSilenceDeltaDb: Double
     let loudRiseDbPerSec: Double
     let loudDynamicsSpreadDb: Double
+    let primingMaximumSeconds: Double
+    let primingQuietSeedSeconds: Double
 
     init(
         mode: VADMode,
@@ -62,7 +64,9 @@ struct VADGateConfig {
         loudContinuationDeltaDb: Double = 3.0,
         loudSilenceDeltaDb: Double = 2.0,
         loudRiseDbPerSec: Double = 12.0,
-        loudDynamicsSpreadDb: Double = 9.0
+        loudDynamicsSpreadDb: Double = 9.0,
+        primingMaximumSeconds: Double = 0.45,
+        primingQuietSeedSeconds: Double = 0.10
     ) {
         self.mode = mode
         self.staticRms = staticRms
@@ -86,6 +90,8 @@ struct VADGateConfig {
         self.loudSilenceDeltaDb = loudSilenceDeltaDb
         self.loudRiseDbPerSec = loudRiseDbPerSec
         self.loudDynamicsSpreadDb = loudDynamicsSpreadDb
+        self.primingMaximumSeconds = primingMaximumSeconds
+        self.primingQuietSeedSeconds = primingQuietSeedSeconds
     }
 }
 
@@ -100,6 +106,10 @@ struct VADGateOutput {
     let dynamicsSpreadDb: Double?
     let shortSpreadDb: Double?
     let isLoudRegime: Bool
+    let didReanchor: Bool
+    let didCompletePriming: Bool
+    let primingDurationSeconds: Double
+    let primingEndedAtCap: Bool
 }
 
 final class VADThresholdGate: @unchecked Sendable {
@@ -141,6 +151,9 @@ final class VADThresholdGate: @unchecked Sendable {
     private let effectiveLoudSilenceDeltaDb: Double
     private var behaviorMode: VADMode
     private var adaptiveRefinementElapsed = 0.0
+    private var adaptivePrimingElapsed = 0.0
+    private var adaptivePrimingQuietElapsed = 0.0
+    private var adaptivePrimed = false
     private var adaptiveRefinementComplete: Bool
     private var coldStartSpeechShapedNow = false
     private var coldStartConverged = false
@@ -237,7 +250,11 @@ final class VADThresholdGate: @unchecked Sendable {
             floorConverged: false,
             dynamicsSpreadDb: nil,
             shortSpreadDb: nil,
-            isLoudRegime: false
+            isLoudRegime: false,
+            didReanchor: false,
+            didCompletePriming: false,
+            primingDurationSeconds: 0,
+            primingEndedAtCap: false
         )
         adaptiveRollingDbs = Array(repeating: 0, count: Self.adaptiveRollingWindowCapacity)
         adaptiveRollingDurations = Array(repeating: 0, count: Self.adaptiveRollingWindowCapacity)
@@ -343,6 +360,9 @@ final class VADThresholdGate: @unchecked Sendable {
     }
 
     private func processAdaptive(frameDb: Double, frameDuration: Double) -> VADGateOutput {
+        var didReanchor = false
+        var didCompletePriming = false
+        var primingEndedAtCap = false
         appendAdaptiveRollingFrame(db: frameDb, duration: frameDuration)
         let rollingPercentile = adaptiveRollingPercentile()
         let windowMax = adaptiveRollingMaxDb(coverSeconds: Self.adaptiveColdStartDispersionWindowSeconds)
@@ -426,6 +446,7 @@ final class VADThresholdGate: @unchecked Sendable {
                     }
                     if floorMoved && !hasRefusedReanchorSinceLastAcceptance {
                         pendingReanchorEvent = true
+                        didReanchor = true
                     }
                     hasRefusedReanchorSinceLastAcceptance = false
                     let thresholds = adaptiveThresholds(floor: reanchoredFloor)
@@ -445,6 +466,11 @@ final class VADThresholdGate: @unchecked Sendable {
             }
         }
         let evidence = dynamicsGatedEvidence(levels.evidence, dispersionDb: dispersionDb)
+        (didCompletePriming, primingEndedAtCap) = updatePriming(
+            frameDb: frameDb,
+            strongThresholdDb: levels.strongThresholdDb,
+            frameDuration: frameDuration
+        )
         return emit(
             evidence: evidence,
             isSpeech: evidence == .strong || evidence == .continuing,
@@ -454,7 +480,11 @@ final class VADThresholdGate: @unchecked Sendable {
             floorDb: floorDb,
             floorConverged: coldStartConverged,
             dynamicsSpreadDb: config.adaptiveDynamicsEnabled ? dispersionDb : nil,
-            shortSpreadDb: shortSpreadDb
+            shortSpreadDb: shortSpreadDb,
+            didReanchor: didReanchor,
+            didCompletePriming: didCompletePriming,
+            primingDurationSeconds: adaptivePrimingElapsed,
+            primingEndedAtCap: primingEndedAtCap
         )
     }
 
@@ -530,6 +560,11 @@ final class VADThresholdGate: @unchecked Sendable {
             dispersionDb: shortSpreadDb ?? dispersionDb
         )
         let isSpeech = evidence == .strong || evidence == .continuing
+        let (didCompletePriming, primingEndedAtCap) = updatePriming(
+            frameDb: frameDb,
+            strongThresholdDb: levels.strongThresholdDb,
+            frameDuration: frameDuration
+        )
         return emit(
             evidence: evidence,
             isSpeech: isSpeech,
@@ -539,8 +574,32 @@ final class VADThresholdGate: @unchecked Sendable {
             floorDb: currentFloor,
             floorConverged: coldStartConverged,
             dynamicsSpreadDb: config.adaptiveDynamicsEnabled ? dispersionDb : nil,
-            shortSpreadDb: shortSpreadDb
+            shortSpreadDb: shortSpreadDb,
+            didCompletePriming: didCompletePriming,
+            primingDurationSeconds: adaptivePrimingElapsed,
+            primingEndedAtCap: primingEndedAtCap
         )
+    }
+
+    private func updatePriming(
+        frameDb: Double,
+        strongThresholdDb: Double,
+        frameDuration: Double
+    ) -> (didComplete: Bool, endedAtCap: Bool) {
+        guard behaviorMode == .adaptive, !adaptivePrimed else { return (false, false) }
+        let duration = max(0, frameDuration)
+        adaptivePrimingElapsed = min(config.primingMaximumSeconds, adaptivePrimingElapsed + duration)
+        if coldStartConverged && frameDb < strongThresholdDb {
+            adaptivePrimingQuietElapsed += duration
+        } else {
+            adaptivePrimingQuietElapsed = 0
+        }
+        let endedAtCap = adaptivePrimingElapsed + Self.timeBoundaryEpsilon >= config.primingMaximumSeconds
+        guard adaptivePrimingQuietElapsed >= config.primingQuietSeedSeconds || endedAtCap else {
+            return (false, false)
+        }
+        adaptivePrimed = true
+        return (true, endedAtCap && adaptivePrimingQuietElapsed < config.primingQuietSeedSeconds)
     }
 
     private func dynamicsGatedEvidence(_ evidence: VADEvidence, dispersionDb: Double) -> VADEvidence {
@@ -660,6 +719,9 @@ final class VADThresholdGate: @unchecked Sendable {
             behaviorMode = .adaptive
             adaptiveRefinementElapsed = 0
             adaptiveRefinementComplete = false
+            adaptivePrimingElapsed = 0
+            adaptivePrimingQuietElapsed = 0
+            adaptivePrimed = false
             coldStartSpeechShapedNow = false
             coldStartConverged = false
             floorDb = Self.floorMinDb
@@ -683,7 +745,11 @@ final class VADThresholdGate: @unchecked Sendable {
             floorConverged: false,
             dynamicsSpreadDb: nil,
             shortSpreadDb: nil,
-            isLoudRegime: false
+            isLoudRegime: false,
+            didReanchor: false,
+            didCompletePriming: false,
+            primingDurationSeconds: 0,
+            primingEndedAtCap: false
         )
     }
 
@@ -833,7 +899,11 @@ final class VADThresholdGate: @unchecked Sendable {
             floorConverged: coldStartConverged,
             dynamicsSpreadDb: lastOutput.dynamicsSpreadDb,
             shortSpreadDb: lastOutput.shortSpreadDb,
-            isLoudRegime: isLoudRegime
+            isLoudRegime: isLoudRegime,
+            didReanchor: false,
+            didCompletePriming: false,
+            primingDurationSeconds: adaptivePrimingElapsed,
+            primingEndedAtCap: false
         )
     }
 
@@ -898,7 +968,11 @@ final class VADThresholdGate: @unchecked Sendable {
         floorConverged: Bool = false,
         dynamicsSpreadDb: Double? = nil,
         shortSpreadDb: Double? = nil,
-        isLoudRegime: Bool? = nil
+        isLoudRegime: Bool? = nil,
+        didReanchor: Bool = false,
+        didCompletePriming: Bool = false,
+        primingDurationSeconds: Double = 0,
+        primingEndedAtCap: Bool = false
     ) -> VADGateOutput {
         let output = VADGateOutput(
             isSpeech: isSpeech,
@@ -910,7 +984,11 @@ final class VADThresholdGate: @unchecked Sendable {
             floorConverged: floorConverged,
             dynamicsSpreadDb: dynamicsSpreadDb,
             shortSpreadDb: shortSpreadDb,
-            isLoudRegime: isLoudRegime ?? self.isLoudRegime
+            isLoudRegime: isLoudRegime ?? self.isLoudRegime,
+            didReanchor: didReanchor,
+            didCompletePriming: didCompletePriming,
+            primingDurationSeconds: primingDurationSeconds,
+            primingEndedAtCap: primingEndedAtCap
         )
         lastOutput = output
         return output

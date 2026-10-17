@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { buildText, summarizeRecording } from '../lib/vad-telemetry-digest.mjs';
+import { retainTelemetryFrames, serializeTelemetryPayload } from '../lib/vad-telemetry-retention.mjs';
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ritoras-vad-digest-'));
 const globalSettings = [
@@ -46,6 +47,63 @@ function digest(files, options = {}) {
 }
 
 describe('VAD telemetry digest', () => {
+  it('mirrors Swift incremental retention for 2,500 frames', () => {
+    const frames = Array.from({ length: 2_500 }, (_, q) => frame(q));
+    const retained = retainTelemetryFrames(frames);
+    assert.equal(retained.frames.length, 1_750);
+    assert.equal(retained.historicalDropped, 750);
+    assert.equal(retained.frames[0].q, 0);
+    assert.equal(retained.frames[750].q, 1_500);
+    assert.equal(retained.frames[751].q, 1_501);
+    assert.equal(retained.frames[1_249].q, 1_999);
+    assert.equal(retained.frames[1_250].q, 2_000);
+    assert.equal(retained.frames.at(-1).q, 2_499);
+  });
+
+  it('trims newest historical rows for payload budget while retaining the full tail', () => {
+    const frames = Array.from({ length: 2_500 }, (_, q) => frame(q, { padding: 'x'.repeat(500) }));
+    const payload = JSON.parse(serializeTelemetryPayload({ frames, summary: {} }).toString('utf8'));
+    const historical = payload.frames.filter(item => item.q < 2_000);
+    const tail = payload.frames.filter(item => item.q >= 2_000);
+    assert.ok(payload.frames.length < 1_750);
+    assert.ok(payload.summary.retention.historical_dropped > 0);
+    assert.equal(historical[0].q, 0);
+    assert.ok(historical.at(-1).q < 1_999);
+    assert.equal(tail.length, 500);
+    assert.equal(tail[0].q, 2_000);
+    assert.equal(tail.at(-1).q, 2_499);
+  });
+
+  it('retains a multi-minute session tail within budget and renders v2 reason-coded events', () => {
+    const frames = Array.from({ length: 12_000 }, (_, q) => frame(q));
+    const events = [
+      { k: 'discard', r: 'below_minimums' },
+      { k: 'reanchor', r: 'floor_moved' },
+      { k: 'pre_roll', r: 'session_head' },
+      { k: 'spill', r: 'created' },
+      { k: 'priming_complete', r: 'duration_cap', tm: 450 },
+      { k: 'split', r: 'split_gap', id: 2, n: 32000, s0: 1000, s1: 3000, boundaryOffsetSamples: 32000 },
+      { k: 'session_end', r: 'ended' },
+    ];
+    const bytes = serializeTelemetryPayload({ frames, events, summary: {} });
+    const payload = JSON.parse(bytes.toString('utf8'));
+    assert.ok(bytes.length <= 768 * 1024);
+    assert.ok(payload.frames.some(item => item.q === frames.at(-1).q));
+    assert.ok(payload.summary.retention.historical_dropped > 0);
+    assert.ok(Object.hasOwn(payload.summary.retention, 'tail_dropped'));
+    assert.deepEqual(payload.events.map(event => event.r), events.map(event => event.r));
+
+    const jobId = '92345678-1234-1234-1234-123456789abc';
+    const file = recordingFile(`${jobId}-vad.jsonl`, [
+      { t: 'meta', jobId, startedAt: '2026-09-23T13:58:02Z', schema_version: 2,
+        summary: { retention: payload.summary.retention } },
+      ...events.map(event => ({ t: 'ev', ...event })),
+    ]);
+    const text = digest([file]);
+    assert.match(text, /telemetry schema=v2 retention=stratified_tail/);
+    assert.match(text, /discard:below_minimums reanchor:floor_moved pre_roll:session_head spill:created priming_complete:duration_cap split:split_gap@1000\.0→3000\.0s session_end:ended/);
+  });
+
   it('reduces metadata, session config, frames, events, and session end records', () => {
     const jobId = '12345678-1234-1234-1234-123456789abc';
     const file = recordingFile(`${jobId}-vad.jsonl`, [

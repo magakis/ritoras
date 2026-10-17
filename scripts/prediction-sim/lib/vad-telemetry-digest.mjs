@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseSession } from '../bin/replay-vad.mjs';
+import { VAD_TELEMETRY_RETENTION } from './vad-telemetry-retention.mjs';
 
 export const DEFAULT_BUDGET = 96 * 1024;
 const TIMELINE_INTERVAL_SECONDS = 0.25;
@@ -61,6 +62,11 @@ export function summarizeRecording({ filename, records, session = null, modified
   const parsedStartDate = parseDate(meta?.startedAt);
   const frames = session?.frames ?? records.filter(record => record.t === 'f');
   const events = session?.events ?? records.filter(record => record.t === 'ev');
+  const reasonEvents = events.filter(event => typeof event.r === 'string');
+  const eventKinds = Object.fromEntries([...new Set(events.map(event => event.k))]
+    .sort().map(kind => [kind, events.filter(event => event.k === kind).length]));
+  const schemaVersion = finiteNumber(session?.schema_version ?? meta?.schema_version);
+  const retention = session?.summary?.retention ?? meta?.summary?.retention ?? meta?.retention ?? null;
   const hasLoudRegimeFrames = frames.some(frame => Object.hasOwn(frame, 'lr'));
   const loudRegimeSeconds = hasLoudRegimeFrames
     ? frames.reduce((total, frame) => (
@@ -200,6 +206,10 @@ export function summarizeRecording({ filename, records, session = null, modified
     startedAt: parsedStartDate ? formatUtc(parsedStartDate) : 'unknown',
     durationSeconds,
     outcome,
+    ...(schemaVersion === null ? {} : { schemaVersion }),
+    reasonEvents,
+    eventKinds,
+    retention,
     parameters,
     frameCount: frames.length,
     speechPercent: frames.length === 0
@@ -382,6 +392,17 @@ function render({ summaries, globalSettings, budget, exportedAt, timelineStride,
     const newestLabel = index === 0 ? ' (newest)' : '';
     lines.push(`== Recording ${index + 1}/${summaries.length}${newestLabel} ==`);
     lines.push(`job=${summary.jobId} started=${summary.startedAt} dur=${fixed(summary.durationSeconds, 1)}s outcome=${summary.outcome}`);
+    if (summary.schemaVersion === 2) {
+      const retention = summary.retention ?? {};
+      lines.push(`telemetry schema=v2 retention=${retention.policy ?? 'unknown'} historicalDropped=${retention.historical_dropped ?? 'n/a'} tailDropped=${retention.tail_dropped ?? 'n/a'} eventsDropped=${retention.events_dropped ?? 'n/a'}`);
+      lines.push(`events{${Object.entries(summary.eventKinds).map(([kind, count]) => `${kind}=${count}`).join(',')}}`);
+      lines.push(`eventReasons{${summary.reasonEvents.map(event => {
+        const boundary = Number.isFinite(event.s0) && Number.isFinite(event.s1)
+          ? `@${fixed(event.s0, 1)}→${fixed(event.s1, 1)}s`
+          : '';
+        return `${event.k}:${event.r}${boundary}`;
+      }).join(' ') || 'none'}}`);
+    }
     lines.push(`chunks=${summary.chunkCount} emitted speech=${fixed(summary.emittedSpeechSeconds, 1)}s/${fixed(summary.emittedChunkSeconds, 1)}s`);
     lines.push(formatChunks(summary, chunkStride));
     lines.push(formatParameters(summary.parameters));

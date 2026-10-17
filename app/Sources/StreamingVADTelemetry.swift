@@ -3,8 +3,12 @@ import Foundation
 final class StreamingVADTelemetry: @unchecked Sendable, VADTelemetrySink, VADTelemetryFlushable {
     private let writer: VADTelemetryFileWriter?
     private let lock = NSLock()
-    private var frames: [VADTelemetryFrame] = []
-    private var droppedFrames = 0
+    private var historicalFrames: [VADTelemetryFrame] = []
+    private var tailFrames: [VADTelemetryFrame] = []
+    private var droppedHistoricalFrames = 0
+    private var droppedTailFrames = 0
+    private var events: [VADTelemetryEvent] = []
+    private var droppedEvents = 0
     private var configuration: [String: Any] = [:]
     private var emissions = 0
     private var decisions: [String: Int] = [:]
@@ -17,9 +21,10 @@ final class StreamingVADTelemetry: @unchecked Sendable, VADTelemetrySink, VADTel
     private var finalFloorDb: Double?
     private var floorConverged = false
 
-    // At most 2,000 frames × a conservative 350 UTF-8 bytes/frame = 700 KB;
-    // metadata is bounded well below the remaining ~348 KB of the 1 MiB limit.
-    private static let maxFrames = 2_000
+    private static let tailFrameLimit = 500
+    private static let historicalFrameLimit = 1_500
+    private static let maxEvents = 256
+    private static let payloadBudgetBytes = 768 * 1024
 
     init(writer: VADTelemetryFileWriter?) { self.writer = writer }
 
@@ -31,7 +36,15 @@ final class StreamingVADTelemetry: @unchecked Sendable, VADTelemetrySink, VADTel
         writer?.frame(record)
         lock.lock()
         defer { lock.unlock() }
-        if frames.count < Self.maxFrames { frames.append(record) } else { droppedFrames += 1 }
+        tailFrames.append(record)
+        if tailFrames.count > Self.tailFrameLimit {
+            historicalFrames.append(tailFrames.removeFirst())
+            if historicalFrames.count > Self.historicalFrameLimit {
+                let before = historicalFrames.count
+                historicalFrames = historicalFrames.enumerated().compactMap { $0.offset.isMultiple(of: 2) ? $0.element : nil }
+                droppedHistoricalFrames += before - historicalFrames.count
+            }
+        }
         if record.isSpeech { speechFrames += 1; speechMs += record.frameDuration * 1000 }
         else if record.evidence == "silence" { silenceFrames += 1; silenceMs += record.frameDuration * 1000 }
         else { ambiguousFrames += 1; ambiguousMs += record.frameDuration * 1000 }
@@ -43,6 +56,11 @@ final class StreamingVADTelemetry: @unchecked Sendable, VADTelemetrySink, VADTel
     func event(_ record: VADTelemetryEvent) {
         writer?.event(record)
         lock.lock()
+        if events.count == Self.maxEvents {
+            events.removeFirst()
+            droppedEvents += 1
+        }
+        events.append(record)
         if record.kind == .sessionStart { configuration = record.config ?? [:] }
         if record.kind == .emit { emissions += 1 }
         lock.unlock()
@@ -51,10 +69,14 @@ final class StreamingVADTelemetry: @unchecked Sendable, VADTelemetrySink, VADTel
     func payload(jobId: UUID, startedAt: Date, duration: TimeInterval, now: Date = Date()) -> Data? {
         writer?.flush()
         lock.lock()
-        let keptFrames = frames
-        let droppedFramesAtSnapshot = droppedFrames
+        let historicalSnapshot = historicalFrames
+        let tailSnapshot = tailFrames
+        let eventSnapshot = events
+        let droppedHistoricalAtSnapshot = droppedHistoricalFrames
+        let droppedTailAtSnapshot = droppedTailFrames
+        let droppedEventsAtSnapshot = droppedEvents
         var metadata: [String: Any] = [
-            "schema_version": 1,
+            "schema_version": 2,
             "type": "TELEMETRY",
             "jobId": jobId.uuidString,
             "started_at": ISO8601DateFormatter().string(from: startedAt),
@@ -69,8 +91,29 @@ final class StreamingVADTelemetry: @unchecked Sendable, VADTelemetrySink, VADTel
                         "silence_ms": silenceMs, "ambiguous_ms": ambiguousMs,
                         "final_noise_floor_db": finalFloorDb as Any? ?? NSNull(),
                         "floor_converged": floorConverged, "emission_count": emissions,
-                        "endpoint_decisions": decisions, "frames_dropped": droppedFramesAtSnapshot],
-            "frames": keptFrames.map { frame in
+                        "endpoint_decisions": decisions,
+                        "retention": ["policy": "stratified_tail", "historical_limit": Self.historicalFrameLimit,
+                                      "tail_limit": Self.tailFrameLimit,
+                                      "historical_dropped": droppedHistoricalAtSnapshot,
+                                      "tail_dropped": droppedTailAtSnapshot,
+                                      "events_dropped": droppedEventsAtSnapshot]],
+            "events": eventSnapshot.map { event in
+                var item: [String: Any] = ["k": event.kind.rawValue]
+                if let reason = event.reason { item["r"] = reason }
+                if let id = event.chunkId { item["id"] = Int(id) }
+                if let samples = event.samples { item["n"] = samples }
+                if let speechMs = event.speechMs { item["sm"] = speechMs }
+                if let totalMs = event.totalMs { item["tm"] = totalMs }
+                if let config = event.config { item["c"] = config }
+                if let startMs = event.startMs { item["s0"] = startMs }
+                if let endMs = event.endMs { item["s1"] = endMs }
+                if let endpointState = event.endpointState { item["es"] = endpointState }
+                if let latencyMs = event.latencyMs { item["lat"] = latencyMs }
+                if let chars = event.chars { item["ch"] = chars }
+                if let metadata = event.metadata { item.merge(metadata) { _, new in new } }
+                return item
+            },
+            "frames": (historicalSnapshot + tailSnapshot).map { frame in
                 var item: [String: Any] = ["q": frame.seq, "dt": frame.frameDuration, "db": frame.frameDb,
                     "e": frame.evidence, "sp": frame.isSpeech, "fc": frame.floorConverged,
                     "th": frame.strongThresholdDb, "ct": frame.continuationThresholdDb,
@@ -84,26 +127,44 @@ final class StreamingVADTelemetry: @unchecked Sendable, VADTelemetrySink, VADTel
             }
         ]
         lock.unlock()
-        guard var frameObjects = metadata["frames"] as? [[String: Any]],
-              var summary = metadata["summary"] as? [String: Any] else { return nil }
-        let originalDropped = droppedFramesAtSnapshot
+        guard var summary = metadata["summary"] as? [String: Any] else { return nil }
+        let originalHistoricalDropped = droppedHistoricalAtSnapshot
+        let originalTailDropped = droppedTailAtSnapshot
+        var historyCount = historicalSnapshot.count
+        let tailCount = tailSnapshot.count
         while true {
-            metadata["frames"] = frameObjects
-            summary["frames_dropped"] = originalDropped + (keptFrames.count - frameObjects.count)
+            let allFrames = historicalSnapshot.prefix(historyCount) + tailSnapshot.suffix(tailCount)
+            metadata["frames"] = Array(allFrames).map { frame in
+                var item: [String: Any] = ["q": frame.seq, "dt": frame.frameDuration, "db": frame.frameDb,
+                    "e": frame.evidence, "sp": frame.isSpeech, "fc": frame.floorConverged,
+                    "th": frame.strongThresholdDb, "ct": frame.continuationThresholdDb,
+                    "st": frame.silenceThresholdDb, "ps": frame.endpointPreviousState,
+                    "es": frame.endpointState, "d": frame.endpointDecision,
+                    "ss": frame.decisionSilenceSamples, "us": frame.utteranceDurationSamples,
+                    "ls": frame.latchStreakMs, "ll": frame.latchLatched, "lr": frame.isLoudRegime]
+                if let floorDb = frame.floorDb { item["fl"] = floorDb }
+                if let spread = frame.dynamicsSpreadDb { item["dy"] = spread }
+                return item
+            }
+            let trimHistory = historicalSnapshot.count - historyCount
+            let trimTail = tailSnapshot.count - tailCount
+            summary["retention"] = ["policy": "stratified_tail", "historical_limit": Self.historicalFrameLimit,
+                "tail_limit": Self.tailFrameLimit, "historical_dropped": originalHistoricalDropped + trimHistory,
+                "tail_dropped": originalTailDropped + trimTail, "events_dropped": droppedEventsAtSnapshot]
             metadata["summary"] = summary
             guard let data = try? JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]) else {
                 FileLogger.shared.warn(.network, "Stream: VAD telemetry serialization failed")
                 return nil
             }
-            if data.count <= 768 * 1024 {
-                let totalDropped = originalDropped + (keptFrames.count - frameObjects.count)
+            if data.count <= Self.payloadBudgetBytes {
+                let totalDropped = originalHistoricalDropped + originalTailDropped + trimHistory + trimTail
                 if totalDropped > 0 {
                     FileLogger.shared.warn(.network, "Stream: VAD telemetry frames truncated", payload: ["framesDropped": totalDropped])
                 }
                 return data
             }
-            guard !frameObjects.isEmpty else { return nil }
-            frameObjects.removeLast(min(100, frameObjects.count))
+            if historyCount > 0 { historyCount = max(0, historyCount - 100) }
+            else { return nil }
         }
     }
 }

@@ -27,7 +27,10 @@ final class VADTelemetryFileWriter: @unchecked Sendable, VADTelemetrySink, VADTe
         var metadata: [String: Any] = [
             "t": "meta",
             "jobId": jobId.uuidString,
-            "startedAt": formatter.string(from: Date())
+            "startedAt": formatter.string(from: Date()),
+            "schema_version": 2,
+            "retention": ["policy": "stratified_tail", "historical_limit": 1_500,
+                          "tail_limit": 500, "payload_budget_bytes": 768 * 1024]
         ]
         if let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
             metadata["appVersion"] = appVersion
@@ -210,6 +213,9 @@ final class VADTelemetryFileWriter: @unchecked Sendable, VADTelemetrySink, VADTe
         }
         if let chars = record.chars {
             object["ch"] = chars
+        }
+        if let metadata = record.metadata {
+            object.merge(metadata) { _, new in new }
         }
         return serialize(object)
     }

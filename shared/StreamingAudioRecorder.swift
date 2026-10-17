@@ -82,6 +82,30 @@ enum VADTelemetryEventKind: String, Sendable {
     case outcome
     case chunkReceived = "chunk_received"
     case flatTerminate = "flat_terminate"
+    case reanchor
+    case preRoll = "pre_roll"
+    case spill
+    case primingComplete = "priming_complete"
+    case split
+
+    var defaultReason: String {
+        switch self {
+        case .sessionStart: return "started"
+        case .startUtterance: return "onset_confirmed"
+        case .emit: return "endpoint"
+        case .discard: return "discarded"
+        case .stopFlush: return "stop"
+        case .sessionEnd: return "ended"
+        case .outcome: return "completed"
+        case .chunkReceived: return "response_received"
+        case .flatTerminate: return "flat_spread"
+        case .reanchor: return "floor_moved"
+        case .preRoll: return "ring_buffer"
+        case .spill: return "created"
+        case .primingComplete: return "priming-complete"
+        case .split: return "split-gap"
+        }
+    }
 }
 
 struct VADTelemetryEvent: @unchecked Sendable {
@@ -97,6 +121,7 @@ struct VADTelemetryEvent: @unchecked Sendable {
     let endpointState: String?
     let latencyMs: Double?
     let chars: Int?
+    let metadata: [String: Any]?
 
     init(
         kind: VADTelemetryEventKind,
@@ -110,12 +135,13 @@ struct VADTelemetryEvent: @unchecked Sendable {
         endMs: Double? = nil,
         endpointState: String? = nil,
         latencyMs: Double? = nil,
-        chars: Int? = nil
+        chars: Int? = nil,
+        metadata: [String: Any]? = nil
     ) {
         self.kind = kind
         self.chunkId = chunkId
         self.samples = samples
-        self.reason = reason
+        self.reason = reason ?? kind.defaultReason
         self.speechMs = speechMs
         self.totalMs = totalMs
         self.config = config
@@ -124,6 +150,7 @@ struct VADTelemetryEvent: @unchecked Sendable {
         self.endpointState = endpointState
         self.latencyMs = latencyMs
         self.chars = chars
+        self.metadata = metadata
     }
 }
 
@@ -216,6 +243,10 @@ private final class VADContext: @unchecked Sendable {
     let loudFlatTerminateEnabled: Bool
     let sessionHeadBufferSamples: Int
     let accumulatorSpillSamples: Int
+    let maxChunkSamples = 30 * 16_000
+    let splitSearchSamples = 3 * 16_000
+    let minimumSplitSilenceSamples = 100 * 16
+    let postRollSamples = 400 * 16
     let analysisHpf: VADHighPassFilter?
 
     // MARK: Lock
@@ -226,6 +257,9 @@ private final class VADContext: @unchecked Sendable {
     private var accumulatorSpillURL: URL?
     private var accumulatorSpillHandle: FileHandle?
     private var spilledSampleCount = 0
+    private var splitEnergyFrames: [(samples: Int, isLowEnergy: Bool)] = []
+    private var splitEnergySamples = 0
+    private var contiguousTrailingSilenceSamples = 0
     private var chunkStartSessionSamples: Int?
     let preRollBuffer: SampleRingBuffer
     var headBuffer: SampleRingBuffer?
@@ -250,6 +284,7 @@ private final class VADContext: @unchecked Sendable {
     private var loudFlatTerminatorActive = false
     private var telemetrySequence: UInt64 = 0
     private var telemetrySink: VADTelemetrySink?
+    private var primingComplete = false
 
     init(
         gateConfig: VADGateConfig,
@@ -271,6 +306,7 @@ private final class VADContext: @unchecked Sendable {
     ) {
         let gate = VADThresholdGate(config: gateConfig)
         self.gate = gate
+        self.primingComplete = gate.snapshot.floorDb == nil
         self.effectiveFlatSpreadDb = (gate.effectiveParameters["flatSpreadDb"] as? Double)
             ?? SharedConfig.Defaults.streamVadFlatSpreadDbDefault
         self.silenceThresholdSamples = silenceThresholdSamples
@@ -343,6 +379,10 @@ private final class VADContext: @unchecked Sendable {
         config["loudFlatStreakMs"] = loudFlatStreakMs
         config["loudFlatTerminatorActive"] = loudFlatTerminatorActive
         config["accumulatorSpillSamples"] = accumulatorSpillSamples
+        config["maxChunkMs"] = Double(maxChunkSamples) / 16.0
+        config["splitSearchWindowMs"] = Double(splitSearchSamples) / 16.0
+        config["minSilenceAtSplitMs"] = Double(minimumSplitSilenceSamples) / 16.0
+        config["postRollMs"] = Double(postRollSamples) / 16.0
         config["silenceMs"] = Double(silenceThresholdSamples) / 16.0
         config["minSpeechMs"] = Double(minSpeechSamples) / 16.0
         config["minChunkMs"] = Double(minChunkSamples) / 16.0
@@ -369,6 +409,7 @@ private final class VADContext: @unchecked Sendable {
         defer { os_unfair_lock_unlock(&unfairLock) }
         analysisHpf?.reset()
         gate.resetFloorAfterRouteChange()
+        primingComplete = gate.snapshot.floorDb == nil
         utteranceQuietestStrongDb = nil
         sawReanchorDuringUtterance = false
         sustainedContinuingMs = 0
@@ -379,6 +420,7 @@ private final class VADContext: @unchecked Sendable {
         loudFlatStreakMs = 0
         loudFlatStreakStartSeconds = nil
         loudFlatTerminatorActive = false
+        contiguousTrailingSilenceSamples = 0
     }
 
     func frameState(emissionSummary: EmissionSummary?) -> StreamingVADFrameState {
@@ -474,12 +516,26 @@ private final class VADContext: @unchecked Sendable {
         lastFrameDb = frameDb
         pendingEmissionSummary = nil
         let frameDuration = Double(frameLength) / 16000.0
+        if !primingComplete { appendToPreRoll(frame) }
         let out = gate.process(frameDb: frameDb, frameDuration: frameDuration)
+        let completedPrimingNow = out.didCompletePriming
+        primingComplete = primingComplete || completedPrimingNow
+        if out.didCompletePriming {
+            telemetrySink?.event(VADTelemetryEvent(
+                kind: .primingComplete,
+                reason: out.primingEndedAtCap ? "duration_cap" : "quiet_floor_seed",
+                totalMs: out.primingDurationSeconds * 1_000.0
+            ))
+        }
         if endpointMachineEnabled {
             appendToSessionHead(frame, frameDb: frameDb, silenceThresholdDb: out.silenceThresholdDb)
         }
-        let reanchorEvent = gate.takePendingReanchorEvent()
+        let reanchorEvent = out.didReanchor
+        _ = gate.takePendingReanchorEvent()
         let previousEndpointState = endpoint.state
+        if reanchorEvent {
+            telemetrySink?.event(VADTelemetryEvent(kind: .reanchor, reason: "floor_moved"))
+        }
         var telemetryDecision: StreamingEndpointDecision = .none
         var telemetryDecisionSilenceSamples = endpoint.accumulatedSilenceSamples
         var telemetryFrameRecorded = false
@@ -489,6 +545,7 @@ private final class VADContext: @unchecked Sendable {
         }
 
         let decision: StreamingEndpointDecision
+        var synthesizedStartNow = false
         if endpointMachineEnabled {
             let previousState = previousEndpointState
             let endpointWasIdle = previousState == .idle
@@ -617,6 +674,12 @@ private final class VADContext: @unchecked Sendable {
                endpointEvidence == .continuing || endpointEvidence == .ambiguous {
                 endpointEvidence = .silence
             }
+            if endpointEvidence == .silence {
+                contiguousTrailingSilenceSamples += frameLength
+            } else {
+                contiguousTrailingSilenceSamples = 0
+            }
+            let silenceBeforeDecision = endpoint.accumulatedSilenceSamples
             decision = endpoint.process(evidence: endpointEvidence, durationSamples: frameLength)
             telemetryDecision = decision
             if loudFlatTerminatorActive && endpoint.state == .idle {
@@ -624,7 +687,12 @@ private final class VADContext: @unchecked Sendable {
                 loudFlatStreakStartSeconds = nil
                 loudFlatTerminatorActive = false
             }
-            let decisionSilenceSamples = endpoint.accumulatedSilenceSamples
+            let decisionSilenceSamples: Int
+            if case .finalizeUtterance = decision, endpointEvidence == .silence {
+                decisionSilenceSamples = silenceBeforeDecision + frameLength
+            } else {
+                decisionSilenceSamples = endpoint.accumulatedSilenceSamples
+            }
             telemetryDecisionSilenceSamples = decisionSilenceSamples
             if previousState != endpoint.state {
                 FileLogger.shared.debug(.audio, "VAD state \(previousState.rawValue) → \(endpoint.state.rawValue)")
@@ -636,43 +704,46 @@ private final class VADContext: @unchecked Sendable {
                 machineIsEnding: previousState == .endPending || endpoint.state == .endPending
             )
 
+            let endpointFinalizedOnCompletionFrame: Bool
+            if case .finalizeUtterance = decision {
+                endpointFinalizedOnCompletionFrame = true
+            } else {
+                endpointFinalizedOnCompletionFrame = false
+            }
+            if completedPrimingNow,
+               accumulatorSampleCount == 0,
+               (endpoint.state != .idle || endpointFinalizedOnCompletionFrame) {
+                synthesizedStartNow = true
+                seedAccumulatorFromPreRoll(frame: frame, output: out)
+            }
+
             switch decision {
             case .startUtterance:
+                guard primingComplete else {
+                    break
+                }
                 utteranceQuietestStrongDb = nil
                 sustainedContinuingMs = 0
                 streakStartFloorDb = nil
                 streakPeakDb = nil
                 streakSawDynamics = false
                 sustainedContinuingOnsetLatched = false
-                clearAccumulator()
-                if let head = headBuffer {
-                    let trimmedSamples = sessionHeadTrimSamples()
-                    chunkStartSessionSamples = sessionElapsedSamples - head.count + trimmedSamples
-                    head.append(to: &accumulator, droppingFirst: trimmedSamples)
-                    FileLogger.shared.debug(.audio, "VAD: session head prepended",
-                                            payload: ["headSamples": head.count,
-                                                      "trimmedSamples": trimmedSamples])
-                } else {
-                    let requestedPreRollSamples = out.isLoudRegime
-                        ? max(preRollSamples, loudPreRollSamples)
-                        : preRollSamples
-                    let availablePreRollSamples = min(requestedPreRollSamples, preRollBuffer.count)
-                    preRollBuffer.append(
-                        to: &accumulator,
-                        droppingFirst: preRollBuffer.count - availablePreRollSamples
-                    )
-                    chunkStartSessionSamples = sessionElapsedSamples - frameLength - availablePreRollSamples
-                }
-                preRollBuffer.removeAll()
+                seedAccumulatorFromPreRoll(frame: frame, output: out)
                 if headBuffer == nil {
                     appendLiveFrame(frame)
                 } else {
                     bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
                 }
             case .continueUtterance, .finalizeUtterance:
-                appendLiveFrame(frame)
+                if primingComplete && !synthesizedStartNow {
+                    appendLiveFrame(frame)
+                }
             case .none:
-                appendToPreRoll(frame)
+                if primingComplete { appendToPreRoll(frame) }
+            }
+            if primingComplete, accumulatorSampleCount > 0 {
+                indexSplitFrame(samples: frameLength,
+                                isLowEnergy: out.evidence == .silence || frameDb < out.silenceThresholdDb)
             }
 
             if adaptivePath, out.evidence == .strong, endpoint.state != .idle {
@@ -687,7 +758,7 @@ private final class VADContext: @unchecked Sendable {
                 decisionSilenceSamples: telemetryDecisionSilenceSamples
             )
             telemetryFrameRecorded = true
-            if case .startUtterance = decision {
+            if case .startUtterance = decision, primingComplete {
                 telemetrySink?.event(VADTelemetryEvent(
                     kind: .startUtterance,
                     samples: accumulatorSampleCount
@@ -695,6 +766,17 @@ private final class VADContext: @unchecked Sendable {
             }
 
             if case .finalizeUtterance(let kind) = decision {
+                if !primingComplete, accumulatorSampleCount == 0 {
+                    telemetrySink?.event(VADTelemetryEvent(
+                        kind: .discard,
+                        reason: "priming_window"
+                    ))
+                    gate.noteUtteranceEnded(quietestStrongDb: utteranceQuietestStrongDb)
+                    utteranceQuietestStrongDb = nil
+                    speechSamples = 0
+                    _ = endpoint.reset()
+                    return nil
+                }
                 guard accumulatorSampleCount >= minChunkSamples,
                       speechSamples >= minSpeechSamples else {
                     FileLogger.shared.info(.audio, "VAD: finalize discarded - below minimum speech or chunk duration",
@@ -727,10 +809,14 @@ private final class VADContext: @unchecked Sendable {
                                                  "speechMs": speechMs,
                                                  "sampleCount": accumulatorSampleCount])
                 return emit(reason: kind.rawValue,
-                            silenceMs: silenceMs,
-                            totalMs: totalMs,
+                            silenceMs: max(silenceMs, Double(decisionSilenceSamples) / 16.0),
                             speechMs: speechMs,
-                            endpointState: previousEndpointState.rawValue)
+                            endpointState: previousEndpointState.rawValue,
+                            trimToPostRoll: true)
+            }
+
+            if let split = splitEmissionIfNeeded(endpointState: endpoint.state.rawValue) {
+                return split
             }
         } else {
             // Legacy kill-switch path: retain the former consecutive-silence
@@ -746,8 +832,10 @@ private final class VADContext: @unchecked Sendable {
             appendAccumulator(frame)
             bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
             if out.isSpeech {
+                contiguousTrailingSilenceSamples = 0
                 silenceSamples = 0
             } else {
+                contiguousTrailingSilenceSamples += frame.count
                 silenceSamples += frame.count
             }
             if silenceSamples >= silenceThresholdSamples,
@@ -771,9 +859,9 @@ private final class VADContext: @unchecked Sendable {
                 telemetryFrameRecorded = true
                 return emit(reason: "pause",
                             silenceMs: silenceMs,
-                            totalMs: totalMs,
                             speechMs: speechMs,
-                            endpointState: previousEndpointState.rawValue)
+                            endpointState: previousEndpointState.rawValue,
+                            trimToPostRoll: true)
             }
 
             // Noise guard: less than 0.1 s of speech within the max-noise
@@ -827,6 +915,29 @@ private final class VADContext: @unchecked Sendable {
         preRollBuffer.append(contentsOf: frame)
     }
 
+    private func seedAccumulatorFromPreRoll(frame: [Float], output: VADGateOutput) {
+        clearAccumulator()
+        splitEnergyFrames.removeAll(keepingCapacity: true)
+        splitEnergySamples = 0
+        if let head = headBuffer {
+            let trimmedSamples = sessionHeadTrimSamples()
+            chunkStartSessionSamples = sessionElapsedSamples - head.count + trimmedSamples
+            head.append(to: &accumulator, droppingFirst: trimmedSamples)
+            telemetrySink?.event(VADTelemetryEvent(kind: .preRoll,
+                samples: head.count - trimmedSamples, reason: "session_head"))
+        } else {
+            let requestedPreRollSamples = output.isLoudRegime
+                ? max(preRollSamples, loudPreRollSamples)
+                : preRollSamples
+            let availablePreRollSamples = min(requestedPreRollSamples, preRollBuffer.count)
+            preRollBuffer.append(to: &accumulator, droppingFirst: preRollBuffer.count - availablePreRollSamples)
+            telemetrySink?.event(VADTelemetryEvent(kind: .preRoll,
+                samples: availablePreRollSamples, reason: "ring_buffer"))
+            chunkStartSessionSamples = sessionElapsedSamples - frame.count - availablePreRollSamples
+        }
+        preRollBuffer.removeAll()
+    }
+
     private var accumulatorSampleCount: Int {
         accumulator.count + spilledSampleCount
     }
@@ -867,10 +978,12 @@ private final class VADContext: @unchecked Sendable {
             do {
                 try handle.write(contentsOf: sampleData(samples))
                 spilledSampleCount += samples.count
+                telemetrySink?.event(VADTelemetryEvent(kind: .spill, samples: samples.count, reason: "append"))
                 return
             } catch {
                 restoreAccumulatorAfterSpillFailure()
                 accumulator.append(contentsOf: samples)
+                telemetrySink?.event(VADTelemetryEvent(kind: .spill, samples: samples.count, reason: "write_failed"))
                 FileLogger.shared.warn(.audio, "VAD accumulator spill failed; retaining audio in memory")
                 return
             }
@@ -880,6 +993,7 @@ private final class VADContext: @unchecked Sendable {
         guard let container = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: SharedConfig.Defaults.appGroupId
         ) else {
+            telemetrySink?.event(VADTelemetryEvent(kind: .spill, samples: accumulator.count, reason: "container_unavailable"))
             FileLogger.shared.warn(.audio, "VAD accumulator spill unavailable; retaining audio in memory")
             return
         }
@@ -891,11 +1005,13 @@ private final class VADContext: @unchecked Sendable {
             let handle = try FileHandle(forWritingTo: url)
             try handle.write(contentsOf: sampleData(accumulator))
             spilledSampleCount = accumulator.count
+            telemetrySink?.event(VADTelemetryEvent(kind: .spill, samples: accumulator.count, reason: "created"))
             accumulator.removeAll(keepingCapacity: false)
             accumulatorSpillURL = url
             accumulatorSpillHandle = handle
         } catch {
             try? FileManager.default.removeItem(at: url)
+            telemetrySink?.event(VADTelemetryEvent(kind: .spill, samples: accumulator.count, reason: "create_failed"))
             FileLogger.shared.warn(.audio, "VAD accumulator spill failed; retaining audio in memory")
         }
     }
@@ -959,18 +1075,102 @@ private final class VADContext: @unchecked Sendable {
         bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
     }
 
+    private func indexSplitFrame(samples: Int, isLowEnergy: Bool) {
+        splitEnergyFrames.append((samples, isLowEnergy))
+        splitEnergySamples += samples
+        while splitEnergySamples > splitSearchSamples, !splitEnergyFrames.isEmpty {
+            splitEnergySamples -= splitEnergyFrames.removeFirst().samples
+        }
+    }
+
+    private func splitEmissionIfNeeded(endpointState: String) -> VADEmission? {
+        guard accumulatorSampleCount >= maxChunkSamples else { return nil }
+        var runSamples = 0
+        var samplesAfterGap = 0
+        var qualifyingGapTailSamples: Int?
+        for index in splitEnergyFrames.indices.reversed() {
+            let frame = splitEnergyFrames[index]
+            if frame.isLowEnergy {
+                runSamples += frame.samples
+                if runSamples >= minimumSplitSilenceSamples {
+                    qualifyingGapTailSamples = samplesAfterGap
+                    break
+                }
+            } else {
+                samplesAfterGap += runSamples + frame.samples
+                runSamples = 0
+            }
+        }
+        let reason = qualifyingGapTailSamples == nil ? "split_hardcut" : "split_gap"
+        if accumulatorSampleCount == maxChunkSamples, qualifyingGapTailSamples == nil {
+            return nil
+        }
+        let requestedCutCount = qualifyingGapTailSamples.map { accumulatorSampleCount - $0 } ?? maxChunkSamples
+        let cutCount = min(requestedCutCount, maxChunkSamples)
+        let gapSamples = qualifyingGapTailSamples == nil ? 0 : runSamples
+        guard cutCount > 0, cutCount <= accumulatorSampleCount else { return nil }
+        let samples = assembledAccumulator()
+        let emittedSamples = Array(samples[..<cutCount])
+        let carry = Array(samples[cutCount...])
+        let id = chunkId
+        let startSamples = chunkStartSessionSamples ?? (sessionElapsedSamples - samples.count)
+        let startMs = Double(startSamples) / 16.0
+        let endMs = startMs + Double(cutCount) / 16.0
+        chunkId &+= 1
+        pendingEmissionSummary = EmissionSummary(
+            chunkId: id,
+            reason: reason,
+            silenceMs: Double(gapSamples) / 16.0,
+            totalMs: Double(cutCount) / 16.0,
+            speechMs: Double(speechSamples) / 16.0
+        )
+        telemetrySink?.event(VADTelemetryEvent(
+            kind: .split,
+            chunkId: id,
+            samples: cutCount,
+            reason: reason,
+            startMs: startMs,
+            endMs: endMs,
+            endpointState: endpointState,
+            metadata: ["gapSamples": gapSamples, "boundaryOffsetSamples": cutCount]
+        ))
+        telemetrySink?.event(VADTelemetryEvent(
+            kind: .emit, chunkId: id, samples: cutCount, reason: reason,
+            speechMs: Double(speechSamples) / 16.0, totalMs: Double(cutCount) / 16.0,
+            startMs: startMs, endMs: endMs, endpointState: endpointState
+        ))
+        clearAccumulator()
+        accumulator = carry
+        contiguousTrailingSilenceSamples = min(contiguousTrailingSilenceSamples, carry.count)
+        chunkStartSessionSamples = startSamples + cutCount
+        preRollBuffer.removeAll()
+        splitEnergyFrames.removeAll(keepingCapacity: true)
+        splitEnergySamples = 0
+        bufferHighWaterSamples = accumulatorSampleCount
+        return VADEmission(chunkId: id, samples: emittedSamples)
+    }
+
     /// Emit current accumulator and reset all VAD state.
     /// - parameter reason: Label for log distinguishability ("pause", "flush").
     func emit(
         reason: String,
         silenceMs: Double,
-        totalMs: Double,
         speechMs: Double,
-        endpointState: String
+        endpointState: String,
+        trimToPostRoll: Bool = false
     ) -> VADEmission {
-        let snapshot = assembledAccumulator()
+        var snapshot = assembledAccumulator()
         let id = chunkId
-        let sampleCount = accumulatorSampleCount
+        var sampleCount = accumulatorSampleCount
+        if trimToPostRoll {
+            let trailing = min(contiguousTrailingSilenceSamples, sampleCount)
+            let excess = max(0, trailing - postRollSamples)
+            if excess > 0 {
+                snapshot.removeLast(excess)
+                sampleCount -= excess
+            }
+        }
+        let emittedTotalMs = Double(sampleCount) / 16.0
         let startSamples = chunkStartSessionSamples ?? (sessionElapsedSamples - sampleCount)
         let startMs = Double(startSamples) / 16.0
         let endMs = startMs + Double(sampleCount) / 16.0
@@ -979,10 +1179,13 @@ private final class VADContext: @unchecked Sendable {
             chunkId: id,
             reason: reason,
             silenceMs: silenceMs,
-            totalMs: totalMs,
+            totalMs: emittedTotalMs,
             speechMs: speechMs
         )
         clearAccumulator()
+        contiguousTrailingSilenceSamples = 0
+        splitEnergyFrames.removeAll(keepingCapacity: true)
+        splitEnergySamples = 0
         chunkStartSessionSamples = nil
         preRollBuffer.removeAll()
         headBuffer = nil
@@ -1007,7 +1210,7 @@ private final class VADContext: @unchecked Sendable {
             samples: sampleCount,
             reason: reason,
             speechMs: speechMs,
-            totalMs: totalMs,
+            totalMs: emittedTotalMs,
             startMs: startMs,
             endMs: endMs,
             endpointState: endpointState
@@ -1037,7 +1240,7 @@ private final class VADContext: @unchecked Sendable {
         let endMs = startMs + Double(sampleCount) / 16.0
         let flushReason: String
         if accumulatorSampleCount == 0 {
-            flushReason = "empty"
+            flushReason = primingComplete ? "empty" : "priming_window"
         } else if speechSamples < minSpeechSamples {
             flushReason = "below_minimums"
         } else {
@@ -1053,6 +1256,7 @@ private final class VADContext: @unchecked Sendable {
             endMs: endMs,
             endpointState: decisionTimeEndpointState
         ))
+        if !primingComplete, accumulatorSampleCount == 0 { return nil }
         guard accumulatorSampleCount > 0 else { return nil }
         guard speechSamples >= minSpeechSamples else {
             FileLogger.shared.debug(.audio, "VAD: flush discarded trailing noise",
@@ -1068,7 +1272,6 @@ private final class VADContext: @unchecked Sendable {
                                payload: ["count": accumulatorSampleCount])
         return emit(reason: "flush",
                     silenceMs: 0,
-                    totalMs: Double(accumulatorSampleCount) / 16.0,
                     speechMs: Double(speechSamples) / 16.0,
                     endpointState: decisionTimeEndpointState)
     }

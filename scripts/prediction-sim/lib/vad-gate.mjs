@@ -10,6 +10,8 @@ export const VAD_SPEECH_CEILING_MARGIN_DB = 2.0;
 export const VAD_SUSTAINED_CONTINUING_ONSET_S = 1.0;
 export const VAD_ADAPTIVE_MIN_REFINEMENT_DURATION_S = 1.0;
 export const VAD_ADAPTIVE_COLD_START_GRACE_S = 0.4;
+export const VAD_ADAPTIVE_PRIMING_MAX_S = 0.45;
+export const VAD_ADAPTIVE_PRIMING_QUIET_S = 0.10;
 export const VAD_ADAPTIVE_COLD_START_DISPERSION_WINDOW_S = 0.4;
 export const VAD_ADAPTIVE_ROLLING_WINDOW_DURATION_S = 3.0;
 export const VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY = 256;
@@ -75,6 +77,8 @@ export function makeVadGateConfig(partial = {}) {
     loudSilenceDeltaDb: 2,
     loudDynamicsSpreadDb: 9,
     loudRiseDbPerSec: 12,
+    primingMaximumSeconds: VAD_ADAPTIVE_PRIMING_MAX_S,
+    primingQuietSeedSeconds: VAD_ADAPTIVE_PRIMING_QUIET_S,
     quietContinuationRiseCapDbPerSec: 12,
     ...(partial ?? {}),
   };
@@ -130,6 +134,9 @@ export class VADThresholdGate {
     );
     this.behaviorMode = this.config.mode;
     this.adaptiveRefinementElapsed = 0;
+    this.adaptivePrimingElapsed = 0;
+    this.adaptivePrimingQuietElapsed = 0;
+    this.adaptivePrimed = this.config.mode !== 'adaptive';
     this.adaptiveRefinementComplete = this.config.mode !== 'adaptive';
     this.coldStartSpeechShapedNow = false;
     this.coldStartConverged = false;
@@ -173,6 +180,10 @@ export class VADThresholdGate {
       dynamicsSpreadDb: null,
       shortSpreadDb: null,
       isLoudRegime: false,
+      didReanchor: false,
+      didCompletePriming: false,
+      primingDurationSeconds: 0,
+      primingEndedAtCap: false,
     };
   }
 
@@ -230,6 +241,7 @@ export class VADThresholdGate {
   }
 
   processAdaptive(frameDb, frameDuration) {
+    let didReanchor = false;
     this.appendAdaptiveRollingFrame(frameDb, frameDuration);
     const rollingPercentile = this.adaptiveRollingPercentile();
     const windowMax = this.adaptiveRollingMaxDb(VAD_ADAPTIVE_COLD_START_DISPERSION_WINDOW_S);
@@ -305,6 +317,7 @@ export class VADThresholdGate {
             this.floorDb = reanchoredFloor;
             if (floorMoved && !this.hasRefusedReanchorSinceLastAcceptance) {
               this.pendingReanchorEvent = true;
+              didReanchor = true;
             }
             this.hasRefusedReanchorSinceLastAcceptance = false;
             const thresholds = this.adaptiveThresholds(reanchoredFloor);
@@ -322,6 +335,11 @@ export class VADThresholdGate {
       }
     }
     const evidence = this.dynamicsGatedEvidence(levels.evidence, dispersionDb);
+    const { didCompletePriming, primingEndedAtCap } = this.updatePriming(
+      frameDb,
+      levels.strongThresholdDb,
+      frameDuration,
+    );
     return this.emit({
       ...levels,
       evidence,
@@ -331,6 +349,11 @@ export class VADThresholdGate {
       floorConverged: this.coldStartConverged,
       dynamicsSpreadDb: this.config.adaptiveDynamicsEnabled ? dispersionDb : null,
       shortSpreadDb,
+      didReanchor,
+      didCompletePriming,
+      primingDurationSeconds: this.adaptivePrimingElapsed,
+      primingEndedAtCap: didCompletePriming
+        && this.adaptivePrimingQuietElapsed < this.config.primingQuietSeedSeconds,
     });
   }
 
@@ -387,6 +410,11 @@ export class VADThresholdGate {
       shortSpreadDb ?? dispersionDb,
     );
     const isSpeech = evidence === 'strong' || evidence === 'continuing';
+    const { didCompletePriming, primingEndedAtCap } = this.updatePriming(
+      frameDb,
+      levels.strongThresholdDb,
+      frameDuration,
+    );
     return this.emit({
       ...levels,
       evidence,
@@ -398,7 +426,37 @@ export class VADThresholdGate {
       floorConverged: this.coldStartConverged,
       dynamicsSpreadDb: this.config.adaptiveDynamicsEnabled ? dispersionDb : null,
       shortSpreadDb,
+      didCompletePriming,
+      primingDurationSeconds: this.adaptivePrimingElapsed,
+      primingEndedAtCap,
     });
+  }
+
+  updatePriming(frameDb, strongThresholdDb, frameDuration) {
+    if (this.behaviorMode !== 'adaptive' || this.adaptivePrimed) {
+      return { didCompletePriming: false, primingEndedAtCap: false };
+    }
+    const duration = Math.max(0, frameDuration);
+    this.adaptivePrimingElapsed = Math.min(
+      this.config.primingMaximumSeconds,
+      this.adaptivePrimingElapsed + duration,
+    );
+    if (this.coldStartConverged && frameDb < strongThresholdDb) {
+      this.adaptivePrimingQuietElapsed += duration;
+    } else {
+      this.adaptivePrimingQuietElapsed = 0;
+    }
+    const endedAtCap = this.adaptivePrimingElapsed + TIME_BOUNDARY_EPSILON_S
+      >= this.config.primingMaximumSeconds;
+    if (this.adaptivePrimingQuietElapsed < this.config.primingQuietSeedSeconds && !endedAtCap) {
+      return { didCompletePriming: false, primingEndedAtCap: false };
+    }
+    this.adaptivePrimed = true;
+    return {
+      didCompletePriming: true,
+      primingEndedAtCap: endedAtCap
+        && this.adaptivePrimingQuietElapsed < this.config.primingQuietSeedSeconds,
+    };
   }
 
   dynamicsGatedEvidence(evidence, dispersionDb) {
@@ -516,6 +574,9 @@ export class VADThresholdGate {
     if (this.config.mode !== 'adaptive') return;
     this.behaviorMode = 'adaptive';
     this.adaptiveRefinementElapsed = 0;
+    this.adaptivePrimingElapsed = 0;
+    this.adaptivePrimingQuietElapsed = 0;
+    this.adaptivePrimed = false;
     this.adaptiveRefinementComplete = false;
     this.coldStartSpeechShapedNow = false;
     this.coldStartConverged = false;
@@ -537,6 +598,10 @@ export class VADThresholdGate {
       floorConverged: false,
       dynamicsSpreadDb: null,
       shortSpreadDb: null,
+      didReanchor: false,
+      didCompletePriming: false,
+      primingDurationSeconds: 0,
+      primingEndedAtCap: false,
     };
   }
 
@@ -681,6 +746,10 @@ export class VADThresholdGate {
       dynamicsSpreadDb: this.lastOutput.dynamicsSpreadDb,
       shortSpreadDb: this.lastOutput.shortSpreadDb,
       isLoudRegime: this.isLoudRegime,
+      didReanchor: false,
+      didCompletePriming: false,
+      primingDurationSeconds: this.adaptivePrimingElapsed,
+      primingEndedAtCap: false,
     };
   }
 
@@ -751,6 +820,10 @@ export class VADThresholdGate {
     dynamicsSpreadDb = null,
     shortSpreadDb = null,
     isLoudRegime = this.isLoudRegime,
+    didReanchor = false,
+    didCompletePriming = false,
+    primingDurationSeconds = 0,
+    primingEndedAtCap = false,
   }) {
     this.lastOutput = {
       isSpeech,
@@ -763,6 +836,10 @@ export class VADThresholdGate {
       dynamicsSpreadDb,
       shortSpreadDb,
       isLoudRegime,
+      didReanchor,
+      didCompletePriming,
+      primingDurationSeconds,
+      primingEndedAtCap,
     };
     return { ...this.lastOutput };
   }

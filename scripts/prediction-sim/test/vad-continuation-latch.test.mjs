@@ -279,7 +279,7 @@ describe('sustained continuing onset latch regime split', () => {
     assert.equal(harness.flatFrameStreakMs, 0);
     assert.equal(harness.terminatorActivationCount, 0);
     assert.equal(events.filter(event => event.k === 'flat_terminate').length, 0);
-    assert.equal(harness.chunkCount, 0);
+    assert.ok(harness.chunkCount > 0);
     assert.equal(harness.endpoint.state, 'speechActive');
   });
 
