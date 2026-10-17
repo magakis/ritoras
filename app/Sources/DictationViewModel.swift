@@ -186,6 +186,7 @@ final class DictationViewModel: ObservableObject {
     private var streamClient: WhisperStreamClient?
     private var chunkAudioStore: ChunkAudioStore?
     private var vadTelemetryWriter: VADTelemetryFileWriter?
+    private var streamVADTelemetry: StreamingVADTelemetry?
     private var lastVADPublishTime: Date?
     private var lastPublishedVADState: StreamingVADFrameState?
 
@@ -774,6 +775,8 @@ final class DictationViewModel: ObservableObject {
                 telemetryWriter = nil
             }
             vadTelemetryWriter = telemetryWriter
+            let streamTelemetry = StreamingVADTelemetry(writer: telemetryWriter)
+            streamVADTelemetry = streamTelemetry
 
             do {
                 try await recorder.start(
@@ -825,7 +828,7 @@ final class DictationViewModel: ObservableObject {
                             }
                         }
                     },
-                    telemetry: telemetryWriter
+                    telemetry: streamVADTelemetry
                 )
                 if await shouldAbortStartingSession(id) {
                     await recorder.stop()
@@ -1421,7 +1424,45 @@ final class DictationViewModel: ObservableObject {
             if queueDrained && canStream {
                 var didSendEndSuccessfully = false
                 do {
-                    try await streamClient?.sendEnd()
+                    guard let client = streamClient else {
+                        throw WhisperError.networkError(URLError(.notConnectedToInternet))
+                    }
+                    let initiallyHealthy = await client.isHealthyForTelemetry()
+                    guard canContinueSession(id) else { return }
+                    guard initiallyHealthy else {
+                        throw WhisperError.networkError(URLError(.notConnectedToInternet))
+                    }
+                    if let telemetry = streamVADTelemetry,
+                       let startedAt = recordingStartTime,
+                       let payload = telemetry.payload(jobId: id, startedAt: startedAt,
+                                                       duration: Date().timeIntervalSince(startedAt)) {
+                        do {
+                            // Do not cancel the WebSocket: dropping the connection would
+                            // discard streamed audio and force an unacceptable re-upload.
+                            // URLSession serializes writes; a late <=768 KiB frame is
+                            // harmless after END (the server ignores it). If this link
+                            // cannot flush it, END is equally doomed; existing liveness
+                            // and fallback logic owns that case.
+                            try await client.sendTelemetry(payload)
+                        } catch is StreamTelemetrySendError {
+                            FileLogger.shared.warn(.network, "Stream: VAD telemetry abandoned after timeout; continuing to END", payload: [
+                                "jobId": id.uuidString,
+                                "timeout_seconds": 3
+                            ])
+                        } catch {
+                            FileLogger.shared.warn(.network, "Stream: VAD telemetry send failed; continuing to END", payload: [
+                                "jobId": id.uuidString,
+                                "error": String(error.localizedDescription.prefix(160))
+                            ])
+                        }
+                        guard canContinueSession(id) else { return }
+                    }
+                    let healthyBeforeEnd = await client.isHealthyForTelemetry()
+                    guard canContinueSession(id) else { return }
+                    guard healthyBeforeEnd else {
+                        throw WhisperError.networkError(URLError(.notConnectedToInternet))
+                    }
+                    try await client.sendEnd()
                     didSendEndSuccessfully = true
                     guard canContinueSession(id) else { return }
                     FileLogger.shared.info(.network, "Stream: END sent, awaiting final from receive task",

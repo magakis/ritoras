@@ -47,7 +47,37 @@ private func scheduleStrictStreamTimer(
 //                             {"type":"PONG"}
 //                             {"type":"error","message":"..."}
 
+enum StreamTelemetrySendError: Error {
+    case timeout
+}
+
+private final class TelemetrySendContinuation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var hasResumed = false
+    private var continuation: CheckedContinuation<Void, Error>?
+
+    init(_ continuation: CheckedContinuation<Void, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(with result: Result<Void, Error>) {
+        lock.lock()
+        guard !hasResumed else {
+            lock.unlock()
+            return
+        }
+        hasResumed = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
+}
+
 actor WhisperStreamClient {
+
+    private static let telemetrySendTimeoutNanoseconds: UInt64 = 3_000_000_000
+
 
     // MARK: - Private Properties
 
@@ -57,6 +87,7 @@ actor WhisperStreamClient {
 
     /// The active WebSocket task, or nil when disconnected.
     private var task: URLSessionWebSocketTask?
+    private var receiveFailed = false
 
     /// Shared URLSession (no custom delegate needed).
     private let session: URLSession = .shared
@@ -214,6 +245,33 @@ actor WhisperStreamClient {
     }
 
     // MARK: - Sending
+
+    /// Sends one JSON telemetry text frame. The caller orders it before END.
+    func sendTelemetry(_ data: Data) async throws {
+        guard data.count <= 1_048_576, let text = String(data: data, encoding: .utf8),
+              let task = task else {
+            throw WhisperError.networkError(URLError(.notConnectedToInternet))
+        }
+        try await withCheckedThrowingContinuation { continuation in
+            let resumeOnce = TelemetrySendContinuation(continuation)
+            Task {
+                do {
+                    try await task.send(.string(text))
+                    resumeOnce.resume(with: .success(()))
+                } catch {
+                    resumeOnce.resume(with: .failure(error))
+                }
+            }
+            DispatchQueue.global().asyncAfter(
+                deadline: .now() + .nanoseconds(Int(Self.telemetrySendTimeoutNanoseconds))) {
+                    resumeOnce.resume(with: .failure(StreamTelemetrySendError.timeout))
+                }
+        }
+    }
+
+    func isHealthyForTelemetry() -> Bool {
+        !receiveFailed && task?.state == .running
+    }
 
     /// Sends a binary frame containing a PCM audio chunk.
     ///
@@ -392,6 +450,7 @@ actor WhisperStreamClient {
         onPartial: @escaping @Sendable (String) -> Void,
         onChunkResult: (@Sendable (UInt32, String) async -> Void)? = nil
     ) async throws -> String {
+        receiveFailed = false
         do {
             let transcription = try await receiveMessagesLoop(
                 onPartial: onPartial,
@@ -403,6 +462,7 @@ actor WhisperStreamClient {
                 serverErrorFrameReceived: false)
             return transcription
         } catch {
+            receiveFailed = true
             let reason = isReceiveCancellation(error) ? "cancellation" : "error"
             logReceiveTaskExit(
                 reason: reason,
