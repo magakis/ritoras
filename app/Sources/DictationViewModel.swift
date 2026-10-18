@@ -184,6 +184,7 @@ final class DictationViewModel: ObservableObject {
     private var chunksSentThisSession = 0
     private var chunkSentAt: [UInt32: Date] = [:]
     private var chunkResultsReceived: Set<UInt32> = []
+    private var chunkFinalTexts: [UInt32: String] = [:]
 
     private var streamRecorder: StreamingAudioRecorder?
     private var streamClient: WhisperStreamClient?
@@ -792,6 +793,7 @@ final class DictationViewModel: ObservableObject {
             streamClient = nil
 
             livePartial = ""
+            chunkFinalTexts.removeAll()
             chunkSendQueue.resetForNewRecording()
             chunkSendQueue.setRecordingActive(true)
 
@@ -1099,6 +1101,9 @@ final class DictationViewModel: ObservableObject {
             }, onChunkResult: { [weak self] chunkId, responseText in
                 await MainActor.run { [weak self] in
                     guard let self, self.activeID == sessionID else { return }
+                    if self.chunkFinalTexts[chunkId] == nil {
+                        self.chunkFinalTexts[chunkId] = responseText
+                    }
                     if self.chunkResultsReceived.insert(chunkId).inserted {
                         let latencyMs = self.chunkSentAt[chunkId].map {
                             Date().timeIntervalSince($0) * 1000
@@ -1507,9 +1512,21 @@ final class DictationViewModel: ObservableObject {
                         "id": id.uuidString
                     ])
 
-                    let text = try await receiveTask?.value ?? ""
+                    let receivedText = try await receiveTask?.value ?? ""
 
                     guard canContinueSession(id) else { return }
+
+                    let mergeEnabled = SharedConfig.Defaults.chunkFinalMergeEnabled
+                    let maxGapMs = min(max(SharedConfig.Defaults.chunkFinalMergeMaxGapMs, 500), 10_000)
+                    let text: String
+                    if mergeEnabled, let streamVADTelemetry {
+                        text = ChunkFinalMerger.merge(
+                            receivedText,
+                            segments: streamVADTelemetry.chunkFinalSegments(texts: chunkFinalTexts),
+                            maxGapMs: Double(maxGapMs))
+                    } else {
+                        text = receivedText
+                    }
 
                     // A non-empty final from this session's receive task is valid by
                     // construction: receiveTask is session-scoped and activeID guards

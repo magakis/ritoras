@@ -8,6 +8,7 @@ final class StreamingVADTelemetry: @unchecked Sendable, VADTelemetrySink, VADTel
     private var droppedHistoricalFrames = 0
     private var droppedTailFrames = 0
     private var events: [VADTelemetryEvent] = []
+    private var chunkTimings: [UInt32: (startMs: Double, endMs: Double)] = [:]
     private var droppedEvents = 0
     private var configuration: [String: Any] = [:]
     private var emissions = 0
@@ -61,9 +62,24 @@ final class StreamingVADTelemetry: @unchecked Sendable, VADTelemetrySink, VADTel
             droppedEvents += 1
         }
         events.append(record)
+        if record.kind == .emit, let chunkId = record.chunkId,
+           let startMs = record.startMs, let endMs = record.endMs {
+            chunkTimings[chunkId] = (startMs, endMs)
+        }
         if record.kind == .sessionStart { configuration = record.config ?? [:] }
         if record.kind == .emit { emissions += 1 }
         lock.unlock()
+    }
+
+    func chunkFinalSegments(texts: [UInt32: String]) -> [ChunkFinalSegment] {
+        lock.lock()
+        let timings = chunkTimings
+        lock.unlock()
+        return texts.keys.sorted().compactMap { chunkId in
+            guard let text = texts[chunkId], let timing = timings[chunkId] else { return nil }
+            return ChunkFinalSegment(chunkId: chunkId, chunkLocalText: text,
+                                     startMs: timing.startMs, endMs: timing.endMs)
+        }
     }
 
     func payload(jobId: UUID, startedAt: Date, duration: TimeInterval, now: Date = Date()) -> Data? {

@@ -350,6 +350,8 @@ struct SharedConfig {
         /// fails, prediction falls back to the in-memory build path. Regenerate
         /// bundled blobs with `node scripts/prediction-sim/bin/build-symspell-blob.mjs`.
         static let symspellMappedIndexEnabled = true
+        static let chunkFinalMergeEnabled = true
+        static let chunkFinalMergeMaxGapMs = 2_500
         /// Temporary development instrumentation gate for verbose prediction diagnostics;
         /// flip to `false` before shipping to disable the added trace in one line.
         static let predictionDebugLoggingEnabled = true
