@@ -238,6 +238,21 @@ class KeyboardViewController: UIInputViewController {
         set { UserDefaults.standard.set(newValue, forKey: "ritoras_consumed_ids") }
     }
 
+    private var deliveryState = DictationDeliveryState()
+    private let deliveryStateKey = "ritoras_delivery_state"
+
+    private func loadDeliveryState() {
+        guard let data = UserDefaults.standard.data(forKey: deliveryStateKey),
+              let state = try? JSONDecoder().decode(DictationDeliveryState.self, from: data) else { return }
+        deliveryState = state
+    }
+
+    private func persistDeliveryState(id: UUID, timestamp: Date, phase: DictationDeliveryState.Phase) {
+        deliveryState.advance(id: id, originalTimestamp: timestamp, to: phase)
+        guard let data = try? JSONEncoder().encode(deliveryState) else { return }
+        UserDefaults.standard.set(data, forKey: deliveryStateKey)
+    }
+
     // MARK: - Server Polling
 
     /// In-memory dedup timestamp for server polling (not persisted — only the
@@ -302,6 +317,7 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        loadDeliveryState()
         FileLogger.shared.debug(.lifecycle, "boot baseline",
             payload: ["launchId": KeyboardViewController.processLaunchId,
                       "footprint": MemoryMonitor.currentFootprint()])
@@ -1020,11 +1036,15 @@ class KeyboardViewController: UIInputViewController {
         }
         switch payload.status {
         case .completed:
-            handleTerminalResult(id: payload.id, text: payload.text, errorMessage: nil)
+            handleTerminalResult(id: payload.id, text: payload.text, errorMessage: nil,
+                                 terminalAt: payload.timestamp)
         case .error:
-            handleTerminalResult(id: payload.id, text: nil, errorMessage: payload.errorMessage ?? "Transcription failed")
+            handleTerminalResult(id: payload.id, text: nil,
+                                 errorMessage: payload.errorMessage ?? "Transcription failed",
+                                 terminalAt: payload.timestamp)
         case .cancelled:
             stopDictationTransports()
+            persistDeliveryState(id: payload.id, timestamp: payload.timestamp, phase: .cleared)
             pendingRequestId = nil
             dictationTargetDocId = nil
             state = .idle
@@ -1118,7 +1138,7 @@ class KeyboardViewController: UIInputViewController {
     /// `insertDictationResult`. Otherwise transitions to the error state
     /// (preventing silent hangs from empty-text results).
     @MainActor
-    private func handleTerminalResult(id: UUID, text: String?, errorMessage: String?) {
+    private func handleTerminalResult(id: UUID, text: String?, errorMessage: String?, terminalAt: Date = Date()) {
         guard locallyCancelledSessionID != id.uuidString else {
             FileLogger.shared.warn(.keyboard, "ignored terminal result after local cancel",
                                    payload: ["id": String(id.uuidString.prefix(8))])
@@ -1147,13 +1167,15 @@ class KeyboardViewController: UIInputViewController {
         ring.append(id.uuidString)
         consumedPayloadIDs = ring.ids
         lastProcessedPayloadId = id
+        persistDeliveryState(id: id, timestamp: terminalAt, phase: .claimed)
         stopDictationTransports()
         if let text = text, !text.isEmpty {
-            insertDictationResult(text: text)
+            insertDictationResult(text: text, id: id, terminalAt: terminalAt)
         } else {
             let belongsToPendingRequest = pendingRequestId == id
             SharedConfig.clearSnapshotFile()
             SharedConfig.clearDictationSnapshot()
+            persistDeliveryState(id: id, timestamp: terminalAt, phase: .cleared)
             pendingRequestId = nil
             dictationTargetDocId = nil
             if belongsToPendingRequest {
@@ -1303,10 +1325,13 @@ class KeyboardViewController: UIInputViewController {
                 scheduleWaitTimer(from: payload)
                 guard pendingRequestId == id else { return }
             case .completed:
-                handleTerminalResult(id: payload.id, text: payload.text, errorMessage: nil)
+                handleTerminalResult(id: payload.id, text: payload.text, errorMessage: nil,
+                                     terminalAt: payload.timestamp)
                 return
             case .error:
-                handleTerminalResult(id: payload.id, text: nil, errorMessage: payload.errorMessage ?? "Transcription failed")
+                handleTerminalResult(id: payload.id, text: nil,
+                                     errorMessage: payload.errorMessage ?? "Transcription failed",
+                                     terminalAt: payload.timestamp)
                 return
             case .cancelled:
                 stopDictationTransports()
@@ -1549,7 +1574,7 @@ class KeyboardViewController: UIInputViewController {
     /// keyboard to idle. Centralizes the shared insert+reset flow and guarantees
     /// every other transport is stopped first (prevents double-insert now that the
     /// Darwin observer and server polling can run concurrently on resume).
-    private func insertDictationResult(text: String) {
+    private func insertDictationResult(text: String, id: UUID, terminalAt: Date) {
         FileLogger.shared.debug(.keyboard, "dictation stop footprint",
             payload: ["footprint": MemoryMonitor.currentFootprint()])
 
@@ -1602,9 +1627,11 @@ class KeyboardViewController: UIInputViewController {
             return
         }
         state = .inserting
+        persistDeliveryState(id: id, timestamp: terminalAt, phase: .insertionIntent)
         textDocumentProxy.insertText(normalizedDictationInsertion(of: text))
         SharedConfig.clearSnapshotFile()
         SharedConfig.clearDictationSnapshot()
+        persistDeliveryState(id: id, timestamp: terminalAt, phase: .cleared)
         followMeAwaitingFocus = false
         FileLogger.shared.info(.keyboard, "Inserted dictation",
                                payload: ["length": text.count, "preview": String(text.prefix(30))])
@@ -1658,6 +1685,7 @@ class KeyboardViewController: UIInputViewController {
                 updatedRing.append(payload.id.uuidString)
                 consumedPayloadIDs = updatedRing.ids
                 lastProcessedPayloadId = payload.id
+                persistDeliveryState(id: payload.id, timestamp: payload.timestamp, phase: .cleared)
                 pendingRequestId = nil
                 SharedConfig.clearSnapshotFile()
                 SharedConfig.clearDictationSnapshot()
@@ -1667,7 +1695,8 @@ class KeyboardViewController: UIInputViewController {
             let age = Date().timeIntervalSince(payload.timestamp)
             let target = dictationTargetDocId == nil || dictationTargetDocId == fieldId ? "original" : "follow-me"
             followMeAwaitingFocus = false
-            handleTerminalResult(id: payload.id, text: payload.text, errorMessage: payload.errorMessage)
+            handleTerminalResult(id: payload.id, text: payload.text, errorMessage: payload.errorMessage,
+                                 terminalAt: payload.timestamp)
             FileLogger.shared.info(.keyboard, "follow-me delivered", payload: [
                 "id": String(payload.id.uuidString.prefix(8)), "length": payload.text?.count ?? 0,
                 "age": age, "reason": reason, "target": target
