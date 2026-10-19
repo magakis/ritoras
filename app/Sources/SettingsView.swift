@@ -38,6 +38,7 @@ struct SettingsView: View {
             serverSection
             apiKeySection
             dictationSection
+            audioSection
             keyboardSection
             dictionarySection
             historySection
@@ -192,6 +193,19 @@ struct SettingsView: View {
             Text("Dictation")
         } footer: {
             Text("Batch records the whole clip then transcribes (most reliable). Stream transcribes live as you pause — faster feedback, needs a stable connection. Streaming VAD settings only affect Stream mode.")
+        }
+    }
+
+    // MARK: - Audio Section
+
+    private var audioSection: some View {
+        Section {
+            Toggle("Measurement Mode", isOn: $settings.audioMeasurementModeEnabled)
+            Toggle("Capture Attenuation (Experimental)", isOn: $settings.audioCaptureAttenuationEnabled)
+        } header: {
+            Text("Audio")
+        } footer: {
+            Text("Measurement Mode minimizes iOS microphone processing and automatic gain control for cleaner Standard-mode capture. Experimental attenuation requests a 16 kHz hardware capture path, which may reduce input level; it takes effect when the audio session next activates.")
         }
     }
 

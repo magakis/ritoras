@@ -43,21 +43,23 @@ enum AudioSession {
     /// recorder is configured can trigger
     /// `AVAudioSessionErrorCodeCannotStartRecording` (OSStatus 561145187).
     ///
-    /// - Note: `setPreferredSampleRate` is deliberately **not** called — forcing
-    /// 16 kHz engages a lower-gain hardware path that captures ~7 dB quieter
-    /// than the native 48 kHz rate. Recording at the native rate and letting
-    /// `AVAudioRecorder` / `AVAudioConverter` resample preserves full hardware
-    /// gain staging, matching iOS Shortcuts. Commit `cb024ca` moved this call
-    /// before `setActive` to ensure it was honored; that change inadvertently
-    /// caused this gain regression.
+    /// - Note: 16 kHz can engage a lower-gain hardware capture path. It is only
+    /// requested when the experimental capture-attenuation setting is enabled;
+    /// the preference is applied before activation and may take effect on the
+    /// next activation if the session is already active.
     static func configure() throws {
         let mode: AVAudioSession.Mode = SharedConfig.audioMeasurementModeEnabled() ? .measurement : .default
+        let captureAttenuationEnabled = SharedConfig.audioCaptureAttenuationEnabled()
         try Self.queue.sync {
             Self.generation &+= 1
             Self.waitForTeardownIfNeeded()
             let session = AVAudioSession.sharedInstance()
+            FileLogger.shared.info(.audio, "input gain capability", payload: [
+                "isInputGainSettable": session.isInputGainSettable
+            ])
             try Self.activateWithRetry {
                 try session.setCategory(.record, mode: mode)
+                try session.setPreferredSampleRate(captureAttenuationEnabled ? 16_000 : 0)
                 try session.setActive(true, options: .notifyOthersOnDeactivation)
             }
             FileLogger.shared.info(.audio, "session configured", payload: [

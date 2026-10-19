@@ -13,6 +13,8 @@ class AppSettings: ObservableObject {
     @Published var verboseLogging: Bool = SharedConfig.Defaults.verboseLoggingDefault
     @Published var hapticsEnabled: Bool = SharedConfig.Defaults.hapticsEnabledDefault
     @Published var keyboardLanguage: KeyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
+    @Published var audioMeasurementModeEnabled: Bool = SharedConfig.Defaults.audioMeasurementModeEnabledDefault
+    @Published var audioCaptureAttenuationEnabled: Bool = SharedConfig.Defaults.audioCaptureAttenuationEnabledDefault
 
     @Published var streamVadMode: VADMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
     @Published var streamVadSensitivityProfile: VADSensitivityProfile = SharedConfig.Defaults.streamVadSensitivityProfileDefault
@@ -40,6 +42,8 @@ class AppSettings: ObservableObject {
         verboseLogging = SharedConfig.verboseLoggingEnabled()
         hapticsEnabled = SharedConfig.hapticsEnabled()
         keyboardLanguage = SharedConfig.keyboardLanguage()
+        audioMeasurementModeEnabled = SharedConfig.audioMeasurementModeEnabled()
+        audioCaptureAttenuationEnabled = SharedConfig.audioCaptureAttenuationEnabled()
         streamVadMode = SharedConfig.streamVadMode()
         streamVadSensitivityProfile = SharedConfig.streamVadSensitivityProfile()
         streamVadPauseProfile = SharedConfig.streamVadPauseProfile()
@@ -92,6 +96,12 @@ class AppSettings: ObservableObject {
             FileLogger.shared.info(.settings, "saving keyboardLanguage",
                                    payload: ["value": newValue.rawValue])
             self?.saveKeyboardLanguage(newValue)
+        }.store(in: &cancellables)
+        $audioMeasurementModeEnabled.dropFirst().sink { [weak self] value in
+            self?.saveAudioMeasurementModeEnabled(value)
+        }.store(in: &cancellables)
+        $audioCaptureAttenuationEnabled.dropFirst().sink { [weak self] value in
+            self?.saveAudioCaptureAttenuationEnabled(value)
         }.store(in: &cancellables)
         $streamVadMode.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving streamVadMode",
@@ -151,6 +161,8 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(verboseLogging, forKey: SharedConfig.Defaults.verboseLoggingKey)
         appGroupDefaults?.set(hapticsEnabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
         appGroupDefaults?.set(keyboardLanguage.rawValue, forKey: SharedConfig.Defaults.keyboardLanguageKey)
+        saveAudioMeasurementModeEnabled(audioMeasurementModeEnabled)
+        saveAudioCaptureAttenuationEnabled(audioCaptureAttenuationEnabled)
         appGroupDefaults?.set(streamVadMode.rawValue, forKey: SharedConfig.Defaults.streamVadModeKey)
         appGroupDefaults?.set(streamVadSensitivityProfile.rawValue, forKey: SharedConfig.Defaults.streamVadSensitivityProfileKey)
         appGroupDefaults?.set(streamVadPauseProfile.rawValue, forKey: SharedConfig.Defaults.streamVadPauseProfileKey)
@@ -210,6 +222,16 @@ class AppSettings: ObservableObject {
         postSettingsChanged()
     }
 
+    private func saveAudioMeasurementModeEnabled(_ enabled: Bool) {
+        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.audioMeasurementModeEnabledKey)
+        postSettingsChanged()
+    }
+
+    private func saveAudioCaptureAttenuationEnabled(_ enabled: Bool) {
+        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.audioCaptureAttenuationEnabledKey)
+        postSettingsChanged()
+    }
+
     private func saveStreamVadMode(_ mode: VADMode) {
         appGroupDefaults?.set(mode.rawValue, forKey: SharedConfig.Defaults.streamVadModeKey)
         postSettingsChanged()
@@ -265,7 +287,6 @@ class AppSettings: ObservableObject {
             SharedConfig.Defaults.streamVadDynamicsSpreadDbKey,
             SharedConfig.Defaults.streamVadFlatSpreadDbKey,
             "streamVadAdaptationSpeed",
-            SharedConfig.Defaults.audioMeasurementModeEnabledKey
         ]
         retiredKeys.forEach { appGroupDefaults?.removeObject(forKey: $0) }
         FileLogger.shared.info(.settings, "removed retired VAD settings",
@@ -282,6 +303,8 @@ class AppSettings: ObservableObject {
         verboseLogging = SharedConfig.Defaults.verboseLoggingDefault
         hapticsEnabled = SharedConfig.Defaults.hapticsEnabledDefault
         keyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
+        audioMeasurementModeEnabled = SharedConfig.Defaults.audioMeasurementModeEnabledDefault
+        audioCaptureAttenuationEnabled = SharedConfig.Defaults.audioCaptureAttenuationEnabledDefault
         streamVadMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
         streamVadPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
         streamVadSilenceOverridePresent = false
