@@ -31,6 +31,9 @@ struct VADSettingsView: View {
             .onChange(of: settings.streamVadSpeechRms) { _, _ in
                 rebuildTesterGate()
             }
+            .onChange(of: settings.streamVadAbsoluteSpeechFloorDb) { _, _ in
+                rebuildTesterGate()
+            }
             .onChange(of: settings.streamVadSensitivityProfile) { _, _ in
                 rebuildTesterGate()
             }
@@ -235,6 +238,7 @@ struct VADSettingsView: View {
                 Text("Normal").tag(VADSensitivityProfile.automatic)
                 Text("Noisy").tag(VADSensitivityProfile.noisyEnvironment)
             }
+            absoluteSpeechFloorRow
             silenceDurationRow
         } header: {
             Text("Basics")
@@ -259,6 +263,21 @@ struct VADSettingsView: View {
                 in: 450...5000,
                 step: 50
             )
+        }
+    }
+
+    private var absoluteSpeechFloorRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Minimum speech level")
+                Spacer()
+                Text(String(format: "%.0f dB", settings.streamVadAbsoluteSpeechFloorDb))
+                    .foregroundColor(.secondary)
+            }
+            Slider(value: $settings.streamVadAbsoluteSpeechFloorDb, in: -80...(-30), step: 1)
+            Text("Sets the quietest level that can count as speech. Lower values can hear whisper-quiet speech in quiet rooms, but may pick up faint background noise. Values above the room's noise floor have no effect. Try −65 dB for whisper testing.")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
     }
 
@@ -327,7 +346,7 @@ struct VADSettingsView: View {
             staticRms: SharedConfig.streamVadSpeechRms(),
             adaptiveDeltaDb: SharedConfig.streamVadAdaptiveDeltaDb(),
             adaptiveContinuationDeltaDb: SharedConfig.streamVadAdaptiveContinuationDeltaDb(),
-            adaptiveAbsoluteSpeechFloorDb: SharedConfig.streamVadAbsoluteSpeechFloorDb(),
+            adaptiveAbsoluteSpeechFloorDb: settings.streamVadAbsoluteSpeechFloorDb,
             adaptiveRiseSpeedMultiplier: 1.0,
             adaptiveSilenceDeltaDb: SharedConfig.streamVadAdaptiveSilenceDeltaDb(),
             adaptiveStaleFloorSeconds: SharedConfig.streamVadStaleFloorSeconds(),

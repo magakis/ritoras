@@ -21,6 +21,7 @@ class AppSettings: ObservableObject {
     @Published var streamVadPauseProfile: VADPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
     @Published var streamVadSilenceMs: Int = SharedConfig.Defaults.streamVadSilenceMsDefault
     @Published var streamVadSpeechRms: Float = SharedConfig.Defaults.streamVadSpeechRmsDefault
+    @Published var streamVadAbsoluteSpeechFloorDb: Double = SharedConfig.Defaults.streamVadAbsoluteSpeechFloorDbDefault
     @Published var streamVadTelemetryEnabled: Bool = SharedConfig.Defaults.streamVadTelemetryEnabledDefault
 
     private var appGroupDefaults: UserDefaults?
@@ -50,6 +51,7 @@ class AppSettings: ObservableObject {
         streamVadSilenceMs = SharedConfig.streamVadSilenceMs()
         streamVadSilenceOverridePresent = SharedConfig.streamVadSilenceMsOverridePresent()
         streamVadSpeechRms = SharedConfig.streamVadSpeechRms()
+        streamVadAbsoluteSpeechFloorDb = SharedConfig.streamVadAbsoluteSpeechFloorDb()
         streamVadTelemetryEnabled = SharedConfig.streamVadTelemetryEnabled()
 
         $servers.dropFirst().sink { [weak self] newValue in
@@ -137,6 +139,9 @@ class AppSettings: ObservableObject {
                                    payload: ["value": newValue])
             self?.saveStreamVadSpeechRms(newValue)
         }.store(in: &cancellables)
+        $streamVadAbsoluteSpeechFloorDb.dropFirst().sink { [weak self] newValue in
+            self?.saveStreamVadAbsoluteSpeechFloorDb(newValue)
+        }.store(in: &cancellables)
         $streamVadTelemetryEnabled.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving streamVadTelemetryEnabled",
                                    payload: ["value": newValue])
@@ -171,6 +176,7 @@ class AppSettings: ObservableObject {
             appGroupDefaults?.set(true, forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
         }
         appGroupDefaults?.set(streamVadSpeechRms, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
+        saveStreamVadAbsoluteSpeechFloorDb(streamVadAbsoluteSpeechFloorDb)
         appGroupDefaults?.set(streamVadTelemetryEnabled, forKey: SharedConfig.Defaults.streamVadTelemetryEnabledKey)
         postSettingsChanged()
     }
@@ -258,6 +264,11 @@ class AppSettings: ObservableObject {
         postSettingsChanged()
     }
 
+    private func saveStreamVadAbsoluteSpeechFloorDb(_ value: Double) {
+        appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadAbsoluteSpeechFloorDbKey)
+        postSettingsChanged()
+    }
+
     private func saveStreamVadTelemetryEnabled(_ enabled: Bool) {
         appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.streamVadTelemetryEnabledKey)
         postSettingsChanged()
@@ -324,6 +335,7 @@ class AppSettings: ObservableObject {
         streamVadPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
         streamVadMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
         streamVadSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
+        appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadAbsoluteSpeechFloorDbKey)
         streamVadTelemetryEnabled = SharedConfig.Defaults.streamVadTelemetryEnabledDefault
         updatingDerivedVadValue = true
         streamVadSilenceMs = SharedConfig.Defaults.streamVadSilenceMsDefault
