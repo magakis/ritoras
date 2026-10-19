@@ -3,7 +3,7 @@ import UIKit
 
 struct RecoveryView: View {
     @EnvironmentObject private var dictationViewModel: DictationViewModel
-    @State private var records: [FailedJobRecord] = []
+    @State private var records: [RecoveryRecord] = []
     @State private var retryingJobIds: Set<UUID> = []
     @State private var toastMessage: String?
     @State private var toastIsError = false
@@ -19,7 +19,7 @@ struct RecoveryView: View {
                         Image(systemName: "checkmark.circle")
                             .font(.system(size: 48))
                             .foregroundColor(.green)
-                        Text("No failed transcriptions")
+                        Text("No transcriptions to recover")
                             .font(.headline)
                             .foregroundColor(.secondary)
                     }
@@ -27,7 +27,8 @@ struct RecoveryView: View {
                     List {
                         ForEach(records, id: \.jobId) { record in
                             RecoveryRow(
-                                record: record,
+                                record: record.failedRecord,
+                                pendingState: record.pendingState,
                                 isRetrying: retryingJobIds.contains(record.jobId),
                                 onRetry: { startRetry(jobId: record.jobId) },
                                 onDelete: { deleteRecord(jobId: record.jobId) }
@@ -36,7 +37,7 @@ struct RecoveryView: View {
                     }
                 }
             }
-            .navigationTitle("Failed Transcriptions")
+            .navigationTitle("Transcription Recovery")
             .navigationBarTitleDisplayMode(.inline)
             .onAppear(perform: refreshRecords)
             .toolbar {
@@ -45,8 +46,8 @@ struct RecoveryView: View {
                 }
                 if !records.isEmpty {
                     ToolbarItem(placement: .navigationBarTrailing) {
-                        Button("Clear All") {
-                            for record in records {
+                        Button("Clear Failed") {
+                            for record in records where record.pendingState == nil {
                                 FailedJobStore.shared.remove(jobId: record.jobId)
                                 RecordingStore.shared.delete(jobId: record.jobId)
                             }
@@ -81,8 +82,41 @@ struct RecoveryView: View {
     // MARK: - Actions
 
     private func refreshRecords() {
-        records = FailedJobStore.shared.list()
+        let failed = FailedJobStore.shared.list()
+        let failedByID = Dictionary(uniqueKeysWithValues: failed.map { ($0.jobId, $0) })
+        let pending = FailedJobStore.shared.listPending()
+        let pendingByID = Dictionary(uniqueKeysWithValues: pending.map { ($0.jobId, $0) })
+        let visibleIDs = PendingJobRecoveryRules.visibleRecoveryIDs(
+            failedIDs: failed.map(\.jobId), pendingIDs: pending.map(\.jobId))
+        records = visibleIDs.compactMap { id in
+            if let item = pendingByID[id] {
+                return RecoveryRecord(
+                    failedRecord: failedByID[id] ?? FailedJobRecord(
+                        jobId: item.jobId,
+                        audioFilePath: item.audioFilePath,
+                        errorMessage: Self.pendingMessage(for: item.state),
+                        recordedDurationSeconds: 0,
+                        createdAt: item.createdAt,
+                        retryCount: 0,
+                        lastRetriedAt: nil,
+                        server: item.resolvedServer ?? item.candidateServer),
+                    pendingState: item.state)
+            }
+            guard let failedRecord = failedByID[id] else { return nil }
+            return RecoveryRecord(failedRecord: failedRecord, pendingState: nil)
+        }
         FileLogger.shared.debug(.app, "RecoveryView loaded", payload: ["recordCount": records.count])
+    }
+
+    private static func pendingMessage(for state: PendingJobState) -> String {
+        switch state {
+        case .recorded: return "Audio saved; transcription has not started."
+        case .submitting: return "Checking whether the server accepted this transcription."
+        case .accepted: return "The server accepted this transcription; its result is being checked."
+        case .syncFallback: return "A synchronous transcription may still be completing."
+        case .ready: return "Transcription is ready; restoring its saved result."
+        case .failed: return "Transcription failed; saved audio is available for retry."
+        }
     }
 
     private func startRetry(jobId: UUID) {
@@ -120,6 +154,7 @@ struct RecoveryView: View {
 
 private struct RecoveryRow: View {
     let record: FailedJobRecord
+    let pendingState: PendingJobState?
     let isRetrying: Bool
     let onRetry: () -> Void
     let onDelete: () -> Void
@@ -133,6 +168,11 @@ private struct RecoveryRow: View {
                 Text(record.errorMessage)
                     .font(.body)
                     .lineLimit(2)
+                if let pendingState {
+                    Text("Status: \(pendingState.label)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
                 HStack(spacing: 4) {
                     if record.retryCount > 0 {
                         Label("Auto-retried \(record.retryCount)×", systemImage: "arrow.triangle.2.circlepath")
@@ -151,13 +191,15 @@ private struct RecoveryRow: View {
                 ProgressView()
                     .progressViewStyle(.circular)
             } else {
-                Button("Retry", action: onRetry)
+                Button(retryButtonTitle, action: onRetry)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                Button("Delete", action: onDelete)
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .tint(.red)
+                if pendingState == nil {
+                    Button("Delete", action: onDelete)
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .tint(.red)
+                }
             }
         }
         .padding(.vertical, 4)
@@ -173,9 +215,38 @@ private struct RecoveryRow: View {
         return "\(secs)s recorded"
     }
 
+    private var retryButtonTitle: String {
+        switch pendingState {
+        case .submitting, .accepted, .syncFallback, .ready:
+            return "Check Status"
+        case .recorded, .failed, nil:
+            return "Retry"
+        }
+    }
+
     private func formatDate(_ date: Date) -> String {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .abbreviated
         return formatter.localizedString(for: date, relativeTo: Date())
     }
+}
+
+private extension PendingJobState {
+    var label: String {
+        switch self {
+        case .recorded: return "saved, not submitted"
+        case .submitting: return "checking submission"
+        case .accepted: return "accepted by server"
+        case .syncFallback: return "synchronous fallback may be running"
+        case .ready: return "result ready"
+        case .failed: return "failed"
+        }
+    }
+}
+
+private struct RecoveryRecord {
+    let failedRecord: FailedJobRecord
+    let pendingState: PendingJobState?
+
+    var jobId: UUID { failedRecord.jobId }
 }

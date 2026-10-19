@@ -96,6 +96,57 @@ non-empty plain-text response. A non-200 HTTP response is surfaced as an error.
 The server's choice of error body and any text processing applied to the
 returned transcription are deployment-specific.
 
+### Async job API
+
+The Ritoras client can submit an asynchronous batch transcription to
+`POST /transcriptions`. This endpoint is implemented by the referenced
+server-v2 source; availability and behavior on any particular deployment are
+not guaranteed by this client contract.
+
+The request is `multipart/form-data` with the required `audio` file part and an
+optional `Idempotency-Key` HTTP header. The server hashes the raw uploaded audio
+bytes with SHA-256. While the key remains indexed, repeating the same key with
+the same audio returns HTTP 202 and the existing `job_id` and
+`status_endpoint`; reusing the key with different audio returns HTTP 422. A
+newly accepted job uses the idempotency key as its `job_id`, or a generated UUID
+when no key is supplied. The optional `language` field is currently ignored by
+this server implementation; this is a source-confirmed property of that
+implementation, not a promise about other compatible servers.
+
+The 202 response has this shape:
+
+```json
+{
+    "job_id": "<job-id>",
+    "status_endpoint": "/jobs/<job-id>"
+}
+```
+
+Poll `GET /jobs/{job_id}` for an object containing `status`, `text`,
+`revision`, and `error`. Status values are `pending`, `transcribing`, `ready`,
+and `failed`; `text` and `error` may be null until applicable. A 404 means that
+the job is not present in the server's current job store. It does not establish
+that the job was specifically evicted: the id may be unknown, belong to a
+different server, have expired, or have been lost on server restart.
+
+For the referenced implementation, terminal job records are retained for 600
+seconds from `terminal_at`; idempotency entries are retained for 600 seconds
+from `created_at`. A background cleanup loop checks for expired entries every
+60 seconds, so these are retention limits rather than exact deletion times.
+Both stores are process-local and in-memory, safe only for a single worker.
+They are not restored after restart; an accepted job is not guaranteed to
+survive a process restart, and the job store is not shared across workers.
+These details describe the source implementation and must not be read as
+confirmation of a deployed server's configuration or runtime behavior.
+
+The client's existing async timeout path retries with the same idempotency key
+up to two times, then falls back to synchronous `POST /transcribe`. That
+synchronous fallback is not deduplicated against an already accepted async
+job, so both paths may perform transcription. The async job contract does not
+promise indefinite background execution or immediate wake/resumption of a
+suspended client; retention windows likewise do not guarantee that a job can
+be recovered after process loss or expiry.
+
 ### Audio upload and timeout
 
 The client uploads AAC/MPEG-4 audio. Accepted formats and server-side decoding

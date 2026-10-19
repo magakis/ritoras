@@ -18,12 +18,18 @@ class TranscriptionHistory: ObservableObject {
         load()
     }
 
-    func add(text: String, recoveredViaFallback: Bool? = nil) {
+    func add(
+        text: String,
+        recoveredViaFallback: Bool? = nil,
+        id: UUID = UUID(),
+        timestamp: Date = Date()
+    ) {
         let entry = TranscriptionEntry(
-            id: UUID(),
+            id: id,
             text: text,
-            timestamp: Date(),
+            timestamp: timestamp,
             recoveredViaFallback: recoveredViaFallback)
+        guard !entries.contains(where: { $0.id == id }) else { return }
         entries.insert(entry, at: 0)
         if entries.count > maxEntries {
             entries = Array(entries.prefix(maxEntries))

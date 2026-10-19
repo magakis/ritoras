@@ -17,6 +17,35 @@ struct FailedJobRecord: Codable, Equatable {
     }
 }
 
+enum PendingJobState: String, Codable {
+    case recorded
+    case submitting
+    case accepted
+    case syncFallback
+    case ready
+    case failed
+}
+
+struct PendingJobRecord: Codable, Equatable {
+    let jobId: UUID
+    let audioFilePath: String
+    var candidateServer: String?
+    var resolvedServer: String?
+    let createdAt: Date
+    var submittedAt: Date?
+    var acceptedAt: Date?
+    var terminalAt: Date?
+    var state: PendingJobState
+    var serverJobId: String?
+    var statusEndpoint: String?
+    var uploadBodyFilePath: String? = nil
+    var uploadTerminalKind: String? = nil
+    var uploadTerminalStatus: Int? = nil
+    var uploadTerminalReason: String? = nil
+    var uploadTerminalRecordedAt: Date? = nil
+    var uploadTerminalNotifiedAt: Date? = nil
+}
+
 // Custom decoder for backward compatibility with old `audioFileName` key.
 extension FailedJobRecord {
     init(from decoder: Decoder) throws {
@@ -47,6 +76,7 @@ final class FailedJobStore: @unchecked Sendable {
     static let shared = FailedJobStore()
     private let lock = NSLock()
     private var records: [FailedJobRecord] = []
+    private var pendingRecords: [PendingJobRecord] = []
 
     private init() {
         load()
@@ -61,6 +91,10 @@ final class FailedJobStore: @unchecked Sendable {
             return nil
         }
         return appSupport.appendingPathComponent("failed-jobs.json")
+    }
+
+    private var pendingFileURL: URL? {
+        fileURL?.deletingLastPathComponent().appendingPathComponent("pending-jobs.json")
     }
 
     // MARK: - Public API
@@ -90,6 +124,20 @@ final class FailedJobStore: @unchecked Sendable {
         persist()
     }
 
+    /// Removes a failed record only when that removal is durable. Unlike
+    /// `remove`, this leaves the in-memory record intact if persistence fails.
+    @discardableResult
+    func removePersisted(jobId: UUID) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let index = records.firstIndex(where: { $0.jobId == jobId }) else { return true }
+        let record = records.remove(at: index)
+        guard persistRecords() else {
+            records.insert(record, at: index)
+            return false
+        }
+        return true
+    }
+
     /// Increments the retry count and sets `lastRetriedAt` to now.
     func incrementRetry(jobId: UUID) {
         lock.lock(); defer { lock.unlock() }
@@ -115,12 +163,78 @@ final class FailedJobStore: @unchecked Sendable {
         persist()
     }
 
+    /// Adds or replaces a pending job, keyed by its dictation UUID.
+    @discardableResult
+    func upsertPending(_ record: PendingJobRecord) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if let index = pendingRecords.firstIndex(where: { $0.jobId == record.jobId }) {
+            let previous = pendingRecords[index]
+            pendingRecords[index] = record
+            guard persistPending() else {
+                pendingRecords[index] = previous
+                return false
+            }
+        } else {
+            pendingRecords.append(record)
+            guard persistPending() else {
+                pendingRecords.removeLast()
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Returns pending jobs. Active records are never subject to failed-job pruning.
+    func listPending() -> [PendingJobRecord] {
+        lock.lock(); defer { lock.unlock() }
+        return pendingRecords
+    }
+
+    /// Replaces an existing pending job. Returns false if absent or persistence fails.
+    @discardableResult
+    func updatePending(_ record: PendingJobRecord) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let index = pendingRecords.firstIndex(where: { $0.jobId == record.jobId }) else { return false }
+        let previous = pendingRecords[index]
+        pendingRecords[index] = record
+        guard persistPending() else {
+            pendingRecords[index] = previous
+            return false
+        }
+        return true
+    }
+
+    /// Removes the durable recovery marker before optionally deleting its audio.
+    /// Audio is retained if the updated pending file cannot be persisted.
+    @discardableResult
+    func removePending(jobId: UUID, deleteAudio: Bool = false) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let index = pendingRecords.firstIndex(where: { $0.jobId == jobId }) else { return false }
+        let record = pendingRecords.remove(at: index)
+        guard persistPending() else {
+            pendingRecords.insert(record, at: index)
+            return false
+        }
+        if deleteAudio {
+            do {
+                try FileManager.default.removeItem(atPath: record.audioFilePath)
+            } catch {
+                FileLogger.shared.error(.app, "FailedJobStore: pending audio deletion failed",
+                                        payload: ["error": error.localizedDescription])
+            }
+        }
+        return true
+    }
+
     /// Removes records older than the given interval, along with their
     /// associated audio files via `RecordingStore`.
     func pruneOlderThan(_ interval: TimeInterval, relativeTo referenceDate: Date = Date()) {
         lock.lock(); defer { lock.unlock() }
         let cutoff = referenceDate.addingTimeInterval(-interval)
-        let (kept, removed) = records.filteredSplit { $0.createdAt >= cutoff }
+        let protectedAudioPaths = Set(pendingRecords.map(\.audioFilePath))
+        let (kept, removed) = records.filteredSplit {
+            $0.createdAt >= cutoff || protectedAudioPaths.contains($0.audioFilePath)
+        }
         records = kept
         for record in removed {
             RecordingStore.shared.delete(jobId: record.jobId)
@@ -133,26 +247,50 @@ final class FailedJobStore: @unchecked Sendable {
     // MARK: - Persistence
 
     private func persist() {
-        guard let url = fileURL else { return }
+        _ = persistRecords()
+    }
+
+    @discardableResult
+    private func persistRecords() -> Bool {
+        guard let url = fileURL else { return false }
         do {
             let data = try JSONEncoder().encode(records)
             try data.write(to: url, options: .atomic)
+            return true
         } catch {
             FileLogger.shared.error(.app, "FailedJobStore: persist failed",
                                     payload: ["error": error.localizedDescription])
+            return false
+        }
+    }
+
+    @discardableResult
+    private func persistPending() -> Bool {
+        guard let url = pendingFileURL else { return false }
+        do {
+            let data = try JSONEncoder().encode(pendingRecords)
+            try data.write(to: url, options: .atomic)
+            return true
+        } catch {
+            FileLogger.shared.error(.app, "FailedJobStore: pending persist failed",
+                                    payload: ["error": error.localizedDescription])
+            return false
         }
     }
 
     private func load() {
-        guard let url = fileURL,
-              FileManager.default.fileExists(atPath: url.path),
-              let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode([FailedJobRecord].self, from: data)
-        else {
-            records = []
-            return
+        if let url = fileURL,
+           FileManager.default.fileExists(atPath: url.path),
+           let data = try? Data(contentsOf: url),
+           let decoded = try? JSONDecoder().decode([FailedJobRecord].self, from: data) {
+            records = decoded
         }
-        records = decoded
+        if let pendingURL = pendingFileURL,
+           FileManager.default.fileExists(atPath: pendingURL.path),
+           let pendingData = try? Data(contentsOf: pendingURL),
+           let decodedPending = try? JSONDecoder().decode([PendingJobRecord].self, from: pendingData) {
+            pendingRecords = decodedPending
+        }
     }
 }
 

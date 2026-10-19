@@ -214,7 +214,34 @@ final class DictationViewModel: ObservableObject {
     /// Idempotency guard: tracks job IDs currently being retried to prevent
     /// concurrent retries of the same job (defense against retry loops).
     private var retryingJobIds: Set<UUID> = []
+    private var finalizingRecoveredJobIDs: Set<UUID> = []
     private let retryLock = NSLock()
+    private var backgroundSubmissionWaitIDs: Set<UUID> = []
+    private var reconcilingBackgroundUploadIDs: Set<UUID> = []
+    private var backgroundUploadObserver: NSObjectProtocol?
+
+    init() {
+        backgroundUploadObserver = NotificationCenter.default.addObserver(
+            forName: BackgroundTranscriptionUploader.durableUpdateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard let id = notification.object as? UUID,
+                  let record = FailedJobStore.shared.listPending().first(where: { $0.jobId == id }) else { return }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if record.uploadTerminalKind == "accepted",
+                   let jobId = record.serverJobId,
+                   let endpoint = record.statusEndpoint {
+                    self.reconcileLateBackgroundAcceptance(
+                        id: id, serverJobId: jobId, statusEndpoint: endpoint)
+                } else if !self.backgroundSubmissionWaitIDs.contains(id) {
+                    self.routePendingJobToSavedAudio(
+                        record, error: record.uploadTerminalReason ?? "Background upload failed")
+                }
+            }
+        }
+    }
 
     // MARK: - Localhost Server Helpers
 
@@ -396,6 +423,13 @@ final class DictationViewModel: ObservableObject {
 
     private func setPinnedServer(_ server: String?, for jobId: UUID) {
         SharedConfig.setSelectedServer(server)
+        if var pending = FailedJobStore.shared.listPending().first(where: { $0.jobId == jobId }) {
+            pending.resolvedServer = server
+            if !FailedJobStore.shared.updatePending(pending) {
+                FileLogger.shared.error(.app, "Could not persist resolved transcription server",
+                                        payload: ["jobId": jobId.uuidString])
+            }
+        }
         if let server {
             FailedJobStore.shared.updateServer(jobId: jobId, server: server)
         }
@@ -560,6 +594,236 @@ final class DictationViewModel: ObservableObject {
         case .connecting, .recording, .transcribing, .cancelled:
             return false
         }
+    }
+
+    /// Makes one bounded GET for each previously accepted job. Reconciliation
+    /// never submits audio; ambiguous records stay available for manual recovery.
+    func reconcilePendingJobsOnLaunch() async {
+        let launchSessionID = activeID
+        guard launchSessionID == nil, recorder == nil, streamRecorder == nil else { return }
+
+        // The store is app-local Application Support. It cannot repair a missing
+        // SideStore app-group container; recovered delivery still uses that channel.
+        let records = Array(FailedJobStore.shared.listPending().prefix(20))
+        for originalRecord in records {
+            guard !Task.isCancelled,
+                  activeID == launchSessionID,
+                  recorder == nil, streamRecorder == nil else { return }
+
+            guard originalRecord.state == .accepted || originalRecord.state == .ready,
+                  let server = originalRecord.resolvedServer,
+                  let endpoint = originalRecord.statusEndpoint else { continue }
+            guard !reconcilingBackgroundUploadIDs.contains(originalRecord.jobId) else { continue }
+            reconcilingBackgroundUploadIDs.insert(originalRecord.jobId)
+            defer { reconcilingBackgroundUploadIDs.remove(originalRecord.jobId) }
+
+            if originalRecord.state == .accepted {
+                let action = PendingJobRecoveryRules.recoveryAction(
+                    state: .accepted, createdAt: originalRecord.createdAt,
+                    terminalAt: nil, now: Date())
+                guard action == .poll else {
+                    routePendingJobToSavedAudio(originalRecord,
+                        error: "Server job is outside its recovery window; saved audio is available for manual retry")
+                    continue
+                }
+            } else if Date().timeIntervalSince(originalRecord.terminalAt ?? originalRecord.createdAt)
+                        > PendingJobRecoveryRules.serverTTL {
+                routePendingJobToSavedAudio(originalRecord,
+                    error: "Server result expired; saved audio is available for manual retry")
+                continue
+            }
+
+            do {
+                if originalRecord.state == .accepted {
+                    let text = try await WhisperClient.waitForAcceptedJob(
+                        statusEndpoint: endpoint,
+                        serverURL: server,
+                        correlationId: originalRecord.jobId,
+                        recordingDurationSeconds: 0)
+                    guard !Task.isCancelled,
+                          activeID == launchSessionID,
+                          recorder == nil, streamRecorder == nil else { return }
+                    var record = FailedJobStore.shared.listPending().first {
+                        $0.jobId == originalRecord.jobId
+                    } ?? originalRecord
+                    let terminalAt = record.terminalAt ?? record.acceptedAt ?? record.createdAt
+                    record.state = .ready
+                    record.terminalAt = terminalAt
+                    guard FailedJobStore.shared.updatePending(record) else { continue }
+                    let action = PendingJobRecoveryRules.recoveryAction(
+                        state: .ready, createdAt: record.createdAt,
+                        terminalAt: terminalAt, now: Date())
+                    publishRecoveredResult(
+                        text, record: record, terminalAt: terminalAt,
+                        deliveryEligible: action == .publishReady(deliveryEligible: true))
+                    continue
+                }
+                let status = try await WhisperClient.recoverJobStatus(
+                    statusEndpoint: endpoint,
+                    serverURL: server,
+                    correlationId: originalRecord.jobId)
+                guard !Task.isCancelled,
+                      activeID == launchSessionID,
+                      recorder == nil, streamRecorder == nil else { return }
+
+                switch status.status {
+                case "ready":
+                    guard let text = status.text, !text.isEmpty else { continue }
+                    var record = FailedJobStore.shared.listPending().first {
+                        $0.jobId == originalRecord.jobId
+                    } ?? originalRecord
+                    let terminalAt = record.terminalAt ?? record.createdAt
+                    record.state = .ready
+                    record.terminalAt = terminalAt
+                    guard FailedJobStore.shared.updatePending(record) else { continue }
+                    let action = PendingJobRecoveryRules.recoveryAction(
+                        state: .ready, createdAt: record.createdAt,
+                        terminalAt: terminalAt, now: Date())
+                    publishRecoveredResult(text, record: record, terminalAt: terminalAt,
+                                            deliveryEligible: action == .publishReady(deliveryEligible: true))
+                case "failed":
+                    routePendingJobToSavedAudio(originalRecord,
+                        error: status.error ?? "Transcription failed on the server")
+                case "pending", "transcribing":
+                    continue
+                default:
+                    continue
+                }
+            } catch WhisperError.jobMissing {
+                guard !Task.isCancelled, activeID == launchSessionID else { return }
+                let action = PendingJobRecoveryRules.recoveryAction(
+                    state: originalRecord.state, createdAt: originalRecord.createdAt,
+                    terminalAt: originalRecord.terminalAt, now: Date(), statusWas404: true)
+                if action == .savedAudioRetry {
+                    routePendingJobToSavedAudio(originalRecord,
+                        error: "Server job is missing or expired; saved audio is available for manual retry")
+                }
+            } catch WhisperError.cancelled {
+                return
+            } catch {
+                // Preserve both the marker and audio for the next launch/manual retry.
+                continue
+            }
+        }
+    }
+
+    private func routePendingJobToSavedAudio(_ record: PendingJobRecord, error: String) {
+        guard FileManager.default.fileExists(atPath: record.audioFilePath) else { return }
+        let existing = FailedJobStore.shared.list().first { $0.jobId == record.jobId }
+        FailedJobStore.shared.append(FailedJobRecord(
+            jobId: record.jobId,
+            audioFilePath: record.audioFilePath,
+            errorMessage: error,
+            recordedDurationSeconds: existing?.recordedDurationSeconds ?? 0,
+            createdAt: record.createdAt,
+            retryCount: existing?.retryCount ?? 0,
+            lastRetriedAt: existing?.lastRetriedAt,
+            server: record.resolvedServer ?? record.candidateServer))
+        // append() has no persistence result; keep the pending marker and audio.
+    }
+
+    private func reconcileLateBackgroundAcceptance(
+        id: UUID,
+        serverJobId: String,
+        statusEndpoint: String
+    ) {
+        guard PendingJobRecoveryRules.mayStartLateReconciliation(
+                hasForegroundWaiter: backgroundSubmissionWaitIDs.contains(id),
+                alreadyReconciling: reconcilingBackgroundUploadIDs.contains(id)),
+              let record = FailedJobStore.shared.listPending().first(where: { $0.jobId == id }),
+              let server = record.resolvedServer,
+              activeID == nil || (activeID == id && !isActivePhase(phase)) else { return }
+        reconcilingBackgroundUploadIDs.insert(id)
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.reconcilingBackgroundUploadIDs.remove(id) }
+            let sessionIDAtStart = self.activeID
+            do {
+                let text = try await WhisperClient.waitForAcceptedJob(
+                    statusEndpoint: statusEndpoint,
+                    serverURL: server,
+                    correlationId: id,
+                    recordingDurationSeconds: 0)
+                guard self.activeID == sessionIDAtStart,
+                      let current = FailedJobStore.shared.listPending().first(where: { $0.jobId == id }) else { return }
+                var completed = current
+                completed.serverJobId = serverJobId
+                completed.statusEndpoint = statusEndpoint
+                completed.state = .ready
+                let terminalAt = completed.terminalAt ?? completed.acceptedAt ?? completed.createdAt
+                completed.terminalAt = terminalAt
+                guard FailedJobStore.shared.updatePending(completed) else { return }
+                let action = PendingJobRecoveryRules.recoveryAction(
+                    state: .ready, createdAt: completed.createdAt,
+                    terminalAt: terminalAt, now: Date())
+                self.publishRecoveredResult(
+                    text, record: completed, terminalAt: terminalAt,
+                    deliveryEligible: action == .publishReady(deliveryEligible: true))
+            } catch WhisperError.jobFailed(let reason) {
+                guard let current = FailedJobStore.shared.listPending().first(where: { $0.jobId == id }) else { return }
+                self.routePendingJobToSavedAudio(current, error: reason)
+            } catch {
+                // Keep the accepted marker and source audio for a later bounded recovery attempt.
+                FileLogger.shared.debug(.app, "late background upload reconciliation deferred", payload: [
+                    "jobId": id.uuidString,
+                    "error": error.localizedDescription
+                ])
+            }
+        }
+    }
+
+    private func publishRecoveredResult(
+        _ text: String,
+        record: PendingJobRecord,
+        terminalAt: Date,
+        deliveryEligible: Bool
+    ) {
+        guard PendingJobRecoveryRules.mayClaimCompletion(
+            alreadyFinalizing: finalizingRecoveredJobIDs.contains(record.jobId)),
+              finalizingRecoveredJobIDs.insert(record.jobId).inserted else { return }
+        defer { finalizingRecoveredJobIDs.remove(record.jobId) }
+        let resultAlreadyOwned = TranscriptionHistory.shared.entries.contains(where: { $0.id == record.jobId })
+        if !resultAlreadyOwned {
+            TranscriptionHistory.shared.add(text: text, id: record.jobId, timestamp: terminalAt)
+        }
+        guard TranscriptionHistory.shared.entries.contains(where: { $0.id == record.jobId }) else { return }
+        if resultAlreadyOwned {
+            _ = removeCompletedRecoveryState(jobId: record.jobId)
+            return
+        }
+        guard deliveryEligible else {
+            _ = removeCompletedRecoveryState(jobId: record.jobId)
+            return
+        }
+
+        snapshotRevision &+= 1
+        let payload = DictationPayload(
+            id: record.jobId,
+            status: .completed,
+            text: text,
+            errorMessage: nil,
+            returnToIdleDeadline: nil,
+            server: record.resolvedServer,
+            timestamp: terminalAt,
+            revision: snapshotRevision)
+        lastPayloadHolder.set(payload)
+        SharedConfig.setSnapshotFile(payload)
+        SharedConfig.setDictationSnapshot(payload)
+        DarwinNotifier.post(SharedConfig.Defaults.darwinStateChangedNotificationName)
+        _ = removeCompletedRecoveryState(jobId: record.jobId)
+    }
+
+    private func removeCompletedRecoveryState(jobId: UUID) -> Bool {
+        let ownsCompletion = finalizingRecoveredJobIDs.contains(jobId)
+        let historyOwned = TranscriptionHistory.shared.entries.contains(where: { $0.id == jobId })
+        guard PendingJobRecoveryRules.mayRemoveFailedRecordAfterRecoveredResult(
+            historyOwned: historyOwned, ownsCompletion: ownsCompletion) else { return false }
+        guard FailedJobStore.shared.removePersisted(jobId: jobId) else { return false }
+        guard PendingJobRecoveryRules.mayRemovePendingAudioAfterRecoveredResult(
+            historyOwned: historyOwned, failedRecordRemovalPersisted: true,
+            ownsCompletion: ownsCompletion) else { return false }
+        return FailedJobStore.shared.removePending(jobId: jobId, deleteAudio: true)
     }
 
     private func scheduleDurableCancellation(for id: UUID) {
@@ -1153,8 +1417,16 @@ final class DictationViewModel: ObservableObject {
                 "recordedDurationMs": recordedDurationMs
             ])
 
+            var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+            FileLogger.shared.info(.lifecycle, "WhisperTranscription lease begin", payload: ["id": String(id.uuidString.prefix(8))])
+            backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "WhisperTranscription") {
+                FileLogger.shared.warn(.lifecycle, "WhisperTranscription lease expired", payload: ["id": String(id.uuidString.prefix(8))])
+                self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id)
+            }
+
             let audioURL = await recorder.stopRecording()
             guard canContinueSession(id) else {
+                endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id)
                 if SharedConfig.pendingDictationCancel()?.id == id {
                     await cancel(expectedID: id)
                 }
@@ -1162,6 +1434,7 @@ final class DictationViewModel: ObservableObject {
             }
 
             guard let url = audioURL else {
+                endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id)
                 UIApplication.shared.isIdleTimerDisabled = false
                 DispatchQueue.global(qos: .utility).async {
                     let deactivateStart = Date()
@@ -1194,13 +1467,6 @@ final class DictationViewModel: ObservableObject {
             // Foreground upload (Scenario A) — runs immediately while the app is in
             // the foreground and updates the UI directly. A background task keeps
             // the app alive briefly if the user switches away mid-flight.
-            var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
-            FileLogger.shared.info(.lifecycle, "WhisperTranscription lease begin", payload: ["id": String(id.uuidString.prefix(8))])
-            backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "WhisperTranscription") {
-                FileLogger.shared.warn(.lifecycle, "WhisperTranscription lease expired", payload: ["id": String(id.uuidString.prefix(8))])
-                self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id)
-            }
-
             transcriptionTask = Task { [weak self] in
                 guard let self = self else {
                     if backgroundTaskID != .invalid {
@@ -1209,6 +1475,13 @@ final class DictationViewModel: ObservableObject {
                     return
                 }
 
+                defer {
+                    self.endStopBackgroundTask(
+                        &backgroundTaskID,
+                        name: "WhisperTranscription",
+                        dictationID: id
+                    )
+                }
                 defer { if self.activeID == id { self.transcriptionTask = nil } }
 
                 let uploadT0 = Date()
@@ -1231,9 +1504,26 @@ final class DictationViewModel: ObservableObject {
                         "server": chosenServer ?? "pending selection"
                     ])
 
+                    let pending = PendingJobRecord(
+                        jobId: id,
+                        audioFilePath: url.path,
+                        candidateServer: chosenServer ?? config.servers.first,
+                        resolvedServer: chosenServer,
+                        createdAt: Date(),
+                        submittedAt: nil,
+                        acceptedAt: nil,
+                        terminalAt: nil,
+                        state: .recorded,
+                        serverJobId: nil,
+                        statusEndpoint: nil)
+                    guard FailedJobStore.shared.upsertPending(pending) else {
+                        throw WhisperError.jobFailed("Could not save transcription recovery state")
+                    }
+
                     let text = try await transcribeWithAutoRetry(
                         audioURL: url, jobId: id, config: config,
                         correlationId: activeID, initialServer: chosenServer,
+                        backgroundSubmitter: BackgroundTranscriptionUploader.shared,
                         language: SharedConfig.keyboardLanguage().dictationLanguageField,
                         recordingDurationSeconds: recordedDurationSeconds)
                     FileLogger.shared.debug(.network, "async transcription succeeded",
@@ -1247,14 +1537,30 @@ final class DictationViewModel: ObservableObject {
                         "textLength": text.count
                     ])
 
+                    if var pending = FailedJobStore.shared.listPending().first(where: { $0.jobId == id }) {
+                        pending.state = .ready
+                        pending.terminalAt = Date()
+                        guard FailedJobStore.shared.updatePending(pending) else {
+                            throw WhisperError.jobFailed("Could not finalize transcription recovery state")
+                        }
+                    }
                     TranscriptionHistory.shared.add(text: text)
-                    // Audio delivered — clean up the recording file.
-                    let deleteJobId = id
-                    RecordingStore.shared.delete(jobId: deleteJobId)
+                    guard FailedJobStore.shared.removePending(jobId: id, deleteAudio: true) else {
+                        throw WhisperError.jobFailed("Could not finalize transcription recovery state")
+                    }
+                    RecordingStore.shared.delete(jobId: id)
                     FileLogger.shared.debug(.audio, "audio deleted on success",
-                                            payload: ["jobId": deleteJobId.uuidString])
+                                            payload: ["jobId": id.uuidString])
                     vadTelemetryWriter?.recordOutcome("success")
                     phase = .done(text)
+                } catch let waitError as BackgroundUploadWaitError {
+                    guard self.canContinueSession(id) else {
+                        self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id)
+                        return
+                    }
+                    // The daemon may still finish. Keep the pending marker and source audio;
+                    // offering a retry here could create a concurrent duplicate POST.
+                    phase = .error(waitError.localizedDescription)
                 } catch WhisperError.cancelled {
                     guard self.canContinueSession(id) else { self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
                     // User cancelled — do not record as failure.
@@ -1271,6 +1577,15 @@ final class DictationViewModel: ObservableObject {
                         "elapsed_ms": failedElapsed,
                         "error": message
                     ])
+                    if let pending = FailedJobStore.shared.listPending().first(where: { $0.jobId == id }),
+                       pending.uploadTerminalKind == "accepted" {
+                        phase = .error("The server accepted this transcription; its saved result is still being checked.")
+                        if let serverJobId = pending.serverJobId, let endpoint = pending.statusEndpoint {
+                            self.reconcileLateBackgroundAcceptance(
+                                id: id, serverJobId: serverJobId, statusEndpoint: endpoint)
+                        }
+                        return
+                    }
                     // Audio preserved on disk for Phase 4 retry.
                     FileLogger.shared.debug(.audio, "audio preserved for retry",
                                             payload: ["jobId": id.uuidString])
@@ -1281,6 +1596,14 @@ final class DictationViewModel: ObservableObject {
                         "audioExists": FileManager.default.fileExists(atPath: url.path)
                     ])
                     if FileManager.default.fileExists(atPath: url.path) {
+                        if var pending = FailedJobStore.shared.listPending().first(where: { $0.jobId == id }) {
+                            pending.state = .failed
+                            pending.terminalAt = Date()
+                            if !FailedJobStore.shared.updatePending(pending) {
+                                FileLogger.shared.error(.app, "Could not persist failed transcription state",
+                                                        payload: ["jobId": id.uuidString])
+                            }
+                        }
                         FailedJobStore.shared.append(FailedJobRecord(
                             jobId: id,
                             audioFilePath: url.path,
@@ -1662,8 +1985,17 @@ final class DictationViewModel: ObservableObject {
             break
         }
 
+        let retrySessionID = activeID
         do {
+            if FailedJobStore.shared.list().first(where: { $0.jobId == jobId }) == nil,
+               let pending = FailedJobStore.shared.listPending().first(where: { $0.jobId == jobId }) {
+                routePendingJobToSavedAudio(pending, error: "Saved audio is available for manual recovery")
+            }
+            guard FailedJobStore.shared.list().contains(where: { $0.jobId == jobId }) else {
+                throw WhisperError.jobFailed("Could not preserve this job in the recovery list")
+            }
             let text = try await transcribeSavedAudio(jobId: jobId)
+            guard activeID == retrySessionID else { return nil }
             return text
         } catch is RetryAlreadyInFlight {
             // Skip — a concurrent retry for this job is already in flight.
@@ -1689,6 +2021,10 @@ final class DictationViewModel: ObservableObject {
             "error": errorMessage
         ])
         FailedJobStore.shared.updateErrorMessage(jobId: jobId, message: errorMessage)
+        if var pending = FailedJobStore.shared.listPending().first(where: { $0.jobId == jobId }) {
+            pending.uploadTerminalReason = errorMessage
+            _ = FailedJobStore.shared.updatePending(pending)
+        }
     }
 
     /// Thrown by `transcribeSavedAudio` when the same job is already being
@@ -1701,9 +2037,11 @@ final class DictationViewModel: ObservableObject {
         config: SharedConfig,
         correlationId: UUID?,
         initialServer: String?,
+        backgroundSubmitter: (any WhisperBackgroundSubmitter)? = nil,
         language: String?,
         recordingDurationSeconds: TimeInterval
     ) async throws -> String {
+        var activeBackgroundSubmitter = backgroundSubmitter
         let maxAttempts = max(1, SharedConfig.Defaults.transcriptionAutoRetryMaxAttempts)
         var attempt = 0
         var pinnedServer = initialServer
@@ -1716,6 +2054,16 @@ final class DictationViewModel: ObservableObject {
             }
             let attemptStart = Date()
             do {
+                guard var pending = FailedJobStore.shared.listPending().first(where: { $0.jobId == jobId }) else {
+                    throw WhisperError.jobFailed("Could not find transcription recovery state")
+                }
+                if pending.state == .recorded, activeBackgroundSubmitter == nil {
+                    pending.state = .submitting
+                    pending.submittedAt = Date()
+                    guard FailedJobStore.shared.updatePending(pending) else {
+                        throw WhisperError.jobFailed("Could not update transcription recovery state")
+                    }
+                }
                 return try await WhisperClient.routeTranscription(
                     audioURL: audioURL, jobId: jobId, config: config,
                     correlationId: correlationId,
@@ -1723,11 +2071,42 @@ final class DictationViewModel: ObservableObject {
                     onServerSelected: { [weak self] server in
                         self?.setPinnedServer(server, for: jobId)
                     },
+                    onEvent: { event in
+                        guard var pending = FailedJobStore.shared.listPending().first(where: { $0.jobId == jobId }) else {
+                            return
+                        }
+                        switch event {
+                        case .accepted(let serverJobId, let statusEndpoint):
+                            pending.serverJobId = serverJobId
+                            pending.statusEndpoint = statusEndpoint
+                            pending.submittedAt = Date()
+                            pending.acceptedAt = Date()
+                            pending.state = .accepted
+                        case .syncFallbackEngaged:
+                            pending.state = .syncFallback
+                        }
+                        if !FailedJobStore.shared.updatePending(pending) {
+                            FileLogger.shared.error(.app, "Could not persist transcription recovery event",
+                                                    payload: ["jobId": jobId.uuidString])
+                        }
+                    },
+                    backgroundSubmitter: activeBackgroundSubmitter,
                     language: language,
+                    onDurableAcceptance: { [weak self] id, serverJobId, statusEndpoint in
+                        guard let self,
+                              !self.backgroundSubmissionWaitIDs.contains(id) else { return }
+                        self.reconcileLateBackgroundAcceptance(
+                            id: id,
+                            serverJobId: serverJobId,
+                            statusEndpoint: statusEndpoint)
+                    },
                     recordingDurationSeconds: recordingDurationSeconds)
             } catch WhisperError.cancelled {
                 throw WhisperError.cancelled
             } catch {
+                // Any return from the injected path is a durable terminal failure;
+                // subsequent ordinary retries may now use the existing sync route.
+                activeBackgroundSubmitter = nil
                 let attemptNumber = attempt + 1
                 let attemptElapsed = Date().timeIntervalSince(attemptStart)
                 let isRetryable = (error as? WhisperError)?.isRetryableConnectionFailure ?? false
@@ -1804,6 +2183,12 @@ final class DictationViewModel: ObservableObject {
             retryLock.unlock()
         }
 
+        backgroundSubmissionWaitIDs.insert(jobId)
+        defer { backgroundSubmissionWaitIDs.remove(jobId) }
+        guard !reconcilingBackgroundUploadIDs.contains(jobId) else {
+            throw WhisperError.jobFailed("The server result is already being reconciled; saved audio has not been resubmitted")
+        }
+
         guard let record = FailedJobStore.shared.list().first(where: { $0.jobId == jobId }) else {
             FileLogger.shared.debug(.app, "retry: no record found",
                                     payload: ["jobId": jobId.uuidString])
@@ -1819,13 +2204,131 @@ final class DictationViewModel: ObservableObject {
             throw WhisperError.jobFailed("Saved audio no longer available")
         }
 
+        let config = SharedConfig.load()
+        let initialSessionID = activeID
+        let liveUploadIDs = await BackgroundTranscriptionUploader.shared.liveUploadIDs()
+        guard activeID == initialSessionID, recorder == nil, streamRecorder == nil else {
+            throw WhisperError.jobFailed("A dictation started while recovery status was being checked")
+        }
+        guard !liveUploadIDs.contains(jobId) else {
+            throw WhisperError.jobFailed("A background upload is still active; saved audio remains available")
+        }
+        if var existingPending = FailedJobStore.shared.listPending().first(where: { $0.jobId == jobId }) {
+            guard let latestPending = FailedJobStore.shared.listPending().first(where: { $0.jobId == jobId }) else {
+                throw WhisperError.jobFailed("Recovery state changed while checking the background upload")
+            }
+            existingPending = latestPending
+            let hasLiveUpload = liveUploadIDs.contains(jobId)
+            let initialDecision = PendingJobRecoveryRules.manualRetryDecision(
+                state: existingPending.state, hasLiveUpload: hasLiveUpload)
+            if case .wait(let reason) = initialDecision {
+                throw WhisperError.jobFailed(reason)
+            }
+            if case .checkStatus = initialDecision {
+                let server = existingPending.resolvedServer ?? existingPending.candidateServer ?? record.server
+                guard let server else {
+                    throw WhisperError.jobFailed("Server status is unknown; configure a server before retrying")
+                }
+                let endpoint = existingPending.statusEndpoint
+                    ?? PendingJobRecoveryRules.statusEndpoint(for: jobId)
+                let status: JobStatusResponse?
+                do {
+                    status = try await WhisperClient.recoverJobStatus(
+                        statusEndpoint: endpoint, serverURL: server, correlationId: jobId)
+                } catch WhisperError.jobMissing {
+                    let decision = PendingJobRecoveryRules.manualRetryDecision(
+                        state: existingPending.state, hasLiveUpload: false, serverStatus: .missing)
+                    guard decision == .retry else {
+                        throw WhisperError.jobFailed("The server job is missing; saved audio remains available")
+                    }
+                    status = nil
+                } catch WhisperError.unauthorized {
+                    throw WhisperError.unauthorized
+                } catch {
+                    throw WhisperError.jobFailed("Server status is unknown: \(error.localizedDescription). Check status again before retrying.")
+                }
+                guard activeID == initialSessionID, recorder == nil, streamRecorder == nil else {
+                    throw WhisperError.jobFailed("A dictation started while recovery status was being checked")
+                }
+                guard let latestPending = FailedJobStore.shared.listPending().first(where: { $0.jobId == jobId }),
+                      latestPending.state == existingPending.state,
+                      latestPending.serverJobId == existingPending.serverJobId,
+                      latestPending.statusEndpoint == existingPending.statusEndpoint else {
+                    throw WhisperError.jobFailed("Recovery state changed during the status check; check status again")
+                }
+                existingPending = latestPending
+                if let status {
+                    switch status.status {
+                    case "ready":
+                        guard let text = status.text, !text.isEmpty else {
+                            throw WhisperError.jobFailed("The server result is ready but contains no text")
+                        }
+                        let terminalAt = existingPending.terminalAt ?? existingPending.acceptedAt ?? existingPending.createdAt
+                        existingPending.state = .ready
+                        existingPending.terminalAt = terminalAt
+                        guard FailedJobStore.shared.updatePending(existingPending) else {
+                            throw WhisperError.jobFailed("Could not save the recovered server result")
+                        }
+                        let deliveryAction = PendingJobRecoveryRules.recoveryAction(
+                            state: .ready, createdAt: existingPending.createdAt,
+                            terminalAt: terminalAt, now: Date())
+                        publishRecoveredResult(
+                            text, record: existingPending, terminalAt: terminalAt,
+                            deliveryEligible: deliveryAction == .publishReady(deliveryEligible: true))
+                        return text
+                    case "pending", "transcribing":
+                        throw WhisperError.jobFailed("The server is still processing this transcription; saved audio has not been resubmitted")
+                    case "failed":
+                        let decision = PendingJobRecoveryRules.manualRetryDecision(
+                            state: existingPending.state, hasLiveUpload: false, serverStatus: .failed)
+                        guard decision == .retry else {
+                            throw WhisperError.jobFailed(status.error ?? "Server transcription failed")
+                        }
+                    case "missing":
+                        break
+                    default:
+                        throw WhisperError.jobFailed("Server returned an unknown status; saved audio has not been resubmitted")
+                    }
+                } else if PendingJobRecoveryRules.manualRetryDecision(
+                    state: existingPending.state, hasLiveUpload: false, serverStatus: .missing) != .retry {
+                    throw WhisperError.jobFailed("The server job is missing; the synchronous request may still complete")
+                }
+            }
+            existingPending.state = .recorded
+            existingPending.submittedAt = nil
+            existingPending.acceptedAt = nil
+            existingPending.terminalAt = nil
+            existingPending.serverJobId = nil
+            existingPending.statusEndpoint = nil
+            existingPending.uploadTerminalKind = nil
+            existingPending.uploadTerminalStatus = nil
+            existingPending.uploadTerminalReason = nil
+            existingPending.uploadTerminalRecordedAt = nil
+            existingPending.uploadTerminalNotifiedAt = nil
+            guard FailedJobStore.shared.updatePending(existingPending) else {
+                throw WhisperError.jobFailed("Could not safely transfer this job to manual retry")
+            }
+        }
+        let pending = PendingJobRecord(
+            jobId: jobId,
+            audioFilePath: audioURL.path,
+            candidateServer: record.server ?? config.servers.first,
+            resolvedServer: record.server,
+            createdAt: record.createdAt,
+            submittedAt: nil,
+            acceptedAt: nil,
+            terminalAt: nil,
+            state: .recorded,
+            serverJobId: nil,
+            statusEndpoint: nil)
         FailedJobStore.shared.incrementRetry(jobId: jobId)
         FileLogger.shared.debug(.app, "retry: starting transcription",
                                 payload: ["jobId": jobId.uuidString,
                                           "path": record.audioFilePath,
                                           "attempt": record.retryCount + 1])
-
-        let config = SharedConfig.load()
+        guard FailedJobStore.shared.upsertPending(pending) else {
+            throw WhisperError.jobFailed("Could not save transcription recovery state")
+        }
         do {
             FileLogger.shared.info(.network, "retry: preferred server from failed-job record", payload: [
                 "jobId": jobId.uuidString,
@@ -1835,18 +2338,40 @@ final class DictationViewModel: ObservableObject {
             let text = try await transcribeWithAutoRetry(
                 audioURL: audioURL, jobId: jobId, config: config,
                 correlationId: jobId, initialServer: record.server,
+                backgroundSubmitter: BackgroundTranscriptionUploader.shared,
                 language: SharedConfig.keyboardLanguage().dictationLanguageField,
                 recordingDurationSeconds: record.recordedDurationSeconds)
 
             // Add to persistent text history.
-            TranscriptionHistory.shared.add(
-                text: text,
-                recoveredViaFallback: recoveredViaFallback)
+            guard var pending = FailedJobStore.shared.listPending().first(where: { $0.jobId == jobId }) else {
+                throw WhisperError.jobFailed("Recovery state was already finalized")
+            }
+            guard PendingJobRecoveryRules.mayClaimCompletion(
+                alreadyFinalizing: finalizingRecoveredJobIDs.contains(jobId)),
+                  finalizingRecoveredJobIDs.insert(jobId).inserted else { return text }
+            defer { finalizingRecoveredJobIDs.remove(jobId) }
+            if let current = FailedJobStore.shared.listPending().first(where: { $0.jobId == jobId }) {
+                pending = current
+                let originalTerminalAt = pending.terminalAt ?? pending.acceptedAt
+                pending.state = .ready
+                pending.terminalAt = originalTerminalAt ?? Date()
+                guard FailedJobStore.shared.updatePending(pending) else {
+                    throw WhisperError.jobFailed("Could not finalize transcription recovery state")
+                }
+            }
+            if !TranscriptionHistory.shared.entries.contains(where: { $0.id == jobId }) {
+                TranscriptionHistory.shared.add(
+                    text: text,
+                    recoveredViaFallback: recoveredViaFallback,
+                    id: jobId,
+                    timestamp: pending.terminalAt ?? pending.createdAt)
+            }
 
-            // Clean up — delete audio file first, then remove the record.
-            try? FileManager.default.removeItem(at: audioURL)
+            guard TranscriptionHistory.shared.entries.contains(where: { $0.id == jobId }),
+                  removeCompletedRecoveryState(jobId: jobId) else {
+                throw WhisperError.jobFailed("Could not finalize transcription recovery state")
+            }
             RecordingStore.shared.delete(jobId: jobId)
-            FailedJobStore.shared.remove(jobId: jobId)
 
             FileLogger.shared.debug(.app, "retry succeeded, cleaning up",
                                     payload: ["jobId": jobId.uuidString])
@@ -1854,9 +2379,26 @@ final class DictationViewModel: ObservableObject {
         } catch WhisperError.cancelled {
             // Cancelled is not a failure — leave the failed-job record untouched.
             throw WhisperError.cancelled
+        } catch let waitError as BackgroundUploadWaitError {
+            FailedJobStore.shared.updateErrorMessage(jobId: jobId, message: waitError.localizedDescription)
+            throw waitError
         } catch {
             let errorMessage = error.localizedDescription
             FailedJobStore.shared.updateErrorMessage(jobId: jobId, message: errorMessage)
+            if var pending = FailedJobStore.shared.listPending().first(where: { $0.jobId == jobId }) {
+                if pending.uploadTerminalKind == "accepted" {
+                    if let serverJobId = pending.serverJobId, let endpoint = pending.statusEndpoint {
+                        reconcileLateBackgroundAcceptance(
+                            id: jobId, serverJobId: serverJobId, statusEndpoint: endpoint)
+                    }
+                    throw error
+                }
+                pending.state = .failed
+                pending.terminalAt = Date()
+                if FailedJobStore.shared.updatePending(pending) {
+                    _ = FailedJobStore.shared.removePending(jobId: jobId)
+                }
+            }
             throw error
         }
     }
@@ -2343,6 +2885,9 @@ final class DictationViewModel: ObservableObject {
     }
 
     deinit {
+        if let backgroundUploadObserver {
+            NotificationCenter.default.removeObserver(backgroundUploadObserver)
+        }
         healthCheckTimer?.invalidate()
         serverProbeRefreshTimer?.invalidate()
         serverProbeRefreshTask?.cancel()

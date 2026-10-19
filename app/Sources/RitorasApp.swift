@@ -2,6 +2,7 @@ import SwiftUI
 import AVFoundation
 @main
 struct RitorasApp: App {
+    @UIApplicationDelegateAdaptor(BackgroundSessionAppDelegate.self) private var appDelegate
     @StateObject private var settings = AppSettings.shared
     @StateObject private var dictationViewModel = DictationViewModel()
     @State private var dictationRequest: DictationRequest?
@@ -41,6 +42,10 @@ struct RitorasApp: App {
                 if AVAudioSession.sharedInstance().recordPermission == .undetermined {
                     AVAudioSession.sharedInstance().requestRecordPermission { _ in }
                 }
+            }
+            .task {
+                await BackgroundTranscriptionUploader.shared.reconcileStartupTasks()
+                await dictationViewModel.reconcilePendingJobsOnLaunch()
             }
             .task {
                 // Phase 4: migrate flat-file logs, then run the first SQLite retention pass.
