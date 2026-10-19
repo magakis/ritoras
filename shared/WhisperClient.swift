@@ -475,9 +475,9 @@ enum WhisperClient {
             return try await transcribeAsync(
                 audioURL: audioURL, jobId: jobId, config: config,
                 correlationId: correlationId, preferredServer: serverURL,
-                onServerSelected: onServerSelected, onEvent: onEvent, language: language,
+                onServerSelected: onServerSelected, onEvent: onEvent,
+                backgroundSubmitter: backgroundSubmitter, language: language,
                 recordingDurationSeconds: recordingDurationSeconds,
-                backgroundSubmitter: backgroundSubmitter,
                 onDurableAcceptance: onDurableAcceptance)
         } catch WhisperError.asyncUnsupported {
             if let onEvent {
@@ -1390,8 +1390,13 @@ enum WhisperClient {
         if backgroundSubmitter == nil {
             do {
                 let bodyBuildT0 = Date()
-                bodyFileURL = try await buildBodyFileOffMain(audioURL: audioURL, boundary: boundary, language: language)
-                let bodyBytes = (try? FileManager.default.attributesOfItem(atPath: bodyFileURL.path)[.size] as? Int64).map(Int.init) ?? 0
+                let preparedBodyFileURL = try await buildBodyFileOffMain(
+                    audioURL: audioURL,
+                    boundary: boundary,
+                    language: language
+                )
+                bodyFileURL = preparedBodyFileURL
+                let bodyBytes = (try? FileManager.default.attributesOfItem(atPath: preparedBodyFileURL.path)[.size] as? Int64).map(Int.init) ?? 0
                 FileLogger.shared.debug(.transcription, "async multipart body build", payload: [
                     "elapsed_ms": Date().timeIntervalSince(bodyBuildT0) * 1000,
                     "bodyBytes": bodyBytes,
