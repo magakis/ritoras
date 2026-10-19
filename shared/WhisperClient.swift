@@ -477,8 +477,8 @@ enum WhisperClient {
                 correlationId: correlationId, preferredServer: serverURL,
                 onServerSelected: onServerSelected, onEvent: onEvent,
                 backgroundSubmitter: backgroundSubmitter, language: language,
-                recordingDurationSeconds: recordingDurationSeconds,
-                onDurableAcceptance: onDurableAcceptance)
+                onDurableAcceptance: onDurableAcceptance,
+                recordingDurationSeconds: recordingDurationSeconds)
         } catch WhisperError.asyncUnsupported {
             if let onEvent {
                 await onEvent(.syncFallbackEngaged)
