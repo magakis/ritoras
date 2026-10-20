@@ -1219,7 +1219,7 @@ private final class VADContext: @unchecked Sendable {
     }
 
     /// Flush any remaining accumulator into an emission (for `stop()`).
-    /// Trailing audio without enough speech is discarded as noise.
+    /// Trailing audio with no speech evidence is discarded as noise.
     func flush() -> VADEmission? {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
@@ -1241,7 +1241,7 @@ private final class VADContext: @unchecked Sendable {
         let flushReason: String
         if accumulatorSampleCount == 0 {
             flushReason = primingComplete ? "empty" : "priming_window"
-        } else if speechSamples < minSpeechSamples {
+        } else if speechSamples == 0 {
             flushReason = "below_minimums"
         } else {
             flushReason = "flush"
@@ -1258,7 +1258,7 @@ private final class VADContext: @unchecked Sendable {
         ))
         if !primingComplete, accumulatorSampleCount == 0 { return nil }
         guard accumulatorSampleCount > 0 else { return nil }
-        guard speechSamples >= minSpeechSamples else {
+        guard speechSamples > 0 else {
             FileLogger.shared.debug(.audio, "VAD: flush discarded trailing noise",
                                     payload: ["sampleCount": accumulatorSampleCount,
                                               "speechSamples": speechSamples])

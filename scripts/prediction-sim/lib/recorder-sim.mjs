@@ -862,7 +862,7 @@ export function makeRecorderHarness({
       const endMs = startMs + sampleCount / 16;
       const reason = sampleCount === 0
         ? (this.primingComplete ? 'empty' : 'priming_window')
-        : this.speechSamples < this.minSpeechSamples ? 'below_minimums' : 'flush';
+        : this.speechSamples === 0 ? 'below_minimums' : 'flush';
       if (this.endpointMachineEnabled) this.endpoint.forceFinalize('stop');
       this.emitEvent({
         t: 'ev',
@@ -877,7 +877,7 @@ export function makeRecorderHarness({
       });
       if (!this.primingComplete && sampleCount === 0) return { type: 'none' };
       if (sampleCount === 0) return { type: 'none' };
-      if (this.speechSamples < this.minSpeechSamples) {
+      if (this.speechSamples === 0) {
         this.accumulatorSamples = 0;
         this.chunkStartSessionSamples = null;
         this.speechSamples = 0;
