@@ -1,0 +1,12 @@
+{
+  "floorDb": -38,
+  "segments": [
+    { "durationMs": 900, "db": -38 },
+    { "durationMs": 100, "db": -30.4 },
+    { "durationMs": 1600, "db": -38 },
+    { "durationMs": 100, "db": -30.4 },
+    { "durationMs": 1600, "db": -38 },
+    { "durationMs": 100, "db": -30.4 },
+    { "durationMs": 900, "db": -38 }
+  ]
+}

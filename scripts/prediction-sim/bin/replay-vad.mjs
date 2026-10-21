@@ -18,6 +18,7 @@ import { makeRecorderHarness } from '../lib/recorder-sim.mjs';
 export const SHIPPING_SESSION_CONFIG = Object.freeze({
   mode: 'adaptive',
   strongDeltaDb: 10,
+  absoluteSpeechFloorDb: -50,
   continuationDeltaDb: 6,
   silenceDeltaDb: 3,
   dynamicsSpreadDb: 9,
@@ -59,6 +60,10 @@ export const SHIPPING_SESSION_CONFIG = Object.freeze({
   quietContinuationRiseCapDbPerSec: 12.0,
   softOnsetPreRollMs: 500,
   softOnsetPreRollEnabled: false,
+  slowOnsetEnabled: false,
+  slowOnsetDeltaDb: 6,
+  slowOnsetEvidenceMs: 400,
+  slowOnsetWindowSeconds: 1.5,
   loudLatchMs: 400,
   loudLatchAmbiguousEnabled: false,
   loudLatchWitnessDb: 3,
@@ -251,6 +256,10 @@ export function normalizeConfig(rawConfig = {}) {
   const gateConfig = makeVadGateConfig({
     mode: raw.mode,
     adaptiveDeltaDb: asFiniteNumber(raw.strongDeltaDb, 'strongDeltaDb'),
+    adaptiveAbsoluteSpeechFloorDb: asFiniteNumber(
+      raw.absoluteSpeechFloorDb,
+      'absoluteSpeechFloorDb',
+    ),
     adaptiveContinuationDeltaDb: asFiniteNumber(raw.continuationDeltaDb, 'continuationDeltaDb'),
     adaptiveSilenceDeltaDb: asFiniteNumber(raw.silenceDeltaDb, 'silenceDeltaDb'),
     adaptiveDynamicsSpreadDb: asFiniteNumber(raw.dynamicsSpreadDb, 'dynamicsSpreadDb'),
@@ -327,6 +336,13 @@ export function normalizeConfig(rawConfig = {}) {
     quietRiseCapWitnessDb: asFiniteNumber(raw.quietRiseCapWitnessDb, 'quietRiseCapWitnessDb'),
     softOnsetPreRollMs: asFiniteNumber(raw.softOnsetPreRollMs, 'softOnsetPreRollMs'),
     softOnsetPreRollEnabled: Boolean(raw.softOnsetPreRollEnabled),
+    slowOnsetEnabled: Boolean(raw.slowOnsetEnabled),
+    slowOnsetDeltaDb: asFiniteNumber(raw.slowOnsetDeltaDb, 'slowOnsetDeltaDb'),
+    slowOnsetEvidenceMs: asFiniteNumber(raw.slowOnsetEvidenceMs, 'slowOnsetEvidenceMs'),
+    slowOnsetWindowSeconds: asFiniteNumber(
+      raw.slowOnsetWindowSeconds,
+      'slowOnsetWindowSeconds',
+    ),
   };
   return { config: normalized, endpoint, gateConfig, minSpeechSamples: minimum('minSpeechMs'), minChunkSamples: minimum('minChunkMs'), maxNoiseSamples, recorderConfig: {
     loudPreRollMs: normalized.loudPreRollMs,
@@ -345,6 +361,10 @@ export function normalizeConfig(rawConfig = {}) {
     quietRiseCapWitnessDb: normalized.quietRiseCapWitnessDb,
     softOnsetPreRollMs: normalized.softOnsetPreRollMs,
     softOnsetPreRollEnabled: normalized.softOnsetPreRollEnabled,
+    slowOnsetEnabled: normalized.slowOnsetEnabled,
+    slowOnsetDeltaDb: normalized.slowOnsetDeltaDb,
+    slowOnsetEvidenceMs: normalized.slowOnsetEvidenceMs,
+    slowOnsetWindowSeconds: normalized.slowOnsetWindowSeconds,
   } };
 }
 
@@ -613,6 +633,7 @@ export function replaySession(session, configInput = session.config, {
   fromWav = null,
   labels = [],
   compare = true,
+  onFrameDiagnostic = null,
 } = {}) {
   const normalized = normalizeConfig(
     session.configIsTelemetry && configInput === session.config
@@ -629,12 +650,20 @@ export function replaySession(session, configInput = session.config, {
   const harness = makeRecorderHarness({
     ...harnessOptions(normalized),
     onFrame: record => generatedFrames.push(makeTimelineFrame(record, eventTime)),
-    onEvent: event => generatedEvents.push({ ...event, time: eventTime }),
+    onEvent: event => generatedEvents.push({ ...event, time: event.time ?? eventTime }),
   });
   for (const source of sourceFrames) {
     const duration = asFiniteNumber(source.dt, 'frame dt');
     eventTime = time + duration;
-    harness.drive(asFiniteNumber(source.db, 'frame db'), duration);
+    const frameResult = harness.drive(asFiniteNumber(source.db, 'frame db'), duration);
+    if (typeof onFrameDiagnostic === 'function') {
+      onFrameDiagnostic({
+        frameIndex: source.q ?? generatedFrames.length,
+        time: eventTime,
+        frame: frameResult.frameRecord,
+        diagnostic: frameResult.slowOnsetDiagnostic,
+      });
+    }
     time = eventTime;
   }
   if (fromWav || session.events.some(event => event.k === 'stop_flush')) {

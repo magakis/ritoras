@@ -16,6 +16,10 @@ export const VAD_SPLIT_SEARCH_SAMPLES = 3 * 16000;
 export const VAD_MIN_SILENCE_AT_SPLIT_SAMPLES = 100 * 16;
 export const VAD_POST_ROLL_SAMPLES = 400 * 16;
 
+export function calculateSlowOnsetThreshold(floorDb, slowLevelDeltaDb, absoluteGuardDb) {
+  return Math.max(floorDb + slowLevelDeltaDb, absoluteGuardDb);
+}
+
 function makeGate(partial = {}) {
   return new VADThresholdGate(makeVadGateConfig({
     mode: 'adaptive',
@@ -116,6 +120,7 @@ export function makeRecorderHarness({
   gateConfig = {},
   onFrame,
   onEvent,
+  onSlowOnsetDiagnostic,
 } = {}) {
   const recorderFrameDuration = frameMs / 1000;
   const endpoint = makeEndpoint(endpointSilenceMs, endpointConfig);
@@ -140,6 +145,10 @@ export function makeRecorderHarness({
     quietLatchWitnessEnabled: recorderConfig.quietLatchWitnessEnabled ?? false,
     quietLatchDutyCycle: recorderConfig.quietLatchDutyCycle ?? 1,
     quietLatchAmbiguousEnabled: recorderConfig.quietLatchAmbiguousEnabled ?? false,
+    slowOnsetEnabled: recorderConfig.slowOnsetEnabled ?? false,
+    slowOnsetDeltaDb: recorderConfig.slowOnsetDeltaDb ?? 6,
+    slowOnsetEvidenceMs: recorderConfig.slowOnsetEvidenceMs ?? 400,
+    slowOnsetWindowSeconds: recorderConfig.slowOnsetWindowSeconds ?? 1.5,
     quietRiseCapAppliesToAmbiguous: recorderConfig.quietRiseCapAppliesToAmbiguous ?? false,
     quietRiseCapWitnessDb: recorderConfig.quietRiseCapWitnessDb ?? 3,
     loudFlatTerminateEnabled: recorderConfig.loudFlatTerminateEnabled ?? false,
@@ -186,6 +195,8 @@ export function makeRecorderHarness({
     streakSawDynamics: false,
     latchWitnessRejectionCounted: false,
     quietLatchHistory: [],
+    slowOnsetHistory: [],
+    slowOnsetTriggerTime: null,
     quietLatchCandidateStartTime: null,
     quietLatchStartFloorDb: null,
     quietLatchCoverageMs: 0,
@@ -256,6 +267,7 @@ export function makeRecorderHarness({
     drive(frameDb, frameDuration = recorderFrameDuration) {
       const frameSamples = Math.round(frameDuration * 16000);
       this.sessionElapsedSamples += frameSamples;
+      this.slowOnsetTriggerTime = null;
       const primingWasComplete = this.primingComplete;
       const output = this.gate.process(frameDb, frameDuration);
       const completedPrimingNow = output.didCompletePriming;
@@ -298,6 +310,27 @@ export function makeRecorderHarness({
       const reanchorEvent = this.gate.takePendingReanchorEvent();
       const previousState = this.endpoint.state;
       const endpointWasIdle = previousState === 'idle';
+      const slowEvidenceBeforeMs = this.slowOnsetHistory.reduce(
+        (total, frame) => total + frame.end - frame.start,
+        0,
+      ) * 1000;
+      const slowThresholdFloorTermDb = output.floorDb === null
+        ? null
+        : output.floorDb + this.slowOnsetDeltaDb;
+      const slowThresholdGuardDb = this.gate.effectiveAbsoluteSpeechFloorDb;
+      const slowThresholdDb = output.floorDb === null
+        ? null
+        : calculateSlowOnsetThreshold(
+          output.floorDb,
+          this.slowOnsetDeltaDb,
+          slowThresholdGuardDb,
+        );
+      const slowOnsetQualifies = this.slowOnsetEnabled
+        && this.endpointMachineEnabled
+        && this.primingComplete
+        && endpointWasIdle
+        && output.floorDb !== null
+        && frameDb >= slowThresholdDb;
       if (reanchorEvent) this.reanchorEventCount += 1;
 
       if (reanchorEvent
@@ -402,6 +435,16 @@ export function makeRecorderHarness({
         && latchedContinuingOnset
         ? 'strong'
         : output.evidence;
+      const slowOnsetTriggered = this.updateSlowOnsetEvidence(
+        frameDb,
+        output.floorDb,
+        frameDuration,
+      );
+      const slowEvidenceAfterMs = this.slowOnsetHistory.reduce(
+        (total, frame) => total + frame.end - frame.start,
+        0,
+      ) * 1000;
+      const slowOnsetAccumulatorBeforeMs = this.accumulatorSamples / 16;
       const flatTerminatorStateEligible = previousState === 'speechActive'
         || (this.flatTerminatorActive && previousState === 'endPending');
       const flat = this.loudFlatTerminateEnabled
@@ -460,7 +503,22 @@ export function makeRecorderHarness({
       let decisionSilenceSamples = this.silenceSamples;
       if (this.endpointMachineEnabled) {
         const silenceBeforeDecision = this.endpoint.accumulatedSilenceSamples;
-        decision = this.endpoint.process(endpointEvidence, frameSamples);
+        if (slowOnsetTriggered) {
+          const remainingOnsetSamples = Math.max(
+            0,
+            this.endpoint.configuration.onsetSamples - this.endpoint.onsetEvidenceSamples,
+          );
+          decision = this.endpoint.process('strong', remainingOnsetSamples);
+          this.emitEvent({
+            t: 'ev',
+            k: 'slow_onset',
+            n: Math.round(this.slowOnsetEvidenceMs * 16),
+            r: 'cumulative_level',
+            time: this.slowOnsetTriggerTime,
+          });
+        } else {
+          decision = this.endpoint.process(endpointEvidence, frameSamples);
+        }
         if (this.flatTerminatorActive && this.endpoint.state === 'idle') {
           this.flatFrameStreakMs = 0;
           this.flatFrameStreakStartTime = null;
@@ -470,10 +528,13 @@ export function makeRecorderHarness({
           && endpointEvidence === 'silence'
           ? silenceBeforeDecision + frameSamples
           : this.endpoint.accumulatedSilenceSamples;
+        // Prevent the adaptive floor from chasing evidence held for a slow onset.
         this.gate.updateFloorTracking(
           frameDb,
           frameDuration,
-          previousState === 'idle' && this.endpoint.state === 'idle',
+          previousState === 'idle'
+            && this.endpoint.state === 'idle'
+            && this.slowOnsetHistory.length === 0,
           previousState === 'endPending' || this.endpoint.state === 'endPending',
           this.quietRiseCapAppliesToAmbiguous,
           this.quietRiseCapWitnessDb,
@@ -488,6 +549,9 @@ export function makeRecorderHarness({
         }
         if (decision.type === 'startUtterance' && this.primingComplete) {
           this.utteranceQuietestStrongDb = null;
+          if (slowOnsetTriggered) {
+            this.speechSamples += Math.round(this.slowOnsetEvidenceMs * 16);
+          }
           const softOnset = this.quietLatchWitnessEnabled
             && latchedContinuingOnset
             && !output.isLoudRegime;
@@ -567,12 +631,56 @@ export function makeRecorderHarness({
         frameDb,
         frameDuration,
       );
+      const slowOnsetDiagnostic = {
+        enabled: this.slowOnsetEnabled,
+        endpointMachineEnabled: this.endpointMachineEnabled,
+        floorDb: output.floorDb,
+        floorThresholdDb: slowThresholdFloorTermDb,
+        guardThresholdDb: slowThresholdGuardDb,
+        thresholdDb: slowThresholdDb,
+        qualifies: slowOnsetQualifies,
+        evidenceBeforeMs: slowEvidenceBeforeMs,
+        evidenceAfterMs: slowEvidenceAfterMs,
+        windowOccupancyMs: slowEvidenceAfterMs,
+        triggered: slowOnsetTriggered,
+        triggerTime: this.slowOnsetTriggerTime,
+        endpointStateBefore: previousState,
+        endpointStateAfter: this.endpoint.state,
+        decision: decision.type,
+        accumulatorBeforeMs: slowOnsetAccumulatorBeforeMs,
+        accumulatorAfterMs: this.accumulatorSamples / 16,
+        reason: !this.slowOnsetEnabled
+          ? 'tier_disabled'
+          : !this.endpointMachineEnabled
+            ? 'endpoint_machine_disabled'
+            : !this.primingComplete
+              ? 'priming_incomplete'
+            : output.floorDb === null
+              ? 'floor_unavailable'
+              : !endpointWasIdle
+                ? 'endpoint_not_idle'
+                : slowOnsetTriggered
+                  ? decision.type === 'startUtterance' ? 'trigger_accepted' : 'endpoint_ignored_trigger'
+                  : !slowOnsetQualifies && slowEvidenceAfterMs < slowEvidenceBeforeMs
+                    ? 'window_evicted_evidence'
+                    : slowOnsetQualifies ? 'evidence_accumulating' : 'below_threshold',
+      };
+      if (typeof onSlowOnsetDiagnostic === 'function') {
+        onSlowOnsetDiagnostic({
+          frame: frameRecord,
+          time: this.sessionElapsedSamples / 16000,
+          db: frameDb,
+          dt: frameDuration,
+          diagnostic: slowOnsetDiagnostic,
+        });
+      }
 
       if (decision.type === 'startUtterance' && this.primingComplete) {
         this.emitEvent({
           t: 'ev',
           k: 'start_utterance',
           n: this.accumulatorSamples,
+          ...(slowOnsetTriggered ? { time: this.slowOnsetTriggerTime } : {}),
           ...(this.quietLatchWitnessEnabled
             && latchedContinuingOnset
             && !output.isLoudRegime ? { softOnset: true } : {}),
@@ -740,6 +848,7 @@ export function makeRecorderHarness({
         discarded,
         latchedContinuingOnset,
         frameRecord,
+        slowOnsetDiagnostic,
       };
     },
 
@@ -748,6 +857,49 @@ export function makeRecorderHarness({
       this.quietLatchCandidateStartTime = null;
       this.quietLatchStartFloorDb = null;
       this.quietLatchCoverageMs = 0;
+    },
+
+    updateSlowOnsetEvidence(frameDb, floorDb, frameDuration) {
+      if (!this.slowOnsetEnabled
+        || !this.endpointMachineEnabled
+        || !this.primingComplete
+        || floorDb === null
+        || this.endpoint.state !== 'idle') {
+        this.slowOnsetHistory.length = 0;
+        return false;
+      }
+
+      const end = this.sessionElapsedSamples / 16000;
+      const start = end - frameDuration;
+      const requiredDb = calculateSlowOnsetThreshold(
+        floorDb,
+        this.slowOnsetDeltaDb,
+        this.gate.effectiveAbsoluteSpeechFloorDb,
+      );
+      if (frameDb >= requiredDb) this.slowOnsetHistory.push({ start, end });
+
+      const cutoff = end - this.slowOnsetWindowSeconds;
+      while (this.slowOnsetHistory.length > 0
+        && this.slowOnsetHistory[0].end <= cutoff) {
+        this.slowOnsetHistory.shift();
+      }
+      if (this.slowOnsetHistory.length > 0
+        && this.slowOnsetHistory[0].start < cutoff) {
+        this.slowOnsetHistory[0].start = cutoff;
+      }
+
+      const evidenceSeconds = this.slowOnsetHistory.reduce(
+        (total, frame) => total + frame.end - frame.start,
+        0,
+      );
+      if (evidenceSeconds * 1000 + 1e-6 < this.slowOnsetEvidenceMs) return false;
+      const evidenceOvershootSeconds = Math.max(
+        0,
+        evidenceSeconds - this.slowOnsetEvidenceMs / 1000,
+      );
+      this.slowOnsetTriggerTime = end - evidenceOvershootSeconds;
+      this.slowOnsetHistory.length = 0;
+      return true;
     },
 
     updateQuietWitnessStreak(output, frameDb, frameDuration, endpointWasIdle) {

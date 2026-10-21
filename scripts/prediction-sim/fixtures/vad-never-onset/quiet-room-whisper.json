@@ -1,0 +1,23 @@
+{
+  "vad_config": {
+    "absoluteSpeechFloorDb": -65,
+    "mode": "adaptive",
+    "strongDeltaDb": 10,
+    "endpointOnsetMs": 70,
+    "endpointEndEvidenceMs": 100,
+    "endpointSilenceMs": 700,
+    "endpointPreRollMs": 500,
+    "minSpeechMs": 300,
+    "minChunkMs": 300,
+    "analysisHpfEnabled": false
+  },
+  "trace": [
+    { "durationMs": 1200, "db": -75 },
+    { "durationMs": 500, "db": -62 },
+    { "durationMs": 400, "db": -75 },
+    { "durationMs": 500, "db": -60 },
+    { "durationMs": 400, "db": -75 },
+    { "durationMs": 500, "db": -64 },
+    { "durationMs": 1000, "db": -75 }
+  ]
+}
