@@ -6,6 +6,11 @@ import {
   VADThresholdGate,
 } from './vad-gate.mjs';
 import { StreamingEndpoint } from './streaming-endpoint.mjs';
+import {
+  IDLE_GAP_TELEMETRY_EVIDENCE_ABOVE_FLOOR_DB,
+  IDLE_GAP_TELEMETRY_MIN_SECONDS,
+  IDLE_GAP_TELEMETRY_PEAK_ABOVE_FLOOR_DB,
+} from './vad-idle-gap.mjs';
 
 const DEFAULT_FRAME_MS = 10;
 const DEFAULT_ENDPOINT_SILENCE_MS = 3000;
@@ -49,6 +54,9 @@ function makeSessionConfig(harness) {
     dynamicsSpreadDb: gate.effectiveDynamicsSpreadDb,
     flatSpreadDb: gate.effectiveFlatSpreadDb,
     dynamicsEnabled: gate.config.adaptiveDynamicsEnabled,
+    idleGapMinSeconds: IDLE_GAP_TELEMETRY_MIN_SECONDS,
+    idleGapPeakAboveFloorDb: IDLE_GAP_TELEMETRY_PEAK_ABOVE_FLOOR_DB,
+    idleGapEvidenceAboveFloorDb: IDLE_GAP_TELEMETRY_EVIDENCE_ABOVE_FLOOR_DB,
     staleFloorSeconds: gate.effectiveStaleFloorSeconds,
     fallTauSeconds: gate.effectiveFallTauSeconds,
     riseMultiplier: gate.effectiveRiseSpeedMultiplier,
@@ -173,6 +181,12 @@ export function makeRecorderHarness({
     chunkCount: 0,
     emittedSampleCount: 0,
     nextChunkId: 0,
+    idleGapRunSamples: 0,
+    idleGapPeakLevelDb: null,
+    idleGapFloorDbAtPeak: null,
+    idleGapStrongThresholdDbAtPeak: null,
+    idleGapContinuationThresholdDbAtPeak: null,
+    idleGapEvidenceAboveFloor5Samples: 0,
     frameSequence: 0,
     reanchorEventCount: 0,
     utteranceQuietestStrongDb: null,
@@ -631,6 +645,13 @@ export function makeRecorderHarness({
         frameDb,
         frameDuration,
       );
+      if (decision.type === 'startUtterance') {
+        this.finishIdleGapRun();
+      } else if (this.endpointMachineEnabled
+        && previousState === 'idle'
+        && this.endpoint.state === 'idle') {
+        this.trackIdleGapFrame(frameDb, frameSamples, output);
+      }
       const slowOnsetDiagnostic = {
         enabled: this.slowOnsetEnabled,
         endpointMachineEnabled: this.endpointMachineEnabled,
@@ -859,6 +880,49 @@ export function makeRecorderHarness({
       this.quietLatchCoverageMs = 0;
     },
 
+    trackIdleGapFrame(frameDb, frameSamples, output) {
+      if (typeof onEvent !== 'function') return;
+      this.idleGapRunSamples += frameSamples;
+      if (output.floorDb === null) return;
+      if (frameDb >= output.floorDb + IDLE_GAP_TELEMETRY_EVIDENCE_ABOVE_FLOOR_DB) {
+        this.idleGapEvidenceAboveFloor5Samples += frameSamples;
+      }
+      if (this.idleGapPeakLevelDb !== null && frameDb <= this.idleGapPeakLevelDb) return;
+      this.idleGapPeakLevelDb = frameDb;
+      this.idleGapFloorDbAtPeak = output.floorDb;
+      this.idleGapStrongThresholdDbAtPeak = output.thresholdDb;
+      this.idleGapContinuationThresholdDbAtPeak = output.continuationThresholdDb;
+    },
+
+    finishIdleGapRun() {
+      const durationMs = this.idleGapRunSamples / 16;
+      const peakAboveFloorDb = this.idleGapPeakLevelDb === null
+        || this.idleGapFloorDbAtPeak === null
+        ? null
+        : this.idleGapPeakLevelDb - this.idleGapFloorDbAtPeak;
+      if (typeof onEvent === 'function'
+        && durationMs >= IDLE_GAP_TELEMETRY_MIN_SECONDS * 1000
+        && peakAboveFloorDb >= IDLE_GAP_TELEMETRY_PEAK_ABOVE_FLOOR_DB) {
+        this.emitEvent({
+          t: 'ev',
+          k: 'discard',
+          r: 'idle_gap',
+          durationMs,
+          peakLevelDbFS: this.idleGapPeakLevelDb,
+          floorDbFSAtPeak: this.idleGapFloorDbAtPeak,
+          strongThresholdDbFSAtPeak: this.idleGapStrongThresholdDbAtPeak,
+          continuationThresholdDbFSAtPeak: this.idleGapContinuationThresholdDbAtPeak,
+          evidenceAboveFloor5Ms: this.idleGapEvidenceAboveFloor5Samples / 16,
+        });
+      }
+      this.idleGapRunSamples = 0;
+      this.idleGapPeakLevelDb = null;
+      this.idleGapFloorDbAtPeak = null;
+      this.idleGapStrongThresholdDbAtPeak = null;
+      this.idleGapContinuationThresholdDbAtPeak = null;
+      this.idleGapEvidenceAboveFloor5Samples = 0;
+    },
+
     updateSlowOnsetEvidence(frameDb, floorDb, frameDuration) {
       if (!this.slowOnsetEnabled
         || !this.endpointMachineEnabled
@@ -1006,6 +1070,7 @@ export function makeRecorderHarness({
     },
 
     flush() {
+      this.finishIdleGapRun();
       const sampleCount = this.accumulatorSamples;
       const speechMs = this.speechSamples / 16;
       const decisionTimeEndpointState = this.endpoint.state;

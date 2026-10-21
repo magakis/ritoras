@@ -285,6 +285,12 @@ private final class VADContext: @unchecked Sendable {
     private var telemetrySequence: UInt64 = 0
     private var telemetrySink: VADTelemetrySink?
     private var primingComplete = false
+    private var idleGapRunSamples = 0
+    private var idleGapPeakLevelDb: Double?
+    private var idleGapFloorDbAtPeak: Double?
+    private var idleGapStrongThresholdDbAtPeak: Double?
+    private var idleGapContinuationThresholdDbAtPeak: Double?
+    private var idleGapEvidenceAboveFloor5Samples = 0
 
     init(
         gateConfig: VADGateConfig,
@@ -356,6 +362,7 @@ private final class VADContext: @unchecked Sendable {
         telemetrySequence = 0
         sessionElapsedSamples = 0
         chunkStartSessionSamples = nil
+        resetIdleGapRun()
         headBuffer = SampleRingBuffer(capacity: sessionHeadBufferSamples)
         headSlices.removeAll(keepingCapacity: true)
         guard let sink else { return }
@@ -368,6 +375,9 @@ private final class VADContext: @unchecked Sendable {
         config["endpointResumeMs"] = Double(endpoint.configuration.resumeSamples) / 16.0
         config["endpointAmbiguousRescueMs"] = Double(endpoint.configuration.ambiguousRescueSamples) / 16.0
         config["endpointPreRollMs"] = Double(endpoint.configuration.preRollSamples) / 16.0
+        config["idleGapMinSeconds"] = SharedConfig.Defaults.streamVadIdleGapMinimumSecondsDefault
+        config["idleGapPeakAboveFloorDb"] = SharedConfig.Defaults.streamVadIdleGapPeakAboveFloorDbDefault
+        config["idleGapEvidenceAboveFloorDb"] = SharedConfig.Defaults.streamVadIdleGapEvidenceAboveFloorDbDefault
         config["sessionHeadBufferMs"] = Double(sessionHeadBufferSamples) / 16.0
         config["loudLatchMs"] = loudLatchMs
         config["loudLatchAmbiguousEnabled"] = loudLatchAmbiguousEnabled
@@ -501,6 +511,61 @@ private final class VADContext: @unchecked Sendable {
         )
         telemetrySequence &+= 1
         sink.frame(record)
+    }
+
+    private func trackIdleGapFrame(frameDb: Double, frameLength: Int, output: VADGateOutput) {
+        guard telemetrySink != nil else { return }
+        idleGapRunSamples += frameLength
+        guard let floorDb = output.floorDb else { return }
+
+        if frameDb >= floorDb + SharedConfig.Defaults.streamVadIdleGapEvidenceAboveFloorDbDefault {
+            idleGapEvidenceAboveFloor5Samples += frameLength
+        }
+        if let currentPeak = idleGapPeakLevelDb, frameDb <= currentPeak { return }
+        idleGapPeakLevelDb = frameDb
+        idleGapFloorDbAtPeak = floorDb
+        idleGapStrongThresholdDbAtPeak = output.thresholdDb
+        idleGapContinuationThresholdDbAtPeak = output.continuationThresholdDb
+    }
+
+    private func finishIdleGapRun() {
+        defer { resetIdleGapRun() }
+        let durationMs = Double(idleGapRunSamples) / 16.0
+        guard durationMs >= SharedConfig.Defaults.streamVadIdleGapMinimumSecondsDefault * 1_000.0,
+              let peakLevelDb = idleGapPeakLevelDb,
+              let floorDbAtPeak = idleGapFloorDbAtPeak,
+              peakLevelDb - floorDbAtPeak >= SharedConfig.Defaults.streamVadIdleGapPeakAboveFloorDbDefault,
+              let strongThresholdDbAtPeak = idleGapStrongThresholdDbAtPeak,
+              let continuationThresholdDbAtPeak = idleGapContinuationThresholdDbAtPeak else {
+            return
+        }
+
+        let evidenceAboveFloor5Ms = Double(idleGapEvidenceAboveFloor5Samples) / 16.0
+        telemetrySink?.event(VADTelemetryEvent(
+            kind: .discard,
+            reason: "idle_gap",
+            metadata: [
+                "durationMs": durationMs,
+                "peakLevelDbFS": peakLevelDb,
+                "floorDbFSAtPeak": floorDbAtPeak,
+                "strongThresholdDbFSAtPeak": strongThresholdDbAtPeak,
+                "continuationThresholdDbFSAtPeak": continuationThresholdDbAtPeak,
+                "evidenceAboveFloor5Ms": evidenceAboveFloor5Ms
+            ]
+        ))
+        FileLogger.shared.debug(.audio, "VAD: reported never-onset idle gap",
+                                payload: ["durationMs": durationMs,
+                                          "peakLevelDbFS": peakLevelDb,
+                                          "evidenceAboveFloor5Ms": evidenceAboveFloor5Ms])
+    }
+
+    private func resetIdleGapRun() {
+        idleGapRunSamples = 0
+        idleGapPeakLevelDb = nil
+        idleGapFloorDbAtPeak = nil
+        idleGapStrongThresholdDbAtPeak = nil
+        idleGapContinuationThresholdDbAtPeak = nil
+        idleGapEvidenceAboveFloor5Samples = 0
     }
 
     /// Process one audio frame. Returns a `VADEmission` if a silence endpoint
@@ -758,6 +823,16 @@ private final class VADContext: @unchecked Sendable {
                 decisionSilenceSamples: telemetryDecisionSilenceSamples
             )
             telemetryFrameRecorded = true
+            if endpointMachineEnabled {
+                switch decision {
+                case .startUtterance:
+                    finishIdleGapRun()
+                default:
+                    if previousEndpointState == .idle, endpoint.state == .idle {
+                        trackIdleGapFrame(frameDb: frameDb, frameLength: frameLength, output: out)
+                    }
+                }
+            }
             if case .startUtterance = decision, primingComplete {
                 telemetrySink?.event(VADTelemetryEvent(
                     kind: .startUtterance,
@@ -1232,6 +1307,7 @@ private final class VADContext: @unchecked Sendable {
         loudFlatStreakStartSeconds = nil
         loudFlatTerminatorActive = false
         let decisionTimeEndpointState = endpoint.state.rawValue
+        finishIdleGapRun()
         _ = endpoint.forceFinalize(kind: .stop)
         let sampleCount = accumulatorSampleCount
         let trailingSpeechMs = Double(speechSamples) / 16.0

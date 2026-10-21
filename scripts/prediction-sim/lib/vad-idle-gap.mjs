@@ -1,3 +1,7 @@
+export const IDLE_GAP_TELEMETRY_MIN_SECONDS = 2;
+export const IDLE_GAP_TELEMETRY_PEAK_ABOVE_FLOOR_DB = 3;
+export const IDLE_GAP_TELEMETRY_EVIDENCE_ABOVE_FLOOR_DB = 5;
+
 export function findIdleGapTriggers(frames, {
   guardDb = -50,
   deltaDb = 6,

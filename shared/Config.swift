@@ -295,6 +295,12 @@ struct SharedConfig {
         static let streamEndpointMachineEnabledDefault = true
         /// Balanced endpoint silence duration (ms).
         static let streamVadEndpointSilenceMsDefault: Int = 700
+        /// Minimum endpoint-idle run duration to surface as never-onset telemetry.
+        static let streamVadIdleGapMinimumSecondsDefault: Double = 2.0
+        /// Peak elevation above the tracked floor required for idle-gap telemetry.
+        static let streamVadIdleGapPeakAboveFloorDbDefault: Double = 3.0
+        /// Evidence metric reported with idle-gap telemetry; does not affect gating.
+        static let streamVadIdleGapEvidenceAboveFloorDbDefault: Double = 5.0
         /// Legacy silence duration key, retained for stored user preferences.
         static let streamVadSilenceMsKey = "streamVadSilenceMs"
         static let streamVadSilenceMsOverrideKey = "streamVadSilenceMsOverride"
