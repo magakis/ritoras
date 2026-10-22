@@ -1,18 +1,38 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  makeVadGateConfig,
+  makeVadGateConfig as makeVadGateConfigBase,
   VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB,
   VAD_ADAPTIVE_IMPLAUSIBLE_SPEECH_S,
   VAD_SPEECH_CEILING_MARGIN_DB,
   VADThresholdGate,
 } from '../lib/vad-gate.mjs';
 import { StreamingEndpoint } from '../lib/streaming-endpoint.mjs';
-import { makeRecorderHarness } from '../lib/recorder-sim.mjs';
+import { makeRecorderHarness as makeRecorderHarnessBase } from '../lib/recorder-sim.mjs';
 
 const frameDurationMs = 10;
 const frameDuration = frameDurationMs / 1000;
 const frameSamples = frameDurationMs * 16;
+
+// Convergence mechanics were originally specified against the 10/6 gate.
+function makeVadGateConfig(partial = {}) {
+  return makeVadGateConfigBase({
+    adaptiveDeltaDb: 10,
+    adaptiveContinuationDeltaDb: 6,
+    ...partial,
+  });
+}
+
+function makeRecorderHarness(options = {}) {
+  return makeRecorderHarnessBase({
+    ...options,
+    gateConfig: {
+      adaptiveDeltaDb: 10,
+      adaptiveContinuationDeltaDb: 6,
+      ...options.gateConfig,
+    },
+  });
+}
 
 function makeGate(partial = {}) {
   return new VADThresholdGate(makeVadGateConfig({

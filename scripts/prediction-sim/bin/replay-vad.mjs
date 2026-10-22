@@ -17,9 +17,9 @@ import { makeRecorderHarness } from '../lib/recorder-sim.mjs';
 
 export const SHIPPING_SESSION_CONFIG = Object.freeze({
   mode: 'adaptive',
-  strongDeltaDb: 10,
+  strongDeltaDb: 7,
   absoluteSpeechFloorDb: -50,
-  continuationDeltaDb: 6,
+  continuationDeltaDb: 4,
   silenceDeltaDb: 3,
   dynamicsSpreadDb: 9,
   flatSpreadDb: 5,

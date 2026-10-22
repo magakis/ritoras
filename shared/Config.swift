@@ -21,8 +21,8 @@ struct VADAdaptiveThresholds {
 enum VADProfileResolver {
     static let defaultSensitivityProfile = VADSensitivityProfile.automatic
     static let defaultPauseProfile = VADPauseProfile.balanced
-    static let defaultStrongDeltaDb = 10.0
-    static let defaultContinuingDeltaDb = 6.0
+    static let defaultStrongDeltaDb = 7.0
+    static let defaultContinuingDeltaDb = 4.0
     static let defaultSilenceDeltaDb = 3.0
     static let minimumAdaptiveDeltaDb = 3.0
     static let maximumAdaptiveDeltaDb = 24.0
@@ -36,15 +36,7 @@ enum VADProfileResolver {
         rawSilenceDeltaDb: Double? = nil,
         rawOverrideExplicit: Bool = false
     ) -> VADAdaptiveThresholds {
-        let profileValues: (strong: Double, continuing: Double)
-        switch profile {
-        case .automatic:
-            profileValues = (10.0, 6.0)
-        case .quietVoice:
-            profileValues = (7.0, 4.0)
-        case .noisyEnvironment:
-            profileValues = (13.0, 8.0)
-        }
+        let profileValues = (strong: 7.0, continuing: 4.0)
 
         let rawStrongDeltaDb: Double
         if let rawAdaptiveDeltaDb,
@@ -292,8 +284,6 @@ struct SharedConfig {
         static let stalePendingJobAgeLimit: TimeInterval = 7 * 24 * 60 * 60
         static let multipartBodyAgeLimit: TimeInterval = 7 * 24 * 60 * 60
         static let sessionHeadBufferMsDefault: Int = 2500
-        static let streamVadSensitivityProfileKey = "streamVadSensitivityProfile"
-        static let streamVadSensitivityProfileDefault: VADSensitivityProfile = .automatic
         static let streamVadPauseProfileKey = "streamVadPauseProfile"
         static let streamVadPauseProfileDefault: VADPauseProfile = .balanced
         /// Enables the sample-count endpoint state machine for streaming VAD.
@@ -1080,17 +1070,6 @@ struct SharedConfig {
         return max(1, value)
     }
 
-    /// Reads the user-facing VAD sensitivity profile from the App Group.
-    /// Invalid or missing values resolve to the automatic profile.
-    static func streamVadSensitivityProfile() -> VADSensitivityProfile {
-        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return Defaults.streamVadSensitivityProfileDefault
-        }
-        return VADSensitivityProfile(rawValue: defaults.string(
-            forKey: Defaults.streamVadSensitivityProfileKey
-        ) ?? "") ?? Defaults.streamVadSensitivityProfileDefault
-    }
-
     /// Returns whether the legacy adaptive delta key is present. Presence is the
     /// explicit Advanced override marker; profile values are used when it is absent.
     static func streamVadAdaptiveDeltaDbOverridePresent() -> Bool {
@@ -1115,7 +1094,7 @@ struct SharedConfig {
     static func streamVadAdaptiveThresholds() -> VADAdaptiveThresholds {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
             return VADProfileResolver.sensitivity(
-                profile: Defaults.streamVadSensitivityProfileDefault,
+                profile: .automatic,
                 rawAdaptiveDeltaDb: nil,
                 rawSilenceDeltaDb: Defaults.streamVadAdaptiveSilenceDeltaDbDefault
             )
@@ -1130,7 +1109,7 @@ struct SharedConfig {
             forKey: Defaults.streamVadAdaptiveSilenceDeltaDbKey
         ) as? NSNumber)?.doubleValue ?? Defaults.streamVadAdaptiveSilenceDeltaDbDefault
         return VADProfileResolver.sensitivity(
-            profile: streamVadSensitivityProfile(),
+            profile: .automatic,
             rawAdaptiveDeltaDb: rawAdaptiveDeltaDb,
             rawSilenceDeltaDb: rawSilenceDeltaDb,
             rawOverrideExplicit: rawOverrideExplicit

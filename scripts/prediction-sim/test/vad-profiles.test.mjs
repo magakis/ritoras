@@ -10,11 +10,11 @@ import {
 } from '../lib/vad-profiles.mjs';
 
 describe('VAD profile resolution', () => {
-  it('maps each sensitivity profile to coordinated onset and continuation deltas', () => {
+  it('resolves every stored sensitivity profile to quiet onset and continuation deltas', () => {
     assert.deepStrictEqual(resolveSensitivity({
       profile: VADSensitivityProfile.automatic,
     }), {
-      profile: 'automatic', strongDeltaDb: 10, continuingDeltaDb: 6, silenceDeltaDb: 3,
+      profile: 'automatic', strongDeltaDb: 7, continuingDeltaDb: 4, silenceDeltaDb: 3,
     });
     assert.deepStrictEqual(resolveSensitivity({
       profile: VADSensitivityProfile.quietVoice,
@@ -24,7 +24,7 @@ describe('VAD profile resolution', () => {
     assert.deepStrictEqual(resolveSensitivity({
       profile: VADSensitivityProfile.noisyEnvironment,
     }), {
-      profile: 'noisyEnvironment', strongDeltaDb: 13, continuingDeltaDb: 8, silenceDeltaDb: 3,
+      profile: 'noisyEnvironment', strongDeltaDb: 7, continuingDeltaDb: 4, silenceDeltaDb: 3,
     });
   });
 
@@ -36,7 +36,7 @@ describe('VAD profile resolution', () => {
     assert.strictEqual(resolveSensitivity({
       profile: VADSensitivityProfile.quietVoice,
       rawAdaptiveDeltaDb: 10,
-    }).strongDeltaDb, 7);
+    }).strongDeltaDb, 10);
     assert.strictEqual(resolveSensitivity({
       profile: VADSensitivityProfile.quietVoice,
       rawAdaptiveDeltaDb: 10,
@@ -51,7 +51,7 @@ describe('VAD profile resolution', () => {
   it('clamps corrupt raw deltas without producing invalid thresholds', () => {
     assert.strictEqual(resolveSensitivity({ rawAdaptiveDeltaDb: -100 }).strongDeltaDb, 3);
     assert.strictEqual(resolveSensitivity({ rawAdaptiveDeltaDb: 100 }).strongDeltaDb, 24);
-    assert.strictEqual(resolveSensitivity({ rawAdaptiveDeltaDb: Number.NaN }).strongDeltaDb, 10);
+    assert.strictEqual(resolveSensitivity({ rawAdaptiveDeltaDb: Number.NaN }).strongDeltaDb, 7);
   });
 
   it('maps pause profiles to their endpoint silence durations', () => {

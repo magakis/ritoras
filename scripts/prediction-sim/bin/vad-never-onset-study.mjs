@@ -10,6 +10,8 @@ import { replaySession } from './replay-vad.mjs';
 export const DEFAULT_CORPUS_PATH = '/home/michael/vad-corpus';
 export const DEFAULT_STUDY_PATH = '/home/michael/vad-corpus/STUDY-2026-10-22-latch.md';
 export const DEFAULT_VERDICT_PATH = '/home/michael/vad-corpus/STUDY-2026-10-22-latch.verdict.json';
+export const DEFAULT_QUIET_EVALUATION_PATH = '/home/michael/vad-corpus/STUDY-2026-10-22-quiet-default.md';
+export const DEFAULT_QUIET_VERDICT_PATH = '/home/michael/vad-corpus/STUDY-2026-10-22-quiet-default.verdict.json';
 const TARGET_ID = '20261022-161020';
 const TARGET_BASELINE_FIRST_ONSET_SECONDS = 9.983;
 // This capture records a sub-minimum tail that the current stop-flush mirror emits.
@@ -39,9 +41,18 @@ function parseArgs(argv) {
     corpusPath: DEFAULT_CORPUS_PATH,
     outputPath: DEFAULT_STUDY_PATH,
     verdictPath: DEFAULT_VERDICT_PATH,
+    evaluateProfile: null,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index];
+    if (key === '--evaluate-profile') {
+      const value = argv[++index];
+      if (value !== 'quiet') throw new Error('--evaluate-profile supports only quiet');
+      options.evaluateProfile = value;
+      options.outputPath = DEFAULT_QUIET_EVALUATION_PATH;
+      options.verdictPath = DEFAULT_QUIET_VERDICT_PATH;
+      continue;
+    }
     if (key === '--corpus' || key === '--output' || key === '--verdict') {
       const value = argv[++index];
       if (!value || value.startsWith('--')) throw new Error(`${key} requires a path`);
@@ -66,6 +77,107 @@ function emissionMap(replay) {
     duration: Number.isFinite(event.tm) ? event.tm / 1000 : null,
     id: event.id ?? null,
   }));
+}
+
+function emissionPeakAboveFloor(replay, emission) {
+  const levels = replay.frames.filter(frame => frame.time > emission.start
+    && frame.time <= emission.end && Number.isFinite(frame.db) && Number.isFinite(frame.fl))
+    .map(frame => frame.db - frame.fl);
+  return levels.length === 0 ? null : Math.max(...levels);
+}
+
+export function quietProfileConfig(recordedConfig) {
+  return { ...recordedConfig, strongDeltaDb: 7, continuationDeltaDb: 4 };
+}
+
+export function diffEmissionMaps(baseline, evaluation, evaluationReplay) {
+  const matched = new Set();
+  const added = [];
+  const changed = [];
+  for (const candidate of evaluation) {
+    const index = baseline.findIndex((previous, baselineIndex) => !matched.has(baselineIndex)
+      && previous.start !== null && candidate.start !== null
+      && Math.abs(previous.start - candidate.start) <= EMISSION_MATCH_TOLERANCE_SECONDS);
+    if (index >= 0) {
+      matched.add(index);
+      if (candidate.end !== null && baseline[index].end !== null
+        && Math.abs(candidate.end - baseline[index].end) > EMISSION_MATCH_TOLERANCE_SECONDS) {
+        changed.push({
+          type: candidate.end > baseline[index].end ? 'extended' : 'shortened',
+          baseline: [baseline[index]],
+          evaluation: candidate,
+        });
+      }
+      continue;
+    }
+    const overlaps = baseline.map((previous, baselineIndex) => ({ previous, baselineIndex }))
+      .filter(({ previous, baselineIndex }) => !matched.has(baselineIndex)
+        && previous.start !== null && previous.end !== null
+        && candidate.start !== null && candidate.end !== null
+        && candidate.start < previous.end && candidate.end > previous.start);
+    if (overlaps.length > 0) {
+      overlaps.forEach(({ baselineIndex }) => matched.add(baselineIndex));
+      changed.push({
+        type: overlaps.length > 1 ? 'merged' : 'extended',
+        baseline: overlaps.map(({ previous }) => previous),
+        evaluation: candidate,
+      });
+    } else {
+      added.push({ ...candidate, peakAboveFloorDb: emissionPeakAboveFloor(evaluationReplay, candidate) });
+    }
+  }
+  return { added, changed };
+}
+
+export function runQuietProfileEvaluation({ corpusPath = DEFAULT_CORPUS_PATH } = {}) {
+  const inventory = readCorpusInventory(corpusPath);
+  const thinnedIds = new Set((inventory.totals.telemetryRetentionWarnings ?? []).map(item => item.id));
+  const sessions = discoverClientTelemetry(corpusPath).filter(session => !thinnedIds.has(session.id));
+  const perSession = sessions.map(session => {
+    const baselineReplay = replaySession(session, session.config, { compare: false });
+    const evaluationReplay = replaySession(session, quietProfileConfig(session.config), { compare: false });
+    const baseline = emissionMap(baselineReplay);
+    const evaluation = emissionMap(evaluationReplay);
+    const diff = diffEmissionMaps(baseline, evaluation, evaluationReplay);
+    return {
+      id: session.id,
+      baselineEmissionCount: baseline.length,
+      evaluationEmissionCount: evaluation.length,
+      identical: diff.added.length === 0 && diff.changed.length === 0
+        && baseline.length === evaluation.length,
+      added: diff.added,
+      changed: diff.changed,
+    };
+  });
+  const summary = {
+    telemetrySessions: sessions.length,
+    skippedThinnedSessions: [...thinnedIds],
+    affectedSessions: perSession.filter(item => !item.identical).length,
+    sessionsWithAddedEmissions: perSession.filter(item => item.added.length > 0).length,
+    addedEmissionCount: perSession.reduce((total, item) => total + item.added.length, 0),
+    addedEmissionSeconds: perSession.reduce((total, item) => total
+      + item.added.reduce((seconds, emission) => seconds + (emission.duration ?? 0), 0), 0),
+  };
+  return { evaluation: 'quiet-default', configOverride: { strongDeltaDb: 7, continuationDeltaDb: 4 }, summary, sessions: perSession };
+}
+
+export function quietEvaluationMarkdown(result) {
+  const lines = [
+    '# Quiet automatic profile evaluation · 2026-10-22',
+    '',
+    'Recorded configuration is the baseline; the evaluation overrides only strongDeltaDb=7 and continuationDeltaDb=4. Loud-regime configuration and all other recorded values are preserved.',
+    `Sessions affected: ${result.summary.affectedSessions}/${result.summary.telemetrySessions}; sessions gaining emissions: ${result.summary.sessionsWithAddedEmissions}; added emissions: ${result.summary.addedEmissionCount}; added seconds: ${result.summary.addedEmissionSeconds.toFixed(3)}.`,
+    `Thinned-history sessions skipped: ${result.summary.skippedThinnedSessions.join(', ') || 'none'}.`,
+    '',
+    '| Session | Same? | Baseline | Evaluation | Added emissions (start / duration / peak above floor) | Extended / merged emissions |',
+    '|---|---|---:|---:|---|---|',
+  ];
+  for (const item of result.sessions) {
+    const additions = item.added.map(emission => `${emission.start?.toFixed(3) ?? 'n/a'}s / ${emission.duration?.toFixed(3) ?? 'n/a'}s / ${emission.peakAboveFloorDb?.toFixed(2) ?? 'n/a'} dB`);
+    const changes = item.changed.map(change => `${change.type}: ${change.baseline.map(emission => `${emission.start?.toFixed(3) ?? 'n/a'}–${emission.end?.toFixed(3) ?? 'n/a'}s`).join(', ')} → ${change.evaluation.start?.toFixed(3) ?? 'n/a'}–${change.evaluation.end?.toFixed(3) ?? 'n/a'}s`);
+    lines.push(`| ${item.id} | ${item.identical ? 'yes' : 'no'} | ${item.baselineEmissionCount} | ${item.evaluationEmissionCount} | ${additions.join('; ') || 'none'} | ${changes.join('; ') || 'none'} |`);
+  }
+  return `${lines.join('\n')}\n`;
 }
 
 export function compareEmissionMaps(expected, actual) {
@@ -794,13 +906,21 @@ export function runStudy({
 }
 
 function usage() {
-  return 'Usage: node scripts/prediction-sim/bin/vad-never-onset-study.mjs [--corpus PATH] [--output PATH] [--verdict PATH]';
+  return 'Usage: node scripts/prediction-sim/bin/vad-never-onset-study.mjs [--corpus PATH] [--output PATH] [--verdict PATH] [--evaluate-profile quiet]';
 }
 
 export function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
   if (options.help) {
     process.stdout.write(`${usage()}\n`);
+    return;
+  }
+  if (options.evaluateProfile === 'quiet') {
+    const result = runQuietProfileEvaluation(options);
+    fs.writeFileSync(options.outputPath, quietEvaluationMarkdown(result));
+    fs.writeFileSync(options.verdictPath, `${JSON.stringify(result, null, 2)}\n`);
+    process.stdout.write(`Sessions affected: ${result.summary.affectedSessions}/${result.summary.telemetrySessions}; added emissions: ${result.summary.addedEmissionCount}; added seconds: ${result.summary.addedEmissionSeconds.toFixed(3)}\n`);
+    process.stdout.write(`Evaluation report: ${options.outputPath}\nMachine verdict: ${options.verdictPath}\n`);
     return;
   }
   const study = runStudy(options);

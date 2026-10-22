@@ -17,7 +17,6 @@ class AppSettings: ObservableObject {
     @Published var audioCaptureAttenuationEnabled: Bool = SharedConfig.Defaults.audioCaptureAttenuationEnabledDefault
 
     @Published var streamVadMode: VADMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
-    @Published var streamVadSensitivityProfile: VADSensitivityProfile = SharedConfig.Defaults.streamVadSensitivityProfileDefault
     @Published var streamVadPauseProfile: VADPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
     @Published var streamVadSilenceMs: Int = SharedConfig.Defaults.streamVadSilenceMsDefault
     @Published var streamVadSpeechRms: Float = SharedConfig.Defaults.streamVadSpeechRmsDefault
@@ -46,7 +45,6 @@ class AppSettings: ObservableObject {
         audioMeasurementModeEnabled = SharedConfig.audioMeasurementModeEnabled()
         audioCaptureAttenuationEnabled = SharedConfig.audioCaptureAttenuationEnabled()
         streamVadMode = SharedConfig.streamVadMode()
-        streamVadSensitivityProfile = SharedConfig.streamVadSensitivityProfile()
         streamVadPauseProfile = SharedConfig.streamVadPauseProfile()
         streamVadSilenceMs = SharedConfig.streamVadSilenceMs()
         streamVadSilenceOverridePresent = SharedConfig.streamVadSilenceMsOverridePresent()
@@ -110,11 +108,6 @@ class AppSettings: ObservableObject {
                                    payload: ["value": newValue.rawValue])
             self?.saveStreamVadMode(newValue)
         }.store(in: &cancellables)
-        $streamVadSensitivityProfile.dropFirst().sink { [weak self] newValue in
-            FileLogger.shared.info(.settings, "saving streamVadSensitivityProfile",
-                                   payload: ["value": newValue.rawValue])
-            self?.saveStreamVadSensitivityProfile(newValue)
-        }.store(in: &cancellables)
         $streamVadPauseProfile.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving streamVadPauseProfile",
                                    payload: ["value": newValue.rawValue])
@@ -169,7 +162,6 @@ class AppSettings: ObservableObject {
         saveAudioMeasurementModeEnabled(audioMeasurementModeEnabled)
         saveAudioCaptureAttenuationEnabled(audioCaptureAttenuationEnabled)
         appGroupDefaults?.set(streamVadMode.rawValue, forKey: SharedConfig.Defaults.streamVadModeKey)
-        appGroupDefaults?.set(streamVadSensitivityProfile.rawValue, forKey: SharedConfig.Defaults.streamVadSensitivityProfileKey)
         appGroupDefaults?.set(streamVadPauseProfile.rawValue, forKey: SharedConfig.Defaults.streamVadPauseProfileKey)
         if streamVadSilenceOverridePresent {
             appGroupDefaults?.set(streamVadSilenceMs, forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
@@ -240,11 +232,6 @@ class AppSettings: ObservableObject {
 
     private func saveStreamVadMode(_ mode: VADMode) {
         appGroupDefaults?.set(mode.rawValue, forKey: SharedConfig.Defaults.streamVadModeKey)
-        postSettingsChanged()
-    }
-
-    private func saveStreamVadSensitivityProfile(_ profile: VADSensitivityProfile) {
-        appGroupDefaults?.set(profile.rawValue, forKey: SharedConfig.Defaults.streamVadSensitivityProfileKey)
         postSettingsChanged()
     }
 
@@ -331,7 +318,6 @@ class AppSettings: ObservableObject {
         streamVadSilenceOverridePresent = false
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
-        streamVadSensitivityProfile = SharedConfig.Defaults.streamVadSensitivityProfileDefault
         streamVadPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
         streamVadMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
         streamVadSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault

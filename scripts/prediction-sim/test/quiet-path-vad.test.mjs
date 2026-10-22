@@ -1,11 +1,13 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { makeRecorderHarness } from '../lib/recorder-sim.mjs';
-import { VADThresholdGate, makeVadGateConfig } from '../lib/vad-gate.mjs';
+import { makeRecorderHarness as makeRecorderHarnessBase } from '../lib/recorder-sim.mjs';
+import { VADThresholdGate, makeVadGateConfig as makeVadGateConfigBase } from '../lib/vad-gate.mjs';
 import { parseSession, replaySession } from '../bin/replay-vad.mjs';
 
 const DEFAULT_QUIET_CONFIG = {
+  strongDeltaDb: 10,
+  continuationDeltaDb: 6,
   quietLatchMs: 1000,
   quietLatchWitnessDb: 3,
   quietLatchWitnessEnabled: false,
@@ -17,6 +19,26 @@ const DEFAULT_QUIET_CONFIG = {
   softOnsetPreRollMs: 500,
   softOnsetPreRollEnabled: false,
 };
+
+// These mechanics fixtures were calibrated against the pre-change 10/6 gate.
+function makeVadGateConfig(partial = {}) {
+  return makeVadGateConfigBase({
+    adaptiveDeltaDb: 10,
+    adaptiveContinuationDeltaDb: 6,
+    ...partial,
+  });
+}
+
+function makeRecorderHarness(options = {}) {
+  return makeRecorderHarnessBase({
+    ...options,
+    gateConfig: {
+      adaptiveDeltaDb: 10,
+      adaptiveContinuationDeltaDb: 6,
+      ...options.gateConfig,
+    },
+  });
+}
 
 function fixture(filename) {
   return fs.readFileSync(new URL(`../fixtures/vad-telemetry/${filename}`, import.meta.url), 'utf8');
@@ -119,9 +141,14 @@ describe('quiet-path VAD mirror knobs', () => {
     ];
     for (const filename of filenames) {
       const session = parseSession(fixture(filename));
-      const baseline = replaySession(session, session.config, { compare: false });
-      const configured = replaySession(session, {
+      const mechanicsConfig = {
         ...session.config,
+        strongDeltaDb: 10,
+        continuationDeltaDb: 6,
+      };
+      const baseline = replaySession(session, mechanicsConfig, { compare: false });
+      const configured = replaySession(session, {
+        ...mechanicsConfig,
         ...DEFAULT_QUIET_CONFIG,
       }, { compare: false });
       assert.deepEqual(configured.frames, baseline.frames, filename);

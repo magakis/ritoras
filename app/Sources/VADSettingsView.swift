@@ -34,9 +34,6 @@ struct VADSettingsView: View {
             .onChange(of: settings.streamVadAbsoluteSpeechFloorDb) { _, _ in
                 rebuildTesterGate()
             }
-            .onChange(of: settings.streamVadSensitivityProfile) { _, _ in
-                rebuildTesterGate()
-            }
     }
 
     private var formContent: some View {
@@ -233,11 +230,6 @@ struct VADSettingsView: View {
 
     private var normalSection: some View {
         Section {
-            Picker("Sensitivity", selection: $settings.streamVadSensitivityProfile) {
-                Text("Quiet").tag(VADSensitivityProfile.quietVoice)
-                Text("Normal").tag(VADSensitivityProfile.automatic)
-                Text("Noisy").tag(VADSensitivityProfile.noisyEnvironment)
-            }
             absoluteSpeechFloorRow
             silenceDurationRow
         } header: {
@@ -525,7 +517,6 @@ struct VADSettingsView: View {
         [
             ("telemetryEnabled", SharedConfig.streamVadTelemetryEnabled() ? "ON" : "OFF"),
             ("mode", SharedConfig.streamVadMode().rawValue),
-            ("sensitivity", SharedConfig.streamVadSensitivityProfile().rawValue),
             ("pause", SharedConfig.streamVadPauseProfile().rawValue),
             ("staticRms", "\(SharedConfig.streamVadSpeechRms())"),
             ("endpointSilence", "\(SharedConfig.streamVadSilenceMs())ms"),

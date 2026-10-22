@@ -57,8 +57,8 @@ export function makeVadGateConfig(partial = {}) {
   return {
     mode: 'static',
     staticRms: 0.025,
-    adaptiveDeltaDb: 10.0,
-    adaptiveContinuationDeltaDb: 6.0,
+    adaptiveDeltaDb: 7.0,
+    adaptiveContinuationDeltaDb: 4.0,
     adaptiveAbsoluteSpeechFloorDb: VAD_ABSOLUTE_SPEECH_FLOOR_DB,
     adaptiveRiseSpeedMultiplier: 1.0,
     adaptiveSilenceDeltaDb: 3.0,

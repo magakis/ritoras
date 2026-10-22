@@ -21,7 +21,12 @@ import {
 import { StreamingEndpoint } from '../lib/streaming-endpoint.mjs';
 
 function config(partial = {}) {
-  return makeVadGateConfig(partial);
+  // Classification mechanics in this suite use the original 10/6 boundaries.
+  return makeVadGateConfig({
+    adaptiveDeltaDb: 10,
+    adaptiveContinuationDeltaDb: 6,
+    ...partial,
+  });
 }
 
 function seedAdaptiveGate(partial = {}, seedDb = -50) {

@@ -5,9 +5,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { adaptClientTelemetry, recordedEmissionMap } from '../lib/client-telemetry.mjs';
 import { findIdleGapTriggers } from '../lib/vad-idle-gap.mjs';
-import { calculateSlowOnsetThreshold } from '../lib/recorder-sim.mjs';
-import { expandLevelSegments, makeFaultTraceHarness } from '../lib/vad-never-onset-fault-trace.mjs';
-import { replaySession } from '../bin/replay-vad.mjs';
+import { calculateSlowOnsetThreshold, makeRecorderHarness } from '../lib/recorder-sim.mjs';
+import { createQuietProfileEvaluationFixture } from '../lib/quiet-profile-evaluation-fixture.mjs';
+import { expandLevelSegments } from '../lib/vad-never-onset-fault-trace.mjs';
+import { normalizeConfig, replaySession } from '../bin/replay-vad.mjs';
 import {
   compareEmissionMaps,
   findFirstFrameDivergence,
@@ -29,13 +30,30 @@ function runTrace(frames, {
   adaptiveDynamicsEnabled = false,
 } = {}) {
   const events = [];
-  const harness = makeFaultTraceHarness({
-    slowOnsetEnabled,
-    absoluteSpeechFloorDb,
-    slowOnsetDeltaDb,
-    slowOnsetEvidenceMs,
-    slowOnsetWindowSeconds,
-    adaptiveDynamicsEnabled,
+  const harness = makeRecorderHarness({
+    frameMs: 10,
+    minChunkSamples: 0,
+    minSpeechSamples: 0,
+    endpointConfig: {
+      onsetMs: 70,
+      endEvidenceMs: 100,
+      endpointSilenceMs: 700,
+      preRollMs: 500,
+    },
+    gateConfig: {
+      mode: 'adaptive',
+      adaptiveDeltaDb: 10,
+      adaptiveContinuationDeltaDb: 6,
+      adaptiveAbsoluteSpeechFloorDb: absoluteSpeechFloorDb,
+      adaptiveDynamicsEnabled,
+      adaptiveRiseSpeedMultiplier: 1,
+    },
+    recorderConfig: {
+      slowOnsetEnabled,
+      slowOnsetDeltaDb,
+      slowOnsetEvidenceMs,
+      slowOnsetWindowSeconds,
+    },
     onEvent: event => events.push(event),
   });
   let elapsed = 0;
@@ -56,6 +74,21 @@ function framesForTrace(fixture) {
 }
 
 describe('never-onset slow-path validation', () => {
+  it('overrides only normal deltas for quiet evaluation and preserves loud-regime caps', () => {
+    const { session, baselineConfig, evaluationConfig } = createQuietProfileEvaluationFixture();
+    const baseline = replaySession(session, baselineConfig, { compare: false });
+    const evaluation = replaySession(session, evaluationConfig, { compare: false });
+    const normalized = normalizeConfig(evaluationConfig);
+
+    assert.equal(baseline.events.some(event => event.k === 'emit'), false);
+    assert.equal(evaluation.events.filter(event => event.k === 'emit').length, 1);
+    assert.equal(evaluationConfig.strongDeltaDb, 7);
+    assert.equal(evaluationConfig.continuationDeltaDb, 4);
+    assert.equal(normalized.config.loudRegimeEnterDb, -35);
+    assert.equal(normalized.gateConfig.loudStrongDeltaDb, 7);
+    assert.equal(normalized.gateConfig.loudContinuationDeltaDb, 3);
+  });
+
   it('replays only client db/dt and extracts recorded emission boundaries', () => {
     const payload = {
       vad_config: { absoluteSpeechFloorDb: -70, mode: 'adaptive' },

@@ -15,8 +15,8 @@ export const VADPauseProfile = Object.freeze({
 export const VAD_PROFILE_DEFAULTS = Object.freeze({
   sensitivity: VADSensitivityProfile.automatic,
   pause: VADPauseProfile.balanced,
-  strongDeltaDb: 10,
-  continuingDeltaDb: 6,
+  strongDeltaDb: 7,
+  continuingDeltaDb: 4,
   silenceDeltaDb: 3,
   legacySilenceMs: 2000,
   minimumSilenceMs: 450,
@@ -24,9 +24,9 @@ export const VAD_PROFILE_DEFAULTS = Object.freeze({
 });
 
 const SENSITIVITY_VALUES = Object.freeze({
-  automatic: { strongDeltaDb: 10, continuingDeltaDb: 6 },
+  automatic: { strongDeltaDb: 7, continuingDeltaDb: 4 },
   quietVoice: { strongDeltaDb: 7, continuingDeltaDb: 4 },
-  noisyEnvironment: { strongDeltaDb: 13, continuingDeltaDb: 8 },
+  noisyEnvironment: { strongDeltaDb: 7, continuingDeltaDb: 4 },
 });
 
 const PAUSE_DURATIONS_MS = Object.freeze({

@@ -1,10 +1,23 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { makeRecorderHarness } from '../lib/recorder-sim.mjs';
+import { makeRecorderHarness as makeRecorderHarnessBase } from '../lib/recorder-sim.mjs';
 import { parseSession, replaySession } from '../bin/replay-vad.mjs';
 
 const FRAME_MS = 10;
+
+// These latch mechanics fixtures use the original 10/6 boundaries and -34 entry.
+function makeRecorderHarness(options = {}) {
+  return makeRecorderHarnessBase({
+    ...options,
+    gateConfig: {
+      adaptiveDeltaDb: 10,
+      adaptiveContinuationDeltaDb: 6,
+      loudRegimeEnterDb: -34,
+      ...options.gateConfig,
+    },
+  });
+}
 
 function prefill(harness, frameDb, frames = 300) {
   for (let i = 0; i < frames; i++) harness.drive(frameDb);
