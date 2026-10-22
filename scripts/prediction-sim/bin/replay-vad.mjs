@@ -67,6 +67,8 @@ export const SHIPPING_SESSION_CONFIG = Object.freeze({
   loudLatchMs: 400,
   loudLatchAmbiguousEnabled: false,
   loudLatchWitnessDb: 3,
+  latchAmbiguousGraceMs: 0,
+  dynamicsWitnessDb: null,
   loudFlatTerminateEnabled: false,
   loudFlatSpreadDb: 2.5,
   loudFlatTerminateSeconds: 3,
@@ -253,6 +255,13 @@ export function normalizeConfig(rawConfig = {}) {
     throw new Error(`mode must be static or adaptive; got ${raw.mode}`);
   }
 
+  // The sweep knob lowers the shared normal/loud dynamics spread gate; the
+  // separate 3 dB loudLatchWitnessDb remains at its current value.
+  const dynamicsWitnessDb = raw.dynamicsWitnessDb === null
+    || raw.dynamicsWitnessDb === undefined
+    ? null
+    : asFiniteNumber(raw.dynamicsWitnessDb, 'dynamicsWitnessDb');
+
   const gateConfig = makeVadGateConfig({
     mode: raw.mode,
     adaptiveDeltaDb: asFiniteNumber(raw.strongDeltaDb, 'strongDeltaDb'),
@@ -262,7 +271,10 @@ export function normalizeConfig(rawConfig = {}) {
     ),
     adaptiveContinuationDeltaDb: asFiniteNumber(raw.continuationDeltaDb, 'continuationDeltaDb'),
     adaptiveSilenceDeltaDb: asFiniteNumber(raw.silenceDeltaDb, 'silenceDeltaDb'),
-    adaptiveDynamicsSpreadDb: asFiniteNumber(raw.dynamicsSpreadDb, 'dynamicsSpreadDb'),
+    adaptiveDynamicsSpreadDb: asFiniteNumber(
+      dynamicsWitnessDb ?? raw.dynamicsSpreadDb,
+      dynamicsWitnessDb === null ? 'dynamicsSpreadDb' : 'dynamicsWitnessDb',
+    ),
     adaptiveFlatSpreadDb: asFiniteNumber(raw.flatSpreadDb, 'flatSpreadDb'),
     adaptiveDynamicsEnabled: Boolean(raw.dynamicsEnabled),
     adaptiveStaleFloorSeconds: asFiniteNumber(raw.staleFloorSeconds, 'staleFloorSeconds'),
@@ -276,7 +288,10 @@ export function normalizeConfig(rawConfig = {}) {
     loudStrongDeltaDb: asFiniteNumber(raw.loudStrongDeltaDb, 'loudStrongDeltaDb'),
     loudContinuationDeltaDb: asFiniteNumber(raw.loudContinuationDeltaDb, 'loudContinuationDeltaDb'),
     loudSilenceDeltaDb: asFiniteNumber(raw.loudSilenceDeltaDb, 'loudSilenceDeltaDb'),
-    loudDynamicsSpreadDb: asFiniteNumber(raw.loudDynamicsSpreadDb, 'loudDynamicsSpreadDb'),
+    loudDynamicsSpreadDb: asFiniteNumber(
+      dynamicsWitnessDb ?? raw.loudDynamicsSpreadDb,
+      dynamicsWitnessDb === null ? 'loudDynamicsSpreadDb' : 'dynamicsWitnessDb',
+    ),
     loudRiseDbPerSec: asFiniteNumber(raw.loudRiseDbPerSec, 'loudRiseDbPerSec'),
     quietContinuationRiseCapDbPerSec: asFiniteNumber(
       raw.quietContinuationRiseCapDbPerSec,
@@ -304,6 +319,8 @@ export function normalizeConfig(rawConfig = {}) {
     continuationDeltaDb: gate.effectiveAdaptiveContinuationDeltaDb,
     silenceDeltaDb: gate.effectiveSilenceDeltaDb,
     dynamicsSpreadDb: gate.effectiveDynamicsSpreadDb,
+    loudDynamicsSpreadDb: gate.config.loudDynamicsSpreadDb,
+    dynamicsWitnessDb: dynamicsWitnessDb ?? gate.effectiveDynamicsSpreadDb,
     flatSpreadDb: gate.effectiveFlatSpreadDb,
     dynamicsEnabled: gate.config.adaptiveDynamicsEnabled,
     staleFloorSeconds: gate.effectiveStaleFloorSeconds,
@@ -332,6 +349,7 @@ export function normalizeConfig(rawConfig = {}) {
     quietLatchWitnessEnabled: Boolean(raw.quietLatchWitnessEnabled),
     quietLatchDutyCycle: asFiniteNumber(raw.quietLatchDutyCycle, 'quietLatchDutyCycle'),
     quietLatchAmbiguousEnabled: Boolean(raw.quietLatchAmbiguousEnabled),
+    latchAmbiguousGraceMs: Math.max(0, asFiniteNumber(raw.latchAmbiguousGraceMs, 'latchAmbiguousGraceMs')),
     quietRiseCapAppliesToAmbiguous: Boolean(raw.quietRiseCapAppliesToAmbiguous),
     quietRiseCapWitnessDb: asFiniteNumber(raw.quietRiseCapWitnessDb, 'quietRiseCapWitnessDb'),
     softOnsetPreRollMs: asFiniteNumber(raw.softOnsetPreRollMs, 'softOnsetPreRollMs'),
@@ -357,6 +375,7 @@ export function normalizeConfig(rawConfig = {}) {
     quietLatchWitnessEnabled: normalized.quietLatchWitnessEnabled,
     quietLatchDutyCycle: normalized.quietLatchDutyCycle,
     quietLatchAmbiguousEnabled: normalized.quietLatchAmbiguousEnabled,
+    latchAmbiguousGraceMs: normalized.latchAmbiguousGraceMs,
     quietRiseCapAppliesToAmbiguous: normalized.quietRiseCapAppliesToAmbiguous,
     quietRiseCapWitnessDb: normalized.quietRiseCapWitnessDb,
     softOnsetPreRollMs: normalized.softOnsetPreRollMs,
@@ -365,6 +384,7 @@ export function normalizeConfig(rawConfig = {}) {
     slowOnsetDeltaDb: normalized.slowOnsetDeltaDb,
     slowOnsetEvidenceMs: normalized.slowOnsetEvidenceMs,
     slowOnsetWindowSeconds: normalized.slowOnsetWindowSeconds,
+    dynamicsWitnessDb: normalized.dynamicsWitnessDb,
   } };
 }
 

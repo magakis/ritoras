@@ -72,7 +72,13 @@ describe('never-onset slow-path validation', () => {
       { t: 'f', q: 0, dt: 0.01, db: -40 },
       { t: 'f', q: 1, dt: 0.02, db: -30 },
     ]);
-    assert.deepEqual(adapted.recordedFrames[1], { q: 1, e: 'strong', es: undefined, d: undefined });
+    const recordedFrame = adapted.recordedFrames[1];
+    assert.equal(recordedFrame.q, 1);
+    assert.equal(recordedFrame.dt, 0.02);
+    assert.equal(recordedFrame.e, 'strong');
+    for (const field of ['es', 'd', 'll', 'ls', 'lr', 'dy', 'fc']) {
+      assert.equal(recordedFrame[field], undefined);
+    }
     assert.equal(replay.frames.length, 2);
     assert.equal(recordedEmissionMap(adapted)[0].start, 0.12);
     assert.equal(recordedEmissionMap(adapted)[0].end, 0.76);

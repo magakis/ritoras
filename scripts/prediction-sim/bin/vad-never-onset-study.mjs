@@ -8,16 +8,29 @@ import { findIdleGapTriggers } from '../lib/vad-idle-gap.mjs';
 import { replaySession } from './replay-vad.mjs';
 
 export const DEFAULT_CORPUS_PATH = '/home/michael/vad-corpus';
-export const DEFAULT_STUDY_PATH = '/home/michael/vad-corpus/STUDY-2026-10-21.md';
-export const DEFAULT_VERDICT_PATH = '/home/michael/vad-corpus/STUDY-2026-10-21.verdict.json';
-const INCIDENT_ID = '20261021-175330';
+export const DEFAULT_STUDY_PATH = '/home/michael/vad-corpus/STUDY-2026-10-22-latch.md';
+export const DEFAULT_VERDICT_PATH = '/home/michael/vad-corpus/STUDY-2026-10-22-latch.verdict.json';
+const TARGET_ID = '20261022-161020';
+const TARGET_BASELINE_FIRST_ONSET_SECONDS = 9.983;
 // This capture records a sub-minimum tail that the current stop-flush mirror emits.
 const KNOWN_LEGACY_FLUSH_SESSION = '20261021-192953';
-const LOST_WINDOW = { start: 7.379, end: 8.579 };
+const LATCH_KNOBS = Object.freeze([
+  'latchAmbiguousGraceMs',
+  'loudRegimeEnterDb',
+  'loudLatchMs',
+  'dynamicsWitnessDb',
+]);
+const CURRENT_LATCH_KNOBS = Object.freeze({
+  latchAmbiguousGraceMs: 0,
+  loudRegimeEnterDb: -34,
+  loudLatchMs: 400,
+  dynamicsWitnessDb: 9,
+});
 const SWEEP = {
-  slowOnsetDeltaDb: [3, 4, 5, 6, 7, 8],
-  slowOnsetEvidenceMs: [150, 200, 250, 300, 400, 500, 600],
-  slowOnsetWindowSeconds: [1, 1.5, 2, 2.5],
+  latchAmbiguousGraceMs: [0, 80, 150, 250],
+  loudRegimeEnterDb: [-34, -35, -36],
+  loudLatchMs: [400, 300, 350],
+  dynamicsWitnessDb: [9, 7.5, 8],
 };
 const EMISSION_MATCH_TOLERANCE_SECONDS = 0.6;
 
@@ -186,22 +199,35 @@ function newEmissionCount(baseline, candidate) {
   return added;
 }
 
-function hasIncidentRecall(replay) {
-  return onsetTimes(replay).some(onset => onset >= LOST_WINDOW.start && onset <= LOST_WINDOW.end);
+function firstOnsetTime(replay) {
+  return onsetTimes(replay).sort((left, right) => left - right)[0] ?? null;
+}
+
+function hasTargetRecall(replay, baselineFirstOnset) {
+  if (baselineFirstOnset === null) return false;
+  const earlyStarts = onsetTimes(replay).filter(time => time < baselineFirstOnset);
+  const emissions = emissionMap(replay);
+  return earlyStarts.some(onset => emissions.some(emission => emission.start !== null
+    && emission.end !== null
+    && emission.start <= onset
+    && emission.end >= onset));
 }
 
 function candidateConfigs(baselineConfig) {
   const candidates = [];
-  for (const delta of SWEEP.slowOnsetDeltaDb) {
-    for (const evidenceMs of SWEEP.slowOnsetEvidenceMs) {
-      for (const windowSeconds of SWEEP.slowOnsetWindowSeconds) {
-        candidates.push({
-          ...baselineConfig,
-          slowOnsetEnabled: true,
-          slowOnsetDeltaDb: delta,
-          slowOnsetEvidenceMs: evidenceMs,
-          slowOnsetWindowSeconds: windowSeconds,
-        });
+  for (const latchAmbiguousGraceMs of SWEEP.latchAmbiguousGraceMs) {
+    for (const loudRegimeEnterDb of SWEEP.loudRegimeEnterDb) {
+      for (const loudLatchMs of SWEEP.loudLatchMs) {
+        for (const dynamicsWitnessDb of SWEEP.dynamicsWitnessDb) {
+          candidates.push({
+            ...baselineConfig,
+            slowOnsetEnabled: false,
+            latchAmbiguousGraceMs,
+            loudRegimeEnterDb,
+            loudLatchMs,
+            dynamicsWitnessDb,
+          });
+        }
       }
     }
   }
@@ -209,54 +235,62 @@ function candidateConfigs(baselineConfig) {
 }
 
 function candidateLabel(config) {
-  return `${config.slowOnsetDeltaDb}dB/${config.slowOnsetEvidenceMs}ms/${config.slowOnsetWindowSeconds}s`;
+  return `grace=${config.latchAmbiguousGraceMs}ms/entry=${config.loudRegimeEnterDb}dB/latch=${config.loudLatchMs}ms/witness=${config.dynamicsWitnessDb}dB`;
 }
 
-function applySlowOnsetParameters(config, candidate) {
+function applyLatchParameters(config, candidate) {
   return {
     ...config,
-    slowOnsetEnabled: true,
-    slowOnsetDeltaDb: candidate.slowOnsetDeltaDb,
-    slowOnsetEvidenceMs: candidate.slowOnsetEvidenceMs,
-    slowOnsetWindowSeconds: candidate.slowOnsetWindowSeconds,
+    slowOnsetEnabled: false,
+    ...Object.fromEntries(LATCH_KNOBS.map(key => [key, candidate[key]])),
   };
 }
 
-function parameterDistance(left, right) {
-  return Math.sqrt(
-    ((left.slowOnsetDeltaDb - right.slowOnsetDeltaDb) / 2) ** 2
-    + ((left.slowOnsetEvidenceMs - right.slowOnsetEvidenceMs) / 100) ** 2
-    + ((left.slowOnsetWindowSeconds - right.slowOnsetWindowSeconds) / 0.5) ** 2,
-  );
-}
-
-function findMargins(winner, violating) {
-  const nearest = violating
-    .map(config => ({ config, distance: parameterDistance(winner, config) }))
-    .sort((left, right) => left.distance - right.distance)[0] ?? null;
-  if (!nearest) return { nearestViolating: null, deltaDb: null, evidenceMs: null, distance: null };
+function conservativeDeviation(config) {
+  const scale = {
+    latchAmbiguousGraceMs: 80,
+    loudRegimeEnterDb: 1,
+    loudLatchMs: 50,
+    dynamicsWitnessDb: 0.5,
+  };
+  const changes = LATCH_KNOBS.map(key => Math.abs(config[key] - CURRENT_LATCH_KNOBS[key]));
   return {
-    nearestViolating: {
-      parameters: {
-        slowOnsetDeltaDb: nearest.config.slowOnsetDeltaDb,
-        slowOnsetEvidenceMs: nearest.config.slowOnsetEvidenceMs,
-        slowOnsetWindowSeconds: nearest.config.slowOnsetWindowSeconds,
-      },
-      normalizedDistance: nearest.distance,
-    },
-    deltaDb: Math.abs(winner.slowOnsetDeltaDb - nearest.config.slowOnsetDeltaDb),
-    evidenceMs: Math.abs(winner.slowOnsetEvidenceMs - nearest.config.slowOnsetEvidenceMs),
-    distance: nearest.distance,
+    changedKnobs: changes.filter(value => value > 0).length,
+    normalizedSteps: LATCH_KNOBS.reduce((sum, key) =>
+      sum + Math.abs(config[key] - CURRENT_LATCH_KNOBS[key]) / scale[key], 0),
   };
+}
+
+function perKnobMargins(candidate, violating) {
+  return Object.fromEntries(LATCH_KNOBS.map(key => {
+    const neighbors = violating.filter(result => LATCH_KNOBS.every(other =>
+      other === key || result.config[other] === candidate.config[other]))
+      .sort((left, right) => Math.abs(left.config[key] - candidate.config[key])
+        - Math.abs(right.config[key] - candidate.config[key]));
+    const nearest = neighbors[0];
+    return [key, {
+      candidateValue: candidate.config[key],
+      nearestViolatingValue: nearest?.config[key] ?? null,
+      distance: nearest ? Math.abs(nearest.config[key] - candidate.config[key]) : null,
+    }];
+  }));
 }
 
 function rankCandidates(results) {
   return results.filter(result => result.recall
     && result.addedSafetyOnsets === 0
     && result.addedSafetyEmissions === 0)
-    .sort((left, right) => right.config.slowOnsetDeltaDb - left.config.slowOnsetDeltaDb
-      || left.config.slowOnsetEvidenceMs - right.config.slowOnsetEvidenceMs
-      || left.config.slowOnsetWindowSeconds - right.config.slowOnsetWindowSeconds);
+    .sort((left, right) => {
+      const leftDeviation = conservativeDeviation(left.config);
+      const rightDeviation = conservativeDeviation(right.config);
+      return leftDeviation.changedKnobs - rightDeviation.changedKnobs
+        || leftDeviation.normalizedSteps - rightDeviation.normalizedSteps
+        || left.config.latchAmbiguousGraceMs - right.config.latchAmbiguousGraceMs
+        || Math.abs(left.config.loudRegimeEnterDb - CURRENT_LATCH_KNOBS.loudRegimeEnterDb)
+          - Math.abs(right.config.loudRegimeEnterDb - CURRENT_LATCH_KNOBS.loudRegimeEnterDb)
+        || right.config.loudLatchMs - left.config.loudLatchMs
+        || right.config.dynamicsWitnessDb - left.config.dynamicsWitnessDb;
+    });
 }
 
 function idleTriggerSummary(sessions, baselineById) {
@@ -277,6 +311,21 @@ function idleTriggerSummary(sessions, baselineById) {
   };
 }
 
+function readCorpusInventory(corpusPath) {
+  const inventoryPath = path.join(corpusPath, 'INVENTORY.json');
+  return JSON.parse(fs.readFileSync(inventoryPath, 'utf8'));
+}
+
+function recordedOnsetTimes(session) {
+  let time = 0;
+  const times = [];
+  session.recordedFrames.forEach((frame, index) => {
+    time += session.frames[index]?.dt ?? 0;
+    if (frame.d === 'start_utterance') times.push(time);
+  });
+  return times;
+}
+
 function formatMap(map) {
   if (map.length === 0) return 'none';
   return map.map(item => item.start === null || item.end === null
@@ -286,7 +335,7 @@ function formatMap(map) {
 
 function buildMarkdown(study) {
   const lines = [
-    '# Never-onset VAD offline study · 2026-10-21',
+    '# Latch recalibration offline study · 2026-10-22',
     '',
     `Verdict: **${study.verdict}**`,
     '',
@@ -294,63 +343,70 @@ function buildMarkdown(study) {
     '',
     '| Gate | Result | Details |',
     '|---|---|---|',
-    `| Fidelity | ${study.gates.fidelity.pass ? 'PASS' : 'FAIL'} | ${study.gates.fidelity.passCount}/${study.gates.fidelity.sessionCount} matched; ${study.gates.fidelity.excludedCount} documented version-specific exclusion(s); ${study.gates.fidelity.unclassifiedCount} unexplained mismatch(es) |`,
-    `| Incident recall | ${study.gates.recall.pass ? 'PASS' : 'FAIL'} | ${study.gates.recall.detail} |`,
+    `| Fidelity | ${study.gates.fidelity.pass ? 'PASS' : 'FAIL'} | ${study.gates.fidelity.passCount}/${study.gates.fidelity.comparedCount} full telemetry replays matched; ${study.gates.fidelity.excludedCount} thinned exclusion(s); ${study.gates.fidelity.skippedCount} missing telemetry session(s); ${study.gates.fidelity.unclassifiedCount} unexplained mismatch(es) |`,
+    `| Baseline target | ${study.gates.baselineTarget.pass ? 'PASS' : 'FAIL'} | ${study.gates.baselineTarget.detail} |`,
+    `| Latch fidelity anchor | ${study.gates.latchAnchor.pass ? 'PASS' : 'FAIL'} | ${study.gates.latchAnchor.detail} |`,
+    `| Target recall | ${study.gates.recall.pass ? 'PASS' : 'FAIL'} | ${study.gates.recall.detail} |`,
     `| Safety | ${study.gates.safety.pass ? 'PASS' : 'FAIL'} | ${study.gates.safety.detail} |`,
     `| Winner/margin | ${study.gates.margin.pass ? 'PASS' : 'FAIL'} | ${study.gates.margin.detail} |`,
     '',
     '## Fidelity by session',
     '',
-    '| Session | Frames | Recorded emissions | Replayed emissions | Result | First mismatch |',
+    '| Session | Frames | Recorded emissions | Replayed emissions | Result | Detail |',
     '|---|---:|---|---|---|---|',
   ];
   for (const item of study.fidelity) {
-    const result = item.pass ? 'PASS' : item.excludedFromFidelity ? 'EXCLUDED' : 'FAIL';
-    const details = item.firstMismatch
-      ? `${item.firstMismatch}${item.reason ? `; ${item.reason}` : ''}`
-      : 'none';
+    const result = item.pass
+      ? 'PASS'
+      : item.excludedFromFidelity ? 'EXCLUDED' : item.skippedFromFidelity ? 'SKIPPED' : 'FAIL';
+    const details = item.firstMismatch ?? item.reason ?? 'none';
     lines.push(`| ${item.id} | ${item.frameCount} | ${formatMap(item.recorded)} | ${formatMap(item.replayed)} | ${result} | ${details} |`);
   }
-  const exclusions = study.fidelity.filter(item => item.excludedFromFidelity);
-  if (exclusions.length > 0) {
-    lines.push('', '### Documented fidelity exclusion', '');
-    for (const item of exclusions) {
-      lines.push(`- ${item.id}: recorded emissions [${formatMap(item.recorded)}]; simulated emissions [${formatMap(item.replayed)}]; first divergence at frame ${item.frameDivergence.frameIndex} (${item.frameDivergence.timeSeconds.toFixed(3)} s). ${item.reason}.`);
+  lines.push('', '## Mirror latch anchor', '',
+    `- Target: ${study.latchAnchor.sessionId}; recorded first onset ${study.latchAnchor.recordedFirstOnsetSeconds?.toFixed(3) ?? 'n/a'} s; baseline mirror first onset ${study.latchAnchor.mirrorFirstOnsetSeconds?.toFixed(3) ?? 'n/a'} s; baseline emissions ${study.latchAnchor.baselineEmissionCount}.`,
+    `- Latch promotions in the target session: recorded ${study.latchAnchor.recordedPromotionCount}, mirror ${study.latchAnchor.mirrorPromotionCount}.`,
+    `- Across full-history comparable corpus sessions: recorded ll=true ${study.latchAnchor.corpusRecordedPromotionCount}; mirror ll=true ${study.latchAnchor.corpusMirrorPromotionCount}.`,
+    `- Corpus exclusions: missing telemetry [${study.missingTelemetryIds.join(', ') || 'none'}]; thinned history [${study.thinnedSessionIds.join(', ') || 'none'}].`,
+    '- Ambiguous grace is a per-interruption cap; it requires a floor-converged frame and a dynamics-spread witness within the preceding 500 ms. Accepted grace frames preserve the latch interval and count elapsed time, but do not qualify by themselves as continuing evidence.',
+    '- dynamicsWitnessDb sweeps the normal and loud dynamics spread gates; the separate loudLatchWitnessDb remains at its current 3 dB setting.',
+    '', '## Sweep frontier', '',
+    `- Recall-passing combinations: ${study.frontier.recallPoints.length}.`,
+    `- Recall + zero-addition safety combinations: ${study.frontier.recallAndSafetyPoints.length}.`,
+    `- Winner combinations (recall + safety): ${study.frontier.winnerPoints.length}.`,
+    '', '| Grace ms | Loud entry dB | Loud latch ms | Dynamics witness dB | Recall | Safety | New emissions / utterances | Per-knob margins to nearest violating neighbor |',
+    '|---:|---:|---:|---:|---|---|---:|---|');
+  for (const result of study.sweep) {
+    const margins = LATCH_KNOBS.map(key => `${key}:${result.margins[key].distance ?? 'n/a'}→${result.margins[key].nearestViolatingValue ?? 'none'}`).join(', ');
+    lines.push(`| ${result.config.latchAmbiguousGraceMs} | ${result.config.loudRegimeEnterDb} | ${result.config.loudLatchMs} | ${result.config.dynamicsWitnessDb} | ${result.recall ? 'yes' : 'no'} | ${result.passesSafety ? 'yes' : 'no'} | ${result.addedSafetyEmissions} / ${result.addedSafetyOnsets} | ${margins} |`);
+  }
+  lines.push('', '## Winner and per-knob sensitivity', '');
+  if (study.winner) {
+    lines.push(`- Winner: ${candidateLabel(study.winner.config)}.`,
+      '- Conservative ordering: fewest changed knobs, then smallest normalized grid-step deviation (80 ms grace, 1 dB entry, 50 ms latch, 0.5 dB witness per step).');
+  } else lines.push(`- No winner. Verdict: ${study.verdict}.`);
+  if (study.sensitivityAnchor) {
+    lines.push(`- One-knob sensitivity around ${candidateLabel(study.sensitivityAnchor.config)}:`);
+    for (const knob of LATCH_KNOBS) {
+      const values = study.sensitivity[knob].map(point =>
+        `${point.value}: recall=${point.recall}, safety=${point.passesSafety}, added=${point.addedSafetyEmissions}/${point.addedSafetyOnsets}`);
+      lines.push(`  - ${knob}: ${values.join('; ')}`);
     }
   }
-  const recallPointLabels = study.frontier.recallPoints.map(candidateLabel);
-  const recallSafeLabels = study.frontier.recallAndSafetyPoints.map(point =>
-    `${candidateLabel(point)} [margin ${point.margins.deltaDb ?? 'n/a'} dB/${point.margins.evidenceMs ?? 'n/a'} ms]`);
-  const allGateLabels = study.frontier.allGatePoints.map(candidateLabel);
-  lines.push('', '## Parameter frontier', '',
-    `- Recall-passing points (${recallPointLabels.length}): ${recallPointLabels.join(', ') || 'none'}.`,
-    `- Recall + zero-addition safety points (${recallSafeLabels.length}): ${recallSafeLabels.join(', ') || 'none'}.`,
-    `- Points passing recall, safety, and margin (${allGateLabels.length}): ${allGateLabels.join(', ') || 'none'}.`,
-    '', '## Full parameter sweep', '',
-    '| Level Δ | Cumulative N | Window W | Recall | Safety | New emissions / utterances | Margin ΔdB / Nms | Margin pass | All gates |',
-    '|---:|---:|---:|---|---|---:|---|---|---|');
-  for (const result of study.sweep) {
-    lines.push(`| ${result.config.slowOnsetDeltaDb} dB | ${result.config.slowOnsetEvidenceMs} ms | ${result.config.slowOnsetWindowSeconds} s | ${result.recall ? 'yes' : 'no'} | ${result.passesSafety ? 'yes' : 'no'} | ${result.addedSafetyEmissions} / ${result.addedSafetyOnsets} | ${result.margins.deltaDb ?? 'n/a'} / ${result.margins.evidenceMs ?? 'n/a'} | ${result.passesMargin ? 'yes' : 'no'} | ${result.passesAll ? 'yes' : 'no'} |`);
-  }
-  lines.push('', '## Selected configuration and safety margin', '');
-  if (study.winner) {
-    lines.push(`- Winner: slowLevelDelta=${study.winner.parameters.slowOnsetDeltaDb} dB, N=${study.winner.parameters.slowOnsetEvidenceMs} ms, W=${study.winner.parameters.slowOnsetWindowSeconds} s.`,
-      `- Nearest violating grid point: ${study.margins.nearestViolating ? candidateLabel(study.margins.nearestViolating.parameters) : 'none in sweep grid'}.`,
-      `- Axis margins: ${study.margins.deltaDb ?? 'n/a'} dB and ${study.margins.evidenceMs ?? 'n/a'} ms (normalized distance ${study.margins.distance?.toFixed(2) ?? 'n/a'}).`);
-  } else if (study.bestSafeParameters) {
-    lines.push(`- No candidate meets the required margin. Best recall+safe point: ${candidateLabel(study.bestSafeParameters)}.`);
-  } else lines.push('- No candidate clears recall and safety.');
   lines.push('', '## Idle-gap trigger scan', '',
-    `- ${study.idleGap.triggerCount} qualifying idle windows across ${study.idleGap.sessions} telemetry sessions; ${study.idleGap.sessionsWithTriggers} sessions had at least one trigger.`,
-    '- Decision rule: continuous ≥300 ms in the last 10 s of each replayed idle stretch, with dB ≥ max(floor+6 dB, absolute guard).',
-    '', `## Baseline-vs-${study.winner ? 'winner' : 'best safe candidate'} emission maps`, '',
+    `- Baseline: ${study.idleGap.baseline.triggerCount} triggers across ${study.idleGap.baseline.sessionsWithTriggers}/${study.idleGap.baseline.sessions} eligible telemetry sessions.`,
+    study.idleGap.underWinner
+      ? `- Under winner: ${study.idleGap.underWinner.triggerCount} triggers across ${study.idleGap.underWinner.sessionsWithTriggers}/${study.idleGap.underWinner.sessions} sessions (${study.idleGap.change} change).`
+      : '- No winner; the baseline idle-gap scan is shown for reference.',
+    '- Trigger scan decision rule remains continuous ≥300 ms at floor+6 dB in the final 10 s of an idle stretch.',
+    '', `## Baseline-vs-${study.winner ? 'winner' : 'reference candidate'} emission maps`, '',
     '| Session | Baseline map | Candidate map | New onset |',
     '|---|---|---|---|');
   for (const item of study.winnerMaps) {
     lines.push(`| ${item.id} | ${formatMap(item.baseline)} | ${formatMap(item.winner)} | ${item.newOnset ? 'yes' : 'no'} |`);
   }
   lines.push('', '## Interpretation', '',
-    '- The replay consumes only telemetry frame `db` and `dt`; recorded output fields are used only for fidelity comparisons.',
+    '- Replay decisions use telemetry frame `db` and `dt`; recorded output fields are used only for fidelity/anchor comparisons.',
+    '- Two no-telemetry sessions are skipped. The thinned 20261021-231954 history is excluded rather than interpolating missing levels, because inventing db values could change latch decisions.',
     '- A pass establishes onset/emission behavior only. It does not establish recovered transcript content or device memory behavior.',
     '');
   return lines.join('\n');
@@ -363,9 +419,10 @@ export function machineVerdict(study) {
       winner: study.winner,
       margins: study.margins,
       idleGap: {
-        triggerCount: study.idleGap.triggerCount,
-        sessionsWithTriggers: study.idleGap.sessionsWithTriggers,
-        sessions: study.idleGap.sessions,
+        baselineTriggerCount: study.idleGap.baseline.triggerCount,
+        baselineSessionsWithTriggers: study.idleGap.baseline.sessionsWithTriggers,
+        sessions: study.idleGap.baseline.sessions,
+        winnerTriggerCount: study.idleGap.underWinner?.triggerCount ?? null,
       },
     },
     details: {
@@ -373,6 +430,11 @@ export function machineVerdict(study) {
       frontier: study.frontier,
       gates: study.gates,
       fidelity: study.fidelity,
+      latchAnchor: study.latchAnchor,
+      sensitivityAnchor: study.sensitivityAnchor,
+      sensitivity: study.sensitivity,
+      missingTelemetryIds: study.missingTelemetryIds,
+      thinnedSessionIds: study.thinnedSessionIds,
       idleGap: study.idleGap,
       sweep: study.sweep,
       winnerMaps: study.winnerMaps,
@@ -385,10 +447,16 @@ export function runStudy({
   outputPath = DEFAULT_STUDY_PATH,
   verdictPath = DEFAULT_VERDICT_PATH,
 } = {}) {
+  const inventory = readCorpusInventory(corpusPath);
+  const corpusSessions = inventory.sessions;
   const allSessions = discoverClientTelemetry(corpusPath);
-  const sessions = allSessions.filter(session => session.frames.length > 0);
-  const incident = sessions.find(session => session.id === INCIDENT_ID);
-  if (!incident) throw new Error(`required incident session ${INCIDENT_ID} not found in ${corpusPath}`);
+  const missingTelemetryIds = inventory.totals.telemetryMissing ?? [];
+  const thinnedWarnings = inventory.totals.telemetryRetentionWarnings ?? [];
+  const thinnedIds = new Set(thinnedWarnings.map(item => item.id));
+  const thinnedSessions = allSessions.filter(session => thinnedIds.has(session.id));
+  const sessions = allSessions.filter(session => !thinnedIds.has(session.id));
+  const targetSession = sessions.find(session => session.id === TARGET_ID);
+  if (!targetSession) throw new Error(`required target session ${TARGET_ID} not found in ${corpusPath}`);
 
   const baselineById = new Map();
   const fidelity = sessions.map(session => {
@@ -418,27 +486,86 @@ export function runStudy({
       mismatch: comparison,
     };
   });
+  for (const session of thinnedSessions) {
+    const warning = thinnedWarnings.find(item => item.id === session.id);
+    fidelity.push({
+      id: session.id,
+      frameCount: session.frames.length,
+      recorded: recordedEmissionMap(session),
+      replayed: [],
+      pass: false,
+      excludedFromFidelity: true,
+      classification: 'thinned-history-excluded',
+      reason: `telemetry retained ${warning?.retainedFrames ?? session.frames.length} frames of ${warning?.summaryFrameCount ?? 'unknown'}; dropped historical frames make db/dt replay incomplete, so inserted frames were not fabricated`,
+      frameDivergence: null,
+      firstMismatch: null,
+      mismatch: null,
+    });
+  }
+  for (const id of missingTelemetryIds) {
+    fidelity.push({
+      id,
+      frameCount: 0,
+      recorded: [],
+      replayed: [],
+      pass: false,
+      excludedFromFidelity: false,
+      skippedFromFidelity: true,
+      classification: 'missing-telemetry-skipped',
+      reason: 'client_telemetry.json absent in rebuilt 40-session corpus',
+      frameDivergence: null,
+      firstMismatch: null,
+      mismatch: null,
+    });
+  }
+  fidelity.sort((left, right) => left.id.localeCompare(right.id));
   const fidelityPassCount = fidelity.filter(item => item.pass).length;
   const fidelityExcludedCount = fidelity.filter(item => item.excludedFromFidelity).length;
-  const fidelityUnclassifiedCount = fidelity.filter(item => !item.pass && !item.excludedFromFidelity).length;
-  const fidelityPass = fidelityPassCount + fidelityExcludedCount === sessions.length
-    && sessions.length === 24;
+  const fidelitySkippedCount = fidelity.filter(item => item.skippedFromFidelity).length;
+  const fidelityUnclassifiedCount = fidelity.filter(item => !item.pass
+    && !item.excludedFromFidelity
+    && !item.skippedFromFidelity).length;
+  const expectedTelemetryCount = corpusSessions.length - missingTelemetryIds.length;
+  const fidelityPass = corpusSessions.length === 40
+    && allSessions.length === expectedTelemetryCount
+    && fidelityPassCount + fidelityExcludedCount + fidelitySkippedCount === corpusSessions.length
+    && fidelityUnclassifiedCount === 0;
 
-  const baselineIncident = baselineById.get(INCIDENT_ID);
-  const safetySessions = sessions.filter(session => session.id !== INCIDENT_ID);
+  const baselineTarget = baselineById.get(TARGET_ID);
+  const baselineOnsets = baselineTarget ? onsetTimes(baselineTarget) : [];
+  const baselineFirstOnset = baselineOnsets[0] ?? null;
+  const recordedTargetOnsets = recordedOnsetTimes(targetSession);
+  const baselineTargetEmissions = baselineTarget ? emissionMap(baselineTarget) : [];
+  const targetBaselinePass = baselineFirstOnset !== null
+    && baselineFirstOnset >= TARGET_BASELINE_FIRST_ONSET_SECONDS
+    && Math.abs(baselineFirstOnset - TARGET_BASELINE_FIRST_ONSET_SECONDS) <= 0.15
+    && recordedTargetOnsets.length === 2
+    && baselineOnsets.length === 2
+    && Math.abs(recordedTargetOnsets[0] - TARGET_BASELINE_FIRST_ONSET_SECONDS) <= 0.15
+    && baselineTargetEmissions.length === 2;
+  const recordedLatchPromotions = targetSession.recordedFrames.filter(frame => frame.ll === true).length;
+  const mirrorLatchPromotions = baselineTarget?.frames.filter(frame => frame.ll === true).length ?? 0;
+  const corpusRecordedLatchPromotions = sessions.reduce((total, session) =>
+    total + session.recordedFrames.filter(frame => frame.ll === true).length, 0);
+  const corpusMirrorLatchPromotions = sessions.reduce((total, session) =>
+    total + baselineById.get(session.id).frames.filter(frame => frame.ll === true).length, 0);
+  const latchAnchorPass = recordedLatchPromotions === 0
+    && mirrorLatchPromotions === 0;
+  const safetySessions = sessions.filter(session => session.id !== TARGET_ID);
   const whisperFixturePath = new URL('../fixtures/vad-never-onset/quiet-room-whisper.json', import.meta.url);
   const whisperPayload = JSON.parse(fs.readFileSync(whisperFixturePath, 'utf8'));
   const whisper = expandTraceFixture(whisperPayload, 'synthetic-whisper');
   const baselineWhisper = replaySession(whisper);
-  const candidateResults = (fidelityPass ? candidateConfigs(baselineIncident.config) : []).map(config => {
-    const incidentReplay = replaySession(incident, config, { compare: false });
+  const tuningReady = fidelityPass && targetBaselinePass && latchAnchorPass;
+  const candidateResults = (tuningReady ? candidateConfigs(baselineTarget.config) : []).map(config => {
+    const targetReplay = replaySession(targetSession, config, { compare: false });
     let addedSafetyOnsets = 0;
     let addedSafetyEmissions = 0;
     for (const session of safetySessions) {
       const baseline = baselineById.get(session.id);
       const candidate = replaySession(
         session,
-        applySlowOnsetParameters(baseline.config, config),
+        applyLatchParameters(baseline.config, config),
         { compare: false },
       );
       addedSafetyOnsets += newOnsetCount(baseline, candidate);
@@ -446,47 +573,47 @@ export function runStudy({
     }
     const candidateWhisper = replaySession(
       whisper,
-      applySlowOnsetParameters(baselineWhisper.config, config),
+      applyLatchParameters(baselineWhisper.config, config),
       { compare: false },
     );
     addedSafetyOnsets += newOnsetCount(baselineWhisper, candidateWhisper);
     addedSafetyEmissions += newEmissionCount(baselineWhisper, candidateWhisper);
     return {
       config,
-      recall: hasIncidentRecall(incidentReplay),
-      incidentReplay,
+      recall: hasTargetRecall(targetReplay, baselineFirstOnset),
+      targetReplay,
+      latchPromotionBeforeBaselineOnset: targetReplay.frames.some(frame =>
+        frame.time < TARGET_BASELINE_FIRST_ONSET_SECONDS && frame.ll),
       addedSafetyOnsets,
       addedSafetyEmissions,
     };
   });
-  const violating = candidateResults.filter(result =>
-    result.addedSafetyOnsets > 0 || result.addedSafetyEmissions > 0);
   for (const result of candidateResults) {
-    result.margins = findMargins(result.config, violating.map(item => item.config));
     result.passesSafety = result.addedSafetyOnsets === 0 && result.addedSafetyEmissions === 0;
-    result.passesMargin = Boolean(result.margins
-      && result.margins.deltaDb >= 2
-      && result.margins.evidenceMs >= 100);
   }
+  const violating = candidateResults.filter(result => !result.passesSafety);
+  for (const result of candidateResults) result.margins = perKnobMargins(result, violating);
   const rankedSafe = rankCandidates(candidateResults);
-  const winner = rankedSafe.find(result => result.passesMargin) ?? null;
+  const winner = rankedSafe[0] ?? null;
   const nearestSafe = rankedSafe[0] ?? null;
   const margins = winner?.margins ?? nearestSafe?.margins ?? null;
   const marginPass = Boolean(winner);
   const safetyPass = Boolean(nearestSafe);
   const recallPass = candidateResults.some(result => result.recall);
-  const recallCandidate = candidateResults.find(result => result.recall);
-  const winnerParams = winner ? {
-    slowOnsetDeltaDb: winner.config.slowOnsetDeltaDb,
-    slowOnsetEvidenceMs: winner.config.slowOnsetEvidenceMs,
-    slowOnsetWindowSeconds: winner.config.slowOnsetWindowSeconds,
-  } : null;
-  const reportedCandidate = winner ?? nearestSafe;
+  const recallCandidate = candidateResults.filter(result => result.recall)
+    .sort((left, right) => {
+      const leftDeviation = conservativeDeviation(left.config);
+      const rightDeviation = conservativeDeviation(right.config);
+      return leftDeviation.changedKnobs - rightDeviation.changedKnobs
+        || leftDeviation.normalizedSteps - rightDeviation.normalizedSteps;
+    })[0] ?? null;
+  const sensitivityAnchor = winner ?? recallCandidate;
+  const reportedCandidate = winner ?? nearestSafe ?? recallCandidate;
   const winnerMaps = reportedCandidate ? sessions.map(session => {
     const baseline = baselineById.get(session.id);
     const candidate = replaySession(
       session,
-      applySlowOnsetParameters(baseline.config, reportedCandidate.config),
+      applyLatchParameters(baseline.config, reportedCandidate.config),
       { compare: false },
     );
     return {
@@ -499,7 +626,7 @@ export function runStudy({
   if (reportedCandidate) {
     const candidateWhisper = replaySession(
       whisper,
-      applySlowOnsetParameters(baselineWhisper.config, reportedCandidate.config),
+      applyLatchParameters(baselineWhisper.config, reportedCandidate.config),
       { compare: false },
     );
     winnerMaps.push({
@@ -509,17 +636,58 @@ export function runStudy({
       newOnset: hasNewOnset(baselineWhisper, candidateWhisper),
     });
   }
-  const idleGap = idleTriggerSummary(sessions, baselineById);
+  const sensitivity = Object.fromEntries(LATCH_KNOBS.map(knob => {
+    const points = sensitivityAnchor
+      ? candidateResults.filter(result => LATCH_KNOBS.every(other => other === knob
+        || result.config[other] === sensitivityAnchor.config[other]))
+        .sort((left, right) => left.config[knob] - right.config[knob])
+        .map(result => ({
+          value: result.config[knob],
+          recall: result.recall,
+          passesSafety: result.passesSafety,
+          addedSafetyEmissions: result.addedSafetyEmissions,
+          addedSafetyOnsets: result.addedSafetyOnsets,
+          latchPromotionBeforeBaselineOnset: result.latchPromotionBeforeBaselineOnset,
+          margin: result.margins[knob],
+        }))
+      : [];
+    return [knob, points];
+  }));
+  const idleGapBaseline = idleTriggerSummary(sessions, baselineById);
+  let idleGapWinner = null;
+  let idleGapReference = null;
+  if (reportedCandidate) {
+    const candidateById = new Map(sessions.map(session => {
+      const baseline = baselineById.get(session.id);
+      const replay = replaySession(
+        session,
+        applyLatchParameters(baseline.config, reportedCandidate.config),
+        { compare: false },
+      );
+      return [session.id, replay];
+    }));
+    const idleSummary = idleTriggerSummary(sessions, candidateById);
+    if (winner) idleGapWinner = idleSummary;
+    else idleGapReference = idleSummary;
+  }
+  const idleGap = {
+    baseline: idleGapBaseline,
+    underWinner: idleGapWinner,
+    underReference: idleGapReference,
+    change: idleGapWinner
+      ? idleGapWinner.triggerCount - idleGapBaseline.triggerCount
+      : null,
+  };
   const sweep = candidateResults.map(result => ({
     config: {
-      slowOnsetDeltaDb: result.config.slowOnsetDeltaDb,
-      slowOnsetEvidenceMs: result.config.slowOnsetEvidenceMs,
-      slowOnsetWindowSeconds: result.config.slowOnsetWindowSeconds,
+      latchAmbiguousGraceMs: result.config.latchAmbiguousGraceMs,
+      loudRegimeEnterDb: result.config.loudRegimeEnterDb,
+      loudLatchMs: result.config.loudLatchMs,
+      dynamicsWitnessDb: result.config.dynamicsWitnessDb,
     },
     recall: result.recall,
     passesSafety: result.passesSafety,
-    passesMargin: result.passesMargin,
-    passesAll: result.recall && result.passesSafety && result.passesMargin,
+    passesAll: result.recall && result.passesSafety,
     addedSafetyOnsets: result.addedSafetyOnsets,
     addedSafetyEmissions: result.addedSafetyEmissions,
     margins: result.margins,
@@ -527,18 +695,31 @@ export function runStudy({
   const frontier = {
     recallPoints: sweep.filter(result => result.recall).map(result => result.config),
     recallAndSafetyPoints: sweep.filter(result => result.recall && result.passesSafety)
-      .map(result => ({ ...result.config, margins: result.margins, passesMargin: result.passesMargin })),
-    allGatePoints: sweep.filter(result => result.passesAll).map(result => result.config),
+      .map(result => ({ ...result.config, margins: result.margins })),
+    winnerPoints: sweep.filter(result => result.passesAll).map(result => result.config),
+  };
+  const latchAnchor = {
+    sessionId: TARGET_ID,
+    pass: latchAnchorPass,
+    recordedFirstOnsetSeconds: recordedTargetOnsets[0] ?? null,
+    mirrorFirstOnsetSeconds: baselineFirstOnset,
+    baselineEmissionCount: baselineTargetEmissions.length,
+    recordedPromotionCount: recordedLatchPromotions,
+    mirrorPromotionCount: mirrorLatchPromotions,
+    corpusRecordedPromotionCount: corpusRecordedLatchPromotions,
+    corpusMirrorPromotionCount: corpusMirrorLatchPromotions,
   };
   const gates = {
     fidelity: {
       pass: fidelityPass,
       passCount: fidelityPassCount,
       excludedCount: fidelityExcludedCount,
+      skippedCount: fidelitySkippedCount,
       unclassifiedCount: fidelityUnclassifiedCount,
-      sessionCount: sessions.length,
-      detail: `${fidelityPassCount}/${sessions.length} matched; ${fidelityExcludedCount} documented version-specific exclusion(s); ${fidelityUnclassifiedCount} unexplained mismatch(es)`,
-      exceptions: fidelity.filter(item => item.excludedFromFidelity || !item.pass).map(item => ({
+      sessionCount: corpusSessions.length,
+      comparedCount: sessions.length,
+      detail: `${fidelityPassCount}/${sessions.length} full telemetry replays matched; ${fidelityExcludedCount} thinned/version-specific exclusion(s); ${fidelitySkippedCount} no-telemetry skip(s); ${fidelityUnclassifiedCount} unexplained mismatch(es)`,
+      exceptions: fidelity.filter(item => item.excludedFromFidelity || item.skippedFromFidelity || !item.pass).map(item => ({
         sessionId: item.id,
         classification: item.classification,
         recordedEmissionMap: item.recorded,
@@ -547,11 +728,19 @@ export function runStudy({
         reason: item.reason,
       })),
     },
+    baselineTarget: {
+      pass: targetBaselinePass,
+      detail: `first simulated onset ${baselineFirstOnset?.toFixed(3) ?? 'none'} s (must match ${TARGET_BASELINE_FIRST_ONSET_SECONDS.toFixed(3)} s baseline); ${baselineTargetEmissions.length} simulated emissions (expected 2)`,
+    },
+    latchAnchor: {
+      pass: latchAnchorPass,
+      detail: `recorded ll=true frames ${recordedLatchPromotions}; mirror ll=true frames ${mirrorLatchPromotions}; expected both zero`,
+    },
     recall: {
       pass: recallPass,
       detail: recallCandidate
-        ? `${candidateLabel(recallCandidate.config)} starts at ${onsetTimes(recallCandidate.incidentReplay).find(time => time >= LOST_WINDOW.start && time <= LOST_WINDOW.end)?.toFixed(3)} s`
-        : fidelityPass ? 'no candidate starts inside the lost-sentence window' : 'not tuned because fidelity failed',
+        ? `${candidateLabel(recallCandidate.config)} starts at ${firstOnsetTime(recallCandidate.targetReplay)?.toFixed(3)} s, before ${TARGET_BASELINE_FIRST_ONSET_SECONDS.toFixed(3)} s`
+        : tuningReady ? `no candidate starts before ${TARGET_BASELINE_FIRST_ONSET_SECONDS.toFixed(3)} s` : 'not tuned because a fidelity/baseline/latch-anchor gate failed',
     },
     safety: {
       pass: safetyPass,
@@ -561,22 +750,32 @@ export function runStudy({
     },
     margin: {
       pass: marginPass,
-      detail: margins
-        ? `${margins.deltaDb} dB / ${margins.evidenceMs} ms to nearest violating grid point (requires ≥2 dB / ≥100 ms)`
-        : 'no recall-and-safety candidate or no violating point',
+      detail: winner
+        ? `per-knob margins reported against nearest one-knob safety-violating neighbors`
+        : 'no combination passes target recall and zero-addition safety',
     },
   };
   const study = {
     generatedAt: 'deterministic-from-inputs',
     corpusPath,
-    sessionCount: sessions.length,
-    verdict: fidelityPass && recallPass && safetyPass && marginPass ? 'GO' : 'NO-GO',
+    sessionCount: corpusSessions.length,
+    telemetrySessionCount: allSessions.length,
+    missingTelemetryIds,
+    thinnedSessionIds: [...thinnedIds],
+    verdict: fidelityPass && targetBaselinePass && latchAnchorPass
+      && recallPass && safetyPass && marginPass ? 'GO' : 'NO-GO',
     gates,
-    winner: winner ? { parameters: winnerParams } : null,
-    bestSafeParameters: nearestSafe ? {
-      slowOnsetDeltaDb: nearestSafe.config.slowOnsetDeltaDb,
-      slowOnsetEvidenceMs: nearestSafe.config.slowOnsetEvidenceMs,
-      slowOnsetWindowSeconds: nearestSafe.config.slowOnsetWindowSeconds,
+    latchAnchor,
+    winner: winner ? {
+      parameters: Object.fromEntries(LATCH_KNOBS.map(key => [key, winner.config[key]])),
+      config: Object.fromEntries(LATCH_KNOBS.map(key => [key, winner.config[key]])),
+    } : null,
+    bestSafeParameters: nearestSafe
+      ? Object.fromEntries(LATCH_KNOBS.map(key => [key, nearestSafe.config[key]]))
+      : null,
+    sensitivity,
+    sensitivityAnchor: sensitivityAnchor ? {
+      config: Object.fromEntries(LATCH_KNOBS.map(key => [key, sensitivityAnchor.config[key]])),
     } : null,
     margins,
     fidelity,
@@ -613,9 +812,10 @@ export function main(argv = process.argv.slice(2)) {
     margins: study.margins,
     gates: Object.fromEntries(Object.entries(study.gates).map(([name, gate]) => [name, gate.pass])),
     idleGap: {
-      triggerCount: study.idleGap.triggerCount,
-      sessionsWithTriggers: study.idleGap.sessionsWithTriggers,
-      sessions: study.idleGap.sessions,
+      baselineTriggerCount: study.idleGap.baseline.triggerCount,
+      baselineSessionsWithTriggers: study.idleGap.baseline.sessionsWithTriggers,
+      sessions: study.idleGap.baseline.sessions,
+      winnerTriggerCount: study.idleGap.underWinner?.triggerCount ?? null,
     },
   })}\n`);
 }

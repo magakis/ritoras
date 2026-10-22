@@ -92,6 +92,8 @@ function makeSessionConfig(harness) {
     loudLatchMs: harness.loudLatchMs,
     loudLatchAmbiguousEnabled: harness.loudLatchAmbiguousEnabled,
     loudLatchWitnessDb: harness.loudLatchWitnessDb,
+    latchAmbiguousGraceMs: harness.latchAmbiguousGraceMs,
+    dynamicsWitnessDb: harness.dynamicsWitnessDb,
     loudFlatTerminateEnabled: harness.loudFlatTerminateEnabled,
     loudFlatSpreadDb: harness.loudFlatSpreadDb,
     loudFlatTerminateSeconds: harness.loudFlatTerminateSeconds,
@@ -148,6 +150,11 @@ export function makeRecorderHarness({
     loudLatchMs: recorderConfig.loudLatchMs ?? 400,
     loudLatchAmbiguousEnabled: recorderConfig.loudLatchAmbiguousEnabled ?? false,
     loudLatchWitnessDb: recorderConfig.loudLatchWitnessDb ?? 3,
+    latchAmbiguousGraceMs: Math.max(0, recorderConfig.latchAmbiguousGraceMs ?? 0),
+    dynamicsWitnessDb: recorderConfig.dynamicsWitnessDb ?? gate.effectiveDynamicsSpreadDb,
+    latchAmbiguousGraceElapsedMs: 0,
+    latchAmbiguousGraceExpired: false,
+    lastLatchDynamicsWitnessTime: null,
     quietLatchMs: recorderConfig.quietLatchMs ?? 1000,
     quietLatchWitnessDb: recorderConfig.quietLatchWitnessDb ?? 3,
     quietLatchWitnessEnabled: recorderConfig.quietLatchWitnessEnabled ?? false,
@@ -355,8 +362,45 @@ export function makeRecorderHarness({
       const adaptivePath = output.floorDb !== null;
       const quietWitnessMode = this.quietLatchWitnessEnabled && !output.isLoudRegime;
       if (this.quietLatchWitnessEnabled && !quietWitnessMode) this.resetQuietLatchWindow();
+      const frameTime = this.sessionElapsedSamples / 16000;
+      if (endpointWasIdle
+        && output.floorConverged
+        && output.dynamicsSpreadDb !== null
+        && output.dynamicsSpreadDb >= this.dynamicsWitnessDb) {
+        this.lastLatchDynamicsWitnessTime = frameTime;
+      }
+      const hasRecentDynamicsWitness = this.lastLatchDynamicsWitnessTime !== null
+        && (frameTime - this.lastLatchDynamicsWitnessTime) * 1000 <= 500;
+      const ambiguousEvidence = output.evidence === 'ambiguous';
+      const legacyAmbiguousStreak = this.loudLatchAmbiguousEnabled && ambiguousEvidence;
+      const ambiguousGraceStreak = ambiguousEvidence
+        && this.latchAmbiguousGraceMs > 0
+        && output.floorConverged
+        && hasRecentDynamicsWitness
+        && !this.latchAmbiguousGraceExpired
+        && this.latchAmbiguousGraceElapsedMs + frameDuration * 1000
+          <= this.latchAmbiguousGraceMs;
+      const ambiguousGraceFrame = ambiguousGraceStreak && !legacyAmbiguousStreak;
       const eligibleStreak = output.evidence === 'continuing'
-        || (this.loudLatchAmbiguousEnabled && output.evidence === 'ambiguous');
+        || legacyAmbiguousStreak
+        || ambiguousGraceStreak;
+      if (output.evidence === 'continuing') {
+        this.latchAmbiguousGraceElapsedMs = 0;
+        this.latchAmbiguousGraceExpired = false;
+      } else if (ambiguousEvidence && this.latchAmbiguousGraceMs > 0
+        && !legacyAmbiguousStreak) {
+        if (ambiguousGraceFrame) {
+          this.latchAmbiguousGraceElapsedMs += frameDuration * 1000;
+        } else if (this.sustainedContinuingMs > 0 || this.streakStartFloorDb !== null) {
+          this.latchAmbiguousGraceElapsedMs = 0;
+          this.latchAmbiguousGraceExpired = true;
+        } else {
+          this.latchAmbiguousGraceElapsedMs = 0;
+        }
+      } else if (!ambiguousEvidence) {
+        this.latchAmbiguousGraceElapsedMs = 0;
+        this.latchAmbiguousGraceExpired = false;
+      }
       if (quietWitnessMode) {
         this.updateQuietWitnessStreak(output, frameDb, frameDuration, endpointWasIdle);
       } else if (adaptivePath && eligibleStreak && endpointWasIdle) {
@@ -405,13 +449,12 @@ export function makeRecorderHarness({
       const loudLatchQualified = output.isLoudRegime
         && this.sustainedContinuingMs >= this.loudLatchMs
         && this.streakSawDynamics;
+      const latchAcceptsAmbiguous = legacyAmbiguousStreak || ambiguousGraceStreak;
+      const latchEligibleEvidence = output.evidence === 'continuing'
+        || (ambiguousEvidence && latchAcceptsAmbiguous);
       if (adaptivePath
         && output.floorConverged
-        && (output.evidence === 'continuing'
-          || (output.isLoudRegime
-            ? this.loudLatchAmbiguousEnabled
-            : this.quietLatchWitnessEnabled && this.quietLatchAmbiguousEnabled)
-            && output.evidence === 'ambiguous')
+        && latchEligibleEvidence
         && endpointWasIdle
         && (quietLatchQualified || legacyLoudLatchQualified || loudLatchQualified)) {
         this.sustainedContinuingOnsetLatched = true;
@@ -427,10 +470,7 @@ export function makeRecorderHarness({
       if (this.sustainedContinuingOnsetLatched
         && (!adaptivePath
           || !endpointInOnsetLimb
-          || (output.evidence === 'ambiguous'
-            && !(output.isLoudRegime
-              ? this.loudLatchAmbiguousEnabled
-              : this.quietLatchWitnessEnabled && this.quietLatchAmbiguousEnabled))
+          || (ambiguousEvidence && !latchAcceptsAmbiguous)
           || output.evidence === 'silence')) {
         this.sustainedContinuingOnsetLatched = false;
         this.sustainedContinuingMs = 0;
@@ -439,11 +479,7 @@ export function makeRecorderHarness({
         this.streakSawDynamics = false;
       }
       const latchedContinuingOnset = this.sustainedContinuingOnsetLatched
-        && (output.evidence === 'continuing'
-          || (output.isLoudRegime
-            ? this.loudLatchAmbiguousEnabled
-            : this.quietLatchWitnessEnabled && this.quietLatchAmbiguousEnabled)
-            && output.evidence === 'ambiguous')
+        && latchEligibleEvidence
         && endpointInOnsetLimb;
       let endpointEvidence = adaptivePath
         && latchedContinuingOnset
@@ -576,6 +612,9 @@ export function makeRecorderHarness({
           this.streakPeakDb = null;
           this.streakSawDynamics = false;
           this.sustainedContinuingOnsetLatched = false;
+          this.latchAmbiguousGraceElapsedMs = 0;
+          this.latchAmbiguousGraceExpired = false;
+          this.lastLatchDynamicsWitnessTime = null;
           this.resetQuietLatchWindow();
           this.silenceSamples = 0;
         } else if (this.primingComplete && (decision.type === 'continueUtterance'

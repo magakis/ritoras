@@ -24,9 +24,15 @@ export function adaptClientTelemetry(payload, sessionId = 'unknown') {
   const events = Array.isArray(payload.events) ? payload.events : [];
   const recordedFrames = payload.frames.map(frame => ({
     q: frame.q,
+    dt: frame.dt,
     e: frame.e,
     es: frame.es,
     d: frame.d,
+    ll: frame.ll,
+    ls: frame.ls,
+    lr: frame.lr,
+    dy: frame.dy,
+    fc: frame.fc,
   }));
   const rawConfig = configFromTelemetry(payload);
   return {
