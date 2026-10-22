@@ -589,7 +589,7 @@ describe('VADThresholdGate', () => {
   it('pins the shipping loud-regime defaults and applies ordered relaxed thresholds', () => {
     const defaults = config({ mode: 'adaptive' });
     assert.strictEqual(defaults.loudRegimeEnabled, true);
-    assert.strictEqual(defaults.loudRegimeEnterDb, -34);
+    assert.strictEqual(defaults.loudRegimeEnterDb, -35);
     assert.strictEqual(defaults.loudRegimeExitDb, -38);
     assert.strictEqual(defaults.loudRegimeEnterMs, 300);
     assert.strictEqual(defaults.loudRegimeExitMs, 1000);

@@ -56,7 +56,7 @@ struct VADGateConfig {
         adaptiveDynamicsSpreadDb: Double,
         adaptiveFlatSpreadDb: Double,
         loudRegimeEnabled: Bool = true,
-        loudRegimeEnterDb: Double = -34.0,
+        loudRegimeEnterDb: Double = -35.0,
         loudRegimeExitDb: Double = -38.0,
         loudRegimeEnterMs: Int = 300,
         loudRegimeExitMs: Int = 1_000,

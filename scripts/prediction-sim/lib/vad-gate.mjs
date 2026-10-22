@@ -68,7 +68,7 @@ export function makeVadGateConfig(partial = {}) {
     adaptiveDynamicsSpreadDb: 9.0,
     adaptiveFlatSpreadDb: 5.0,
     loudRegimeEnabled: true,
-    loudRegimeEnterDb: -34,
+    loudRegimeEnterDb: -35,
     loudRegimeExitDb: -38,
     loudRegimeEnterMs: 300,
     loudRegimeExitMs: 1000,

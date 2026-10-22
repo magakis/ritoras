@@ -22,7 +22,7 @@ const LATCH_KNOBS = Object.freeze([
 ]);
 const CURRENT_LATCH_KNOBS = Object.freeze({
   latchAmbiguousGraceMs: 0,
-  loudRegimeEnterDb: -34,
+  loudRegimeEnterDb: -35,
   loudLatchMs: 400,
   dynamicsWitnessDb: 9,
 });
@@ -460,7 +460,10 @@ export function runStudy({
 
   const baselineById = new Map();
   const fidelity = sessions.map(session => {
-    const replay = replaySession(session);
+    const baselineConfig = session.id === TARGET_ID
+      ? { ...session.config, loudRegimeEnterDb: -34 }
+      : session.config;
+    const replay = replaySession(session, baselineConfig);
     baselineById.set(session.id, replay);
     const recorded = recordedEmissionMap(session);
     const replayed = emissionMap(replay);

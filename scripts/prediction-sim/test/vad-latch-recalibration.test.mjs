@@ -100,4 +100,39 @@ describe('latch recalibration anchor', () => {
     assert.equal(replay.events.some(event => event.k === 'start_utterance'
       && event.time < fixture.firstBaselineOnsetSeconds), false);
   });
+
+  it('promotes the latch before the baseline onset with the -35 dB entry threshold', () => {
+    const fixture = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+    const recordedEvidence = fixture.recordedEvidenceRuns.join('').split('').map(code => ({
+      C: 'continuing',
+      A: 'ambiguous',
+      S: 'silence',
+      T: 'strong',
+    })[code]);
+    const session = adaptClientTelemetry({
+      id: fixture.sessionId,
+      vad_config: fixture.vad_config,
+      frames: fixture.frames.map(([q, dt, db], index) => ({
+        q,
+        dt,
+        db,
+        e: recordedEvidence[index],
+        fc: q >= fixture.floorConvergedFromQ,
+        ll: false,
+      })),
+      events: [],
+    }, fixture.sessionId);
+    const replay = replaySession(session, {
+      ...session.config,
+      latchAmbiguousGraceMs: 0,
+      loudRegimeEnterDb: -35,
+      loudLatchMs: 400,
+      dynamicsWitnessDb: 9,
+    }, { compare: false });
+    const onset = replay.events.find(event => event.k === 'start_utterance');
+
+    assert.ok(onset, 'expected an utterance onset');
+    assert.ok(onset.time < fixture.firstBaselineOnsetSeconds);
+    assert.ok(onset.time >= 4.0 && onset.time <= 5.5, `unexpected onset time ${onset.time}`);
+  });
 });

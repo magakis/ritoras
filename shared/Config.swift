@@ -242,7 +242,7 @@ struct SharedConfig {
         static let streamVadLoudRegimeEnabledKey = "streamVadLoudRegimeEnabled"
         static let streamVadLoudRegimeEnabledDefault = true
         static let streamVadLoudFloorRegimeEnterDbKey = "streamVadLoudFloorRegimeEnterDb"
-        static let streamVadLoudFloorRegimeEnterDbDefault: Double = -34.0
+        static let streamVadLoudFloorRegimeEnterDbDefault: Double = -35.0
         static let streamVadLoudFloorRegimeExitDbKey = "streamVadLoudFloorRegimeExitDb"
         static let streamVadLoudFloorRegimeExitDbDefault: Double = -38.0
         static let streamVadLoudRegimeEnterMsKey = "streamVadLoudRegimeEnterMs"

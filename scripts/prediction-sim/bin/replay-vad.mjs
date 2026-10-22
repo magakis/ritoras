@@ -41,7 +41,7 @@ export const SHIPPING_SESSION_CONFIG = Object.freeze({
   analysisHpfEnabled: false,
   analysisHpfCutoffHz: 100,
   loudRegimeEnabled: true,
-  loudRegimeEnterDb: -34,
+  loudRegimeEnterDb: -35,
   loudRegimeExitDb: -38,
   loudRegimeEnterMs: 300,
   loudRegimeExitMs: 1000,
