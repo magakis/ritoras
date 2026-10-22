@@ -285,6 +285,8 @@ struct SharedConfig {
         static let streamVadPreRollMsDefault: Int = 500
         static let streamVadAccumulatorSpillSamplesKey = "streamVadAccumulatorSpillSamples"
         static let streamVadAccumulatorSpillSamplesDefault: Int = 1_048_576
+        static let streamVadAccumulatorCapEnabledKey = "streamVadAccumulatorCapEnabled"
+        static let streamVadAccumulatorCapEnabledDefault = true
         static let sessionHeadBufferMsDefault: Int = 2500
         static let streamVadSensitivityProfileKey = "streamVadSensitivityProfile"
         static let streamVadSensitivityProfileDefault: VADSensitivityProfile = .automatic
@@ -1148,6 +1150,15 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.streamEndpointMachineEnabledKey) as? Bool)
             ?? Defaults.streamEndpointMachineEnabledDefault
+    }
+
+    /// Reads the VAD accumulator hard-cap kill switch from the App Group.
+    static func streamVadAccumulatorCapEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadAccumulatorCapEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.streamVadAccumulatorCapEnabledKey) as? Bool)
+            ?? Defaults.streamVadAccumulatorCapEnabledDefault
     }
 
     /// Reads the analysis-only VAD high-pass kill switch from the App Group.

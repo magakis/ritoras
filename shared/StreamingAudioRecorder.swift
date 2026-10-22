@@ -243,6 +243,8 @@ private final class VADContext: @unchecked Sendable {
     let loudFlatTerminateEnabled: Bool
     let sessionHeadBufferSamples: Int
     let accumulatorSpillSamples: Int
+    let accumulatorCapEnabled: Bool
+    var maxAccumulatorSamples: Int { accumulatorSpillSamples * 2 }
     let maxChunkSamples = 30 * 16_000
     let splitSearchSamples = 3 * 16_000
     let minimumSplitSilenceSamples = 100 * 16
@@ -320,6 +322,7 @@ private final class VADContext: @unchecked Sendable {
         self.minChunkSamples = minChunkSamples
         self.maxNoiseSamples = maxNoiseSamples
         self.accumulatorSpillSamples = SharedConfig.streamVadAccumulatorSpillSamples()
+        self.accumulatorCapEnabled = SharedConfig.streamVadAccumulatorCapEnabled()
         self.endpointMachineEnabled = endpointMachineEnabled
         let effectivePreRollSamples = max(0, preRollSamples)
         let effectiveLoudPreRollSamples = max(0, loudPreRollSamples)
@@ -893,6 +896,9 @@ private final class VADContext: @unchecked Sendable {
             if let split = splitEmissionIfNeeded(endpointState: endpoint.state.rawValue) {
                 return split
             }
+            if let split = splitAccumulatorAtCap(endpointState: endpoint.state.rawValue) {
+                return split
+            }
         } else {
             // Legacy kill-switch path: retain the former consecutive-silence
             // behavior while the endpoint state machine is disabled.
@@ -906,6 +912,9 @@ private final class VADContext: @unchecked Sendable {
             }
             appendAccumulator(frame)
             bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
+            if let split = splitAccumulatorAtCap(endpointState: endpoint.state.rawValue) {
+                return split
+            }
             if out.isSpeech {
                 contiguousTrailingSilenceSamples = 0
                 silenceSamples = 0
@@ -1028,9 +1037,18 @@ private final class VADContext: @unchecked Sendable {
         guard let url = accumulatorSpillURL else { return }
         try? accumulatorSpillHandle?.close()
         accumulatorSpillHandle = nil
-        if let data = try? Data(contentsOf: url) {
+        do {
+            let data = try Data(contentsOf: url)
             let restored = data.withUnsafeBytes { $0.bindMemory(to: Float.self) }
             accumulator.append(contentsOf: restored)
+        } catch {
+            FileLogger.shared.error(.audio, "VAD spill restore failed; audio lost",
+                                    payload: ["spilledSamples": spilledSampleCount])
+            telemetrySink?.event(VADTelemetryEvent(
+                kind: .spill,
+                samples: spilledSampleCount,
+                reason: "restore_failed"
+            ))
         }
         try? FileManager.default.removeItem(at: url)
         accumulatorSpillURL = nil
@@ -1184,7 +1202,19 @@ private final class VADContext: @unchecked Sendable {
         let cutCount = min(requestedCutCount, maxChunkSamples)
         let gapSamples = qualifyingGapTailSamples == nil ? 0 : runSamples
         guard cutCount > 0, cutCount <= accumulatorSampleCount else { return nil }
+        return splitEmissionAtCutCount(cutCount, endpointState: endpointState, reason: reason,
+                                       gapSamples: gapSamples)
+    }
+
+    private func splitEmissionAtCutCount(
+        _ requestedCutCount: Int,
+        endpointState: String,
+        reason: String,
+        gapSamples: Int = 0
+    ) -> VADEmission? {
         let samples = assembledAccumulator()
+        let cutCount = min(requestedCutCount, samples.count)
+        guard cutCount > 0 else { return nil }
         let emittedSamples = Array(samples[..<cutCount])
         let carry = Array(samples[cutCount...])
         let id = chunkId
@@ -1223,6 +1253,22 @@ private final class VADContext: @unchecked Sendable {
         splitEnergySamples = 0
         bufferHighWaterSamples = accumulatorSampleCount
         return VADEmission(chunkId: id, samples: emittedSamples)
+    }
+
+    private func splitAccumulatorAtCap(endpointState: String) -> VADEmission? {
+        guard accumulatorCapEnabled,
+              accumulatorSampleCount >= maxAccumulatorSamples else { return nil }
+        FileLogger.shared.warn(.audio, "VAD accumulator cap reached; forcing chunk emission",
+                               payload: ["sampleCount": accumulatorSampleCount,
+                                         "capSamples": maxAccumulatorSamples])
+        telemetrySink?.event(VADTelemetryEvent(
+            kind: .split,
+            samples: accumulatorSampleCount,
+            reason: "accumulator_cap",
+            endpointState: endpointState
+        ))
+        return splitEmissionAtCutCount(maxChunkSamples, endpointState: endpointState,
+                                       reason: "accumulator_cap")
     }
 
     /// Emit current accumulator and reset all VAD state.
