@@ -132,6 +132,59 @@ final class BackgroundTranscriptionUploader: NSObject, URLSessionDataDelegate, U
         }
     }
 
+    /// Bounds transient upload-body and pending-job retention after reconciliation.
+    func sweepStaleJobs() {
+        guard SharedConfig.stalePendingJobSweepEnabled() else { return }
+        let fileManager = FileManager.default
+        let now = Date()
+        let staleCutoff = now.addingTimeInterval(-SharedConfig.Defaults.stalePendingJobAgeLimit)
+        let multipartCutoff = now.addingTimeInterval(-SharedConfig.Defaults.multipartBodyAgeLimit)
+        let applicationSupport = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first
+        let uploadDirectory = applicationSupport?.appendingPathComponent("BackgroundUploads", isDirectory: true)
+
+        if let uploadDirectory,
+           let files = try? fileManager.contentsOfDirectory(
+               at: uploadDirectory,
+               includingPropertiesForKeys: [.contentModificationDateKey],
+               options: [.skipsHiddenFiles]) {
+            for file in files where file.pathExtension == "multipart" {
+                guard let modifiedAt = try? file.resourceValues(forKeys: [.contentModificationDateKey])
+                    .contentModificationDate,
+                      modifiedAt < multipartCutoff else { continue }
+                do {
+                    try fileManager.removeItem(at: file)
+                    FileLogger.shared.warn(.network, "Background upload multipart body expired", payload: [
+                        "ageSeconds": now.timeIntervalSince(modifiedAt)
+                    ])
+                } catch {
+                    FileLogger.shared.error(.network, "Background upload multipart cleanup failed",
+                                            payload: ["error": error.localizedDescription])
+                }
+            }
+        }
+
+        for pending in FailedJobStore.shared.listPending() where pending.createdAt < staleCutoff {
+            guard fileManager.fileExists(atPath: pending.audioFilePath) else { continue }
+            guard FailedJobStore.shared.movePendingToFailed(
+                pending,
+                errorMessage: "Pending transcription expired; retry from the saved recording.") else { continue }
+            FileLogger.shared.warn(.app, "Stale pending transcription moved to recovery")
+            if let bodyPath = pending.uploadBodyFilePath,
+               let uploadDirectory,
+               URL(fileURLWithPath: bodyPath).deletingLastPathComponent().standardizedFileURL == uploadDirectory.standardizedFileURL {
+                do {
+                    try fileManager.removeItem(atPath: bodyPath)
+                } catch {
+                    FileLogger.shared.error(.network, "Stale multipart body cleanup failed",
+                                            payload: ["error": error.localizedDescription])
+                }
+            }
+        }
+    }
+
     /// Writes and submits the background upload using the existing multipart format.
     /// The body and pending mapping are durable before the task is resumed.
     func submit(

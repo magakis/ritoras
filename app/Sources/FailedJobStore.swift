@@ -190,6 +190,44 @@ final class FailedJobStore: @unchecked Sendable {
         return pendingRecords
     }
 
+    /// Moves an aged pending job into failed recovery without deleting its audio.
+    @discardableResult
+    func movePendingToFailed(_ pending: PendingJobRecord, errorMessage: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let pendingIndex = pendingRecords.firstIndex(where: { $0.jobId == pending.jobId }),
+              pendingRecords[pendingIndex] == pending else { return false }
+        let previousRecords = records
+        let previousPendingRecords = pendingRecords
+        let existing = records.first { $0.jobId == pending.jobId }
+        let failed = FailedJobRecord(
+            jobId: pending.jobId,
+            audioFilePath: pending.audioFilePath,
+            errorMessage: errorMessage,
+            recordedDurationSeconds: existing?.recordedDurationSeconds ?? 0,
+            createdAt: Date(),
+            retryCount: existing?.retryCount ?? 0,
+            lastRetriedAt: existing?.lastRetriedAt,
+            server: pending.resolvedServer ?? pending.candidateServer)
+        if let index = records.firstIndex(where: { $0.jobId == pending.jobId }) {
+            records[index] = failed
+        } else {
+            records.append(failed)
+        }
+        pendingRecords.remove(at: pendingIndex)
+        guard persistRecords() else {
+            records = previousRecords
+            pendingRecords = previousPendingRecords
+            return false
+        }
+        guard persistPending() else {
+            records = previousRecords
+            pendingRecords = previousPendingRecords
+            _ = persistRecords()
+            return false
+        }
+        return true
+    }
+
     /// Replaces an existing pending job. Returns false if absent or persistence fails.
     @discardableResult
     func updatePending(_ record: PendingJobRecord) -> Bool {

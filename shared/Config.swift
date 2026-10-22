@@ -287,6 +287,10 @@ struct SharedConfig {
         static let streamVadAccumulatorSpillSamplesDefault: Int = 1_048_576
         static let streamVadAccumulatorCapEnabledKey = "streamVadAccumulatorCapEnabled"
         static let streamVadAccumulatorCapEnabledDefault = true
+        static let stalePendingJobSweepEnabledKey = "stalePendingJobSweepEnabled"
+        static let stalePendingJobSweepEnabledDefault = true
+        static let stalePendingJobAgeLimit: TimeInterval = 7 * 24 * 60 * 60
+        static let multipartBodyAgeLimit: TimeInterval = 7 * 24 * 60 * 60
         static let sessionHeadBufferMsDefault: Int = 2500
         static let streamVadSensitivityProfileKey = "streamVadSensitivityProfile"
         static let streamVadSensitivityProfileDefault: VADSensitivityProfile = .automatic
@@ -1159,6 +1163,15 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.streamVadAccumulatorCapEnabledKey) as? Bool)
             ?? Defaults.streamVadAccumulatorCapEnabledDefault
+    }
+
+    /// Reads the stale-job cleanup kill switch from the App Group.
+    static func stalePendingJobSweepEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.stalePendingJobSweepEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.stalePendingJobSweepEnabledKey) as? Bool)
+            ?? Defaults.stalePendingJobSweepEnabledDefault
     }
 
     /// Reads the analysis-only VAD high-pass kill switch from the App Group.

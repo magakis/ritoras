@@ -46,6 +46,7 @@ struct RitorasApp: App {
             .task {
                 await BackgroundTranscriptionUploader.shared.reconcileStartupTasks()
                 await dictationViewModel.reconcilePendingJobsOnLaunch()
+                BackgroundTranscriptionUploader.shared.sweepStaleJobs()
             }
             .task {
                 // Phase 4: migrate flat-file logs, then run the first SQLite retention pass.
