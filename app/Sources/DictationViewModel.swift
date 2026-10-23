@@ -2854,7 +2854,17 @@ final class DictationViewModel: ObservableObject {
 
         guard activeID == id else { return }
         if let currentId = activeID {
-            RecordingStore.shared.deleteStreamWav(for: currentId)
+            let expectedWavPath = RecordingStore.shared.streamWavURL(for: currentId)?.path
+            let hasRecoveryReference = expectedWavPath.map { wavPath in
+                FailedJobStore.shared.list().contains {
+                    $0.jobId == currentId && $0.audioFilePath == wavPath
+                } || FailedJobStore.shared.listPending().contains {
+                    $0.jobId == currentId && $0.audioFilePath == wavPath
+                }
+            } ?? false
+            if !hasRecoveryReference {
+                RecordingStore.shared.deleteStreamWav(for: currentId)
+            }
         }
         chunkSentAt.removeAll()
         clearChunkReviews()
