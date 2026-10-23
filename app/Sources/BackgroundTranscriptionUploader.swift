@@ -8,6 +8,12 @@ final class BackgroundTranscriptionUploader: NSObject, URLSessionDataDelegate, U
     static let backgroundSessionIdentifier = "com.ritoras.app.background-transcription-upload"
     private static let requestTimeout: TimeInterval = 600
     private static let resourceTimeout: TimeInterval = 600
+    private static let acceptanceBodyRecoveryTaskSuffix = ":acceptance-body-recovery"
+
+    private enum StatusSource: String {
+        case delegate
+        case completionFallback = "completion-fallback"
+    }
 
     private struct TaskState {
         var statusCode: Int?
@@ -87,8 +93,7 @@ final class BackgroundTranscriptionUploader: NSObject, URLSessionDataDelegate, U
             restore { snapshots in
                 self.stateQueue.sync {}
                 let ids = Set(snapshots.compactMap { snapshot -> UUID? in
-                    guard let description = snapshot.taskDescription else { return nil }
-                    return UUID(uuidString: description)
+                    Self.dictationID(from: snapshot.taskDescription)
                 })
                 continuation.resume(returning: ids)
             }
@@ -105,8 +110,7 @@ final class BackgroundTranscriptionUploader: NSObject, URLSessionDataDelegate, U
                 // before allowing the ordinary pending-job recovery sweep to start.
                 self.stateQueue.sync {}
                 let liveIDs = Set(snapshots.compactMap { snapshot -> UUID? in
-                    guard let description = snapshot.taskDescription else { return nil }
-                    return UUID(uuidString: description)
+                    Self.dictationID(from: snapshot.taskDescription)
                 })
                 let pendingRecords = FailedJobStore.shared.listPending()
                 let knownIDs = Set(pendingRecords.map(\.jobId))
@@ -366,15 +370,55 @@ final class BackgroundTranscriptionUploader: NSObject, URLSessionDataDelegate, U
         didCompleteWithError error: Error?
     ) {
         stateQueue.async {
-            guard let idString = task.taskDescription, let id = UUID(uuidString: idString) else { return }
+            guard let id = Self.dictationID(from: task.taskDescription) else { return }
             let state = self.taskStates[task.taskIdentifier] ?? TaskState()
+            let observedStatus: (code: Int, source: StatusSource)?
+            if let statusCode = state.statusCode {
+                observedStatus = (statusCode, .delegate)
+            } else if error == nil, let response = task.response as? HTTPURLResponse {
+                observedStatus = (response.statusCode, .completionFallback)
+            } else {
+                observedStatus = nil
+            }
+
+            if let observedStatus {
+                let payload: [String: Any] = [
+                    "jobId": id.uuidString,
+                    "source": observedStatus.source.rawValue,
+                    "status": observedStatus.code
+                ]
+                switch observedStatus.source {
+                case .delegate:
+                    FileLogger.shared.info(.network, "background upload HTTP response observed", payload: payload)
+                case .completionFallback:
+                    FileLogger.shared.warn(.network, "background upload HTTP response observed via completion fallback",
+                                            payload: payload)
+                }
+            }
+
             let terminal: BackgroundUploadTerminal
             if state.responseTooLarge {
                 terminal = .responseTooLarge
+            } else if let observedStatus, (200..<300).contains(observedStatus.code), state.responseData.isEmpty,
+                      !Self.isAcceptanceBodyRecoveryTask(task.taskDescription),
+                      self.resubmitForMissingAcceptanceBody(
+                        using: session,
+                        completedTask: task,
+                        dictationID: id,
+                        status: observedStatus.code,
+                        source: observedStatus.source
+                      ) {
+                self.taskStates.removeValue(forKey: task.taskIdentifier)
+                return
             } else if let error {
                 terminal = .transportFailure(reason: error.localizedDescription)
-            } else if let status = state.statusCode {
-                terminal = BackgroundUploadRules.classifyResponse(status: status, body: state.responseData)
+            } else if let observedStatus {
+                terminal = BackgroundUploadRules.classifyResponse(
+                    status: observedStatus.code,
+                    body: state.responseData
+                )
+            } else if task.response != nil {
+                terminal = .transportFailure(reason: "Upload completed with a non-HTTP response")
             } else {
                 terminal = .transportFailure(reason: "Upload completed without an HTTP response")
             }
@@ -382,6 +426,40 @@ final class BackgroundTranscriptionUploader: NSObject, URLSessionDataDelegate, U
                 self.taskStates.removeValue(forKey: task.taskIdentifier)
             }
         }
+    }
+
+    private func resubmitForMissingAcceptanceBody(
+        using session: URLSession,
+        completedTask: URLSessionTask,
+        dictationID: UUID,
+        status: Int,
+        source: StatusSource
+    ) -> Bool {
+        let store = FailedJobStore.shared
+        guard let pending = store.listPending().first(where: { $0.jobId == dictationID }),
+              pending.state == .submitting,
+              pending.uploadTerminalKind == nil,
+              let bodyPath = pending.uploadBodyFilePath,
+              FileManager.default.fileExists(atPath: bodyPath),
+              let request = completedTask.originalRequest,
+              request.value(forHTTPHeaderField: "Idempotency-Key") == dictationID.uuidString.lowercased() else {
+            return false
+        }
+
+        let recoveryTask = session.uploadTask(
+            with: request,
+            fromFile: URL(fileURLWithPath: bodyPath)
+        )
+        recoveryTask.taskDescription = Self.acceptanceBodyRecoveryTaskDescription(for: dictationID)
+        taskStates[recoveryTask.taskIdentifier] = TaskState()
+        FileLogger.shared.warn(.network, "background upload 2xx body missing; resubmitting with the same key",
+                               payload: [
+                                   "jobId": dictationID.uuidString,
+                                   "source": source.rawValue,
+                                   "status": status
+                               ])
+        recoveryTask.resume()
+        return true
     }
 
     @discardableResult
@@ -536,6 +614,22 @@ final class BackgroundTranscriptionUploader: NSObject, URLSessionDataDelegate, U
         default:
             return nil
         }
+    }
+
+    private static func dictationID(from taskDescription: String?) -> UUID? {
+        guard let taskDescription else { return nil }
+        let idString = isAcceptanceBodyRecoveryTask(taskDescription)
+            ? String(taskDescription.dropLast(acceptanceBodyRecoveryTaskSuffix.count))
+            : taskDescription
+        return UUID(uuidString: idString)
+    }
+
+    private static func isAcceptanceBodyRecoveryTask(_ taskDescription: String?) -> Bool {
+        taskDescription?.hasSuffix(acceptanceBodyRecoveryTaskSuffix) == true
+    }
+
+    private static func acceptanceBodyRecoveryTaskDescription(for id: UUID) -> String {
+        "\(id.uuidString)\(acceptanceBodyRecoveryTaskSuffix)"
     }
 }
 
