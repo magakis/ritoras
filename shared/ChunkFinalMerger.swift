@@ -9,12 +9,26 @@ struct ChunkFinalSegment {
 
 enum ChunkFinalMerger {
     static let maxGapMs: Double = 2_500
+    private static let ruleBMinGapExclusiveMs: Double = 2_500
+    private static let ruleBMaxGapMs: Double = 10_000
 
     private static let continuationWords: Set<String> = [
         "for", "and", "but", "or", "nor", "so", "yet", "which", "that",
         "because", "with", "also", "to", "from", "when", "while", "since",
         "although", "however", "plus"
     ]
+
+    // Keep Rule B aligned with ZERO_RISK_MERGER_CONFIG in
+    // scripts/prediction-sim/lib/chunk-final-merge.mjs:7–23, including exact classes and bounds.
+    private static let ruleBAuxiliaryWords: Set<String> = [
+        "is", "are", "was", "were", "be", "been", "being", "am", "will", "would",
+        "have", "has", "had", "do", "does", "did", "can", "could",
+        "should", "must", "may", "might"
+    ]
+    private static let ruleBHangingClauseAdverbs: Set<String> = [
+        "essentially", "basically", "rather", "actually"
+    ]
+    private static let ruleBGerundSuffix = "ing"
 
     static func merge(_ finalText: String, segments: [ChunkFinalSegment], maxGapMs: Double = maxGapMs) -> String {
         let nonempty = segments.filter { !$0.chunkLocalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -33,14 +47,30 @@ enum ChunkFinalMerger {
             let left = boundaries[index]
             let right = boundaries[index + 1]
             let gap = right.segment.startMs - left.segment.endMs
-            guard gap <= maxGapMs,
-                  let localTail = terminalPunctuationRange(in: left.segment.chunkLocalText.trimmingCharacters(in: .whitespacesAndNewlines)),
-                  shouldContinue(right.segment.chunkLocalText) else { continue }
-
             let leftText = left.segment.chunkLocalText.trimmingCharacters(in: .whitespacesAndNewlines)
             let rightText = right.segment.chunkLocalText.trimmingCharacters(in: .whitespacesAndNewlines)
-            let punctuationOffset = leftText.distance(from: leftText.startIndex, to: localTail.lowerBound)
-            let finalPunctuation = finalText.index(left.range.lowerBound, offsetBy: punctuationOffset)
+            let localTail = terminalPunctuationRange(in: leftText)
+            let firstRightWord = words(in: rightText).first
+            // Port seam evaluation and edit precedence from
+            // scripts/prediction-sim/lib/chunk-final-merge.mjs:88–110, 162–177.
+            let shouldMergeWithRuleA = gap <= maxGapMs
+                && localTail != nil
+                && shouldContinue(rightText)
+            let shouldMergeWithRuleB = gap > Self.maxGapMs
+                && gap > ruleBMinGapExclusiveMs
+                && gap <= ruleBMaxGapMs
+                && hasAuxiliaryAdverbTail(leftText)
+                && isGerund(firstRightWord)
+            guard shouldMergeWithRuleA || shouldMergeWithRuleB,
+                  let firstRightWord else { continue }
+
+            let punctuationIndex: String.Index?
+            if let localTail {
+                let punctuationOffset = leftText.distance(from: leftText.startIndex, to: localTail.lowerBound)
+                punctuationIndex = finalText.index(left.range.lowerBound, offsetBy: punctuationOffset)
+            } else {
+                punctuationIndex = nil
+            }
             let nextWordStartOffset = rightText.distance(
                 from: rightText.startIndex, to: firstWordStart(in: rightText))
             let nextStart = finalText.index(right.range.lowerBound, offsetBy: nextWordStartOffset)
@@ -48,11 +78,21 @@ enum ChunkFinalMerger {
                 from: firstWordStart(in: rightText), to: firstWordEnd(in: rightText))
             let nextEnd = finalText.index(nextStart, offsetBy: nextWordEndOffset)
             let word = String(finalText[nextStart..<nextEnd])
-            let replacementWord = continuationReplacement(word)
 
-            edits.append((finalPunctuation..<nextStart, " "))
-            if replacementWord != word {
-                edits.append((nextStart..<nextEnd, replacementWord))
+            if shouldMergeWithRuleA, let punctuationIndex {
+                let replacementWord = continuationReplacement(word)
+                edits.append((punctuationIndex..<nextStart, " "))
+                if replacementWord != word {
+                    edits.append((nextStart..<nextEnd, replacementWord))
+                }
+            } else {
+                if let punctuationIndex {
+                    edits.append((punctuationIndex..<finalText.index(after: punctuationIndex), ""))
+                }
+                let replacementWord = lowercaseInitialCharacter(word)
+                if replacementWord != word {
+                    edits.append((nextStart..<nextEnd, replacementWord))
+                }
             }
         }
         var result = finalText
@@ -97,8 +137,29 @@ enum ChunkFinalMerger {
         return word.first?.isLowercase == true || continuationWords.contains(word.lowercased())
     }
 
+    private static func words(in text: String) -> [String] {
+        text.split(whereSeparator: { !$0.isLetter }).map(String.init)
+    }
+
+    private static func hasAuxiliaryAdverbTail(_ text: String) -> Bool {
+        let words = words(in: text)
+        guard words.count >= 2 else { return false }
+        let auxiliary = words[words.count - 2].lowercased()
+        let adverb = words[words.count - 1].lowercased()
+        return ruleBAuxiliaryWords.contains(auxiliary)
+            && ruleBHangingClauseAdverbs.contains(adverb)
+    }
+
+    private static func isGerund(_ word: String?) -> Bool {
+        word?.lowercased().hasSuffix(ruleBGerundSuffix) == true
+    }
+
     private static func continuationReplacement(_ word: String) -> String {
         guard continuationWords.contains(word.lowercased()), word.first?.isUppercase == true else { return word }
-        return word.prefix(1).lowercased() + word.dropFirst()
+        return lowercaseInitialCharacter(word)
+    }
+
+    private static func lowercaseInitialCharacter(_ word: String) -> String {
+        word.prefix(1).lowercased() + word.dropFirst()
     }
 }
