@@ -51,6 +51,12 @@ enum StreamTelemetrySendError: Error {
     case timeout
 }
 
+enum WhisperStreamTransportError: Error {
+    case dead
+    case notReady
+    case superseded
+}
+
 private final class TelemetrySendContinuation: @unchecked Sendable {
     private let lock = NSLock()
     private var hasResumed = false
@@ -88,6 +94,12 @@ actor WhisperStreamClient {
     /// The active WebSocket task, or nil when disconnected.
     private var task: URLSessionWebSocketTask?
     private var receiveFailed = false
+    private var connectionReady = false
+    private var connectionGeneration: UInt64 = 0
+    private var connectionAttempt: Task<Void, Error>?
+    private var connectionAttemptID: UUID?
+    /// Stop-time telemetry starts finalization; reconnecting after it could orphan END.
+    private var finalizationStarted = false
 
     /// Shared URLSession (no custom delegate needed).
     private let session: URLSession = .shared
@@ -129,15 +141,27 @@ actor WhisperStreamClient {
 
     // MARK: - Connection
 
-    /// Opens the WebSocket connection and verifies reachability
-    /// via a PING/PONG handshake.
+    /// Opens the WebSocket connection and verifies reachability via a PING/PONG handshake.
+    /// Concurrent callers share the in-flight handshake.
     ///
-    /// - Throws: `WhisperError.timeout` if the connection does not
-    ///   complete within `streamWsConnectTimeout`.
-    /// - Throws: `WhisperError.networkError` if the transport reports
-    ///   a connection failure.
+    /// - Throws: `WhisperError.timeout` if the connection does not complete within
+    ///   `streamWsConnectTimeout`.
+    /// - Throws: `WhisperError.networkError` if the transport reports a connection failure.
+    /// - Throws: `WhisperStreamTransportError.superseded` if another lifecycle action wins.
     func connect() async throws {
-        stopKeepaliveTimer()
+        if let connectionAttempt {
+            guard let currentTask = task else {
+                throw WhisperStreamTransportError.superseded
+            }
+            let generation = connectionGeneration
+            try await connectionAttempt.value
+            guard isReadyConnection(currentTask, generation: generation) else {
+                throw WhisperStreamTransportError.superseded
+            }
+            return
+        }
+
+        let generation = prepareNewConnection()
         var request = URLRequest(url: url)
         WhisperClient.applyAuth(to: &request)
         let newTask = session.webSocketTask(with: request)
@@ -147,10 +171,69 @@ actor WhisperStreamClient {
         FileLogger.shared.debug(.network, "Stream: connecting",
                                payload: ["jobId": dictationID, "server": url.absoluteString])
 
+        let attemptID = UUID()
+        let attempt = Task { [weak self] in
+            guard let self else { throw WhisperStreamTransportError.superseded }
+            try await self.completeConnectionHandshake(using: newTask, generation: generation)
+        }
+        connectionAttemptID = attemptID
+        connectionAttempt = attempt
+
         do {
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                // Probe: send PING, wait for PONG
-                group.addTask {
+            try await attempt.value
+            guard isReadyConnection(newTask, generation: generation) else {
+                throw WhisperStreamTransportError.superseded
+            }
+            if connectionAttemptID == attemptID {
+                connectionAttempt = nil
+                connectionAttemptID = nil
+            }
+        } catch {
+            if connectionAttemptID == attemptID {
+                connectionAttempt = nil
+                connectionAttemptID = nil
+                if isCurrentConnection(newTask, generation: generation) {
+                    closeConnection(markReceiveFailed: true)
+                }
+            }
+            throw error
+        }
+    }
+
+    /// Starts one fresh server session, bounded by the normal connect handshake timeout.
+    /// Reconnect is invalid once stop-time telemetry or END has begun.
+    func reconnect() async -> Bool {
+        guard !finalizationStarted else { return false }
+        do {
+            try await connect()
+            return isConnected()
+        } catch {
+            return false
+        }
+    }
+
+    private func prepareNewConnection() -> UInt64 {
+        connectionGeneration &+= 1
+        stopKeepaliveTimer()
+        connectionAttempt?.cancel()
+        connectionAttempt = nil
+        connectionAttemptID = nil
+        task?.cancel(with: .goingAway, reason: nil)
+        task = nil
+        connectionReady = false
+        receiveFailed = false
+        finalizationStarted = false
+        livenessEvaluator = StreamLivenessEvaluator()
+        return connectionGeneration
+    }
+
+    private func completeConnectionHandshake(
+        using newTask: URLSessionWebSocketTask,
+        generation: UInt64
+    ) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                try await withTaskCancellationHandler {
                     do {
                         try await newTask.send(.string(#"{"type":"PING"}"#))
 
@@ -158,12 +241,12 @@ actor WhisperStreamClient {
                             switch try await newTask.receive() {
                             case .string(let text):
                                 if text.contains("PONG") {
-                                    FileLogger.shared.info(.network, "Connected (PONG received)",
-                                                           payload: ["jobId": self.dictationID,
-                                                                     "server": self.url.absoluteString])
+                                    guard await self.isCurrentConnection(
+                                        newTask, generation: generation) else {
+                                        throw WhisperStreamTransportError.superseded
+                                    }
                                     return
                                 }
-                                // Unexpected message before PONG — ignore
                                 continue
                             case .data:
                                 continue
@@ -171,49 +254,100 @@ actor WhisperStreamClient {
                                 continue
                             }
                         }
+                    } catch let error as WhisperStreamTransportError {
+                        throw error
                     } catch let error as WhisperError {
                         throw error
                     } catch {
                         throw WhisperError.networkError(error)
                     }
+                } onCancel: {
+                    newTask.cancel(with: .goingAway, reason: nil)
                 }
+            }
 
-                // Timeout guard
-                group.addTask {
-                    try await Task.sleep(
-                        nanoseconds: UInt64(SharedConfig.Defaults.streamWsConnectTimeout * 1_000_000_000)
-                    )
-                    FileLogger.shared.debug(.network, "Connection timed out",
-                                           payload: ["id": self.dictationID,
-                                                     "timeout": SharedConfig.Defaults.streamWsConnectTimeout])
-                    throw WhisperError.timeout
+            group.addTask {
+                try await Task.sleep(
+                    nanoseconds: UInt64(SharedConfig.Defaults.streamWsConnectTimeout * 1_000_000_000)
+                )
+                guard await self.isCurrentConnection(
+                    newTask, generation: generation) else {
+                    throw WhisperStreamTransportError.superseded
                 }
+                FileLogger.shared.debug(.network, "Connection timed out",
+                                       payload: ["id": self.dictationID,
+                                                 "timeout": SharedConfig.Defaults.streamWsConnectTimeout])
+                throw WhisperError.timeout
+            }
 
-                try await group.next()
-                group.cancelAll()
-            }
-        } catch {
-            newTask.cancel(with: .goingAway, reason: nil)
-            if task === newTask {
-                task = nil
-            }
-            throw error
+            try await group.next()
+            group.cancelAll()
         }
 
-        livenessEvaluator.recordConnected(at: Date())
+        guard isCurrentConnection(newTask, generation: generation) else {
+            throw WhisperStreamTransportError.superseded
+        }
 
-        startKeepaliveTimer()
+        FileLogger.shared.info(.network, "Connected (PONG received)",
+                               payload: ["jobId": dictationID, "server": url.absoluteString])
+        livenessEvaluator.recordConnected(at: Date())
+        connectionReady = true
+
+        startKeepaliveTimer(for: newTask, generation: generation)
         FileLogger.shared.debug(.network, "Keepalive loop started",
                                payload: ["interval": SharedConfig.Defaults.streamKeepaliveIntervalSeconds])
     }
 
-    private func startKeepaliveTimer() {
+    private func isCurrentConnection(
+        _ expectedTask: URLSessionWebSocketTask,
+        generation: UInt64
+    ) -> Bool {
+        connectionGeneration == generation && task === expectedTask
+    }
+
+    private func isReadyConnection(
+        _ expectedTask: URLSessionWebSocketTask,
+        generation: UInt64
+    ) -> Bool {
+        isCurrentConnection(expectedTask, generation: generation)
+            && connectionReady
+            && !receiveFailed
+            && expectedTask.state == .running
+    }
+
+    private func activeConnection() throws -> (task: URLSessionWebSocketTask, generation: UInt64) {
+        guard let task, task.state == .running, !receiveFailed else {
+            throw WhisperStreamTransportError.dead
+        }
+        guard connectionReady else {
+            throw WhisperStreamTransportError.notReady
+        }
+        return (task, connectionGeneration)
+    }
+
+    func isTransportDead() -> Bool {
+        guard let task else { return true }
+        return receiveFailed || task.state != .running
+    }
+
+    func isConnected() -> Bool {
+        guard let task else { return false }
+        return isReadyConnection(task, generation: connectionGeneration)
+    }
+
+    private func startKeepaliveTimer(
+        for task: URLSessionWebSocketTask,
+        generation: UInt64
+    ) {
         stopKeepaliveTimer()
         let timerID = UUID()
         let interval = SharedConfig.Defaults.streamKeepaliveIntervalSeconds
         let timer = makeStrictStreamTimer(after: interval) { [weak self] in
             Task { [weak self] in
-                await self?.keepaliveTimerFired(timerID: timerID)
+                await self?.keepaliveTimerFired(
+                    timerID: timerID,
+                    task: task,
+                    generation: generation)
             }
         }
         keepaliveTimerID = timerID
@@ -221,17 +355,25 @@ actor WhisperStreamClient {
         timer.resume()
     }
 
-    private func keepaliveTimerFired(timerID: UUID) async {
-        guard keepaliveTimerID == timerID else { return }
+    private func keepaliveTimerFired(
+        timerID: UUID,
+        task: URLSessionWebSocketTask,
+        generation: UInt64
+    ) async {
+        guard keepaliveTimerID == timerID,
+              isReadyConnection(task, generation: generation) else { return }
         do {
-            try await sendPing()
+            try await sendPing(on: task, generation: generation)
         } catch {
-            guard keepaliveTimerID == timerID else { return }
+            guard keepaliveTimerID == timerID,
+                  isReadyConnection(task, generation: generation) else { return }
             forceClose()
             return
         }
 
-        guard keepaliveTimerID == timerID, let keepaliveTimer else { return }
+        guard keepaliveTimerID == timerID,
+              isReadyConnection(task, generation: generation),
+              let keepaliveTimer else { return }
         scheduleStrictStreamTimer(
             keepaliveTimer,
             after: SharedConfig.Defaults.streamKeepaliveIntervalSeconds
@@ -248,18 +390,30 @@ actor WhisperStreamClient {
 
     /// Sends one JSON telemetry text frame. The caller orders it before END.
     func sendTelemetry(_ data: Data) async throws {
-        guard data.count <= 1_048_576, let text = String(data: data, encoding: .utf8),
-              let task = task else {
+        guard data.count <= 1_048_576, let text = String(data: data, encoding: .utf8) else {
             throw WhisperError.networkError(URLError(.notConnectedToInternet))
         }
+        let connection = try activeConnection()
+        finalizationStarted = true
         try await withCheckedThrowingContinuation { continuation in
             let resumeOnce = TelemetrySendContinuation(continuation)
             Task {
                 do {
-                    try await task.send(.string(text))
+                    try await connection.task.send(.string(text))
+                    let stillConnected = await self.isReadyConnection(
+                        connection.task,
+                        generation: connection.generation)
+                    guard stillConnected else {
+                        resumeOnce.resume(with: .failure(WhisperStreamTransportError.dead))
+                        return
+                    }
                     resumeOnce.resume(with: .success(()))
                 } catch {
-                    resumeOnce.resume(with: .failure(error))
+                    let mappedError = await self.mappedSendFailure(
+                        error,
+                        task: connection.task,
+                        generation: connection.generation)
+                    resumeOnce.resume(with: .failure(mappedError))
                 }
             }
             DispatchQueue.global().asyncAfter(
@@ -270,7 +424,7 @@ actor WhisperStreamClient {
     }
 
     func isHealthyForTelemetry() -> Bool {
-        !receiveFailed && task?.state == .running
+        isConnected()
     }
 
     /// Sends a binary frame containing a PCM audio chunk.
@@ -285,9 +439,7 @@ actor WhisperStreamClient {
     ///   - samples: Float PCM samples (16 kHz mono).
     /// - Throws: `WhisperError.networkError` if the transport fails.
     func sendChunk(id: UInt32, samples: [Float]) async throws {
-        guard let task = task else {
-            throw WhisperError.networkError(URLError(.notConnectedToInternet))
-        }
+        let connection = try activeConnection()
 
         var data = Data(capacity: 4 + samples.count * MemoryLayout<Float>.size)
 
@@ -305,7 +457,17 @@ actor WhisperStreamClient {
             maxAge: SharedConfig.Defaults.streamUploadWindowMaxAgeSeconds)
         logUploadWindowEvents(windowEvents, bytes: data.count)
 
-        try await task.send(.data(data))
+        do {
+            try await connection.task.send(.data(data))
+        } catch {
+            throw mappedSendFailure(
+                error,
+                task: connection.task,
+                generation: connection.generation)
+        }
+        guard isReadyConnection(connection.task, generation: connection.generation) else {
+            throw WhisperStreamTransportError.dead
+        }
 
         FileLogger.shared.debug(.network, "Sent chunk",
                                 payload: ["chunkId": id, "bytes": data.count])
@@ -316,7 +478,10 @@ actor WhisperStreamClient {
     /// respond with a `final` transcription.
     func sendEnd() async throws {
         let timestamp = Date()
-        guard let task = task else {
+        let connection: (task: URLSessionWebSocketTask, generation: UInt64)
+        do {
+            connection = try activeConnection()
+        } catch {
             FileLogger.shared.debug(.network, "Stream: END send result", payload: [
                 "jobId": dictationID,
                 "server": url.absoluteString,
@@ -325,10 +490,14 @@ actor WhisperStreamClient {
                 "timestamp_ms": timestamp.timeIntervalSince1970 * 1000,
                 "error": "WebSocket is not connected"
             ])
-            throw WhisperError.networkError(URLError(.notConnectedToInternet))
+            throw error
         }
+        finalizationStarted = true
         do {
-            try await task.send(.string(#"{"type":"END"}"#))
+            try await connection.task.send(.string(#"{"type":"END"}"#))
+            guard isReadyConnection(connection.task, generation: connection.generation) else {
+                throw WhisperStreamTransportError.dead
+            }
             let sentAt = Date()
             let windowEvents = livenessEvaluator.recordEndSent(
                 at: sentAt,
@@ -350,7 +519,10 @@ actor WhisperStreamClient {
                 "timestamp_ms": timestamp.timeIntervalSince1970 * 1000,
                 "error": String(error.localizedDescription.prefix(160))
             ])
-            throw error
+            throw mappedSendFailure(
+                error,
+                task: connection.task,
+                generation: connection.generation)
         }
     }
 
@@ -358,35 +530,102 @@ actor WhisperStreamClient {
     /// idle timeout is 600 s; the caller should send a PING well
     /// before that threshold during long pauses.
     func sendPing() async throws {
-        guard let task = task else {
-            throw WhisperError.networkError(URLError(.notConnectedToInternet))
+        let connection = try activeConnection()
+        try await sendPing(on: connection.task, generation: connection.generation)
+    }
+
+    private func sendPing(
+        on task: URLSessionWebSocketTask,
+        generation: UInt64
+    ) async throws {
+        guard isReadyConnection(task, generation: generation) else {
+            throw WhisperStreamTransportError.dead
         }
-        try await task.send(.string(#"{"type":"PING"}"#))
+        do {
+            try await task.send(.string(#"{"type":"PING"}"#))
+        } catch {
+            throw mappedSendFailure(error, task: task, generation: generation)
+        }
+        guard isReadyConnection(task, generation: generation) else {
+            throw WhisperStreamTransportError.dead
+        }
         FileLogger.shared.debug(.network, "Sent PING")
     }
 
+    private func mappedSendFailure(
+        _ error: Error,
+        task: URLSessionWebSocketTask,
+        generation: UInt64
+    ) -> Error {
+        guard isReadyConnection(task, generation: generation) else {
+            if isCurrentConnection(task, generation: generation) {
+                forceClose()
+            }
+            return WhisperStreamTransportError.dead
+        }
+        return error
+    }
+
     /// Records a partial that keeps the stream alive only before END.
-    private func touchActivity() {
+    private func touchActivity(
+        from task: URLSessionWebSocketTask,
+        generation: UInt64
+    ) -> Bool {
+        guard isReadyConnection(task, generation: generation) else { return false }
         let windowEvents = livenessEvaluator.recordPartialReceived(
             at: Date(),
             maxAge: SharedConfig.Defaults.streamUploadWindowMaxAgeSeconds)
         logUploadWindowEvents(windowEvents)
+        return true
     }
 
     /// Records a PONG for both recording and post-END liveness checks.
-    private func touchPong() {
+    private func touchPong(
+        from task: URLSessionWebSocketTask,
+        generation: UInt64
+    ) -> Bool {
+        guard isReadyConnection(task, generation: generation) else { return false }
         let windowEvents = livenessEvaluator.recordPongReceived(
             at: Date(),
             maxAge: SharedConfig.Defaults.streamUploadWindowMaxAgeSeconds)
         logUploadWindowEvents(windowEvents)
+        return true
     }
 
     /// Records a final frame as post-END evidence for closing an upload window.
-    private func touchFinal() {
+    private func touchFinal(
+        from task: URLSessionWebSocketTask,
+        generation: UInt64
+    ) -> Bool {
+        guard isReadyConnection(task, generation: generation) else { return false }
         let windowEvents = livenessEvaluator.recordFinalReceived(
             at: Date(),
             maxAge: SharedConfig.Defaults.streamUploadWindowMaxAgeSeconds)
         logUploadWindowEvents(windowEvents)
+        return true
+    }
+
+    private func publishPartial(
+        _ partial: String,
+        using callback: @Sendable (String) -> Void,
+        from task: URLSessionWebSocketTask,
+        generation: UInt64
+    ) -> Bool {
+        guard isReadyConnection(task, generation: generation) else { return false }
+        callback(partial)
+        return true
+    }
+
+    private func publishChunkResult(
+        id: UInt32,
+        text: String,
+        using callback: (@Sendable (UInt32, String) async -> Void)?,
+        from task: URLSessionWebSocketTask,
+        generation: UInt64
+    ) async -> Bool {
+        guard isReadyConnection(task, generation: generation) else { return false }
+        await callback?(id, text)
+        return isReadyConnection(task, generation: generation)
     }
 
     /// Returns staleness after accounting for upload time using wall-clock dates.
@@ -398,6 +637,14 @@ actor WhisperStreamClient {
             maxUploadWindowAge: SharedConfig.Defaults.streamUploadWindowMaxAgeSeconds)
         logUploadWindowEvents(status.windowEvents)
         return status
+    }
+
+    private func livenessStatus(
+        for task: URLSessionWebSocketTask,
+        generation: UInt64
+    ) -> StreamLivenessEvaluator.Evaluation? {
+        guard isReadyConnection(task, generation: generation) else { return nil }
+        return livenessStatus()
     }
 
     private func logUploadWindowEvents(
@@ -445,16 +692,22 @@ actor WhisperStreamClient {
     /// - Throws: `WhisperError.timeout` if `streamFinalTimeout` elapses
     ///   without receiving `final`.
     /// - Throws: `WhisperError.httpError` if the server returns an error frame.
+    /// - Throws: `WhisperStreamTransportError` if the connection is dead, not ready, or superseded.
     /// - Throws: `WhisperError.networkError` on transport failure.
     func receiveMessages(
         onPartial: @escaping @Sendable (String) -> Void,
         onChunkResult: (@Sendable (UInt32, String) async -> Void)? = nil
     ) async throws -> String {
-        receiveFailed = false
+        let connection = try activeConnection()
         do {
             let transcription = try await receiveMessagesLoop(
+                task: connection.task,
+                generation: connection.generation,
                 onPartial: onPartial,
                 onChunkResult: onChunkResult)
+            guard isReadyConnection(connection.task, generation: connection.generation) else {
+                throw WhisperStreamTransportError.superseded
+            }
             let completedNormally = !Task.isCancelled
             logReceiveTaskExit(
                 reason: completedNormally ? "normal_completion" : "cancellation",
@@ -462,25 +715,25 @@ actor WhisperStreamClient {
                 serverErrorFrameReceived: false)
             return transcription
         } catch {
-            receiveFailed = true
-            let reason = isReceiveCancellation(error) ? "cancellation" : "error"
-            logReceiveTaskExit(
-                reason: reason,
-                finalFrameReceived: false,
-                serverErrorFrameReceived: isServerErrorFrame(error),
-                error: error.localizedDescription)
+            if isCurrentConnection(connection.task, generation: connection.generation) {
+                closeConnection(markReceiveFailed: true)
+                let reason = isReceiveCancellation(error) ? "cancellation" : "error"
+                logReceiveTaskExit(
+                    reason: reason,
+                    finalFrameReceived: false,
+                    serverErrorFrameReceived: isServerErrorFrame(error),
+                    error: error.localizedDescription)
+            }
             throw error
         }
     }
 
     private func receiveMessagesLoop(
+        task: URLSessionWebSocketTask,
+        generation: UInt64,
         onPartial: @escaping @Sendable (String) -> Void,
         onChunkResult: (@Sendable (UInt32, String) async -> Void)?
     ) async throws -> String {
-        guard let task = task else {
-            throw WhisperError.networkError(URLError(.notConnectedToInternet))
-        }
-
         return try await withThrowingTaskGroup(of: String.self) { group in
 
             // Receive loop
@@ -490,6 +743,9 @@ actor WhisperStreamClient {
 
                     while true {
                         let message = try await task.receive()
+                        guard await self.isReadyConnection(task, generation: generation) else {
+                            throw WhisperStreamTransportError.superseded
+                        }
 
                         switch message {
                         case .string(let text):
@@ -505,9 +761,19 @@ actor WhisperStreamClient {
                                 case "partial":
                                     let msg = try JSONDecoder().decode(
                                         StreamPartial.self, from: data)
-                                    await self.touchActivity()
+                                    guard await self.touchActivity(
+                                        from: task, generation: generation) else {
+                                        throw WhisperStreamTransportError.superseded
+                                    }
                                     if let chunkId = msg.chunk_id {
-                                        await onChunkResult?(chunkId, msg.transcription)
+                                        guard await self.publishChunkResult(
+                                            id: chunkId,
+                                            text: msg.transcription,
+                                            using: onChunkResult,
+                                            from: task,
+                                            generation: generation) else {
+                                            throw WhisperStreamTransportError.superseded
+                                        }
                                     } else {
                                         FileLogger.shared.debug(.network, "Received partial without chunk ID")
                                     }
@@ -518,15 +784,35 @@ actor WhisperStreamClient {
                                                             payload: ["preview": String(accumulated.prefix(60)),
                                                                       "length": accumulated.count,
                                                                       "chunkId": msg.chunk_id as Any])
-                                    onPartial(accumulated)
+                                    guard await self.publishPartial(
+                                        accumulated,
+                                        using: onPartial,
+                                        from: task,
+                                        generation: generation) else {
+                                        throw WhisperStreamTransportError.superseded
+                                    }
 
                                 case "final":
                                     let msg = try JSONDecoder().decode(
                                         StreamFinal.self, from: data)
-                                    await self.touchFinal()
+                                    guard await self.touchFinal(
+                                        from: task, generation: generation) else {
+                                        throw WhisperStreamTransportError.superseded
+                                    }
                                     let elapsedSinceEndMs = await self.elapsedSinceEndMs()
+                                    guard await self.isReadyConnection(
+                                        task, generation: generation) else {
+                                        throw WhisperStreamTransportError.superseded
+                                    }
                                     if let chunkId = msg.chunk_id {
-                                        await onChunkResult?(chunkId, msg.transcription)
+                                        guard await self.publishChunkResult(
+                                            id: chunkId,
+                                            text: msg.transcription,
+                                            using: onChunkResult,
+                                            from: task,
+                                            generation: generation) else {
+                                            throw WhisperStreamTransportError.superseded
+                                        }
                                     }
                                     var payload: [String: Any] = [
                                         "jobId": self.dictationID,
@@ -545,14 +831,21 @@ actor WhisperStreamClient {
                                     return msg.transcription
 
                                 case "PONG":
+                                    guard await self.touchPong(
+                                        from: task, generation: generation) else {
+                                        throw WhisperStreamTransportError.superseded
+                                    }
                                     FileLogger.shared.debug(.network, "Received PONG")
-                                    await self.touchPong()
                                     continue
 
                                 case "error":
                                     let msg = try JSONDecoder().decode(
                                         StreamError.self, from: data)
                                     let elapsedSinceEndMs = await self.elapsedSinceEndMs()
+                                    guard await self.isReadyConnection(
+                                        task, generation: generation) else {
+                                        throw WhisperStreamTransportError.superseded
+                                    }
                                     var payload: [String: Any] = [
                                         "jobId": self.dictationID,
                                         "server": self.url.absoluteString,
@@ -574,6 +867,8 @@ actor WhisperStreamClient {
                                     continue
                                 }
 
+                            } catch let error as WhisperStreamTransportError {
+                                throw error
                             } catch let error as WhisperError {
                                 throw error
                             } catch {
@@ -592,6 +887,8 @@ actor WhisperStreamClient {
                             continue
                         }
                     }
+                } catch let error as WhisperStreamTransportError {
+                    throw error
                 } catch let error as WhisperError {
                     throw error
                 } catch {
@@ -609,7 +906,10 @@ actor WhisperStreamClient {
                 )
                 let timer = makeStrictStreamTimer(after: interval) { [weak self] in
                     Task { [weak self] in
-                        await self?.yieldLivenessTick(to: tickContinuation)
+                        await self?.yieldLivenessTick(
+                            to: tickContinuation,
+                            from: task,
+                            generation: generation)
                     }
                 }
                 timer.resume()
@@ -621,18 +921,39 @@ actor WhisperStreamClient {
                 return try await withTaskCancellationHandler {
                     for await _ in ticks {
                         guard !Task.isCancelled else { return "" }
-                        try? await self.sendPing()  // solicit a PONG
-                        let status = await self.livenessStatus()
+                        guard await self.isReadyConnection(
+                            task, generation: generation) else {
+                            throw WhisperStreamTransportError.superseded
+                        }
+                        do {
+                            try await self.sendPing(on: task, generation: generation)
+                        } catch {
+                            guard await self.isReadyConnection(
+                                task, generation: generation) else {
+                                throw WhisperStreamTransportError.superseded
+                            }
+                        }
+                        guard let status = await self.livenessStatus(
+                            for: task,
+                            generation: generation) else {
+                            throw WhisperStreamTransportError.superseded
+                        }
                         if status.shouldTimeout {
                             let missingEvidence = status.endSent ? "PONG" : "activity"
-                            FileLogger.shared.warn(.network,
-                                                   "Stream liveness: no \(missingEvidence), declaring timeout",
-                                                   payload: ["id": self.dictationID,
-                                                             "staleSec": status.secondsSinceEvidence,
-                                                             "interval": interval,
-                                                             "maxMissedPongs": maxMissed,
-                                                             "endSent": status.endSent])
+                            guard await self.logLivenessTimeoutIfCurrent(
+                                status,
+                                missingEvidence: missingEvidence,
+                                interval: interval,
+                                maxMissed: maxMissed,
+                                task: task,
+                                generation: generation) else {
+                                throw WhisperStreamTransportError.superseded
+                            }
                             throw WhisperError.timeout
+                        }
+                        guard await self.isReadyConnection(
+                            task, generation: generation) else {
+                            throw WhisperStreamTransportError.superseded
                         }
                         scheduleStrictStreamTimer(timer, after: interval)
                     }
@@ -652,8 +973,32 @@ actor WhisperStreamClient {
         }
     }
 
-    private func yieldLivenessTick(to continuation: AsyncStream<Void>.Continuation) {
+    private func yieldLivenessTick(
+        to continuation: AsyncStream<Void>.Continuation,
+        from task: URLSessionWebSocketTask,
+        generation: UInt64
+    ) {
+        guard isReadyConnection(task, generation: generation) else { return }
         continuation.yield(())
+    }
+
+    private func logLivenessTimeoutIfCurrent(
+        _ status: StreamLivenessEvaluator.Evaluation,
+        missingEvidence: String,
+        interval: TimeInterval,
+        maxMissed: Int,
+        task: URLSessionWebSocketTask,
+        generation: UInt64
+    ) -> Bool {
+        guard isReadyConnection(task, generation: generation) else { return false }
+        FileLogger.shared.warn(.network,
+                               "Stream liveness: no \(missingEvidence), declaring timeout",
+                               payload: ["id": dictationID,
+                                         "staleSec": status.secondsSinceEvidence,
+                                         "interval": interval,
+                                         "maxMissedPongs": maxMissed,
+                                         "endSent": status.endSent])
+        return true
     }
 
     private func elapsedSinceEndMs() -> Double? {
@@ -901,9 +1246,23 @@ actor WhisperStreamClient {
     /// `send()`/`receive()` calls fail immediately rather than waiting
     /// for `streamFinalTimeout`.
     private func forceClose() {
-        stopKeepaliveTimer()
-        task?.cancel(with: .goingAway, reason: nil)
+        closeConnection(markReceiveFailed: true)
         FileLogger.shared.info(.network, "Force-close: transport cancelled")
+    }
+
+    private func closeConnection(markReceiveFailed: Bool) {
+        connectionGeneration &+= 1
+        stopKeepaliveTimer()
+        connectionAttempt?.cancel()
+        connectionAttempt = nil
+        connectionAttemptID = nil
+        let oldTask = task
+        task = nil
+        connectionReady = false
+        if markReceiveFailed {
+            receiveFailed = true
+        }
+        oldTask?.cancel(with: .goingAway, reason: nil)
     }
 
     /// Gracefully closes the WebSocket connection.
@@ -911,10 +1270,7 @@ actor WhisperStreamClient {
     /// It is safe to call this method even if the client is not currently
     /// connected; it becomes a no-op.
     func disconnect() async {
-        stopKeepaliveTimer()
-        // Cancel any in-flight receive/send operations and close.
-        task?.cancel(with: .goingAway, reason: nil)
-        task = nil
+        closeConnection(markReceiveFailed: false)
         FileLogger.shared.info(.network, "Stream: disconnected", payload: ["id": dictationID])
     }
 

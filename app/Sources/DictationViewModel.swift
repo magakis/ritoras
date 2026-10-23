@@ -93,6 +93,13 @@ final class DictationViewModel: ObservableObject {
         case cancelled
     }
 
+    private enum StreamChunkConsumerOutcome: Equatable, Sendable {
+        case drained
+        case sendFailed
+        case cancelled
+        case timedOut
+    }
+
     @Published var phase: DictationPhase = .recording {
         didSet {
             if isTerminalResult(oldValue), phase == .cancelled {
@@ -189,6 +196,8 @@ final class DictationViewModel: ObservableObject {
     private var streamRecorder: StreamingAudioRecorder?
     private var streamClient: WhisperStreamClient?
     private var chunkAudioStore: ChunkAudioStore?
+    // One fresh-server-session recovery attempt bounds each dictation's reconnect budget.
+    private var streamReconnectAttemptedSessionID: UUID?
     private var vadTelemetryWriter: VADTelemetryFileWriter?
     private var streamVADTelemetry: StreamingVADTelemetry?
     private var lastVADPublishTime: Date?
@@ -202,7 +211,7 @@ final class DictationViewModel: ObservableObject {
 
     private let chunkSendQueue = ChunkSendQueue()
     private var streamConnectTask: Task<Void, Never>?
-    private var chunkConsumerTask: Task<Void, Never>?
+    private var chunkConsumerTask: Task<StreamChunkConsumerOutcome, Never>?
     private var receiveTask: Task<String, Error>?
     private var transcriptionTask: Task<Void, Never>?
 
@@ -922,6 +931,7 @@ final class DictationViewModel: ObservableObject {
         streamConnectGraceSessionID = nil
         SharedConfig.clearPendingDictationCancel(exceptSessionID: id)
         activeID = id
+        streamReconnectAttemptedSessionID = nil
         earlyCancelledSessionID = nil
         returnToIdleDeadline = nil
         fallbackNotice = nil
@@ -1338,56 +1348,13 @@ final class DictationViewModel: ObservableObject {
 
         streamClient = client
 
-        let receiveClient = client
-        receiveTask?.cancel()
-        receiveTask = Task { [weak self] in
-            guard let self = self else { throw WhisperError.networkError(URLError(.cancelled)) }
-            return try await receiveClient.receiveMessages(onPartial: { [weak self] partial in
-                FileLogger.shared.debug(.transcription, "livePartial updated",
-                                        payload: ["preview": String(partial.prefix(60)), "length": partial.count])
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    guard self.activeID == sessionID else { return }
-                    if self.firstPartialReceivedAt == nil {
-                        let receivedAt = Date()
-                        self.firstPartialReceivedAt = receivedAt
-                        let deltaMs = self.recordingStartTime.map {
-                            receivedAt.timeIntervalSince($0) * 1000
-                        } ?? 0
-                        FileLogger.shared.info(.transcription,
-                                               "Stream: first partial received",
-                                               payload: ["deltaMs": deltaMs,
-                                                         "textLength": partial.count])
-                    }
-                    self.livePartial = partial
-                    self.transcriptionDeliveredThisSession = true
-                }
-            }, onChunkResult: { [weak self] chunkId, responseText in
-                await MainActor.run { [weak self] in
-                    guard let self, self.activeID == sessionID else { return }
-                    if self.chunkFinalTexts[chunkId] == nil {
-                        self.chunkFinalTexts[chunkId] = responseText
-                    }
-                    if self.chunkResultsReceived.insert(chunkId).inserted {
-                        let latencyMs = self.chunkSentAt[chunkId].map {
-                            Date().timeIntervalSince($0) * 1000
-                        }
-                        self.vadTelemetryWriter?.event(VADTelemetryEvent(
-                            kind: .chunkReceived,
-                            chunkId: chunkId,
-                            latencyMs: latencyMs,
-                            chars: responseText.count))
-                    }
-                    self.mergeChunkReview(id: chunkId, update: .responseText(responseText))
-                }
-            })
-        }
+        startStreamReceive(client: client, sessionID: sessionID)
 
         chunkConsumerTask?.cancel()
         let consumerClient = client
         chunkConsumerTask = Task { [weak self] in
-            guard let self = self else { return }
-            await self.runChunkConsumer(client: consumerClient, sessionID: sessionID)
+            guard let self else { return .cancelled }
+            return await self.runChunkConsumer(client: consumerClient, sessionID: sessionID)
         }
 
         let sinceRecordingStartSec = recordingStartTime.map {
@@ -1737,22 +1704,24 @@ final class DictationViewModel: ObservableObject {
 
             let canStream = streamClient != nil
             var queueDrained = false
+            var queueDrainOutcome: StreamChunkConsumerOutcome?
             var queueDrainElapsedMs: Double?
             if canStream, let consumerTask = chunkConsumerTask {
                 guard activeID == id else { return }
 
                 let drainStart = Date()
-                let (drainEvents, drainContinuation) = AsyncStream<Bool>.makeStream()
+                let (drainEvents, drainContinuation) =
+                    AsyncStream<StreamChunkConsumerOutcome>.makeStream()
                 let drainWaitTask = Task {
-                    await consumerTask.value
-                    drainContinuation.yield(true)
+                    let outcome = await consumerTask.value
+                    drainContinuation.yield(outcome)
                     drainContinuation.finish()
                 }
                 let drainTimeoutTask = Task {
                     try? await Task.sleep(nanoseconds: UInt64(
                         SharedConfig.Defaults.streamFinalTimeout * 1_000_000_000))
                     guard !Task.isCancelled else { return }
-                    drainContinuation.yield(false)
+                    drainContinuation.yield(.timedOut)
                     drainContinuation.finish()
                 }
 
@@ -1761,10 +1730,26 @@ final class DictationViewModel: ObservableObject {
                     drainTimeoutTask.cancel()
                     return
                 }
-                queueDrained = await drainEvents.first(where: { _ in true }) ?? false
+                queueDrainOutcome = await drainEvents.first(where: { _ in true }) ?? .timedOut
+                queueDrained = queueDrainOutcome == .drained
                 drainWaitTask.cancel()
                 drainTimeoutTask.cancel()
                 guard canContinueSession(id) else { return }
+
+                if queueDrained, let client = streamClient,
+                   !(await client.isConnected()) {
+                    guard canContinueSession(id) else { return }
+                    let reconnected = await reconnectStreamTransport(
+                        client: client,
+                        sessionID: id,
+                        reason: "stop_drain_transport_unavailable")
+                    guard canContinueSession(id) else { return }
+                    if !reconnected {
+                        queueDrained = false
+                        queueDrainOutcome = .sendFailed
+                    }
+                }
+
                 let drainElapsedMs = Date().timeIntervalSince(drainStart) * 1000
                 queueDrainElapsedMs = drainElapsedMs
                 FileLogger.shared.log(queueDrained ? .info : .warn, .network,
@@ -1773,6 +1758,7 @@ final class DictationViewModel: ObservableObject {
                     "server": selectedServer ?? "none",
                     "depth": queueDepthAtStop,
                     "drained": queueDrained,
+                    "outcome": queueDrainOutcome.map { String(describing: $0) } ?? "unknown",
                     "elapsed_ms": drainElapsedMs
                 ])
             }
@@ -1785,8 +1771,9 @@ final class DictationViewModel: ObservableObject {
 
             if queueDrained && canStream {
                 var didSendEndSuccessfully = false
+                let client = streamClient
                 do {
-                    guard let client = streamClient else {
+                    guard let client else {
                         throw WhisperError.networkError(URLError(.notConnectedToInternet))
                     }
                     let initiallyHealthy = await client.isHealthyForTelemetry()
@@ -1901,7 +1888,17 @@ final class DictationViewModel: ObservableObject {
                 } catch {
                     guard canContinueSession(id) else { return }
                     let errorMessage = error.localizedDescription
-                    if didSendEndSuccessfully, !errorMessage.contains("send failed") {
+                    let transportUnavailable: Bool
+                    if let client {
+                        transportUnavailable = !(await client.isConnected())
+                    } else {
+                        transportUnavailable = false
+                    }
+                    if transportUnavailable && !didSendEndSuccessfully {
+                        handleStreamTerminalFailure(
+                            jobId: id,
+                            error: "stream send failed — recording preserved for retry")
+                    } else if didSendEndSuccessfully, !errorMessage.contains("send failed") {
                         await recoverFromStreamTerminalFailure(
                             jobId: id,
                             error: errorMessage)
@@ -2546,27 +2543,125 @@ final class DictationViewModel: ObservableObject {
         return timestamp.timeIntervalSince(start) * 1000
     }
 
-    /// Background task that dequeues and sends chunks with unbounded retry
-    /// while recording is active. Runs until the queue is empty AND recording
-    /// has stopped (natural completion), or until cancelled.
-    private func runChunkConsumer(client: WhisperStreamClient, sessionID: UUID) async {
+    private func startStreamReceive(client: WhisperStreamClient, sessionID: UUID) {
+        receiveTask?.cancel()
+        receiveTask = Task { [weak self] in
+            guard let self else { throw WhisperError.networkError(URLError(.cancelled)) }
+            return try await client.receiveMessages(onPartial: { [weak self] partial in
+                FileLogger.shared.debug(.transcription, "livePartial updated",
+                                        payload: ["preview": String(partial.prefix(60)), "length": partial.count])
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    guard self.activeID == sessionID else { return }
+                    if self.firstPartialReceivedAt == nil {
+                        let receivedAt = Date()
+                        self.firstPartialReceivedAt = receivedAt
+                        let deltaMs = self.recordingStartTime.map {
+                            receivedAt.timeIntervalSince($0) * 1000
+                        } ?? 0
+                        FileLogger.shared.info(.transcription,
+                                               "Stream: first partial received",
+                                               payload: ["deltaMs": deltaMs,
+                                                         "textLength": partial.count])
+                    }
+                    self.livePartial = partial
+                    self.transcriptionDeliveredThisSession = true
+                }
+            }, onChunkResult: { [weak self] chunkId, responseText in
+                await MainActor.run { [weak self] in
+                    guard let self, self.activeID == sessionID else { return }
+                    if self.chunkFinalTexts[chunkId] == nil {
+                        self.chunkFinalTexts[chunkId] = responseText
+                    }
+                    if self.chunkResultsReceived.insert(chunkId).inserted {
+                        let latencyMs = self.chunkSentAt[chunkId].map {
+                            Date().timeIntervalSince($0) * 1000
+                        }
+                        self.vadTelemetryWriter?.event(VADTelemetryEvent(
+                            kind: .chunkReceived,
+                            chunkId: chunkId,
+                            latencyMs: latencyMs,
+                            chars: responseText.count))
+                    }
+                    self.mergeChunkReview(id: chunkId, update: .responseText(responseText))
+                }
+            })
+        }
+    }
+
+    private func reconnectStreamTransport(
+        client: WhisperStreamClient,
+        sessionID: UUID,
+        reason: String
+    ) async -> Bool {
+        guard activeID == sessionID, !Task.isCancelled else { return false }
+        guard streamReconnectAttemptedSessionID != sessionID else { return false }
+        streamReconnectAttemptedSessionID = sessionID
+
+        let startedAt = Date()
+        let reconnected = await client.reconnect()
+        guard activeID == sessionID, !Task.isCancelled else { return false }
+
+        let elapsedMs = Date().timeIntervalSince(startedAt) * 1000
+        guard reconnected else {
+            FileLogger.shared.warn(.network, "Stream: bounded reconnect failed", payload: [
+                "jobId": sessionID.uuidString,
+                "reason": reason,
+                "elapsed_ms": elapsedMs
+            ])
+            return false
+        }
+
+        startStreamReceive(client: client, sessionID: sessionID)
+        // Give the replacement receive task a chance to attach before the consumer can drain.
+        await Task.yield()
+        FileLogger.shared.warn(.network, "Stream: reconnected with fresh receive task", payload: [
+            "jobId": sessionID.uuidString,
+            "reason": reason,
+            "elapsed_ms": elapsedMs
+        ])
+        return true
+    }
+
+    /// Retries transient send errors while recording; a dead transport gets one
+    /// bounded reconnect. Runs until the stopped queue drains or recovery fails.
+    private func runChunkConsumer(
+        client: WhisperStreamClient,
+        sessionID: UUID
+    ) async -> StreamChunkConsumerOutcome {
         let backoff = SharedConfig.Defaults.streamChunkRetryBackoffSeconds
         while !Task.isCancelled {
+            guard activeID == sessionID else { return .cancelled }
             let entry = chunkSendQueue.dequeue()
 
             guard let (chunkId, samples) = entry else {
-                // Queue empty: check if recording is done
+                if await client.isTransportDead() {
+                    let reconnected = await reconnectStreamTransport(
+                        client: client,
+                        sessionID: sessionID,
+                        reason: "idle_queue_transport_dead")
+                    guard activeID == sessionID, !Task.isCancelled else { return .cancelled }
+                    guard reconnected else { return .sendFailed }
+                    continue
+                }
+
                 let stillRecording = chunkSendQueue.isRecordingActive
                 let queueEmpty = chunkSendQueue.isEmpty
-                if !stillRecording && queueEmpty { return }
-                try? await Task.sleep(nanoseconds: 100_000_000)
+                if !stillRecording && queueEmpty { return .drained }
+                do {
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                } catch {
+                    return .cancelled
+                }
                 continue
             }
 
-            // Unbounded retry loop for this chunk
+            // Keep this chunk in flight until sent or the session fails.
             var attempt = 0
+            var transientAttempt = 0
             var sent = false
             while !sent && !Task.isCancelled {
+                guard activeID == sessionID else { return .cancelled }
                 do {
                     try await client.sendChunk(id: chunkId, samples: samples)
                     sent = true
@@ -2592,21 +2687,52 @@ final class DictationViewModel: ObservableObject {
                                                 payload: ["chunkId": chunkId, "attempts": attempt])
                     }
                 } catch {
+                    guard !Task.isCancelled, activeID == sessionID else { return .cancelled }
+
+                    let transportDead: Bool
+                    if let transportError = error as? WhisperStreamTransportError {
+                        switch transportError {
+                        case .dead, .superseded:
+                            transportDead = true
+                        case .notReady:
+                            transportDead = await client.isTransportDead()
+                        }
+                    } else {
+                        transportDead = await client.isTransportDead()
+                    }
+
                     attempt += 1
+                    if transportDead {
+                        FileLogger.shared.debug(.network, "Stream: chunk send found dead transport", payload: [
+                            "jobId": sessionID.uuidString,
+                            "chunkId": chunkId,
+                            "attempt": attempt
+                        ])
+                        let reconnected = await reconnectStreamTransport(
+                            client: client,
+                            sessionID: sessionID,
+                            reason: "chunk_send_transport_dead")
+                        guard activeID == sessionID, !Task.isCancelled else { return .cancelled }
+                        guard reconnected else { return .sendFailed }
+                        continue
+                    }
+
+                    transientAttempt += 1
                     FileLogger.shared.debug(.network, "Chunk send failed, retrying",
                                             payload: ["chunkId": chunkId, "attempt": attempt,
                                                       "error": error.localizedDescription])
-                    let sleepIdx = min(attempt - 1, backoff.count - 1)
+                    let sleepIdx = min(transientAttempt - 1, backoff.count - 1)
                     let sleepSec = backoff[sleepIdx]
                     do {
                         try await Task.sleep(nanoseconds: UInt64(sleepSec * 1_000_000_000))
                     } catch {
-                        return
+                        return .cancelled
                     }
                 }
             }
-            if Task.isCancelled { return }
+            if Task.isCancelled { return .cancelled }
         }
+        return .cancelled
     }
 
     /// Preserves failed stream audio, then delivers the error through the normal
