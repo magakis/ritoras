@@ -43,11 +43,30 @@ export function makeStreamingEndpointConfig(partial = {}) {
     ['onsetMs', 'onsetSamples'],
     ['endEvidenceMs', 'endEvidenceSamples'],
     ['endpointSilenceMs', 'endpointSilenceSamples'],
-    ['resumeMs', 'resumeSamples'],
-    ['ambiguousRescueMs', 'ambiguousRescueSamples'],
     ['preRollMs', 'preRollSamples'],
   ];
   for (const [millisecondsKey, samplesKey] of millisecondFields) {
+    if (partial?.[millisecondsKey] !== undefined) {
+      config[samplesKey] = partial[millisecondsKey] * 16;
+    }
+  }
+  const proportionalFields = [
+    ['resumeToEndpointSilenceRatio', 'resumeSamples'],
+    ['ambiguousRescueToEndpointSilenceRatio', 'ambiguousRescueSamples'],
+  ];
+  for (const [ratioKey, samplesKey] of proportionalFields) {
+    if (partial?.[ratioKey] !== undefined) {
+      config[samplesKey] = config.endpointSilenceSamples * partial[ratioKey];
+    }
+  }
+  // Do not impose Config.swift's current upper bounds here; Phase 4 must revisit
+  // those bounds if the corpus sweep exceeds them.
+  // Explicit milliseconds remain the most specific override; ratios let
+  // replay sweeps scale the windows without selecting new defaults here.
+  for (const [millisecondsKey, samplesKey] of [
+    ['resumeMs', 'resumeSamples'],
+    ['ambiguousRescueMs', 'ambiguousRescueSamples'],
+  ]) {
     if (partial?.[millisecondsKey] !== undefined) {
       config[samplesKey] = partial[millisecondsKey] * 16;
     }
@@ -162,6 +181,9 @@ export class StreamingEndpoint {
         this.accumulatedSilenceSamples = 0;
         return this.continue();
       case StreamingEndpointEvidence.ambiguous:
+        // Match speech-like treatment: ambiguous frames must not bank silence
+        // toward end evidence (StreamingEndpoint.swift:155–173).
+        this.accumulatedSilenceSamples = 0;
         return this.continue();
       case StreamingEndpointEvidence.silence:
         this.accumulatedSilenceSamples += durationSamples;

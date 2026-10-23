@@ -51,6 +51,11 @@ enum StreamTelemetrySendError: Error {
     case timeout
 }
 
+enum StreamChunkResultKind: Equatable, Sendable {
+    case partial
+    case final
+}
+
 enum WhisperStreamTransportError: Error {
     case dead
     case notReady
@@ -618,13 +623,14 @@ actor WhisperStreamClient {
 
     private func publishChunkResult(
         id: UInt32,
+        kind: StreamChunkResultKind,
         text: String,
-        using callback: (@Sendable (UInt32, String) async -> Void)?,
+        using callback: (@Sendable (UInt32, StreamChunkResultKind, String) async -> Void)?,
         from task: URLSessionWebSocketTask,
         generation: UInt64
     ) async -> Bool {
         guard isReadyConnection(task, generation: generation) else { return false }
-        await callback?(id, text)
+        await callback?(id, kind, text)
         return isReadyConnection(task, generation: generation)
     }
 
@@ -687,7 +693,7 @@ actor WhisperStreamClient {
     ///   Called from the receive loop's async context; the caller should
     ///   marshal to `MainActor` if UI updates are needed.
     /// - Parameter onChunkResult: Optional closure invoked with the server's
-    ///   chunk ID and transcription for each partial or final result that includes an ID.
+    ///   chunk ID, result kind, and transcription for each partial or final result that includes an ID.
     /// - Returns: The final, normalized transcription.
     /// - Throws: `WhisperError.timeout` if `streamFinalTimeout` elapses
     ///   without receiving `final`.
@@ -696,7 +702,7 @@ actor WhisperStreamClient {
     /// - Throws: `WhisperError.networkError` on transport failure.
     func receiveMessages(
         onPartial: @escaping @Sendable (String) -> Void,
-        onChunkResult: (@Sendable (UInt32, String) async -> Void)? = nil
+        onChunkResult: (@Sendable (UInt32, StreamChunkResultKind, String) async -> Void)? = nil
     ) async throws -> String {
         let connection = try activeConnection()
         do {
@@ -732,7 +738,7 @@ actor WhisperStreamClient {
         task: URLSessionWebSocketTask,
         generation: UInt64,
         onPartial: @escaping @Sendable (String) -> Void,
-        onChunkResult: (@Sendable (UInt32, String) async -> Void)?
+        onChunkResult: (@Sendable (UInt32, StreamChunkResultKind, String) async -> Void)?
     ) async throws -> String {
         return try await withThrowingTaskGroup(of: String.self) { group in
 
@@ -768,6 +774,7 @@ actor WhisperStreamClient {
                                     if let chunkId = msg.chunk_id {
                                         guard await self.publishChunkResult(
                                             id: chunkId,
+                                            kind: .partial,
                                             text: msg.transcription,
                                             using: onChunkResult,
                                             from: task,
@@ -807,6 +814,7 @@ actor WhisperStreamClient {
                                     if let chunkId = msg.chunk_id {
                                         guard await self.publishChunkResult(
                                             id: chunkId,
+                                            kind: .final,
                                             text: msg.transcription,
                                             using: onChunkResult,
                                             from: task,

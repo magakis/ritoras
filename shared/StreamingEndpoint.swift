@@ -162,6 +162,8 @@ final class StreamingEndpoint {
             accumulatedSilenceSamples = 0
             return .continueUtterance
         case .ambiguous:
+            // Match speech-like treatment in scripts/prediction-sim/lib/streaming-endpoint.mjs:183–187.
+            accumulatedSilenceSamples = 0
             return .continueUtterance
         case .silence:
             accumulatedSilenceSamples += durationSamples

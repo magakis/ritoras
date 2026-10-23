@@ -192,6 +192,7 @@ final class DictationViewModel: ObservableObject {
     private var chunkSentAt: [UInt32: Date] = [:]
     private var chunkResultsReceived: Set<UInt32> = []
     private var chunkFinalTexts: [UInt32: String] = [:]
+    private var chunkFinalResultKinds: [UInt32: StreamChunkResultKind] = [:]
 
     private var streamRecorder: StreamingAudioRecorder?
     private var streamClient: WhisperStreamClient?
@@ -1068,6 +1069,7 @@ final class DictationViewModel: ObservableObject {
 
             livePartial = ""
             chunkFinalTexts.removeAll()
+            chunkFinalResultKinds.removeAll()
             chunkSendQueue.resetForNewRecording()
             chunkSendQueue.setRecordingActive(true)
 
@@ -2567,11 +2569,15 @@ final class DictationViewModel: ObservableObject {
                     self.livePartial = partial
                     self.transcriptionDeliveredThisSession = true
                 }
-            }, onChunkResult: { [weak self] chunkId, responseText in
+            }, onChunkResult: { [weak self] chunkId, kind, responseText in
                 await MainActor.run { [weak self] in
                     guard let self, self.activeID == sessionID else { return }
-                    if self.chunkFinalTexts[chunkId] == nil {
+                    // Match scripts/prediction-sim/lib/chunk-result-store.mjs:11–28:
+                    // finals replace partials; first results of each kind remain authoritative.
+                    if self.chunkFinalTexts[chunkId] == nil
+                        || (kind == .final && self.chunkFinalResultKinds[chunkId] == .partial) {
                         self.chunkFinalTexts[chunkId] = responseText
+                        self.chunkFinalResultKinds[chunkId] = kind
                     }
                     if self.chunkResultsReceived.insert(chunkId).inserted {
                         let latencyMs = self.chunkSentAt[chunkId].map {

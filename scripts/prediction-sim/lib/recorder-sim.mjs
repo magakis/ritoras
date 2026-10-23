@@ -36,6 +36,42 @@ function makeEndpoint(endpointSilenceMs = DEFAULT_ENDPOINT_SILENCE_MS, partial =
   return new StreamingEndpoint({ endpointSilenceMs, ...partial });
 }
 
+export function classifyEndPendingEvidence({
+  endpointState,
+  evidence,
+  shortSpreadDb,
+  dynamicsSpreadDb,
+  flatSpreadDb,
+  accumulatedSilenceSamples,
+  endpointSilenceSamples,
+  ambiguousRescueSamples,
+  rescueAwareWindowsEnabled,
+}) {
+  if (endpointState !== 'endPending'
+    || (evidence !== 'continuing' && evidence !== 'ambiguous')
+    || shortSpreadDb === null
+    || shortSpreadDb === undefined
+    || dynamicsSpreadDb === null
+    || dynamicsSpreadDb === undefined
+    || shortSpreadDb >= flatSpreadDb
+    || dynamicsSpreadDb >= VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB) {
+    return evidence;
+  }
+
+  // Swift currently erases this low-spread evidence to silence at
+  // StreamingAudioRecorder.swift:737–744. Preserve the existing wind filter
+  // until the remaining silence is within one rescue window; after that,
+  // continuing evidence must reach the endpoint as ambiguous or the widened
+  // rescue threshold can never fire. The aperture is opt-in via sweep ratios;
+  // legacy millisecond settings retain the original unconditional rewrite.
+  if (!rescueAwareWindowsEnabled
+    || endpointSilenceSamples - accumulatedSilenceSamples > ambiguousRescueSamples) {
+    return 'silence';
+  }
+
+  return evidence === 'continuing' ? 'ambiguous' : evidence;
+}
+
 function decisionLabel(decision) {
   if (decision.type === 'finalizeUtterance') return `finalize_${decision.kind}`;
   if (decision.type === 'startUtterance') return 'start_utterance';
@@ -529,14 +565,19 @@ export function makeRecorderHarness({
         this.flatFrameStreakStartTime = null;
         this.flatTerminatorActive = false;
       }
-      if (previousState === 'endPending'
-        && output.shortSpreadDb !== null
-        && output.dynamicsSpreadDb !== null
-        && output.shortSpreadDb < this.gate.effectiveFlatSpreadDb
-        && output.dynamicsSpreadDb < VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB
-        && (endpointEvidence === 'continuing' || endpointEvidence === 'ambiguous')) {
-        endpointEvidence = 'silence';
-      }
+      endpointEvidence = classifyEndPendingEvidence({
+        endpointState: previousState,
+        evidence: endpointEvidence,
+        shortSpreadDb: output.shortSpreadDb,
+        dynamicsSpreadDb: output.dynamicsSpreadDb,
+        flatSpreadDb: this.gate.effectiveFlatSpreadDb,
+        accumulatedSilenceSamples: this.endpoint.accumulatedSilenceSamples,
+        endpointSilenceSamples: this.endpoint.configuration.endpointSilenceSamples,
+        ambiguousRescueSamples: this.endpoint.configuration.ambiguousRescueSamples,
+        rescueAwareWindowsEnabled:
+          this.endpoint.configuration.resumeToEndpointSilenceRatio !== undefined
+          || this.endpoint.configuration.ambiguousRescueToEndpointSilenceRatio !== undefined,
+      });
       if (output.isSpeech) this.speechSamples += frameSamples;
       if (this.endpointMachineEnabled) {
         this.contiguousTrailingSilenceSamples = endpointEvidence === 'silence'

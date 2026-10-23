@@ -1280,6 +1280,12 @@ describe('adaptive VAD convergence', () => {
     const below = makeRecorderHarness({ endpointSilenceMs: 1000 });
     prefillAmbient(below, 300, -60);
     for (let i = 0; i < 30; i++) below.drive(-45);
+    // Ambiguous frames now reset active-state silence, matching the speech-like
+    // rule intended for StreamingEndpoint.swift:155–173. Seed endPending with
+    // real silence so this remains a test of the recorder's just-below-flat
+    // close boundary under legacy (120/320 ms, no-ratio) settings.
+    for (let i = 0; i < 10; i++) below.drive(-80);
+    assert.strictEqual(below.endpoint.state, 'endPending');
     const belowFloor = below.gate.snapshot.floorDb;
     const belowHighDb = belowFloor + 5.9;
     const belowLowDb = belowFloor + 2.5;
