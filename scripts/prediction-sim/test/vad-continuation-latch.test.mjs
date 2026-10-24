@@ -338,7 +338,7 @@ describe('sustained continuing onset latch regime split', () => {
       }
     }
 
-    assert.ok(latchAtMs !== null && latchAtMs >= 1000 && latchAtMs <= 1010);
+    assert.ok(latchAtMs !== null && latchAtMs >= 300 && latchAtMs <= 310);
     assert.strictEqual(harness.endpoint.state, 'speechActive');
   });
 

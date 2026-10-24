@@ -33,7 +33,7 @@ export const SHIPPING_SESSION_CONFIG = Object.freeze({
   endpointSilenceMs: 700,
   endpointResumeMs: 120,
   endpointAmbiguousRescueMs: 320,
-  endpointPreRollMs: 500,
+  endpointPreRollMs: 900,
   silenceMs: 700,
   minSpeechMs: 300,
   minChunkMs: 300,
@@ -79,6 +79,17 @@ export const DEFAULT_SESSION_CONFIG = Object.freeze({
   ...SHIPPING_SESSION_CONFIG,
   mode: 'static',
 });
+
+export function mergeSessionConfig(overrides = {}) {
+  const supplied = overrides ?? {};
+  const config = { ...DEFAULT_SESSION_CONFIG, ...supplied };
+  if (Object.hasOwn(supplied, 'endpointSilenceMs')) {
+    config.silenceMs = supplied.endpointSilenceMs;
+  } else if (Object.hasOwn(supplied, 'silenceMs')) {
+    config.endpointSilenceMs = supplied.silenceMs;
+  }
+  return config;
+}
 
 const CONFIG_KEYS = new Set(Object.keys(DEFAULT_SESSION_CONFIG));
 const DIVERGENCE_FIELDS = ['e', 'es', 'd'];
@@ -218,7 +229,7 @@ export function parseSession(text) {
   const session = {
     frames,
     events,
-    config: { ...DEFAULT_SESSION_CONFIG, ...(config ?? {}) },
+    config: mergeSessionConfig(config ?? {}),
   };
   Object.defineProperty(session, 'configIsTelemetry', {
     value: config !== null,
@@ -250,7 +261,7 @@ function rawConfigFromTelemetry(config) {
 }
 
 export function normalizeConfig(rawConfig = {}) {
-  const raw = { ...DEFAULT_SESSION_CONFIG, ...(rawConfig ?? {}) };
+  const raw = mergeSessionConfig(rawConfig);
   if (!['static', 'adaptive'].includes(raw.mode)) {
     throw new Error(`mode must be static or adaptive; got ${raw.mode}`);
   }
@@ -299,7 +310,7 @@ export function normalizeConfig(rawConfig = {}) {
     ),
   });
   const gate = new VADThresholdGate(gateConfig);
-  const endpointSilenceMs = asFiniteNumber(raw.silenceMs ?? raw.endpointSilenceMs, 'silenceMs');
+  const endpointSilenceMs = asFiniteNumber(raw.endpointSilenceMs, 'endpointSilenceMs');
   const endpoint = new StreamingEndpoint(makeStreamingEndpointConfig({
     onsetMs: asFiniteNumber(raw.endpointOnsetMs, 'endpointOnsetMs'),
     endEvidenceMs: asFiniteNumber(raw.endpointEndEvidenceMs, 'endpointEndEvidenceMs'),
@@ -625,6 +636,7 @@ export function compareTelemetry(recordedFrames, replayFrames) {
   let mismatchCount = 0;
   let fieldMismatchCount = 0;
   let firstDivergence = null;
+  const mismatches = [];
   const count = Math.max(recordedFrames.length, replayFrames.length);
   for (let index = 0; index < count; index += 1) {
     const expected = recordedFrames[index];
@@ -633,16 +645,27 @@ export function compareTelemetry(recordedFrames, replayFrames) {
     if (fields.length > 0) {
       mismatchCount += 1;
       fieldMismatchCount += fields.length;
-      firstDivergence ??= {
+      const mismatch = {
         frame: index,
         seq: expected?.q ?? actual?.q ?? index,
         fields,
         expected: expected ? Object.fromEntries(fields.map(field => [field, expected[field]])) : null,
         actual: actual ? Object.fromEntries(fields.map(field => [field, actual[field]])) : null,
       };
+      firstDivergence ??= mismatch;
+      mismatches.push(mismatch);
     }
   }
-  return { mismatchCount, fieldMismatchCount, firstDivergence };
+  const matchedFrameCount = count - mismatchCount;
+  return {
+    comparedFrameCount: count,
+    matchedFrameCount,
+    matchRate: count === 0 ? null : matchedFrameCount / count,
+    mismatchCount,
+    fieldMismatchCount,
+    firstDivergence,
+    mismatches,
+  };
 }
 
 function makeTimelineFrame(record, time) {
@@ -708,8 +731,9 @@ export function replaySession(session, configInput = session.config, {
       event.k === 'flat_terminate' || event.k === 'loud_flat_terminate').length,
     latchMissingDynamicsWitnessCount: harness.latchMissingDynamicsWitnessCount,
   };
+  const recordedFrames = session.recordedFrames ?? session.frames;
   const divergence = compare && !fromWav
-    ? compareTelemetry(session.frames, generatedFrames)
+    ? compareTelemetry(recordedFrames, generatedFrames)
     : null;
   return {
     config: normalized.config,
@@ -771,6 +795,12 @@ function printDefaultReport(result) {
   }
   if (result.divergence) {
     const first = result.divergence.firstDivergence;
+    const parity = result.divergence.matchRate === null
+      ? 'n/a'
+      : `${(result.divergence.matchRate * 100).toFixed(2)}%`;
+    console.log(
+      `Per-frame e/es/d parity: ${result.divergence.matchedFrameCount}/${result.divergence.comparedFrameCount} (${parity})`,
+    );
     console.log('');
     console.log(`Divergence: ${result.divergence.mismatchCount} frames, ${result.divergence.fieldMismatchCount} fields`);
     if (first) console.log(`First divergence: frame ${first.frame} (seq ${first.seq}), ${first.fields.join(', ')}`);

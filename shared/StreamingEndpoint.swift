@@ -43,7 +43,7 @@ struct StreamingEndpointConfiguration {
         endpointSilenceSamples: Int = 11_200,
         resumeSamples: Int = 1_920,
         ambiguousRescueSamples: Int = 5_120,
-        preRollSamples: Int = 8_000
+        preRollSamples: Int = 14_400
     ) {
         let normalizedOnsetSamples = max(160, onsetSamples)
         let normalizedEndEvidenceSamples = max(160, endEvidenceSamples)

@@ -230,7 +230,9 @@ private final class VADContext: @unchecked Sendable {
     let maxNoiseSamples: Int
     let noiseGuardSpeechSamples = 1600  // 0.1 s @ 16 kHz — reference client's fixed noise-floor cutoff
     // The 10-ms fallback frames are shorter than the endpoint's 70-ms onset requirement.
-    let sustainedContinuingOnsetSeconds = 1.0
+    let sustainedContinuingOnsetSeconds = 0.3
+    // Keep the legacy-loud branch at its prior 1.5-second dwell.
+    let legacyLoudLatchOnsetSeconds = 1.0
     let endpointMachineEnabled: Bool
     let endpoint: StreamingEndpoint
     let preRollSamples: Int
@@ -249,6 +251,7 @@ private final class VADContext: @unchecked Sendable {
     let splitSearchSamples = 3 * 16_000
     let minimumSplitSilenceSamples = 100 * 16
     let postRollSamples = 400 * 16
+    let postFinalizeSoftLatchSuppressionSamples = 700 * 16
     let analysisHpf: VADHighPassFilter?
 
     // MARK: Lock
@@ -262,6 +265,8 @@ private final class VADContext: @unchecked Sendable {
     private var splitEnergyFrames: [(samples: Int, isLowEnergy: Bool)] = []
     private var splitEnergySamples = 0
     private var contiguousTrailingSilenceSamples = 0
+    private var contiguousTrailingSilenceMinimumDb: Double?
+    private var postFinalizeSoftLatchSuppressionSamplesRemaining = 0
     private var chunkStartSessionSamples: Int?
     let preRollBuffer: SampleRingBuffer
     var headBuffer: SampleRingBuffer?
@@ -276,10 +281,13 @@ private final class VADContext: @unchecked Sendable {
     private var sawReanchorDuringUtterance = false
     private var bufferHighWaterSamples = 0
     private var utteranceQuietestStrongDb: Double?
+    private var previousProcessedFrameDb: Double?
     private var sustainedContinuingMs = 0.0
     private var streakStartFloorDb: Double?
     private var streakPeakDb: Double?
     private var streakSawDynamics = false
+    private var quietLatchRisingEdgeAtSessionSamples: Int?
+    private var quietLatchRisingEdgeSeen = false
     private var sustainedContinuingOnsetLatched = false
     private var loudFlatStreakMs = 0.0
     private var loudFlatStreakStartSeconds: Double?
@@ -415,6 +423,9 @@ private final class VADContext: @unchecked Sendable {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         analysisHpf?.reset()
+        previousProcessedFrameDb = nil
+        quietLatchRisingEdgeAtSessionSamples = nil
+        quietLatchRisingEdgeSeen = false
     }
 
     func resetAfterRouteChange() {
@@ -424,16 +435,21 @@ private final class VADContext: @unchecked Sendable {
         gate.resetFloorAfterRouteChange()
         primingComplete = gate.snapshot.floorDb == nil
         utteranceQuietestStrongDb = nil
+        previousProcessedFrameDb = nil
         sawReanchorDuringUtterance = false
         sustainedContinuingMs = 0
         streakStartFloorDb = nil
         streakPeakDb = nil
         streakSawDynamics = false
+        quietLatchRisingEdgeAtSessionSamples = nil
+        quietLatchRisingEdgeSeen = false
         sustainedContinuingOnsetLatched = false
         loudFlatStreakMs = 0
         loudFlatStreakStartSeconds = nil
         loudFlatTerminatorActive = false
         contiguousTrailingSilenceSamples = 0
+        contiguousTrailingSilenceMinimumDb = nil
+        postFinalizeSoftLatchSuppressionSamplesRemaining = 0
     }
 
     func frameState(emissionSummary: EmissionSummary?) -> StreamingVADFrameState {
@@ -578,9 +594,12 @@ private final class VADContext: @unchecked Sendable {
         defer { os_unfair_lock_unlock(&unfairLock) }
 
         sessionElapsedSamples += frameLength
+        let frameStartSamples = sessionElapsedSamples - frameLength
         let analysisFrame = analysisHpf?.process(frame) ?? frame
         let rms = AudioMath.dcCorrectedRMS(analysisFrame)
         let frameDb = Double(AudioMath.dbFromRms(rms))
+        let previousFrameDb = previousProcessedFrameDb
+        previousProcessedFrameDb = frameDb
         lastFrameDb = frameDb
         pendingEmissionSummary = nil
         let frameDuration = Double(frameLength) / 16000.0
@@ -623,15 +642,47 @@ private final class VADContext: @unchecked Sendable {
             }
             let evidence = StreamingEndpointEvidence(rawValue: out.evidence.rawValue) ?? .silence
             let adaptivePath = out.floorDb != nil
-            let eligibleStreakEvidence = out.evidence == .continuing
-                || (loudLatchAmbiguousEnabled && out.evidence == .ambiguous)
+            // Cool off only fallback promotion; raw strong evidence still reaches the endpoint.
+            let suppressPostFinalizeSoftLatch = postFinalizeSoftLatchSuppressionSamplesRemaining > 0
+            if suppressPostFinalizeSoftLatch {
+                postFinalizeSoftLatchSuppressionSamplesRemaining = max(
+                    0,
+                    postFinalizeSoftLatchSuppressionSamplesRemaining - frameLength
+                )
+                sustainedContinuingMs = 0
+                streakStartFloorDb = nil
+                streakPeakDb = nil
+                streakSawDynamics = false
+                quietLatchRisingEdgeAtSessionSamples = nil
+                quietLatchRisingEdgeSeen = false
+                sustainedContinuingOnsetLatched = false
+            }
+            let eligibleStreakEvidence = !suppressPostFinalizeSoftLatch
+                && (out.evidence == .continuing
+                    || (loudLatchAmbiguousEnabled && out.evidence == .ambiguous))
+            if suppressPostFinalizeSoftLatch || !endpointWasIdle || !adaptivePath || out.evidence == .silence {
+                quietLatchRisingEdgeAtSessionSamples = nil
+                quietLatchRisingEdgeSeen = false
+            } else if previousFrameDb.map({ frameDb - $0 >= gate.effectiveFlatSpreadDb }) == true {
+                quietLatchRisingEdgeAtSessionSamples = sessionElapsedSamples
+            }
             if adaptivePath && eligibleStreakEvidence && endpointWasIdle {
+                let hadImmediateRisingEdge = quietLatchRisingEdgeAtSessionSamples == frameStartSamples
+                let hasRisingEdgeWitness = previousFrameDb.map {
+                    frameDb - $0 >= gate.effectiveFlatSpreadDb
+                } == true
                 if sustainedContinuingMs == 0 {
                     streakStartFloorDb = gate.snapshot.floorDb
                     streakPeakDb = frameDb
                     streakSawDynamics = false
+                    quietLatchRisingEdgeSeen = hadImmediateRisingEdge || hasRisingEdgeWitness
+                    quietLatchRisingEdgeAtSessionSamples = nil
                 } else {
                     streakPeakDb = max(streakPeakDb ?? frameDb, frameDb)
+                    quietLatchRisingEdgeSeen = quietLatchRisingEdgeSeen || hasRisingEdgeWitness
+                    if hasRisingEdgeWitness {
+                        quietLatchRisingEdgeAtSessionSamples = nil
+                    }
                 }
                 sustainedContinuingMs += frameDuration * 1000.0
                 if (out.dynamicsSpreadDb ?? 0) >= loudLatchWitnessDb {
@@ -647,6 +698,7 @@ private final class VADContext: @unchecked Sendable {
                 streakStartFloorDb = nil
                 streakPeakDb = nil
                 streakSawDynamics = false
+                quietLatchRisingEdgeSeen = false
             }
 
             let quietRegimeEvidence = out.floorDb.map {
@@ -657,7 +709,7 @@ private final class VADContext: @unchecked Sendable {
             let quietRegimeFloorStable: Bool
             if let currentFloorDb = out.floorDb,
                let streakStartFloorDb {
-                quietRegimeFloorStable = (currentFloorDb - streakStartFloorDb) <= 2.0
+                quietRegimeFloorStable = currentFloorDb <= streakStartFloorDb
             } else {
                 quietRegimeFloorStable = false
             }
@@ -668,10 +720,11 @@ private final class VADContext: @unchecked Sendable {
                 && out.floorDb.map { $0 >= VADThresholdGate.loudFloorRegimeDb } == true
             let quietLatchQualified = quietRegimeEvidence
                 && quietRegimeFloorStable
+                && quietLatchRisingEdgeSeen
                 && sustainedContinuingMs >= sustainedContinuingOnsetSeconds * 1000.0
             let legacyLoudLatchQualified = legacyLoudBranch
                 && loudRegimeEvidence
-                && sustainedContinuingMs >= 1.5 * sustainedContinuingOnsetSeconds * 1000.0
+                && sustainedContinuingMs >= 1.5 * legacyLoudLatchOnsetSeconds * 1000.0
             let loudLatchQualified = out.isLoudRegime
                 && sustainedContinuingMs >= Double(loudLatchMs)
                 && streakSawDynamics
@@ -692,6 +745,8 @@ private final class VADContext: @unchecked Sendable {
                 streakStartFloorDb = nil
                 streakPeakDb = nil
                 streakSawDynamics = false
+                quietLatchRisingEdgeAtSessionSamples = nil
+                quietLatchRisingEdgeSeen = false
             }
             let latchedContinuingOnset = sustainedContinuingOnsetLatched &&
                                          (out.evidence == .continuing
@@ -744,8 +799,13 @@ private final class VADContext: @unchecked Sendable {
             }
             if endpointEvidence == .silence {
                 contiguousTrailingSilenceSamples += frameLength
+                contiguousTrailingSilenceMinimumDb = min(
+                    contiguousTrailingSilenceMinimumDb ?? frameDb,
+                    frameDb
+                )
             } else {
                 contiguousTrailingSilenceSamples = 0
+                contiguousTrailingSilenceMinimumDb = nil
             }
             let silenceBeforeDecision = endpoint.accumulatedSilenceSamples
             decision = endpoint.process(evidence: endpointEvidence, durationSamples: frameLength)
@@ -795,6 +855,8 @@ private final class VADContext: @unchecked Sendable {
                 streakStartFloorDb = nil
                 streakPeakDb = nil
                 streakSawDynamics = false
+                quietLatchRisingEdgeAtSessionSamples = nil
+                quietLatchRisingEdgeSeen = false
                 sustainedContinuingOnsetLatched = false
                 seedAccumulatorFromPreRoll(frame: frame, output: out)
                 if headBuffer == nil {
@@ -844,12 +906,18 @@ private final class VADContext: @unchecked Sendable {
             }
 
             if case .finalizeUtterance(let kind) = decision {
+                if case .endpoint = kind {
+                    postFinalizeSoftLatchSuppressionSamplesRemaining = postFinalizeSoftLatchSuppressionSamples
+                }
                 if !primingComplete, accumulatorSampleCount == 0 {
                     telemetrySink?.event(VADTelemetryEvent(
                         kind: .discard,
                         reason: "priming_window"
                     ))
-                    gate.noteUtteranceEnded(quietestStrongDb: utteranceQuietestStrongDb)
+                    gate.noteUtteranceEnded(
+                        quietestStrongDb: utteranceQuietestStrongDb,
+                        trailingSilenceDb: contiguousTrailingSilenceMinimumDb
+                    )
                     utteranceQuietestStrongDb = nil
                     speechSamples = 0
                     _ = endpoint.reset()
@@ -917,9 +985,14 @@ private final class VADContext: @unchecked Sendable {
             }
             if out.isSpeech {
                 contiguousTrailingSilenceSamples = 0
+                contiguousTrailingSilenceMinimumDb = nil
                 silenceSamples = 0
             } else {
                 contiguousTrailingSilenceSamples += frame.count
+                contiguousTrailingSilenceMinimumDb = min(
+                    contiguousTrailingSilenceMinimumDb ?? frameDb,
+                    frameDb
+                )
                 silenceSamples += frame.count
             }
             if silenceSamples >= silenceThresholdSamples,
@@ -1246,6 +1319,9 @@ private final class VADContext: @unchecked Sendable {
         ))
         clearAccumulator()
         accumulator = carry
+        if carry.count < contiguousTrailingSilenceSamples {
+            contiguousTrailingSilenceMinimumDb = nil
+        }
         contiguousTrailingSilenceSamples = min(contiguousTrailingSilenceSamples, carry.count)
         chunkStartSessionSamples = startSamples + cutCount
         preRollBuffer.removeAll()
@@ -1283,6 +1359,7 @@ private final class VADContext: @unchecked Sendable {
         var snapshot = assembledAccumulator()
         let id = chunkId
         var sampleCount = accumulatorSampleCount
+        let trailingSilenceDb = contiguousTrailingSilenceMinimumDb
         if trimToPostRoll {
             let trailing = min(contiguousTrailingSilenceSamples, sampleCount)
             let excess = max(0, trailing - postRollSamples)
@@ -1305,6 +1382,7 @@ private final class VADContext: @unchecked Sendable {
         )
         clearAccumulator()
         contiguousTrailingSilenceSamples = 0
+        contiguousTrailingSilenceMinimumDb = nil
         splitEnergyFrames.removeAll(keepingCapacity: true)
         splitEnergySamples = 0
         chunkStartSessionSamples = nil
@@ -1315,12 +1393,17 @@ private final class VADContext: @unchecked Sendable {
         endpoint.reset()
         sawReanchorDuringUtterance = false
         bufferHighWaterSamples = 0
-        gate.noteUtteranceEnded(quietestStrongDb: utteranceQuietestStrongDb)
+        gate.noteUtteranceEnded(
+            quietestStrongDb: utteranceQuietestStrongDb,
+            trailingSilenceDb: trailingSilenceDb
+        )
         utteranceQuietestStrongDb = nil
         sustainedContinuingMs = 0
         streakStartFloorDb = nil
         streakPeakDb = nil
         streakSawDynamics = false
+        quietLatchRisingEdgeAtSessionSamples = nil
+        quietLatchRisingEdgeSeen = false
         sustainedContinuingOnsetLatched = false
         loudFlatStreakMs = 0
         loudFlatStreakStartSeconds = nil
@@ -1344,10 +1427,13 @@ private final class VADContext: @unchecked Sendable {
     func flush() -> VADEmission? {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
+        previousProcessedFrameDb = nil
         sustainedContinuingMs = 0
         streakStartFloorDb = nil
         streakPeakDb = nil
         streakSawDynamics = false
+        quietLatchRisingEdgeAtSessionSamples = nil
+        quietLatchRisingEdgeSeen = false
         sustainedContinuingOnsetLatched = false
         loudFlatStreakMs = 0
         loudFlatStreakStartSeconds = nil

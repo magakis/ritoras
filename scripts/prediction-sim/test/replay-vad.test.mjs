@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { makeRecorderHarness } from '../lib/recorder-sim.mjs';
 import {
   computeLabelMetrics,
@@ -9,6 +10,7 @@ import {
   expandSweep,
   parseSession,
   parseArgs,
+  normalizeConfig,
   SHIPPING_SESSION_CONFIG,
   replaySession,
 } from '../bin/replay-vad.mjs';
@@ -114,6 +116,95 @@ function makeWav({ audioFormat, channels, sampleRate = 16000, samples }) {
 }
 
 describe('VAD replay', () => {
+  it('keeps an explicit endpoint silence override ahead of the default alias', () => {
+    const session = parseSession(serializeRecords([{
+      t: 'ev',
+      k: 'session_start',
+      c: { mode: 'adaptive', endpointSilenceMs: 1900 },
+    }]));
+
+    assert.equal(session.config.endpointSilenceMs, 1900);
+    assert.equal(session.config.silenceMs, 1900);
+    assert.equal(normalizeConfig(session.config).config.endpointSilenceMs, 1900);
+    assert.equal(normalizeConfig({ silenceMs: 450 }).config.endpointSilenceMs, 450);
+  });
+
+  it('parses the recorded 2026-10-24 session from the fixture JSONL convention', () => {
+    const session = parseSession(fs.readFileSync(new URL(
+      '../fixtures/vad-telemetry/20261024-124619/session.jsonl',
+      import.meta.url,
+    ), 'utf8'));
+
+    assert.equal(session.frames.length, 119);
+    assert.equal(session.frames[50].q, 50);
+    assert.equal(session.frames[50].e, 'continuing');
+    assert.equal(session.frames[50].es, 'idle');
+    assert.equal(session.frames[50].d, 'none');
+    assert.equal(session.config.endpointSilenceMs, 1900);
+    assert.equal(session.events.some(event => event.k === 'stop_flush'), true);
+  });
+
+  it('captures the soft post-pause onset without opening on the finalize noise bump', () => {
+    const session = parseSession(fs.readFileSync(new URL(
+      '../fixtures/vad-telemetry/20261024-124619/session.jsonl',
+      import.meta.url,
+    ), 'utf8'));
+    const replay = replaySession(session, {
+      ...session.config,
+      endpointPreRollMs: 900,
+    }, { compare: false });
+    const starts = replay.frames.filter(frame => frame.d === 'start_utterance');
+    const emits = replay.events.filter(event => event.k === 'emit');
+    const finalizeFrame = replay.frames.find(frame => frame.d === 'finalize_endpoint');
+    const previousSoftFrame = replay.frames.find(frame => frame.q === 49);
+    const firstSoftFrame = replay.frames.find(frame => frame.q === 50);
+    const finalSoftFrame = replay.frames.find(frame => frame.q === 55);
+    const softLatchFrames = replay.frames.filter(frame => frame.q >= 50 && frame.q <= 52);
+
+    assert.equal(replay.config.endpointSilenceMs, 1900);
+    assert.equal(replay.config.silenceMs, 1900);
+    assert.equal(replay.config.endpointPreRollMs, 900);
+    assert.equal(starts.length, 2);
+    assert.equal(emits.length, 2);
+    assert.ok(finalizeFrame);
+    assert.ok(previousSoftFrame);
+    assert.ok(firstSoftFrame);
+    assert.ok(finalSoftFrame);
+    assert.equal(softLatchFrames.length, 3);
+    assert.ok(Number.isFinite(softLatchFrames[0].fl));
+    assert.equal(finalizeFrame.q, 41);
+    assert.ok(Math.abs(emits[0].s1 - 2679.5) <= 100);
+    assert.equal(emits[0].s0, 0);
+    assert.ok(starts[1].q >= 50 && starts[1].q <= 52);
+    assert.equal(starts[1].e, 'continuing');
+    assert.ok((starts[1].time - starts[1].dt) * 1000 <= 5200);
+    assert.ok(firstSoftFrame.db - previousSoftFrame.db >= replay.config.flatSpreadDb);
+    assert.ok(softLatchFrames.every(frame => frame.fl <= softLatchFrames[0].fl));
+    assert.equal(starts.some(frame => frame.q >= 42 && frame.q <= 49), false);
+    assert.equal(starts.some(frame => {
+      const startMs = (frame.time - frame.dt) * 1000;
+      return startMs >= 4200 && startMs <= 4950;
+    }), false);
+    assert.ok(emits[1].s0 <= 4950);
+    assert.ok(emits[1].s0 <= (firstSoftFrame.time - firstSoftFrame.dt) * 1000);
+    assert.ok(emits[1].s1 >= finalSoftFrame.time * 1000);
+  });
+
+  it('keeps normal strong onsets available during the post-finalize blackout', () => {
+    const events = [];
+    const harness = makeRecorderHarness({
+      gateConfig: { mode: 'static', staticRms: 0.025 },
+      endpointConfig: { onsetMs: 70, endpointSilenceMs: 700, preRollMs: 900 },
+      onEvent: event => events.push(event),
+    });
+    harness.postFinalizeSoftLatchSuppressionSamplesRemaining = 700 * 16;
+
+    for (let index = 0; index < 7; index += 1) harness.drive(-20);
+
+    assert.equal(events.filter(event => event.k === 'start_utterance').length, 1);
+    assert.equal(harness.endpoint.state, 'speechActive');
+  });
+
   it('accepts WAV-only invocation and pins shipping session defaults', () => {
     const options = parseArgs(['audio.wav', '--from-wav', '--labels-file', 'speech.txt']);
     assert.strictEqual(options.wavPath, 'audio.wav');
@@ -125,7 +216,7 @@ describe('VAD replay', () => {
     assert.strictEqual(SHIPPING_SESSION_CONFIG.maxNoiseSec, 6);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.minSpeechMs, 300);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.minChunkMs, 300);
-    assert.strictEqual(SHIPPING_SESSION_CONFIG.endpointPreRollMs, 500);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.endpointPreRollMs, 900);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.loudRegimeEnabled, true);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.loudStrongDeltaDb, 7);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.loudContinuationDeltaDb, 3);
@@ -193,6 +284,10 @@ describe('VAD replay', () => {
 
     assert.equal(replay.divergence.mismatchCount, 0);
     assert.equal(replay.divergence.fieldMismatchCount, 0);
+    assert.equal(replay.divergence.comparedFrameCount, source.frames.length);
+    assert.equal(replay.divergence.matchedFrameCount, source.frames.length);
+    assert.equal(replay.divergence.matchRate, 1);
+    assert.deepEqual(replay.divergence.mismatches, []);
     assert.equal(replay.metrics.utteranceCount, 1);
     assert.equal(replay.metrics.chunkCount, 1);
     assert.ok(Math.abs(replay.metrics.sessionDurationSeconds - 1) < 1e-9);
@@ -216,7 +311,7 @@ describe('VAD replay', () => {
     assert.equal(start.n, 480);
   });
 
-  it('keeps the pre-roll trace identical at the 500 ms default and uses a larger loud tail', () => {
+  it('keeps the pre-roll trace identical at the 900 ms default and uses a larger loud tail', () => {
     function startAfterIdle(recorderConfig, idleFrames) {
       const events = [];
       const harness = makeRecorderHarness({
@@ -228,7 +323,7 @@ describe('VAD replay', () => {
           endpointSilenceMs: 100,
           resumeMs: 20,
           ambiguousRescueMs: 320,
-          preRollMs: 500,
+          preRollMs: 900,
         },
         recorderConfig,
         onEvent: event => events.push(event),
@@ -241,7 +336,7 @@ describe('VAD replay', () => {
     }
 
     const implicitDefault = startAfterIdle({}, 20);
-    const explicitDefault = startAfterIdle({ loudPreRollMs: 500 }, 20);
+    const explicitDefault = startAfterIdle({ loudPreRollMs: 900 }, 20);
     const extended = startAfterIdle({ loudPreRollMs: 1000 }, 80);
     assert.deepStrictEqual(explicitDefault, implicitDefault);
     assert.equal(implicitDefault.n, 3360);

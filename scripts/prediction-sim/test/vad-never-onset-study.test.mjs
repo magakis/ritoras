@@ -89,12 +89,28 @@ describe('never-onset slow-path validation', () => {
     assert.equal(normalized.gateConfig.loudContinuationDeltaDb, 3);
   });
 
-  it('replays only client db/dt and extracts recorded emission boundaries', () => {
+  it('replays client db/dt while comparing recorded decision telemetry', () => {
     const payload = {
       vad_config: { absoluteSpeechFloorDb: -70, mode: 'adaptive' },
       frames: [
-        { q: 0, dt: 0.01, db: -40, e: 'corrupt', th: 0 },
-        { q: 1, dt: 0.02, db: -30, e: 'strong', th: -99 },
+        {
+          q: 0,
+          dt: 0.01,
+          db: -40,
+          e: 'corrupt',
+          es: 'recorded-endpoint-state',
+          d: 'recorded-decision',
+          th: 0,
+        },
+        {
+          q: 1,
+          dt: 0.02,
+          db: -30,
+          e: 'strong',
+          es: 'recorded-active-state',
+          d: 'recorded-start-decision',
+          th: -99,
+        },
       ],
       events: [{ k: 'emit', id: 1, s0: 120, s1: 760, tm: 640 }],
     };
@@ -109,10 +125,18 @@ describe('never-onset slow-path validation', () => {
     assert.equal(recordedFrame.q, 1);
     assert.equal(recordedFrame.dt, 0.02);
     assert.equal(recordedFrame.e, 'strong');
-    for (const field of ['es', 'd', 'll', 'ls', 'lr', 'dy', 'fc']) {
+    assert.equal(recordedFrame.es, 'recorded-active-state');
+    assert.equal(recordedFrame.d, 'recorded-start-decision');
+    for (const field of ['ll', 'ls', 'lr', 'dy', 'fc']) {
       assert.equal(recordedFrame[field], undefined);
     }
     assert.equal(replay.frames.length, 2);
+    assert.deepEqual(replay.divergence.firstDivergence.fields, ['e', 'es', 'd']);
+    assert.deepEqual(replay.divergence.firstDivergence.expected, {
+      e: 'corrupt',
+      es: 'recorded-endpoint-state',
+      d: 'recorded-decision',
+    });
     assert.equal(recordedEmissionMap(adapted)[0].start, 0.12);
     assert.equal(recordedEmissionMap(adapted)[0].end, 0.76);
   });

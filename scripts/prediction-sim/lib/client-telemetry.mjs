@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { DEFAULT_SESSION_CONFIG } from '../bin/replay-vad.mjs';
+import { mergeSessionConfig } from '../bin/replay-vad.mjs';
 
 function configFromTelemetry(payload) {
   return payload.vad_config
@@ -40,7 +40,7 @@ export function adaptClientTelemetry(payload, sessionId = 'unknown') {
     frames,
     recordedFrames,
     events,
-    config: { ...DEFAULT_SESSION_CONFIG, ...rawConfig },
+    config: mergeSessionConfig(rawConfig),
     configIsTelemetry: true,
   };
 }

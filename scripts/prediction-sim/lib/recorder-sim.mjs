@@ -16,6 +16,9 @@ const DEFAULT_FRAME_MS = 10;
 const DEFAULT_ENDPOINT_SILENCE_MS = 3000;
 const DEFAULT_MAX_NOISE_SAMPLES = 6 * 16000;
 const DEFAULT_HEAD_BUFFER_SAMPLES = 2500 * 16;
+// Keep the legacy-loud branch at its prior 1.5-second dwell.
+const LEGACY_LOUD_LATCH_ONSET_SECONDS = 1.0;
+const POST_FINALIZE_SOFT_LATCH_SUPPRESSION_SAMPLES = 700 * 16;
 export const VAD_MAX_CHUNK_SAMPLES = 30 * 16000;
 export const VAD_SPLIT_SEARCH_SAMPLES = 3 * 16000;
 export const VAD_MIN_SILENCE_AT_SPLIT_SAMPLES = 100 * 16;
@@ -221,6 +224,8 @@ export function makeRecorderHarness({
     splitEnergyFrames: [],
     splitEnergySamples: 0,
     contiguousTrailingSilenceSamples: 0,
+    contiguousTrailingSilenceMinimumDb: null,
+    postFinalizeSoftLatchSuppressionSamplesRemaining: 0,
     chunkCount: 0,
     emittedSampleCount: 0,
     nextChunkId: 0,
@@ -245,11 +250,13 @@ export function makeRecorderHarness({
     silenceSamples: 0,
     emittedTotalMs: null,
     noteUtteranceEndedValues: [],
+    previousProcessedFrameDb: null,
     sustainedContinuingMs: 0,
     streakStartFloorDb: null,
     streakPeakDb: null,
     sustainedContinuingOnsetLatched: false,
     streakSawDynamics: false,
+    quietLatchRisingEdgeAtSessionSamples: null,
     latchWitnessRejectionCounted: false,
     quietLatchHistory: [],
     slowOnsetHistory: [],
@@ -269,6 +276,11 @@ export function makeRecorderHarness({
       this.gate.resetFloorAfterRouteChange();
       this.primingComplete = this.gate.snapshot.floorDb === null;
       this.contiguousTrailingSilenceSamples = 0;
+      this.contiguousTrailingSilenceMinimumDb = null;
+      this.postFinalizeSoftLatchSuppressionSamplesRemaining = 0;
+      this.previousProcessedFrameDb = null;
+      this.quietLatchRisingEdgeAtSessionSamples = null;
+      this.quietLatchRisingEdgeSeen = false;
     },
 
     recordFrame(output, previousState, decision, decisionSilenceSamples, frameDb, frameDuration) {
@@ -323,6 +335,11 @@ export function makeRecorderHarness({
 
     drive(frameDb, frameDuration = recorderFrameDuration) {
       const frameSamples = Math.round(frameDuration * 16000);
+      const frameStartSamples = this.sessionElapsedSamples;
+      const previousFrameDb = this.previousProcessedFrameDb;
+      this.previousProcessedFrameDb = frameDb;
+      const hasRisingEdgeWitness = previousFrameDb !== null
+        && frameDb - previousFrameDb >= this.gate.effectiveFlatSpreadDb;
       this.sessionElapsedSamples += frameSamples;
       this.slowOnsetTriggerTime = null;
       const primingWasComplete = this.primingComplete;
@@ -367,6 +384,24 @@ export function makeRecorderHarness({
       const reanchorEvent = this.gate.takePendingReanchorEvent();
       const previousState = this.endpoint.state;
       const endpointWasIdle = previousState === 'idle';
+      // Cool off only fallback promotion; raw strong evidence still reaches the endpoint.
+      const suppressPostFinalizeSoftLatch = this.postFinalizeSoftLatchSuppressionSamplesRemaining > 0;
+      if (suppressPostFinalizeSoftLatch) {
+        this.postFinalizeSoftLatchSuppressionSamplesRemaining = Math.max(
+          0,
+          this.postFinalizeSoftLatchSuppressionSamplesRemaining - frameSamples,
+        );
+        this.sustainedContinuingMs = 0;
+        this.streakStartFloorDb = null;
+        this.streakPeakDb = null;
+        this.streakSawDynamics = false;
+        this.quietLatchRisingEdgeAtSessionSamples = null;
+        this.quietLatchRisingEdgeSeen = false;
+        this.sustainedContinuingOnsetLatched = false;
+        this.latchAmbiguousGraceElapsedMs = 0;
+        this.latchAmbiguousGraceExpired = false;
+        this.lastLatchDynamicsWitnessTime = null;
+      }
       const slowEvidenceBeforeMs = this.slowOnsetHistory.reduce(
         (total, frame) => total + frame.end - frame.start,
         0,
@@ -405,6 +440,7 @@ export function makeRecorderHarness({
         && output.dynamicsSpreadDb >= this.dynamicsWitnessDb) {
         this.lastLatchDynamicsWitnessTime = frameTime;
       }
+      if (suppressPostFinalizeSoftLatch) this.lastLatchDynamicsWitnessTime = null;
       const hasRecentDynamicsWitness = this.lastLatchDynamicsWitnessTime !== null
         && (frameTime - this.lastLatchDynamicsWitnessTime) * 1000 <= 500;
       const ambiguousEvidence = output.evidence === 'ambiguous';
@@ -417,9 +453,39 @@ export function makeRecorderHarness({
         && this.latchAmbiguousGraceElapsedMs + frameDuration * 1000
           <= this.latchAmbiguousGraceMs;
       const ambiguousGraceFrame = ambiguousGraceStreak && !legacyAmbiguousStreak;
-      const eligibleStreak = output.evidence === 'continuing'
-        || legacyAmbiguousStreak
-        || ambiguousGraceStreak;
+      const eligibleStreak = !suppressPostFinalizeSoftLatch
+        && (output.evidence === 'continuing'
+          || legacyAmbiguousStreak
+          || ambiguousGraceStreak);
+      if (suppressPostFinalizeSoftLatch
+        || !endpointWasIdle
+        || !adaptivePath
+        || output.evidence === 'silence') {
+        this.quietLatchRisingEdgeAtSessionSamples = null;
+        this.quietLatchRisingEdgeSeen = false;
+      } else if (hasRisingEdgeWitness) {
+        this.quietLatchRisingEdgeAtSessionSamples = this.sessionElapsedSamples;
+      }
+      const quietWitnessEvidenceEligible = output.evidence === 'continuing'
+        || (this.quietLatchAmbiguousEnabled && ambiguousEvidence);
+      const quietLatchStreakEligible = quietWitnessMode
+        ? quietWitnessEvidenceEligible
+        : eligibleStreak;
+      if (quietLatchStreakEligible && endpointWasIdle) {
+        const startsQuietLatchStreak = quietWitnessMode
+          ? this.quietLatchCandidateStartTime === null
+          : this.sustainedContinuingMs === 0;
+        const hadImmediateRisingEdge = this.quietLatchRisingEdgeAtSessionSamples === frameStartSamples;
+        if (startsQuietLatchStreak) {
+          this.quietLatchRisingEdgeSeen = hasRisingEdgeWitness || hadImmediateRisingEdge;
+          this.quietLatchRisingEdgeAtSessionSamples = null;
+        } else if (hasRisingEdgeWitness) {
+          this.quietLatchRisingEdgeSeen = true;
+          this.quietLatchRisingEdgeAtSessionSamples = null;
+        }
+      } else if (!quietWitnessMode && !this.sustainedContinuingOnsetLatched) {
+        this.quietLatchRisingEdgeSeen = false;
+      }
       if (output.evidence === 'continuing') {
         this.latchAmbiguousGraceElapsedMs = 0;
         this.latchAmbiguousGraceExpired = false;
@@ -437,8 +503,13 @@ export function makeRecorderHarness({
         this.latchAmbiguousGraceElapsedMs = 0;
         this.latchAmbiguousGraceExpired = false;
       }
+      if (suppressPostFinalizeSoftLatch) {
+        this.latchAmbiguousGraceElapsedMs = 0;
+        this.latchAmbiguousGraceExpired = false;
+      }
       if (quietWitnessMode) {
-        this.updateQuietWitnessStreak(output, frameDb, frameDuration, endpointWasIdle);
+        if (suppressPostFinalizeSoftLatch) this.resetQuietLatchWindow();
+        else this.updateQuietWitnessStreak(output, frameDb, frameDuration, endpointWasIdle);
       } else if (adaptivePath && eligibleStreak && endpointWasIdle) {
         if (this.sustainedContinuingMs === 0) {
           this.streakStartFloorDb = this.gate.snapshot.floorDb;
@@ -464,35 +535,39 @@ export function makeRecorderHarness({
           || frameDb >= output.continuationThresholdDb + 3);
       const quietRegimeFloorStable = output.floorDb !== null
         && this.streakStartFloorDb !== null
-        && output.floorDb - this.streakStartFloorDb <= 2;
+        && output.floorDb <= this.streakStartFloorDb;
       const loudRegimeEvidence = output.floorDb !== null
         && (this.streakPeakDb ?? -Infinity)
           >= output.floorDb + this.gate.effectiveAdaptiveDeltaDb;
       const legacyLoudBranch = !this.gate.config.loudRegimeEnabled
         && output.floorDb >= VAD_LOUD_FLOOR_REGIME_DB;
-      const quietLatchQualified = quietWitnessMode
-        ? this.quietLatchStreakQualified(
-          output,
-          quietRegimeEvidence,
-          quietRegimeFloorStable,
-        )
-        : quietRegimeEvidence
-          && quietRegimeFloorStable
-          && this.sustainedContinuingMs >= VAD_SUSTAINED_CONTINUING_ONSET_S * 1000;
+      const quietLatchQualified = this.quietLatchRisingEdgeSeen
+        && (quietWitnessMode
+          ? this.quietLatchStreakQualified(
+            output,
+            quietRegimeEvidence,
+            quietRegimeFloorStable,
+          )
+          : quietRegimeEvidence
+            && quietRegimeFloorStable
+            && this.sustainedContinuingMs >= VAD_SUSTAINED_CONTINUING_ONSET_S * 1000);
       const legacyLoudLatchQualified = legacyLoudBranch
         && loudRegimeEvidence
-        && this.sustainedContinuingMs >= 1.5 * VAD_SUSTAINED_CONTINUING_ONSET_S * 1000;
+        && this.sustainedContinuingMs >= 1.5 * LEGACY_LOUD_LATCH_ONSET_SECONDS * 1000;
       const loudLatchQualified = output.isLoudRegime
         && this.sustainedContinuingMs >= this.loudLatchMs
         && this.streakSawDynamics;
       const latchAcceptsAmbiguous = legacyAmbiguousStreak || ambiguousGraceStreak;
-      const latchEligibleEvidence = output.evidence === 'continuing'
-        || (ambiguousEvidence && latchAcceptsAmbiguous);
+      const latchEligibleEvidence = !suppressPostFinalizeSoftLatch
+        && (output.evidence === 'continuing'
+          || (ambiguousEvidence && latchAcceptsAmbiguous));
       if (adaptivePath
         && output.floorConverged
         && latchEligibleEvidence
         && endpointWasIdle
-        && (quietLatchQualified || legacyLoudLatchQualified || loudLatchQualified)) {
+        && (quietLatchQualified
+          || legacyLoudLatchQualified
+          || loudLatchQualified)) {
         this.sustainedContinuingOnsetLatched = true;
       }
       if (output.isLoudRegime
@@ -513,6 +588,8 @@ export function makeRecorderHarness({
         this.streakStartFloorDb = null;
         this.streakPeakDb = null;
         this.streakSawDynamics = false;
+        this.quietLatchRisingEdgeAtSessionSamples = null;
+        this.quietLatchRisingEdgeSeen = false;
       }
       const latchedContinuingOnset = this.sustainedContinuingOnsetLatched
         && latchEligibleEvidence
@@ -583,10 +660,16 @@ export function makeRecorderHarness({
         this.contiguousTrailingSilenceSamples = endpointEvidence === 'silence'
           ? this.contiguousTrailingSilenceSamples + frameSamples
           : 0;
+        this.contiguousTrailingSilenceMinimumDb = endpointEvidence === 'silence'
+          ? Math.min(this.contiguousTrailingSilenceMinimumDb ?? frameDb, frameDb)
+          : null;
       } else {
         this.contiguousTrailingSilenceSamples = output.isSpeech
           ? 0
           : this.contiguousTrailingSilenceSamples + frameSamples;
+        this.contiguousTrailingSilenceMinimumDb = output.isSpeech
+          ? null
+          : Math.min(this.contiguousTrailingSilenceMinimumDb ?? frameDb, frameDb);
       }
 
       let decision = { type: 'none' };
@@ -789,10 +872,16 @@ export function makeRecorderHarness({
       }
 
       if (decision.type === 'finalizeUtterance') {
+        if (decision.kind === 'endpoint') {
+          this.postFinalizeSoftLatchSuppressionSamplesRemaining = POST_FINALIZE_SOFT_LATCH_SUPPRESSION_SAMPLES;
+        }
         if (!this.primingComplete && this.accumulatorSamples === 0) {
           this.emitEvent({ t: 'ev', k: 'discard', r: 'priming_window' });
           this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
-          this.gate.noteUtteranceEnded(this.utteranceQuietestStrongDb);
+          this.gate.noteUtteranceEnded(
+            this.utteranceQuietestStrongDb,
+            this.contiguousTrailingSilenceMinimumDb,
+          );
           this.utteranceQuietestStrongDb = null;
           this.speechSamples = 0;
           return { output, decision, frameRecord: null, discarded: true };
@@ -829,7 +918,10 @@ export function makeRecorderHarness({
           this.chunkCount += 1;
           this.emittedSampleCount += totalSamples;
           this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
-          this.gate.noteUtteranceEnded(this.utteranceQuietestStrongDb);
+          this.gate.noteUtteranceEnded(
+            this.utteranceQuietestStrongDb,
+            this.contiguousTrailingSilenceMinimumDb,
+          );
           this.emitEvent({
             t: 'ev',
             k: 'emit',
@@ -908,6 +1000,9 @@ export function makeRecorderHarness({
           this.emittedSampleCount += splitSamples;
           const carriedSamples = this.accumulatorSamples - splitSamples;
           this.accumulatorSamples = carriedSamples;
+          if (carriedSamples < this.contiguousTrailingSilenceSamples) {
+            this.contiguousTrailingSilenceMinimumDb = null;
+          }
           this.contiguousTrailingSilenceSamples = Math.min(
             this.contiguousTrailingSilenceSamples,
             carriedSamples,
@@ -958,6 +1053,8 @@ export function makeRecorderHarness({
       this.quietLatchCandidateStartTime = null;
       this.quietLatchStartFloorDb = null;
       this.quietLatchCoverageMs = 0;
+      this.quietLatchRisingEdgeAtSessionSamples = null;
+      this.quietLatchRisingEdgeSeen = false;
     },
 
     trackIdleGapFrame(frameDb, frameSamples, output) {
@@ -1150,6 +1247,9 @@ export function makeRecorderHarness({
     },
 
     flush() {
+      this.previousProcessedFrameDb = null;
+      this.quietLatchRisingEdgeAtSessionSamples = null;
+      this.quietLatchRisingEdgeSeen = false;
       this.finishIdleGapRun();
       const sampleCount = this.accumulatorSamples;
       const speechMs = this.speechSamples / 16;
@@ -1187,7 +1287,10 @@ export function makeRecorderHarness({
       this.emittedSampleCount += sampleCount;
       this.emittedTotalMs = sampleCount / 16;
       this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
-      this.gate.noteUtteranceEnded(this.utteranceQuietestStrongDb);
+      this.gate.noteUtteranceEnded(
+        this.utteranceQuietestStrongDb,
+        this.contiguousTrailingSilenceMinimumDb,
+      );
       this.emitEvent({
         t: 'ev',
         k: 'emit',
@@ -1212,6 +1315,8 @@ export function makeRecorderHarness({
       this.streakPeakDb = null;
       this.sustainedContinuingOnsetLatched = false;
       this.streakSawDynamics = false;
+      this.quietLatchRisingEdgeAtSessionSamples = null;
+      this.quietLatchRisingEdgeSeen = false;
       return { type: 'finalizeUtterance', kind: 'stop' };
     },
 

@@ -1456,7 +1456,7 @@ describe('adaptive VAD convergence', () => {
       }
     }
 
-    assert.ok(latchAtMs !== null && latchAtMs >= 1000 && latchAtMs <= 1010);
+    assert.ok(latchAtMs !== null && latchAtMs >= 300 && latchAtMs <= 310);
     assert.strictEqual(harness.endpoint.state, 'speechActive');
 
     for (let i = 0; i < 100; i++) {
@@ -1604,7 +1604,8 @@ describe('adaptive VAD convergence', () => {
     }
     harness.gate.floorDb = -50;
 
-    for (let i = 0; i < 50; i++) {
+    // Interrupt this continuing run just before the new 300 ms latch dwell.
+    for (let i = 0; i < 29; i++) {
       const frame = harness.drive(-44);
       assert.strictEqual(frame.output.evidence, 'continuing');
       assert.strictEqual(frame.latchedContinuingOnset, false);

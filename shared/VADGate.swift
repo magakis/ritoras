@@ -124,6 +124,9 @@ final class VADThresholdGate: @unchecked Sendable {
     private static let staticSilenceOffsetDb = 6.0
     private static let elevatedRiseDbPerSecond = 12.0
     private static let speechCeilingMarginDb = 2.0
+    // Bound the utterance-end correction and keep the residual breath bump from undoing it.
+    private static let utteranceEndFloorReseedMaximumDropDb = 4.0
+    private static let utteranceEndFloorRiseHoldSeconds = 1.2
     private static let adaptiveMinRefinementDuration = 1.0
     private static let adaptiveColdStartGraceSeconds = 0.4
     private static let adaptiveColdStartDispersionWindowSeconds = 0.4
@@ -169,6 +172,7 @@ final class VADThresholdGate: @unchecked Sendable {
     private var adaptiveRollingCount = 0
     private var adaptiveRollingElapsed = 0.0
     private var adaptiveRollingPercentileCache: Double?
+    private var floorRiseSuppressionRemainingSeconds = 0.0
     private var lastKnownMachineIsIdle = true
     private var speechCeilingDb: Double?
     private var isLoudRegime = false
@@ -324,7 +328,7 @@ final class VADThresholdGate: @unchecked Sendable {
         return event
     }
 
-    func noteUtteranceEnded(quietestStrongDb: Double?) {
+    func noteUtteranceEnded(quietestStrongDb: Double?, trailingSilenceDb: Double? = nil) {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         guard behaviorMode == .adaptive else { return }
@@ -339,6 +343,29 @@ final class VADThresholdGate: @unchecked Sendable {
             speechCeilingDb = quietestStrongDb
         }
         // Rejected or nil: keep the previous ceiling (idle decay still releases it).
+        if let trailingSilenceDb, trailingSilenceDb.isFinite, let floorDb {
+            if speechCeilingDb == nil {
+                let lowestAllowedFloor = max(
+                    Self.floorMinDb,
+                    floorDb - Self.utteranceEndFloorReseedMaximumDropDb
+                )
+                let reseededFloor = min(
+                    floorDb,
+                    max(lowestAllowedFloor, clampFloor(trailingSilenceDb))
+                )
+                if reseededFloor < floorDb {
+                    self.floorDb = reseededFloor
+                    floorRiseSuppressionRemainingSeconds = Self.utteranceEndFloorRiseHoldSeconds
+                } else {
+                    floorRiseSuppressionRemainingSeconds = 0
+                }
+            } else {
+                // Preserve headroom: a deeper floor could promote ambient evidence to strong.
+                floorRiseSuppressionRemainingSeconds = 0
+            }
+        } else {
+            floorRiseSuppressionRemainingSeconds = 0
+        }
         resetAdaptiveRollingWindow()
     }
 
@@ -655,20 +682,32 @@ final class VADThresholdGate: @unchecked Sendable {
         guard behaviorMode == .adaptive else { return }
         guard floorDb != nil else { return }
         guard adaptiveRefinementComplete else { return }
-        let riseCap: Double
-        switch lastOutput.evidence {
-        case .strong:
+        // Let residual post-finalize noise decay before it can lift the new quiet floor.
+        let suppressReseededFloorRise = machineIsIdle && floorRiseSuppressionRemainingSeconds > 0
+        if suppressReseededFloorRise {
+            floorRiseSuppressionRemainingSeconds = max(
+                0,
+                floorRiseSuppressionRemainingSeconds - max(0, duration)
+            )
+        }
+        var riseCap: Double
+        if suppressReseededFloorRise {
             riseCap = 0
-        case .continuing:
-            riseCap = machineIsIdle
-                ? (isLoudRegime ? config.loudRiseDbPerSec : Self.elevatedRiseDbPerSecond)
-                    * effectiveRiseSpeedMultiplier
-                : 0
-        case .ambiguous, .silence:
-            riseCap = machineIsIdle
-                ? (isLoudRegime ? config.loudRiseDbPerSec : Self.elevatedRiseDbPerSecond)
-                    * effectiveRiseSpeedMultiplier
-                : 0
+        } else {
+            switch lastOutput.evidence {
+            case .strong:
+                riseCap = 0
+            case .continuing:
+                riseCap = machineIsIdle
+                    ? (isLoudRegime ? config.loudRiseDbPerSec : Self.elevatedRiseDbPerSecond)
+                        * effectiveRiseSpeedMultiplier
+                    : 0
+            case .ambiguous, .silence:
+                riseCap = machineIsIdle
+                    ? (isLoudRegime ? config.loudRiseDbPerSec : Self.elevatedRiseDbPerSecond)
+                        * effectiveRiseSpeedMultiplier
+                    : 0
+            }
         }
         if machineIsIdle, let speechCeilingDb {
             let decayedCeilingDb = speechCeilingDb
@@ -679,6 +718,7 @@ final class VADThresholdGate: @unchecked Sendable {
                 : decayedCeilingDb
         }
         if machineIsEnding,
+           !suppressReseededFloorRise,
            let shortSpreadDb = lastOutput.shortSpreadDb,
            let dynamicsSpreadDb = lastOutput.dynamicsSpreadDb,
            shortSpreadDb < effectiveFlatSpreadDb,
@@ -734,6 +774,7 @@ final class VADThresholdGate: @unchecked Sendable {
         pendingReanchorEvent = false
         hasRefusedReanchorSinceLastAcceptance = false
         speechCeilingDb = nil
+        floorRiseSuppressionRemainingSeconds = 0
         resetAdaptiveRollingWindow()
         lastOutput = VADGateOutput(
             isSpeech: false,

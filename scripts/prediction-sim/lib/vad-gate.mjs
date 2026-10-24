@@ -7,7 +7,10 @@ export const VAD_STATIC_CONTINUATION_OFFSET_DB = 4.0;
 export const VAD_STATIC_SILENCE_OFFSET_DB = 6.0;
 export const VAD_ELEVATED_RISE_DB_PER_SECOND = 12.0;
 export const VAD_SPEECH_CEILING_MARGIN_DB = 2.0;
-export const VAD_SUSTAINED_CONTINUING_ONSET_S = 1.0;
+export const VAD_SUSTAINED_CONTINUING_ONSET_S = 0.3;
+// Keep the end-floor correction bounded until the residual post-finalize bump decays.
+const VAD_UTTERANCE_END_FLOOR_RESEED_MAX_DROP_DB = 4.0;
+const VAD_UTTERANCE_END_FLOOR_RISE_HOLD_S = 1.2;
 export const VAD_ADAPTIVE_MIN_REFINEMENT_DURATION_S = 1.0;
 export const VAD_ADAPTIVE_COLD_START_GRACE_S = 0.4;
 export const VAD_ADAPTIVE_PRIMING_MAX_S = 0.45;
@@ -158,6 +161,7 @@ export class VADThresholdGate {
     this.adaptiveRollingCount = 0;
     this.adaptiveRollingElapsed = 0;
     this.adaptiveRollingPercentileCache = null;
+    this.floorRiseSuppressionRemainingSeconds = 0;
     this.lastKnownMachineIsIdle = true;
     this.isLoudRegime = false;
     this.loudEnterElapsed = 0;
@@ -212,7 +216,7 @@ export class VADThresholdGate {
     return event;
   }
 
-  noteUtteranceEnded(quietestStrongDb) {
+  noteUtteranceEnded(quietestStrongDb, trailingSilenceDb = null) {
     if (this.behaviorMode !== 'adaptive') return;
     if (this.floorDb !== null
       && quietestStrongDb !== null
@@ -221,6 +225,29 @@ export class VADThresholdGate {
         + this.effectiveAdaptiveDeltaDb
         + VAD_SPEECH_CEILING_MARGIN_DB) {
       this.speechCeilingDb = quietestStrongDb;
+    }
+    if (this.floorDb !== null && Number.isFinite(trailingSilenceDb)) {
+      if (this.speechCeilingDb === null) {
+        const lowestAllowedFloor = Math.max(
+          VAD_FLOOR_MIN_DB,
+          this.floorDb - VAD_UTTERANCE_END_FLOOR_RESEED_MAX_DROP_DB,
+        );
+        const reseededFloor = Math.min(
+          this.floorDb,
+          Math.max(lowestAllowedFloor, this.clampFloor(trailingSilenceDb)),
+        );
+        if (reseededFloor < this.floorDb) {
+          this.floorDb = reseededFloor;
+          this.floorRiseSuppressionRemainingSeconds = VAD_UTTERANCE_END_FLOOR_RISE_HOLD_S;
+        } else {
+          this.floorRiseSuppressionRemainingSeconds = 0;
+        }
+      } else {
+        // Preserve headroom: a deeper floor could promote ambient evidence to strong.
+        this.floorRiseSuppressionRemainingSeconds = 0;
+      }
+    } else {
+      this.floorRiseSuppressionRemainingSeconds = 0;
     }
     this.resetAdaptiveRollingWindow();
   }
@@ -494,6 +521,15 @@ export class VADThresholdGate {
     if (this.behaviorMode !== 'adaptive') return;
     if (this.floorDb === null) return;
     if (!this.adaptiveRefinementComplete) return;
+    // Match the Swift hold while the recorder is idle after an utterance ends.
+    const suppressReseededFloorRise = machineIsIdle
+      && this.floorRiseSuppressionRemainingSeconds > 0;
+    if (suppressReseededFloorRise) {
+      this.floorRiseSuppressionRemainingSeconds = Math.max(
+        0,
+        this.floorRiseSuppressionRemainingSeconds - Math.max(0, duration),
+      );
+    }
     let riseCap;
     switch (this.lastOutput.evidence) {
       case 'strong':
@@ -532,6 +568,7 @@ export class VADThresholdGate {
           : 0;
         break;
     }
+    if (suppressReseededFloorRise) riseCap = 0;
     if (machineIsIdle && this.speechCeilingDb !== null) {
       const decayedCeilingDb = this.speechCeilingDb
         + VAD_ELEVATED_RISE_DB_PER_SECOND
@@ -545,6 +582,7 @@ export class VADThresholdGate {
         : decayedCeilingDb;
     }
     if (machineIsEnding
+      && !suppressReseededFloorRise
       && this.lastOutput.shortSpreadDb !== null
       && this.lastOutput.dynamicsSpreadDb !== null
       && this.lastOutput.shortSpreadDb < this.effectiveFlatSpreadDb
@@ -587,6 +625,7 @@ export class VADThresholdGate {
     this.pendingReanchorEvent = false;
     this.hasRefusedReanchorSinceLastAcceptance = false;
     this.speechCeilingDb = null;
+    this.floorRiseSuppressionRemainingSeconds = 0;
     this.resetAdaptiveRollingWindow();
     this.lastOutput = {
       isSpeech: false,

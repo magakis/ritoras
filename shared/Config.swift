@@ -274,7 +274,7 @@ struct SharedConfig {
         static let streamVadAmbiguousRescueMsKey = "streamVadAmbiguousRescueMs"
         static let streamVadAmbiguousRescueMsDefault: Int = 320
         static let streamVadPreRollMsKey = "streamVadPreRollMs"
-        static let streamVadPreRollMsDefault: Int = 500
+        static let streamVadPreRollMsDefault: Int = 900
         static let streamVadAccumulatorSpillSamplesKey = "streamVadAccumulatorSpillSamples"
         static let streamVadAccumulatorSpillSamplesDefault: Int = 1_048_576
         static let streamVadAccumulatorCapEnabledKey = "streamVadAccumulatorCapEnabled"
