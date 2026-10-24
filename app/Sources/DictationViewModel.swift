@@ -1376,6 +1376,7 @@ final class DictationViewModel: ObservableObject {
         lastVADPublishTime = nil
         lastPublishedVADState = nil
         let stopStartTime = Date()
+        var stagedDiagnosticsUpload: (url: URL, serverURL: String, token: String)?
         switch SharedConfig.dictationMode() {
         case .batch:
             guard let recorder = recorder, let id = activeID else { return }
@@ -1456,8 +1457,6 @@ final class DictationViewModel: ObservableObject {
                 defer { if self.activeID == id { self.transcriptionTask = nil } }
 
                 let uploadT0 = Date()
-                var stagedDiagnosticsUpload: (url: URL, serverURL: String, token: String)?
-
                 do {
                     let audioBytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? UInt64 ?? 0
 
