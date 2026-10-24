@@ -22,6 +22,7 @@ class AppSettings: ObservableObject {
     @Published var streamVadSpeechRms: Float = SharedConfig.Defaults.streamVadSpeechRmsDefault
     @Published var streamVadAbsoluteSpeechFloorDb: Double = SharedConfig.Defaults.streamVadAbsoluteSpeechFloorDbDefault
     @Published var streamVadTelemetryEnabled: Bool = SharedConfig.Defaults.streamVadTelemetryEnabledDefault
+    @Published var fullRecordingUploadEnabled: Bool = SharedConfig.Defaults.fullRecordingUploadEnabledDefault
 
     private var appGroupDefaults: UserDefaults?
     private var cancellables = Set<AnyCancellable>()
@@ -51,6 +52,7 @@ class AppSettings: ObservableObject {
         streamVadSpeechRms = SharedConfig.streamVadSpeechRms()
         streamVadAbsoluteSpeechFloorDb = SharedConfig.streamVadAbsoluteSpeechFloorDb()
         streamVadTelemetryEnabled = SharedConfig.streamVadTelemetryEnabled()
+        fullRecordingUploadEnabled = SharedConfig.fullRecordingUploadEnabled()
 
         $servers.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving servers",
@@ -140,6 +142,9 @@ class AppSettings: ObservableObject {
                                    payload: ["value": newValue])
             self?.saveStreamVadTelemetryEnabled(newValue)
         }.store(in: &cancellables)
+        $fullRecordingUploadEnabled.dropFirst().sink { [weak self] newValue in
+            self?.saveFullRecordingUploadEnabled(newValue)
+        }.store(in: &cancellables)
     }
 
     /// Synchronous write to App Group — backs the explicit Save button.
@@ -170,6 +175,7 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(streamVadSpeechRms, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
         saveStreamVadAbsoluteSpeechFloorDb(streamVadAbsoluteSpeechFloorDb)
         appGroupDefaults?.set(streamVadTelemetryEnabled, forKey: SharedConfig.Defaults.streamVadTelemetryEnabledKey)
+        saveFullRecordingUploadEnabled(fullRecordingUploadEnabled)
         postSettingsChanged()
     }
 
@@ -261,6 +267,11 @@ class AppSettings: ObservableObject {
         postSettingsChanged()
     }
 
+    private func saveFullRecordingUploadEnabled(_ enabled: Bool) {
+        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.fullRecordingUploadEnabledKey)
+        postSettingsChanged()
+    }
+
     private func postSettingsChanged() {
         DarwinNotifier.post(SharedConfig.Defaults.darwinSettingsChangedNotificationName)
     }
@@ -323,6 +334,7 @@ class AppSettings: ObservableObject {
         streamVadSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadAbsoluteSpeechFloorDbKey)
         streamVadTelemetryEnabled = SharedConfig.Defaults.streamVadTelemetryEnabledDefault
+        fullRecordingUploadEnabled = SharedConfig.Defaults.fullRecordingUploadEnabledDefault
         updatingDerivedVadValue = true
         streamVadSilenceMs = SharedConfig.Defaults.streamVadSilenceMsDefault
         updatingDerivedVadValue = false

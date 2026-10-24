@@ -358,6 +358,11 @@ struct VADSettingsView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
 
+            Toggle("Full Recording Upload", isOn: $settings.fullRecordingUploadEnabled)
+            Text("Uploads the complete pre-VAD session recording for diagnostics after each streamed transcription.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
             Text("\(telemetryURLs.count) of 20 telemetry recordings retained")
                 .font(.caption)
                 .foregroundColor(.secondary)
