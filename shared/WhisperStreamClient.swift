@@ -103,6 +103,8 @@ actor WhisperStreamClient {
     private var connectionGeneration: UInt64 = 0
     private var connectionAttempt: Task<Void, Error>?
     private var connectionAttemptID: UUID?
+    /// Server-minted token from the final message, when the server supports uploads.
+    private(set) var finalRecordingToken: String?
     /// Stop-time telemetry starts finalization; reconnecting after it could orphan END.
     private var finalizationStarted = false
 
@@ -318,6 +320,10 @@ actor WhisperStreamClient {
             && connectionReady
             && !receiveFailed
             && expectedTask.state == .running
+    }
+
+    private func recordFinalRecordingToken(_ token: String?) {
+        finalRecordingToken = token
     }
 
     private func activeConnection() throws -> (task: URLSessionWebSocketTask, generation: UInt64) {
@@ -811,6 +817,7 @@ actor WhisperStreamClient {
                                         task, generation: generation) else {
                                         throw WhisperStreamTransportError.superseded
                                     }
+                                    await self.recordFinalRecordingToken(msg.recording_token)
                                     if let chunkId = msg.chunk_id {
                                         guard await self.publishChunkResult(
                                             id: chunkId,
@@ -1299,6 +1306,7 @@ actor WhisperStreamClient {
         let type: String
         let transcription: String
         let chunk_id: UInt32?
+        let recording_token: String?
     }
 
     private struct StreamError: Decodable {

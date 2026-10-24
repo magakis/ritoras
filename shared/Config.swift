@@ -206,6 +206,8 @@ struct SharedConfig {
         static let audioCaptureAttenuationEnabledDefault = false
         static let streamVadTelemetryEnabledKey = "streamVadTelemetryEnabled"
         static let streamVadTelemetryEnabledDefault = false
+        static let fullRecordingUploadEnabledKey = "fullRecordingUploadEnabled"
+        static let fullRecordingUploadEnabledDefault = false
 
         // MARK: - Streaming / VAD Tunables
 
@@ -1188,6 +1190,16 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.streamVadTelemetryEnabledKey) as? Bool)
             ?? Defaults.streamVadTelemetryEnabledDefault
+    }
+
+    /// Reads the full-recording diagnostics upload flag from the App Group.
+    /// Returns `false` when the App Group is unavailable or the key is unset.
+    static func fullRecordingUploadEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.fullRecordingUploadEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.fullRecordingUploadEnabledKey) as? Bool)
+            ?? Defaults.fullRecordingUploadEnabledDefault
     }
 
     /// Reads the streaming VAD silence threshold (ms) from the App Group.

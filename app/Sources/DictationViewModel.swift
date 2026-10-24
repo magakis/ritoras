@@ -196,6 +196,7 @@ final class DictationViewModel: ObservableObject {
 
     private var streamRecorder: StreamingAudioRecorder?
     private var streamClient: WhisperStreamClient?
+    private var finalRecordingToken: String?
     private var chunkAudioStore: ChunkAudioStore?
     // One fresh-server-session recovery attempt bounds each dictation's reconnect budget.
     private var streamReconnectAttemptedSessionID: UUID?
@@ -933,6 +934,7 @@ final class DictationViewModel: ObservableObject {
         SharedConfig.clearPendingDictationCancel(exceptSessionID: id)
         activeID = id
         streamReconnectAttemptedSessionID = nil
+        finalRecordingToken = nil
         earlyCancelledSessionID = nil
         returnToIdleDeadline = nil
         fallbackNotice = nil
@@ -1454,6 +1456,7 @@ final class DictationViewModel: ObservableObject {
                 defer { if self.activeID == id { self.transcriptionTask = nil } }
 
                 let uploadT0 = Date()
+                var stagedDiagnosticsUpload: (url: URL, serverURL: String, token: String)?
 
                 do {
                     let audioBytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? UInt64 ?? 0
@@ -1827,6 +1830,9 @@ final class DictationViewModel: ObservableObject {
                     let receivedText = try await receiveTask?.value ?? ""
 
                     guard canContinueSession(id) else { return }
+                    let receivedRecordingToken = await client.finalRecordingToken
+                    guard canContinueSession(id) else { return }
+                    finalRecordingToken = receivedRecordingToken
 
                     let mergeEnabled = SharedConfig.Defaults.chunkFinalMergeEnabled
                     let maxGapMs = min(max(SharedConfig.Defaults.chunkFinalMergeMaxGapMs, 500), 10_000)
@@ -1873,9 +1879,36 @@ final class DictationViewModel: ObservableObject {
                         guard activeID == id else { return }
 
                         TranscriptionHistory.shared.add(text: text)
-                        RecordingStore.shared.deleteStreamWav(for: id)
-                        FileLogger.shared.debug(.audio, "stream wav deleted on success",
-                                                payload: ["jobId": id.uuidString])
+                        if SharedConfig.fullRecordingUploadEnabled(),
+                           let recordingToken = receivedRecordingToken,
+                           !recordingToken.isEmpty {
+                            if let serverURL = selectedServer,
+                               let sourceURL = RecordingStore.shared.streamWavURL(for: id) {
+                                do {
+                                    let stagedURL = try FullRecordingDiagnosticsUploader.stage(
+                                        sourceURL: sourceURL,
+                                        sessionID: id)
+                                    stagedDiagnosticsUpload = (
+                                        url: stagedURL,
+                                        serverURL: serverURL,
+                                        token: recordingToken)
+                                } catch {
+                                    RecordingStore.shared.deleteStreamWav(for: id)
+                                    FileLogger.shared.debug(.network, "Full recording upload staging failed",
+                                                            payload: ["jobId": id.uuidString,
+                                                                      "reason": String(
+                                                                        error.localizedDescription.prefix(120))])
+                                }
+                            } else {
+                                RecordingStore.shared.deleteStreamWav(for: id)
+                                FileLogger.shared.debug(.network, "Full recording upload staging unavailable",
+                                                        payload: ["jobId": id.uuidString])
+                            }
+                        } else {
+                            RecordingStore.shared.deleteStreamWav(for: id)
+                            FileLogger.shared.debug(.audio, "stream wav deleted on success",
+                                                    payload: ["jobId": id.uuidString])
+                        }
                         vadTelemetryWriter?.recordOutcome("success")
                         phase = .done(text)
                     }
@@ -1927,6 +1960,15 @@ final class DictationViewModel: ObservableObject {
             receiveTask = nil
 
             await streamClient?.disconnect()
+            if let stagedDiagnosticsUpload {
+                Task.detached(priority: .utility) {
+                    await FullRecordingDiagnosticsUploader.upload(
+                        stagedURL: stagedDiagnosticsUpload.url,
+                        serverURL: stagedDiagnosticsUpload.serverURL,
+                        recordingToken: stagedDiagnosticsUpload.token,
+                        sessionID: id)
+                }
+            }
             guard canContinueSession(id) else { return }
             streamClient = nil
             streamRecorder = nil
