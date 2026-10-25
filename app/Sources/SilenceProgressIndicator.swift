@@ -6,12 +6,14 @@ struct SilenceProgressIndicator: View {
 
     private var silenceProgress: Double {
         guard state.endpointState == "endPending",
-              state.evidence == "silence",
-              state.silenceTargetMs > 0 else {
+              state.silenceTargetMs > 0,
+              state.silenceTargetMs > state.endEvidenceMs else {
             return 0
         }
 
-        return min(max(state.accumulatedSilenceMs / state.silenceTargetMs, 0), 1)
+        let progressRangeMs = state.silenceTargetMs - state.endEvidenceMs
+        let silenceSinceEndPendingMs = state.accumulatedSilenceMs - state.endEvidenceMs
+        return min(max(silenceSinceEndPendingMs / progressRangeMs, 0), 1)
     }
 
     private var stateLabel: String {
@@ -23,7 +25,7 @@ struct SilenceProgressIndicator: View {
         case "speechActive":
             return "Recording speech"
         case "endPending":
-            return "Waiting for endpoint"
+            return "Finalizing…"
         default:
             return "Listening"
         }
@@ -114,7 +116,7 @@ struct SilenceProgressIndicator: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .scaleEffect(x: silenceProgress, y: 1, anchor: .leading)
                 .animation(
-                    state.endpointState == "endPending" && state.evidence == "silence"
+                    state.endpointState == "endPending"
                         ? .linear(duration: 0.08)
                         : nil,
                     value: silenceProgress

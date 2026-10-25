@@ -164,6 +164,7 @@ struct StreamingVADFrameState: Sendable {
     let floorDb: Double?
     let accumulatedSilenceMs: Double
     let silenceTargetMs: Double
+    let endEvidenceMs: Double
     let utteranceDurationMs: Double
     let resumeEvidenceMs: Double
     let lastEmissionReason: String?
@@ -467,6 +468,7 @@ private final class VADContext: @unchecked Sendable {
             floorDb: gateSnapshot.floorDb,
             accumulatedSilenceMs: Double(endpoint.accumulatedSilenceSamples) / 16.0,
             silenceTargetMs: Double(silenceThresholdSamples) / 16.0,
+            endEvidenceMs: Double(endpoint.configuration.endEvidenceSamples) / 16.0,
             utteranceDurationMs: Double(endpoint.utteranceDurationSamples) / 16.0,
             resumeEvidenceMs: Double(endpoint.resumeEvidenceSamples) / 16.0,
             lastEmissionReason: emissionSummary?.reason,
