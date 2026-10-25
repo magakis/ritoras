@@ -16,22 +16,22 @@ class AppSettings: ObservableObject {
     @Published var audioMeasurementModeEnabled: Bool = SharedConfig.Defaults.audioMeasurementModeEnabledDefault
     @Published var audioCaptureAttenuationEnabled: Bool = SharedConfig.Defaults.audioCaptureAttenuationEnabledDefault
 
-    @Published var streamVadMode: VADMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
-    @Published var streamVadPauseProfile: VADPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
-    @Published var streamVadSilenceMs: Int = SharedConfig.Defaults.streamVadSilenceMsDefault
-    @Published var streamVadSpeechRms: Float = SharedConfig.Defaults.streamVadSpeechRmsDefault
-    @Published var streamVadAbsoluteSpeechFloorDb: Double = SharedConfig.Defaults.streamVadAbsoluteSpeechFloorDbDefault
-    @Published var streamVadTelemetryEnabled: Bool = SharedConfig.Defaults.streamVadTelemetryEnabledDefault
+    @Published var chunkSplitterMode: VADMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
+    @Published var chunkSplitterPauseProfile: ChunkSplitterPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
+    @Published var chunkSplitterSilenceMs: Int = SharedConfig.Defaults.streamVadSilenceMsDefault
+    @Published var chunkSplitterSpeechRms: Float = SharedConfig.Defaults.streamVadSpeechRmsDefault
+    @Published var chunkSplitterAbsoluteSpeechFloorDb: Double = SharedConfig.Defaults.streamVadAbsoluteSpeechFloorDbDefault
+    @Published var chunkSplitterTelemetryEnabled: Bool = SharedConfig.Defaults.streamVadTelemetryEnabledDefault
     @Published var fullRecordingUploadEnabled: Bool = SharedConfig.Defaults.fullRecordingUploadEnabledDefault
 
     private var appGroupDefaults: UserDefaults?
     private var cancellables = Set<AnyCancellable>()
-    private var streamVadSilenceOverridePresent = false
-    private var updatingDerivedVadValue = false
+    private var chunkSplitterSilenceOverridePresent = false
+    private var updatingDerivedChunkSplitterValue = false
 
     private init() {
         appGroupDefaults = UserDefaults(suiteName: SharedConfig.Defaults.appGroupId)
-        migrateRetiredVadKeys()
+        migrateRetiredChunkSplitterKeys()
 
         let config = SharedConfig.load()
         servers = config.servers
@@ -45,13 +45,13 @@ class AppSettings: ObservableObject {
         keyboardLanguage = SharedConfig.keyboardLanguage()
         audioMeasurementModeEnabled = SharedConfig.audioMeasurementModeEnabled()
         audioCaptureAttenuationEnabled = SharedConfig.audioCaptureAttenuationEnabled()
-        streamVadMode = SharedConfig.streamVadMode()
-        streamVadPauseProfile = SharedConfig.streamVadPauseProfile()
-        streamVadSilenceMs = SharedConfig.streamVadSilenceMs()
-        streamVadSilenceOverridePresent = SharedConfig.streamVadSilenceMsOverridePresent()
-        streamVadSpeechRms = SharedConfig.streamVadSpeechRms()
-        streamVadAbsoluteSpeechFloorDb = SharedConfig.streamVadAbsoluteSpeechFloorDb()
-        streamVadTelemetryEnabled = SharedConfig.streamVadTelemetryEnabled()
+        chunkSplitterMode = SharedConfig.streamVadMode()
+        chunkSplitterPauseProfile = SharedConfig.chunkSplitterPauseProfile()
+        chunkSplitterSilenceMs = SharedConfig.chunkSplitterSilenceMs()
+        chunkSplitterSilenceOverridePresent = SharedConfig.chunkSplitterSilenceMsOverridePresent()
+        chunkSplitterSpeechRms = SharedConfig.streamVadSpeechRms()
+        chunkSplitterAbsoluteSpeechFloorDb = SharedConfig.streamVadAbsoluteSpeechFloorDb()
+        chunkSplitterTelemetryEnabled = SharedConfig.chunkSplitterTelemetryEnabled()
         fullRecordingUploadEnabled = SharedConfig.fullRecordingUploadEnabled()
 
         $servers.dropFirst().sink { [weak self] newValue in
@@ -105,42 +105,42 @@ class AppSettings: ObservableObject {
         $audioCaptureAttenuationEnabled.dropFirst().sink { [weak self] value in
             self?.saveAudioCaptureAttenuationEnabled(value)
         }.store(in: &cancellables)
-        $streamVadMode.dropFirst().sink { [weak self] newValue in
-            FileLogger.shared.info(.settings, "saving streamVadMode",
+        $chunkSplitterMode.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving chunk splitter mode",
                                    payload: ["value": newValue.rawValue])
-            self?.saveStreamVadMode(newValue)
+            self?.saveChunkSplitterMode(newValue)
         }.store(in: &cancellables)
-        $streamVadPauseProfile.dropFirst().sink { [weak self] newValue in
-            FileLogger.shared.info(.settings, "saving streamVadPauseProfile",
+        $chunkSplitterPauseProfile.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving chunk splitter pause profile",
                                    payload: ["value": newValue.rawValue])
             guard let self else { return }
-            self.streamVadSilenceOverridePresent = false
+            self.chunkSplitterSilenceOverridePresent = false
             self.appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
             self.appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
-            self.saveStreamVadPauseProfile(newValue)
-            self.updatingDerivedVadValue = true
-            self.streamVadSilenceMs = VADProfileResolver.pauseDurationMs(for: newValue)
-            self.updatingDerivedVadValue = false
+            self.saveChunkSplitterPauseProfile(newValue)
+            self.updatingDerivedChunkSplitterValue = true
+            self.chunkSplitterSilenceMs = ChunkSplitterProfileResolver.pauseDurationMs(for: newValue)
+            self.updatingDerivedChunkSplitterValue = false
         }.store(in: &cancellables)
-        $streamVadSilenceMs.dropFirst().sink { [weak self] newValue in
-            guard let self, !self.updatingDerivedVadValue else { return }
-            FileLogger.shared.info(.settings, "saving streamVadSilenceMs",
+        $chunkSplitterSilenceMs.dropFirst().sink { [weak self] newValue in
+            guard let self, !self.updatingDerivedChunkSplitterValue else { return }
+            FileLogger.shared.info(.settings, "saving chunk splitter silence duration",
                                    payload: ["value": newValue])
-            self.streamVadSilenceOverridePresent = true
-            self.saveStreamVadSilenceMs(newValue)
+            self.chunkSplitterSilenceOverridePresent = true
+            self.saveChunkSplitterSilenceMs(newValue)
         }.store(in: &cancellables)
-        $streamVadSpeechRms.dropFirst().sink { [weak self] newValue in
-            FileLogger.shared.info(.settings, "saving streamVadSpeechRms",
+        $chunkSplitterSpeechRms.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving chunk splitter speech threshold",
                                    payload: ["value": newValue])
-            self?.saveStreamVadSpeechRms(newValue)
+            self?.saveChunkSplitterSpeechRms(newValue)
         }.store(in: &cancellables)
-        $streamVadAbsoluteSpeechFloorDb.dropFirst().sink { [weak self] newValue in
-            self?.saveStreamVadAbsoluteSpeechFloorDb(newValue)
+        $chunkSplitterAbsoluteSpeechFloorDb.dropFirst().sink { [weak self] newValue in
+            self?.saveChunkSplitterAbsoluteSpeechFloorDb(newValue)
         }.store(in: &cancellables)
-        $streamVadTelemetryEnabled.dropFirst().sink { [weak self] newValue in
-            FileLogger.shared.info(.settings, "saving streamVadTelemetryEnabled",
+        $chunkSplitterTelemetryEnabled.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving chunk splitter telemetry enabled",
                                    payload: ["value": newValue])
-            self?.saveStreamVadTelemetryEnabled(newValue)
+            self?.saveChunkSplitterTelemetryEnabled(newValue)
         }.store(in: &cancellables)
         $fullRecordingUploadEnabled.dropFirst().sink { [weak self] newValue in
             self?.saveFullRecordingUploadEnabled(newValue)
@@ -166,15 +166,15 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(keyboardLanguage.rawValue, forKey: SharedConfig.Defaults.keyboardLanguageKey)
         saveAudioMeasurementModeEnabled(audioMeasurementModeEnabled)
         saveAudioCaptureAttenuationEnabled(audioCaptureAttenuationEnabled)
-        appGroupDefaults?.set(streamVadMode.rawValue, forKey: SharedConfig.Defaults.streamVadModeKey)
-        appGroupDefaults?.set(streamVadPauseProfile.rawValue, forKey: SharedConfig.Defaults.streamVadPauseProfileKey)
-        if streamVadSilenceOverridePresent {
-            appGroupDefaults?.set(streamVadSilenceMs, forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
+        appGroupDefaults?.set(chunkSplitterMode.rawValue, forKey: SharedConfig.Defaults.streamVadModeKey)
+        appGroupDefaults?.set(chunkSplitterPauseProfile.rawValue, forKey: SharedConfig.Defaults.streamVadPauseProfileKey)
+        if chunkSplitterSilenceOverridePresent {
+            appGroupDefaults?.set(chunkSplitterSilenceMs, forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
             appGroupDefaults?.set(true, forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
         }
-        appGroupDefaults?.set(streamVadSpeechRms, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
-        saveStreamVadAbsoluteSpeechFloorDb(streamVadAbsoluteSpeechFloorDb)
-        appGroupDefaults?.set(streamVadTelemetryEnabled, forKey: SharedConfig.Defaults.streamVadTelemetryEnabledKey)
+        appGroupDefaults?.set(chunkSplitterSpeechRms, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
+        saveChunkSplitterAbsoluteSpeechFloorDb(chunkSplitterAbsoluteSpeechFloorDb)
+        appGroupDefaults?.set(chunkSplitterTelemetryEnabled, forKey: SharedConfig.Defaults.streamVadTelemetryEnabledKey)
         saveFullRecordingUploadEnabled(fullRecordingUploadEnabled)
         postSettingsChanged()
     }
@@ -236,33 +236,33 @@ class AppSettings: ObservableObject {
         postSettingsChanged()
     }
 
-    private func saveStreamVadMode(_ mode: VADMode) {
+    private func saveChunkSplitterMode(_ mode: VADMode) {
         appGroupDefaults?.set(mode.rawValue, forKey: SharedConfig.Defaults.streamVadModeKey)
         postSettingsChanged()
     }
 
-    private func saveStreamVadPauseProfile(_ profile: VADPauseProfile) {
+    private func saveChunkSplitterPauseProfile(_ profile: ChunkSplitterPauseProfile) {
         appGroupDefaults?.set(profile.rawValue, forKey: SharedConfig.Defaults.streamVadPauseProfileKey)
         postSettingsChanged()
     }
 
-    private func saveStreamVadSilenceMs(_ value: Int) {
+    private func saveChunkSplitterSilenceMs(_ value: Int) {
         appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
         appGroupDefaults?.set(true, forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
         postSettingsChanged()
     }
 
-    private func saveStreamVadSpeechRms(_ value: Float) {
+    private func saveChunkSplitterSpeechRms(_ value: Float) {
         appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
         postSettingsChanged()
     }
 
-    private func saveStreamVadAbsoluteSpeechFloorDb(_ value: Double) {
+    private func saveChunkSplitterAbsoluteSpeechFloorDb(_ value: Double) {
         appGroupDefaults?.set(value, forKey: SharedConfig.Defaults.streamVadAbsoluteSpeechFloorDbKey)
         postSettingsChanged()
     }
 
-    private func saveStreamVadTelemetryEnabled(_ enabled: Bool) {
+    private func saveChunkSplitterTelemetryEnabled(_ enabled: Bool) {
         appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.streamVadTelemetryEnabledKey)
         postSettingsChanged()
     }
@@ -276,7 +276,7 @@ class AppSettings: ObservableObject {
         DarwinNotifier.post(SharedConfig.Defaults.darwinSettingsChangedNotificationName)
     }
 
-    private func migrateRetiredVadKeys() {
+    private func migrateRetiredChunkSplitterKeys() {
         // Keep the old key names here after removing their SharedConfig constants.
         let retiredKeys = [
             "streamVadCalibrationMs",
@@ -302,7 +302,7 @@ class AppSettings: ObservableObject {
             "streamVadAdaptationSpeed",
         ]
         retiredKeys.forEach { appGroupDefaults?.removeObject(forKey: $0) }
-        FileLogger.shared.info(.settings, "removed retired VAD settings",
+        FileLogger.shared.info(.settings, "removed retired chunk splitter settings",
                                payload: ["count": retiredKeys.count])
     }
 
@@ -318,30 +318,30 @@ class AppSettings: ObservableObject {
         keyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
         audioMeasurementModeEnabled = SharedConfig.Defaults.audioMeasurementModeEnabledDefault
         audioCaptureAttenuationEnabled = SharedConfig.Defaults.audioCaptureAttenuationEnabledDefault
-        streamVadMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
-        streamVadPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
-        streamVadSilenceOverridePresent = false
-        updatingDerivedVadValue = true
-        streamVadSilenceMs = SharedConfig.Defaults.streamVadSilenceMsDefault
-        updatingDerivedVadValue = false
+        chunkSplitterMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
+        chunkSplitterPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
+        chunkSplitterSilenceOverridePresent = false
+        updatingDerivedChunkSplitterValue = true
+        chunkSplitterSilenceMs = SharedConfig.Defaults.streamVadSilenceMsDefault
+        updatingDerivedChunkSplitterValue = false
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
-        streamVadSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
+        chunkSplitterSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
     }
 
-    func resetVadSettingsToDefaults() {
-        streamVadSilenceOverridePresent = false
+    func resetChunkSplitterSettingsToDefaults() {
+        chunkSplitterSilenceOverridePresent = false
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
-        streamVadPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
-        streamVadMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
-        streamVadSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
+        chunkSplitterPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
+        chunkSplitterMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
+        chunkSplitterSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadAbsoluteSpeechFloorDbKey)
-        streamVadTelemetryEnabled = SharedConfig.Defaults.streamVadTelemetryEnabledDefault
+        chunkSplitterTelemetryEnabled = SharedConfig.Defaults.streamVadTelemetryEnabledDefault
         fullRecordingUploadEnabled = SharedConfig.Defaults.fullRecordingUploadEnabledDefault
-        updatingDerivedVadValue = true
-        streamVadSilenceMs = SharedConfig.Defaults.streamVadSilenceMsDefault
-        updatingDerivedVadValue = false
+        updatingDerivedChunkSplitterValue = true
+        chunkSplitterSilenceMs = SharedConfig.Defaults.streamVadSilenceMsDefault
+        updatingDerivedChunkSplitterValue = false
         postSettingsChanged()
     }
 }

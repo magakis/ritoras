@@ -3,7 +3,7 @@ import AVFoundation
 import UIKit
 
 /// Thread-safe in-memory queue of audio chunks awaiting WebSocket send.
-/// Shared between the VAD audio thread (producer, off-MainActor), the
+/// Shared between the chunk splitter audio thread (producer, off-MainActor), the
 /// @MainActor view model, and the background consumer Task. Marked
 /// @unchecked Sendable because all access is serialized via internal NSLock.
 final class ChunkSendQueue: @unchecked Sendable {
@@ -138,7 +138,7 @@ final class DictationViewModel: ObservableObject {
     }
     @Published private(set) var livePartial: String = ""
     @Published private(set) var activeModeLabel: String = ""
-    @Published private(set) var vadState: StreamingVADFrameState?
+    @Published private(set) var chunkSplitterState: ChunkSplitterFrameState?
     @Published private(set) var chunkDispatchCount = 0
     @Published private(set) var chunkReviews: [ChunkReviewRecord] = []
     @Published private(set) var fallbackNotice: String?
@@ -200,10 +200,10 @@ final class DictationViewModel: ObservableObject {
     private var chunkAudioStore: ChunkAudioStore?
     // One fresh-server-session recovery attempt bounds each dictation's reconnect budget.
     private var streamReconnectAttemptedSessionID: UUID?
-    private var vadTelemetryWriter: VADTelemetryFileWriter?
-    private var streamVADTelemetry: StreamingVADTelemetry?
-    private var lastVADPublishTime: Date?
-    private var lastPublishedVADState: StreamingVADFrameState?
+    private var chunkSplitterTelemetryWriter: ChunkSplitterTelemetryFileWriter?
+    private var streamChunkSplitterTelemetry: StreamingChunkSplitterTelemetry?
+    private var lastChunkSplitterPublishTime: Date?
+    private var lastPublishedChunkSplitterState: ChunkSplitterFrameState?
 
     private var selectedServer: String?
     private var serverSelectionTask: Task<ServerSelectionResult, Never>?
@@ -941,17 +941,17 @@ final class DictationViewModel: ObservableObject {
         currentResultUsedSavedAudioFallback = false
         chunkAudioStore = ChunkAudioStore(sessionID: id)
         livePartial = ""
-        vadState = nil
+        chunkSplitterState = nil
         chunkDispatchCount = 0
-        lastVADPublishTime = nil
-        lastPublishedVADState = nil
+        lastChunkSplitterPublishTime = nil
+        lastPublishedChunkSplitterState = nil
         transcriptionDeliveredThisSession = false
         firstChunkSentAt = nil
         firstPartialReceivedAt = nil
         chunksSentThisSession = 0
         chunkSentAt.removeAll()
         chunkResultsReceived.removeAll()
-        vadTelemetryWriter = nil
+        chunkSplitterTelemetryWriter = nil
         selectedServer = nil
         phase = .connecting
         if await shouldAbortStartingSession(id) { return }
@@ -1081,16 +1081,16 @@ final class DictationViewModel: ObservableObject {
             streamRecorder = recorder
 
             let wavURL = RecordingStore.shared.streamWavURL(for: id)
-            let telemetryWriter: VADTelemetryFileWriter?
-            if SharedConfig.streamVadTelemetryEnabled(),
+            let telemetryWriter: ChunkSplitterTelemetryFileWriter?
+            if SharedConfig.chunkSplitterTelemetryEnabled(),
                let telemetryURL = RecordingStore.shared.streamTelemetryURL(for: id) {
-                telemetryWriter = VADTelemetryFileWriter(url: telemetryURL, jobId: id)
+                telemetryWriter = ChunkSplitterTelemetryFileWriter(url: telemetryURL, jobId: id)
             } else {
                 telemetryWriter = nil
             }
-            vadTelemetryWriter = telemetryWriter
-            let streamTelemetry = StreamingVADTelemetry(writer: telemetryWriter)
-            streamVADTelemetry = streamTelemetry
+            chunkSplitterTelemetryWriter = telemetryWriter
+            let streamTelemetry = StreamingChunkSplitterTelemetry(writer: telemetryWriter)
+            streamChunkSplitterTelemetry = streamTelemetry
 
             do {
                 try await recorder.start(
@@ -1107,17 +1107,17 @@ final class DictationViewModel: ObservableObject {
                             self.mergeChunkReview(id: chunkId, update: .audioURL(audioURL))
                         }
                     },
-                    onVADState: { state in
+                    onChunkSplitterState: { state in
                         Task { @MainActor [weak self] in
                             guard let self, self.activeID == id else { return }
 
                             let now = Date()
                             let shouldPublish: Bool
                             let emissionChunkChanged: Bool
-                            if let previous = self.lastPublishedVADState {
+                            if let previous = self.lastPublishedChunkSplitterState {
                                 let evidenceChanged = (previous.evidence == "silence") != (state.evidence == "silence")
                                 emissionChunkChanged = previous.lastEmissionChunkId != state.lastEmissionChunkId
-                                shouldPublish = now.timeIntervalSince(self.lastVADPublishTime ?? .distantPast) >= 0.05
+                                shouldPublish = now.timeIntervalSince(self.lastChunkSplitterPublishTime ?? .distantPast) >= 0.05
                                     || previous.endpointState != state.endpointState
                                     || previous.lastEmissionReason != state.lastEmissionReason
                                     || emissionChunkChanged
@@ -1128,9 +1128,9 @@ final class DictationViewModel: ObservableObject {
                             }
 
                             guard shouldPublish else { return }
-                            self.vadState = state
-                            self.lastVADPublishTime = now
-                            self.lastPublishedVADState = state
+                            self.chunkSplitterState = state
+                            self.lastChunkSplitterPublishTime = now
+                            self.lastPublishedChunkSplitterState = state
 
                             if emissionChunkChanged, let chunkId = state.lastEmissionChunkId {
                                 self.upsertChunkReview(
@@ -1142,7 +1142,7 @@ final class DictationViewModel: ObservableObject {
                             }
                         }
                     },
-                    telemetry: streamVADTelemetry
+                    telemetry: streamChunkSplitterTelemetry
                 )
                 if await shouldAbortStartingSession(id) {
                     await recorder.stop()
@@ -1169,17 +1169,17 @@ final class DictationViewModel: ObservableObject {
                 serverSelectionTask = nil
                 FileLogger.shared.error(.transcription, "Stream start error",
                                         payload: ["error": error.localizedDescription])
-                vadTelemetryWriter?.recordOutcome("aborted")
+                chunkSplitterTelemetryWriter?.recordOutcome("aborted")
                 chunkSendQueue.clearAll()
                 await streamClient?.disconnect()
                 receiveTask?.cancel()
                 receiveTask = nil
                 streamClient = nil
                 streamRecorder = nil
-                vadTelemetryWriter = nil
-                vadState = nil
-                lastVADPublishTime = nil
-                lastPublishedVADState = nil
+                chunkSplitterTelemetryWriter = nil
+                chunkSplitterState = nil
+                lastChunkSplitterPublishTime = nil
+                lastPublishedChunkSplitterState = nil
                 DispatchQueue.global(qos: .utility).async {
                     let deactivateStart = Date()
                     AudioSession.deactivate()
@@ -1372,9 +1372,9 @@ final class DictationViewModel: ObservableObject {
     }
 
     func stop() async {
-        vadState = nil
-        lastVADPublishTime = nil
-        lastPublishedVADState = nil
+        chunkSplitterState = nil
+        lastChunkSplitterPublishTime = nil
+        lastPublishedChunkSplitterState = nil
         let stopStartTime = Date()
         var stagedDiagnosticsUpload: (url: URL, serverURL: String, token: String)?
         switch SharedConfig.dictationMode() {
@@ -1522,7 +1522,7 @@ final class DictationViewModel: ObservableObject {
                     RecordingStore.shared.delete(jobId: id)
                     FileLogger.shared.debug(.audio, "audio deleted on success",
                                             payload: ["jobId": id.uuidString])
-                    vadTelemetryWriter?.recordOutcome("success")
+                    chunkSplitterTelemetryWriter?.recordOutcome("success")
                     phase = .done(text)
                 } catch let waitError as BackgroundUploadWaitError {
                     guard self.canContinueSession(id) else {
@@ -1537,7 +1537,7 @@ final class DictationViewModel: ObservableObject {
                     // User cancelled — do not record as failure.
                     FileLogger.shared.debug(.app, "transcription cancelled",
                                             payload: ["jobId": id.uuidString])
-                    vadTelemetryWriter?.recordOutcome("cancelled")
+                    chunkSplitterTelemetryWriter?.recordOutcome("cancelled")
                     phase = .cancelled
                 } catch {
                     guard self.canContinueSession(id) else { self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
@@ -1592,7 +1592,7 @@ final class DictationViewModel: ObservableObject {
                             "audioPath": url.path
                         ])
                     }
-                    vadTelemetryWriter?.recordOutcome("upload-failed")
+                    chunkSplitterTelemetryWriter?.recordOutcome("upload-failed")
                     phase = .error(message)
                 }
 
@@ -1661,9 +1661,9 @@ final class DictationViewModel: ObservableObject {
                 }
                 return
             }
-            vadState = nil
-            lastVADPublishTime = nil
-            lastPublishedVADState = nil
+            chunkSplitterState = nil
+            lastChunkSplitterPublishTime = nil
+            lastPublishedChunkSplitterState = nil
             chunkSendQueue.setRecordingActive(false)
             let queueDepthAtStop = chunkSendQueue.depth
 
@@ -1785,7 +1785,7 @@ final class DictationViewModel: ObservableObject {
                     guard initiallyHealthy else {
                         throw WhisperError.networkError(URLError(.notConnectedToInternet))
                     }
-                    if let telemetry = streamVADTelemetry,
+                    if let telemetry = streamChunkSplitterTelemetry,
                        let startedAt = recordingStartTime,
                        let payload = telemetry.payload(jobId: id, startedAt: startedAt,
                                                        duration: Date().timeIntervalSince(startedAt)) {
@@ -1798,12 +1798,12 @@ final class DictationViewModel: ObservableObject {
                             // and fallback logic owns that case.
                             try await client.sendTelemetry(payload)
                         } catch is StreamTelemetrySendError {
-                            FileLogger.shared.warn(.network, "Stream: VAD telemetry abandoned after timeout; continuing to END", payload: [
+                            FileLogger.shared.warn(.network, "Stream: chunk splitter telemetry abandoned after timeout; continuing to END", payload: [
                                 "jobId": id.uuidString,
                                 "timeout_seconds": 3
                             ])
                         } catch {
-                            FileLogger.shared.warn(.network, "Stream: VAD telemetry send failed; continuing to END", payload: [
+                            FileLogger.shared.warn(.network, "Stream: chunk splitter telemetry send failed; continuing to END", payload: [
                                 "jobId": id.uuidString,
                                 "error": String(error.localizedDescription.prefix(160))
                             ])
@@ -1836,10 +1836,10 @@ final class DictationViewModel: ObservableObject {
                     let mergeEnabled = SharedConfig.Defaults.chunkFinalMergeEnabled
                     let maxGapMs = min(max(SharedConfig.Defaults.chunkFinalMergeMaxGapMs, 500), 10_000)
                     let text: String
-                    if mergeEnabled, let streamVADTelemetry {
+                    if mergeEnabled, let streamChunkSplitterTelemetry {
                         text = ChunkFinalMerger.merge(
                             receivedText,
-                            segments: streamVADTelemetry.chunkFinalSegments(texts: chunkFinalTexts),
+                            segments: streamChunkSplitterTelemetry.chunkFinalSegments(texts: chunkFinalTexts),
                             maxGapMs: Double(maxGapMs))
                     } else {
                         text = receivedText
@@ -1908,13 +1908,13 @@ final class DictationViewModel: ObservableObject {
                             FileLogger.shared.debug(.audio, "stream wav deleted on success",
                                                     payload: ["jobId": id.uuidString])
                         }
-                        vadTelemetryWriter?.recordOutcome("success")
+                        chunkSplitterTelemetryWriter?.recordOutcome("success")
                         phase = .done(text)
                     }
                 } catch WhisperError.cancelled {
                     guard canContinueSession(id) else { return }
                     // User cancelled — do not record as failure.
-                    vadTelemetryWriter?.recordOutcome("cancelled")
+                        chunkSplitterTelemetryWriter?.recordOutcome("cancelled")
                     RecordingStore.shared.deleteStreamWav(for: id)
                     FileLogger.shared.debug(.app, "transcription cancelled, wav deleted",
                                             payload: ["jobId": id.uuidString])
@@ -1971,7 +1971,7 @@ final class DictationViewModel: ObservableObject {
             guard canContinueSession(id) else { return }
             streamClient = nil
             streamRecorder = nil
-            vadTelemetryWriter = nil
+            chunkSplitterTelemetryWriter = nil
             chunkSentAt.removeAll()
 
             let producedChunks = chunkSendQueue.producedCount
@@ -2542,7 +2542,7 @@ final class DictationViewModel: ObservableObject {
         speechMs: Double,
         totalMs: Double
     ) {
-        // No session sample clock is exposed by the VAD frame, so use the
+        // No session sample clock is exposed by the detector frame, so use the
         // cumulative durations of earlier records plus this chunk as an approximation
         // of this chunk's end time.
         let priorTotalMs = chunkReviews
@@ -2624,7 +2624,7 @@ final class DictationViewModel: ObservableObject {
                         let latencyMs = self.chunkSentAt[chunkId].map {
                             Date().timeIntervalSince($0) * 1000
                         }
-                        self.vadTelemetryWriter?.event(VADTelemetryEvent(
+                        self.chunkSplitterTelemetryWriter?.event(VADTelemetryEvent(
                             kind: .chunkReceived,
                             chunkId: chunkId,
                             latencyMs: latencyMs,
@@ -2830,7 +2830,7 @@ final class DictationViewModel: ObservableObject {
                 return
             }
             fallbackNotice = nil
-            vadTelemetryWriter?.recordOutcome("cancelled")
+            chunkSplitterTelemetryWriter?.recordOutcome("cancelled")
             phase = .cancelled
         } catch let fallbackError {
             guard canContinueSession(jobId) else {
@@ -2856,7 +2856,7 @@ final class DictationViewModel: ObservableObject {
         guard activeID == jobId else { return nil }
         let classification = error.contains("send failed") ? "send" : "terminal"
 
-        vadTelemetryWriter?.recordOutcome("stream-failed")
+        chunkSplitterTelemetryWriter?.recordOutcome("stream-failed")
 
         let wavURL = RecordingStore.shared.streamWavURL(for: jobId)
         let wavExists = wavURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
@@ -2966,9 +2966,9 @@ final class DictationViewModel: ObservableObject {
         }
 
         FileLogger.shared.info(.transcription, "cancel: stream teardown")
-        vadState = nil
-        lastVADPublishTime = nil
-        lastPublishedVADState = nil
+        chunkSplitterState = nil
+        lastChunkSplitterPublishTime = nil
+        lastPublishedChunkSplitterState = nil
         let sessionRecorder = streamRecorder
 
         // Keep the localhost /state listener alive for cancelGraceSeconds so a
@@ -2992,7 +2992,7 @@ final class DictationViewModel: ObservableObject {
         default:
             earlyCancelledSessionID = id
             if phase != .cancelled {
-                vadTelemetryWriter?.recordOutcome("aborted")
+                chunkSplitterTelemetryWriter?.recordOutcome("aborted")
                 FileLogger.shared.info(.transcription, "cancel: publishing cancelled snapshot to keyboard")
                 phase = .cancelled
             }
@@ -3009,9 +3009,9 @@ final class DictationViewModel: ObservableObject {
         chunkSendQueue.clearAll()
         await sessionRecorder?.stop()
         guard activeID == id else { return }
-        vadState = nil
-        lastVADPublishTime = nil
-        lastPublishedVADState = nil
+        chunkSplitterState = nil
+        lastChunkSplitterPublishTime = nil
+        lastPublishedChunkSplitterState = nil
         await streamClient?.disconnect()
         guard activeID == id else { return }
         streamClient = nil
@@ -3050,7 +3050,7 @@ final class DictationViewModel: ObservableObject {
         } else if phase != .cancelled {
             phase = .cancelled
         }
-        vadTelemetryWriter = nil
+        chunkSplitterTelemetryWriter = nil
         activeID = nil
         // Retain the terminal .cancelled payload in the localhost /state holder
         // for terminalStateRetentionSeconds so a suspended/reappearing keyboard

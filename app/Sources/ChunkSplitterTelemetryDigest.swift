@@ -1,7 +1,7 @@
 import Foundation
 import CoreFoundation
 
-enum VADTelemetryDigest {
+enum ChunkSplitterTelemetryDigest {
     static let defaultBudget = 96 * 1024
     private static let maxChunkRows = 12
 
@@ -421,10 +421,10 @@ enum VADTelemetryDigest {
         let telemetryValue = globalSettings.first(where: { $0.0 == "telemetryEnabled" })?.1 ?? "ON"
         let budgetKilobytes = (budget + 1023) / 1024
         var lines = [
-            "Ritoras VAD digest v1 — exported \(formatUTC(exportedAt))",
+            "Ritoras Chunk Splitter digest v1 — exported \(formatUTC(exportedAt))",
             "recordings: \(summaries.count) retained (telemetry toggle currently \(telemetryValue)) | budget: \(budgetKilobytes) KB",
             "",
-            "== Current global VAD settings ==",
+            "== Current global chunk splitter settings ==",
             globalSettings.map { "\($0.0)=\($0.1)" }.joined(separator: " "),
             ""
         ]

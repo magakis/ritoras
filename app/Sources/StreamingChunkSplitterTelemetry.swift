@@ -1,7 +1,7 @@
 import Foundation
 
-final class StreamingVADTelemetry: @unchecked Sendable, VADTelemetrySink, VADTelemetryFlushable {
-    private let writer: VADTelemetryFileWriter?
+final class StreamingChunkSplitterTelemetry: @unchecked Sendable, VADTelemetrySink, VADTelemetryFlushable {
+    private let writer: ChunkSplitterTelemetryFileWriter?
     private let lock = NSLock()
     private var historicalFrames: [VADTelemetryFrame] = []
     private var tailFrames: [VADTelemetryFrame] = []
@@ -27,7 +27,7 @@ final class StreamingVADTelemetry: @unchecked Sendable, VADTelemetrySink, VADTel
     private static let maxEvents = 256
     private static let payloadBudgetBytes = 768 * 1024
 
-    init(writer: VADTelemetryFileWriter?) { self.writer = writer }
+    init(writer: ChunkSplitterTelemetryFileWriter?) { self.writer = writer }
 
     func flushIfNeeded() { writer?.flushIfNeeded() }
 
@@ -169,13 +169,13 @@ final class StreamingVADTelemetry: @unchecked Sendable, VADTelemetrySink, VADTel
                 "tail_dropped": originalTailDropped + trimTail, "events_dropped": droppedEventsAtSnapshot]
             metadata["summary"] = summary
             guard let data = try? JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]) else {
-                FileLogger.shared.warn(.network, "Stream: VAD telemetry serialization failed")
+                FileLogger.shared.warn(.network, "Stream: chunk splitter telemetry serialization failed")
                 return nil
             }
             if data.count <= Self.payloadBudgetBytes {
                 let totalDropped = originalHistoricalDropped + originalTailDropped + trimHistory + trimTail
                 if totalDropped > 0 {
-                    FileLogger.shared.warn(.network, "Stream: VAD telemetry frames truncated", payload: ["framesDropped": totalDropped])
+                    FileLogger.shared.warn(.network, "Stream: chunk splitter telemetry frames truncated", payload: ["framesDropped": totalDropped])
                 }
                 return data
             }

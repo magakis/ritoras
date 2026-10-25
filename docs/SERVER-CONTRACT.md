@@ -246,7 +246,7 @@ When the user stops recording, the client:
 
 ---
 
-## 7. Client-side VAD
+## 7. Client-side Chunk Splitter
 
 Streaming uses an energy-based RMS voice-activity detector with DC-corrected RMS
 and an adaptive noise floor. The endpoint machine owns chunk boundaries. A

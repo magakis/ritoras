@@ -1,6 +1,6 @@
 import Foundation
 
-final class VADTelemetryFileWriter: @unchecked Sendable, VADTelemetrySink, VADTelemetryFlushable {
+final class ChunkSplitterTelemetryFileWriter: @unchecked Sendable, VADTelemetrySink, VADTelemetryFlushable {
     // 20 one-minute recordings at ~50 frames/s × ~180 B (~7.5 KB/s)
     // stay under ~10 MB; app-target Application Support only.
     private static let maxFiles = 20

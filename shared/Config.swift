@@ -6,7 +6,7 @@ enum VADSensitivityProfile: String, CaseIterable {
     case noisyEnvironment
 }
 
-enum VADPauseProfile: String, CaseIterable {
+enum ChunkSplitterPauseProfile: String, CaseIterable {
     case fast
     case balanced
     case long
@@ -18,9 +18,9 @@ struct VADAdaptiveThresholds {
     let silenceDeltaDb: Double
 }
 
-enum VADProfileResolver {
+enum ChunkSplitterProfileResolver {
     static let defaultSensitivityProfile = VADSensitivityProfile.automatic
-    static let defaultPauseProfile = VADPauseProfile.balanced
+    static let defaultPauseProfile = ChunkSplitterPauseProfile.balanced
     static let defaultStrongDeltaDb = 7.0
     static let defaultContinuingDeltaDb = 4.0
     static let defaultSilenceDeltaDb = 3.0
@@ -88,9 +88,9 @@ enum VADProfileResolver {
     static func pauseProfile(
         profileRawValue: String?,
         legacySilenceMs: Int?
-    ) -> VADPauseProfile {
+    ) -> ChunkSplitterPauseProfile {
         if let profileRawValue,
-           let profile = VADPauseProfile(rawValue: profileRawValue) {
+           let profile = ChunkSplitterPauseProfile(rawValue: profileRawValue) {
             return profile
         }
 
@@ -101,7 +101,7 @@ enum VADProfileResolver {
         return pauseProfile(forLegacySilenceMs: legacySilenceMs)
     }
 
-    static func pauseProfile(forLegacySilenceMs value: Int) -> VADPauseProfile {
+    static func pauseProfile(forLegacySilenceMs value: Int) -> ChunkSplitterPauseProfile {
         let clampedValue = min(max(value, 0), 5_000)
         if clampedValue < 575 {
             return .fast
@@ -112,7 +112,7 @@ enum VADProfileResolver {
         return .long
     }
 
-    static func pauseDurationMs(for profile: VADPauseProfile) -> Int {
+    static func pauseDurationMs(for profile: ChunkSplitterPauseProfile) -> Int {
         switch profile {
         case .fast:
             return 450
@@ -124,7 +124,7 @@ enum VADProfileResolver {
     }
 
     static func silenceDurationMs(
-        for profile: VADPauseProfile,
+        for profile: ChunkSplitterPauseProfile,
         rawSilenceMs: Int?,
         rawOverrideExplicit: Bool = false
     ) -> Int {
@@ -209,9 +209,9 @@ struct SharedConfig {
         static let fullRecordingUploadEnabledKey = "fullRecordingUploadEnabled"
         static let fullRecordingUploadEnabledDefault = false
 
-        // MARK: - Streaming / VAD Tunables
+        // MARK: - Streaming / Voice Detection Tunables
 
-        /// RMS threshold for VAD speech detection. Higher = less sensitive.
+        /// RMS threshold for voice detection. Higher = less sensitive.
         static let streamVadSpeechRmsKey = "streamVadSpeechRms"
         static let streamVadSpeechRmsDefault: Float = 0.025
         static let streamVadModeKey = "streamVadMode"
@@ -276,8 +276,8 @@ struct SharedConfig {
         static let stalePendingJobAgeLimit: TimeInterval = 7 * 24 * 60 * 60
         static let multipartBodyAgeLimit: TimeInterval = 7 * 24 * 60 * 60
         static let streamVadPauseProfileKey = "streamVadPauseProfile"
-        static let streamVadPauseProfileDefault: VADPauseProfile = .balanced
-        /// Enables the sample-count endpoint state machine for streaming VAD.
+        static let streamVadPauseProfileDefault: ChunkSplitterPauseProfile = .balanced
+        /// Enables the sample-count endpoint state machine for streaming voice detection.
         static let streamEndpointMachineEnabledKey = "streamEndpointMachineEnabled"
         static let streamEndpointMachineEnabledDefault = true
         /// Balanced endpoint silence duration (ms).
@@ -736,7 +736,7 @@ struct SharedConfig {
         DarwinNotifier.post(Defaults.darwinSettingsChangedNotificationName)
     }
 
-    /// Reads the streaming VAD speech RMS threshold from the App Group.
+    /// Reads the streaming voice detection RMS threshold from the App Group.
     /// Used by the keyboard extension, which cannot link `AppSettings`.
     /// Returns the default (`0.025`) when the App Group is unavailable or the key is unset.
     static func streamVadSpeechRms() -> Float {
@@ -747,7 +747,7 @@ struct SharedConfig {
             ?? Defaults.streamVadSpeechRmsDefault
     }
 
-    /// Reads the streaming VAD mode from the App Group.
+    /// Reads the streaming voice detection mode from the App Group.
     /// Used by the keyboard extension, which cannot link `AppSettings`.
     /// Returns `.adaptive` when the App Group is unavailable, the key is unset,
     /// or the stored value is invalid.
@@ -1035,7 +1035,7 @@ struct SharedConfig {
     /// the profile continues to coordinate the continuation delta.
     static func streamVadAdaptiveThresholds() -> VADAdaptiveThresholds {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return VADProfileResolver.sensitivity(
+            return ChunkSplitterProfileResolver.sensitivity(
                 profile: .automatic,
                 rawAdaptiveDeltaDb: nil,
                 rawSilenceDeltaDb: Defaults.streamVadAdaptiveSilenceDeltaDbDefault
@@ -1050,7 +1050,7 @@ struct SharedConfig {
         let rawSilenceDeltaDb = (defaults.object(
             forKey: Defaults.streamVadAdaptiveSilenceDeltaDbKey
         ) as? NSNumber)?.doubleValue ?? Defaults.streamVadAdaptiveSilenceDeltaDbDefault
-        return VADProfileResolver.sensitivity(
+        return ChunkSplitterProfileResolver.sensitivity(
             profile: .automatic,
             rawAdaptiveDeltaDb: rawAdaptiveDeltaDb,
             rawSilenceDeltaDb: rawSilenceDeltaDb,
@@ -1058,7 +1058,7 @@ struct SharedConfig {
         )
     }
 
-    /// Reads the adaptive VAD threshold delta (dB) from the App Group.
+    /// Reads the adaptive voice detection threshold delta (dB) from the App Group.
     static func streamVadAdaptiveDeltaDb() -> Double {
         streamVadAdaptiveThresholds().strongDeltaDb
     }
@@ -1095,7 +1095,7 @@ struct SharedConfig {
             ?? Defaults.stalePendingJobSweepEnabledDefault
     }
 
-    /// Reads the analysis-only VAD high-pass kill switch from the App Group.
+    /// Reads the analysis-only voice detector high-pass kill switch from the App Group.
     static func streamVadAnalysisHpfEnabled() -> Bool {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
             return Defaults.streamVadAnalysisHpfEnabledDefault
@@ -1121,10 +1121,10 @@ struct SharedConfig {
             ?? Defaults.audioCaptureAttenuationEnabledDefault
     }
 
-    /// Reads the streaming VAD telemetry kill switch from the App Group.
+    /// Reads the chunk splitter telemetry kill switch from the App Group.
     /// Returns the default (`false`) when the App Group is unavailable or the
     /// key is unset.
-    static func streamVadTelemetryEnabled() -> Bool {
+    static func chunkSplitterTelemetryEnabled() -> Bool {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
             return Defaults.streamVadTelemetryEnabledDefault
         }
@@ -1142,11 +1142,11 @@ struct SharedConfig {
             ?? Defaults.fullRecordingUploadEnabledDefault
     }
 
-    /// Reads the streaming VAD silence threshold (ms) from the App Group.
+    /// Reads the chunk splitter silence threshold (ms) from the App Group.
     /// Used by the keyboard extension, which cannot link `AppSettings`.
     /// Returns an explicit override when present, otherwise the selected pause
     /// profile duration.
-    static func streamVadSilenceMs() -> Int {
+    static func chunkSplitterSilenceMs() -> Int {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
             return Defaults.streamVadSilenceMsDefault
         }
@@ -1156,15 +1156,15 @@ struct SharedConfig {
         let rawOverrideExplicit = (defaults.object(
             forKey: Defaults.streamVadSilenceMsOverrideKey
         ) as? Bool) ?? Defaults.streamVadSilenceMsOverrideDefault
-        return VADProfileResolver.silenceDurationMs(
-            for: streamVadPauseProfile(),
+        return ChunkSplitterProfileResolver.silenceDurationMs(
+            for: chunkSplitterPauseProfile(),
             rawSilenceMs: rawSilenceMs,
             rawOverrideExplicit: rawOverrideExplicit
         )
     }
 
     /// Returns whether the silence duration is explicitly overridden in Advanced.
-    static func streamVadSilenceMsOverridePresent() -> Bool {
+    static func chunkSplitterSilenceMsOverridePresent() -> Bool {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
             return Defaults.streamVadSilenceMsOverrideDefault
         }
@@ -1172,16 +1172,16 @@ struct SharedConfig {
             ?? Defaults.streamVadSilenceMsOverrideDefault
     }
 
-    /// Reads the user-facing VAD pause profile from the App Group. A legacy
+    /// Reads the user-facing chunk splitter pause profile from the App Group. A legacy
     /// silence value is used only when no profile has been stored yet.
-    static func streamVadPauseProfile() -> VADPauseProfile {
+    static func chunkSplitterPauseProfile() -> ChunkSplitterPauseProfile {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
             return Defaults.streamVadPauseProfileDefault
         }
         let legacySilenceMs = (defaults.object(
             forKey: Defaults.streamVadSilenceMsKey
         ) as? NSNumber)?.intValue
-        return VADProfileResolver.pauseProfile(
+        return ChunkSplitterProfileResolver.pauseProfile(
             profileRawValue: defaults.string(forKey: Defaults.streamVadPauseProfileKey),
             legacySilenceMs: legacySilenceMs
         )

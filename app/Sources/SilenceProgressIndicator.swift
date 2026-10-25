@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct SilenceProgressIndicator: View {
-    let state: StreamingVADFrameState
+    let state: ChunkSplitterFrameState
     let chunkDispatchCount: Int
 
     private var silenceProgress: Double {

@@ -1,7 +1,7 @@
 import AVFoundation
 import os
 
-// This is a chunk SLICER, not a silence-stripping VAD. It segments a continuous
+// This chunk splitter segments a continuous
 // audio stream into chunks for streaming ASR while retaining all audio except
 // voiceless slabs over maxNoiseSec. Speech is never trimmed from chunks; do not
 // add silence-stripping or aggressive speech-gating here.
@@ -28,7 +28,7 @@ enum StreamingRecorderError: LocalizedError {
     }
 }
 
-// MARK: - VAD Emission
+// MARK: - Chunk Splitter Emission
 
 struct VADEmission {
     let chunkId: UInt32
@@ -43,7 +43,7 @@ struct EmissionSummary: Sendable {
     let speechMs: Double
 }
 
-/// Receives per-frame and lifecycle observations from the streaming VAD.
+/// Receives per-frame and lifecycle observations from the streaming chunk splitter.
 protocol VADTelemetrySink: AnyObject, Sendable {
     func frame(_ record: VADTelemetryFrame)
     func event(_ record: VADTelemetryEvent)
@@ -157,7 +157,7 @@ struct VADTelemetryEvent: @unchecked Sendable {
     }
 }
 
-struct StreamingVADFrameState: Sendable {
+struct ChunkSplitterFrameState: Sendable {
     let endpointState: String
     let evidence: String
     let frameDb: Double
@@ -365,12 +365,12 @@ private final class VADContext: @unchecked Sendable {
         contiguousTrailingSilenceMinimumDb = nil
     }
 
-    func frameState(emissionSummary: EmissionSummary?) -> StreamingVADFrameState {
+    func frameState(emissionSummary: EmissionSummary?) -> ChunkSplitterFrameState {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
 
         let gateSnapshot = gate.snapshot
-        return StreamingVADFrameState(
+        return ChunkSplitterFrameState(
             endpointState: endpoint.state.rawValue,
             evidence: gateSnapshot.evidence.rawValue,
             frameDb: lastFrameDb,
@@ -484,7 +484,7 @@ private final class VADContext: @unchecked Sendable {
                 "evidenceAboveFloor5Ms": evidenceAboveFloor5Ms
             ]
         ))
-        FileLogger.shared.debug(.audio, "VAD: reported never-onset idle gap",
+        FileLogger.shared.debug(.audio, "Chunk splitter: reported never-onset idle gap",
                                 payload: ["durationMs": durationMs,
                                           "peakLevelDbFS": peakLevelDb,
                                           "evidenceAboveFloor5Ms": evidenceAboveFloor5Ms])
@@ -629,7 +629,7 @@ private final class VADContext: @unchecked Sendable {
                 decisionSilenceSamples = endpoint.accumulatedSilenceSamples
             }
             if previousState != endpoint.state {
-                FileLogger.shared.debug(.audio, "VAD state \(previousState.rawValue) → \(endpoint.state.rawValue)")
+                FileLogger.shared.debug(.audio, "Chunk splitter: \(previousState.rawValue) → \(endpoint.state.rawValue)")
             }
             gate.updateFloorTracking(
                 frameDb: frameDb,
@@ -694,7 +694,7 @@ private final class VADContext: @unchecked Sendable {
                 trailingSilenceDb: contiguousTrailingSilenceMinimumDb
             )
             if sawReanchorDuringUtterance {
-                FileLogger.shared.debug(.audio, "VAD: kept utterance after mid-utterance re-anchor",
+                FileLogger.shared.debug(.audio, "Chunk splitter kept utterance after mid-utterance re-anchor",
                                         payload: ["quietestStrongDb": utteranceQuietestStrongDb ?? NSNull(),
                                                   "floorDb": gate.snapshot.floorDb ?? NSNull()])
             }
@@ -709,14 +709,14 @@ private final class VADContext: @unchecked Sendable {
                     totalMs: Double(accumulatorSampleCount) / 16.0,
                     endpointState: previousEndpointState.rawValue
                 ))
-                FileLogger.shared.info(.audio, "VAD: finalize held below minimum chunk gates",
+                FileLogger.shared.info(.audio, "Chunk splitter: finalize held below minimum chunk gates",
                                        payload: ["sampleCount": accumulatorSampleCount,
                                                  "speechSamples": speechSamples])
             } else {
                 let silenceMs = Double(decisionSilenceSamples) / 16.0
                 let totalMs = Double(accumulatorSampleCount) / 16.0
                 let speechMs = Double(speechSamples) / 16.0
-                FileLogger.shared.info(.audio, "VAD: \(kind.rawValue) → emit",
+                FileLogger.shared.info(.audio, "Chunk splitter: \(kind.rawValue) → emit",
                                        payload: ["silenceMs": silenceMs,
                                                  "totalMs": totalMs,
                                                  "speechMs": speechMs,
@@ -757,7 +757,7 @@ private final class VADContext: @unchecked Sendable {
             contiguousTrailingSilenceSamples = 0
             contiguousTrailingSilenceMinimumDb = nil
             bufferHighWaterSamples = 0
-            FileLogger.shared.debug(.audio, "VAD: shed voiceless pending audio")
+            FileLogger.shared.debug(.audio, "Chunk splitter: shed voiceless pending audio")
             return nil
         }
 
@@ -772,7 +772,7 @@ private final class VADContext: @unchecked Sendable {
         if diagnosticElapsed >= 1.0 {
             diagnosticElapsed = 0
             let snapshot = gate.snapshot
-            FileLogger.shared.debug(.audio, "VAD summary", payload: [
+        FileLogger.shared.debug(.audio, "Chunk splitter summary", payload: [
                 "state": endpoint.state.rawValue,
                 "floorDb": snapshot.floorDb ?? snapshot.thresholdDb,
                 "onsetDb": snapshot.thresholdDb,
@@ -846,7 +846,7 @@ private final class VADContext: @unchecked Sendable {
             contiguousTrailingSilenceMinimumDb = nil
             bufferHighWaterSamples = 0
         }
-        FileLogger.shared.debug(.audio, "VAD: shed voiceless pending audio")
+        FileLogger.shared.debug(.audio, "Chunk splitter: shed voiceless pending audio")
     }
 
     private func sampleData(_ samples: [Float]) -> Data {
@@ -865,7 +865,7 @@ private final class VADContext: @unchecked Sendable {
             let restored = data.withUnsafeBytes { $0.bindMemory(to: Float.self) }
             accumulator.append(contentsOf: restored)
         } catch {
-            FileLogger.shared.error(.audio, "VAD spill restore failed; audio lost",
+            FileLogger.shared.error(.audio, "Chunk splitter spill restore failed; audio lost",
                                     payload: ["spilledSamples": spilledSampleCount])
             telemetrySink?.event(VADTelemetryEvent(
                 kind: .spill,
@@ -900,7 +900,7 @@ private final class VADContext: @unchecked Sendable {
                 restoreAccumulatorAfterSpillFailure()
                 accumulator.append(contentsOf: samples)
                 telemetrySink?.event(VADTelemetryEvent(kind: .spill, samples: samples.count, reason: "write_failed"))
-                FileLogger.shared.warn(.audio, "VAD accumulator spill failed; retaining audio in memory")
+                FileLogger.shared.warn(.audio, "Chunk splitter accumulator spill failed; retaining audio in memory")
                 return
             }
         }
@@ -910,10 +910,10 @@ private final class VADContext: @unchecked Sendable {
             forSecurityApplicationGroupIdentifier: SharedConfig.Defaults.appGroupId
         ) else {
             telemetrySink?.event(VADTelemetryEvent(kind: .spill, samples: accumulator.count, reason: "container_unavailable"))
-            FileLogger.shared.warn(.audio, "VAD accumulator spill unavailable; retaining audio in memory")
+            FileLogger.shared.warn(.audio, "Chunk splitter accumulator spill unavailable; retaining audio in memory")
             return
         }
-        let url = container.appendingPathComponent("vad-accumulator-\(UUID().uuidString).tmp")
+        let url = container.appendingPathComponent("chunk-splitter-accumulator-\(UUID().uuidString).tmp")
         do {
             guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
                 throw CocoaError(.fileWriteUnknown)
@@ -928,7 +928,7 @@ private final class VADContext: @unchecked Sendable {
         } catch {
             try? FileManager.default.removeItem(at: url)
             telemetrySink?.event(VADTelemetryEvent(kind: .spill, samples: accumulator.count, reason: "create_failed"))
-            FileLogger.shared.warn(.audio, "VAD accumulator spill failed; retaining audio in memory")
+            FileLogger.shared.warn(.audio, "Chunk splitter accumulator spill failed; retaining audio in memory")
         }
     }
 
@@ -1168,7 +1168,7 @@ private final class VADContext: @unchecked Sendable {
                 samples: sampleCount,
                 reason: "tail_floor"
             ))
-            FileLogger.shared.debug(.audio, "VAD: flush dropped sub-250 ms tail",
+            FileLogger.shared.debug(.audio, "Chunk splitter: flush dropped sub-250 ms tail",
                                     payload: ["sampleCount": sampleCount])
             clearAccumulator()
             splitEnergyFrames.removeAll(keepingCapacity: true)
@@ -1179,7 +1179,7 @@ private final class VADContext: @unchecked Sendable {
             bufferHighWaterSamples = 0
             return nil
         }
-        FileLogger.shared.info(.audio, "VAD: stop → emit",
+        FileLogger.shared.info(.audio, "Chunk splitter: stop → emit",
                                payload: ["count": accumulatorSampleCount])
         if speechSamples > 0 {
             gate.noteUtteranceEnded(
@@ -1307,7 +1307,7 @@ private final class ConverterAccounting: @unchecked Sendable {
 
 // MARK: - Streaming Audio Recorder
 
-/// Captures microphone audio via `AVAudioEngine`, runs an energy-based VAD
+/// Captures microphone audio via `AVAudioEngine`, runs an energy-based voice detector
 /// state machine, and emits pause-bounded float32 PCM chunks via a callback.
 ///
 /// Chunks are delivered as `[Float]` at 16 kHz mono, one chunk per detected
@@ -1317,7 +1317,7 @@ private final class ConverterAccounting: @unchecked Sendable {
 /// ## Thread safety
 /// The audio-tap callback runs on a real-time audio thread. The callback is
 /// minimal — it reads the buffer, copies samples, and dispatches all heavy
-/// work (RMS, VAD, chunk emission) to a dedicated serial `vadQueue`. VAD
+/// work (RMS, voice detection, chunk emission) to a dedicated serial `vadQueue`. Detector
 /// state is protected internally by `os_unfair_lock`.
 actor StreamingAudioRecorder {
     typealias ChunkHandler = @Sendable (UInt32, [Float]) -> Void
@@ -1327,7 +1327,7 @@ actor StreamingAudioRecorder {
     private let engine = AVAudioEngine()
     private var isRecording = false
     private var onChunk: ChunkHandler?
-    private var onVADState: ((StreamingVADFrameState) -> Void)?
+    private var onChunkSplitterState: ((ChunkSplitterFrameState) -> Void)?
 
     /// Thread-safe holder for the lazy `AVAudioConverter`; access only
     /// through its lock-protected methods (never actor-isolated `var`).
@@ -1346,14 +1346,14 @@ actor StreamingAudioRecorder {
     /// Tracks whether a tap is installed, enabling idempotent teardown.
     private var tapInstalled = false
 
-    /// Route changes reset the VAD baseline and analysis filter without touching
+    /// Route changes reset the voice detector baseline and analysis filter without touching
     /// the captured PCM stream.
     private var routeChangeObserver: NSObjectProtocol?
 
     /// Serial queue for audio processing off the real-time audio thread.
-    private let vadQueue = DispatchQueue(label: "com.ritoras.streaming-vad", qos: .userInitiated)
+    private let vadQueue = DispatchQueue(label: "com.ritoras.chunk-splitter", qos: .userInitiated)
 
-    /// VAD state machine; accessed only via `process()`/`flush()` which lock internally.
+    /// Voice detector state machine; accessed only via `process()`/`flush()` which lock internally.
     private let vad: VADContext
     private let vadGateConfig: VADGateConfig
     private var telemetryFlushable: VADTelemetryFlushable?
@@ -1361,7 +1361,7 @@ actor StreamingAudioRecorder {
     // MARK: - Initialization
 
     init() {
-        let silenceSamples = Int(Double(SharedConfig.streamVadSilenceMs()) * 16.0)
+        let silenceSamples = Int(Double(SharedConfig.chunkSplitterSilenceMs()) * 16.0)
         let minSpeechSamples = Int(Double(SharedConfig.streamVadMinSpeechMs()) * 16.0)
         let minChunkSamples = Int(Double(SharedConfig.streamVadMinChunkMs()) * 16.0)
         let maxNoiseSamples = Int(SharedConfig.streamVadMaxNoiseSec() * 16000.0)
@@ -1412,15 +1412,15 @@ actor StreamingAudioRecorder {
     /// - Parameter onChunk: Called on vadQueue for each detected speech
     ///   segment. The first argument is a monotonically increasing chunk ID
     ///   (starting at 0); the second is float32 PCM samples at 16 kHz mono.
-    /// - Parameter onVADState: Called on vadQueue after each processed audio
-    ///   frame with the current VAD and endpoint state.
-    /// - Parameter telemetry: Optional per-frame VAD telemetry sink. Telemetry
+    /// - Parameter onChunkSplitterState: Called on vadQueue after each processed audio
+    ///   frame with the current detector and endpoint state.
+    /// - Parameter telemetry: Optional per-frame chunk splitter telemetry sink. Telemetry
     ///   callbacks run on vadQueue and are disabled when this is `nil`.
     /// - Throws: `AudioRecorder.AudioRecorderError.permissionDenied` or `.permissionNotRequested`
     ///   if mic access is unavailable; `AudioRecorder.AudioRecorderError.invalidSessionConfiguration`
     ///   if session setup fails; `StreamingRecorderError.engineStartFailed` if
     ///   the audio engine cannot start.
-    func start(fileURL: URL? = nil, onChunk: @escaping ChunkHandler, onVADState: ((StreamingVADFrameState) -> Void)? = nil, telemetry: VADTelemetrySink? = nil) async throws {
+    func start(fileURL: URL? = nil, onChunk: @escaping ChunkHandler, onChunkSplitterState: ((ChunkSplitterFrameState) -> Void)? = nil, telemetry: VADTelemetrySink? = nil) async throws {
         guard !isRecording else {
             throw StreamingRecorderError.alreadyStreaming
         }
@@ -1450,14 +1450,14 @@ actor StreamingAudioRecorder {
             if !startCompleted {
                 teardownEngine()
                 self.onChunk = nil
-                self.onVADState = nil
+                self.onChunkSplitterState = nil
                 isRecording = false
                 AudioSession.deactivate()
             }
         }
 
         self.onChunk = onChunk
-        self.onVADState = onVADState
+        self.onChunkSplitterState = onChunkSplitterState
         self.telemetryFlushable = telemetry as? VADTelemetryFlushable
         vad.setTelemetrySink(telemetry)
 
@@ -1502,7 +1502,7 @@ actor StreamingAudioRecorder {
 
         // Capture references for the closure (no actor self capture).
         let handler = onChunk
-        let stateHandler = onVADState
+        let stateHandler = onChunkSplitterState
         let vad = self.vad
         let vadQueue = self.vadQueue
         let telemetryFlushable = self.telemetryFlushable
@@ -1593,7 +1593,7 @@ actor StreamingAudioRecorder {
         var startedPayload: [String: Any] = [
             "rms": vadGateConfig.staticRms,
             "mode": vadGateConfig.mode.rawValue,
-            "silenceMs": SharedConfig.streamVadSilenceMs(),
+            "silenceMs": SharedConfig.chunkSplitterSilenceMs(),
             "minSpeechMs": SharedConfig.streamVadMinSpeechMs(),
             "minChunkMs": SharedConfig.streamVadMinChunkMs(),
             "maxNoiseSec": SharedConfig.streamVadMaxNoiseSec(),
@@ -1626,7 +1626,7 @@ actor StreamingAudioRecorder {
         targetFormat: AVAudioFormat,
         vad: VADContext,
         handler: ChunkHandler,
-        stateHandler: ((StreamingVADFrameState) -> Void)?,
+        stateHandler: ((ChunkSplitterFrameState) -> Void)?,
         telemetryFlushable: VADTelemetryFlushable?,
         diskWriter: DiskWriterHolder,
         stoppedFlag: StoppedFlag,
@@ -1789,7 +1789,7 @@ actor StreamingAudioRecorder {
 
         // Emit chunk if ready (handler runs synchronously on vadQueue)
         if let emission = emission {
-            FileLogger.shared.debug(.audio, "vadQueue: emission",
+            FileLogger.shared.debug(.audio, "Chunk splitter: emission",
                                     payload: ["chunkId": emission.chunkId,
                                               "sampleCount": emission.samples.count])
             handler(emission.chunkId, emission.samples)
@@ -1832,7 +1832,7 @@ actor StreamingAudioRecorder {
         let vadQueue = self.vadQueue
         let vad = self.vad
         let diskWriter = self.diskWriter
-        let stateHandler = self.onVADState
+        let stateHandler = self.onChunkSplitterState
         let stoppedFlag = self.stoppedFlag
         let accounting = self.accounting
         let telemetryFlushable = self.telemetryFlushable
@@ -1873,7 +1873,7 @@ actor StreamingAudioRecorder {
         vad.setTelemetrySink(nil)
         self.telemetryFlushable = nil
         onChunk = nil
-        onVADState = nil
+        onChunkSplitterState = nil
 
         FileLogger.shared.info(.audio, "Stopped")
     }

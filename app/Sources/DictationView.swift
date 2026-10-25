@@ -161,7 +161,7 @@ struct DictationView: View {
                     .background(.tertiary, in: Capsule())
             }
 
-            if let state = viewModel.vadState {
+            if let state = viewModel.chunkSplitterState {
                 SilenceProgressIndicator(
                     state: state,
                     chunkDispatchCount: viewModel.chunkDispatchCount

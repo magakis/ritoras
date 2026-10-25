@@ -175,7 +175,7 @@ final class AudioLevelTesterViewModel: ObservableObject {
         endpoint = StreamingEndpoint(configuration: StreamingEndpointConfiguration(
             onsetSamples: Int(Double(SharedConfig.streamVadOnsetMs()) * 16.0),
             endEvidenceSamples: Int(Double(SharedConfig.streamVadEndEvidenceMs()) * 16.0),
-            endpointSilenceSamples: Int(Double(SharedConfig.streamVadSilenceMs()) * 16.0),
+            endpointSilenceSamples: Int(Double(SharedConfig.chunkSplitterSilenceMs()) * 16.0),
             resumeSamples: Int(Double(SharedConfig.streamVadResumeMs()) * 16.0),
             ambiguousRescueSamples: Int(Double(SharedConfig.streamVadAmbiguousRescueMs()) * 16.0)
         ))

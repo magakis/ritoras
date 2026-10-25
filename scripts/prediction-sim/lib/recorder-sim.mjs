@@ -11,7 +11,7 @@ import {
   IDLE_GAP_TELEMETRY_PEAK_ABOVE_FLOOR_DB,
 } from './vad-idle-gap.mjs';
 
-// This is a chunk SLICER, not a silence-stripping VAD. It segments a continuous
+// This chunk splitter segments a continuous
 // audio stream into chunks for streaming ASR while retaining all audio except
 // voiceless slabs over maxNoiseSec. Speech is never trimmed from chunks; do not
 // add silence-stripping or aggressive speech-gating here.

@@ -52,13 +52,13 @@ final class RecordingStore {
         directoryURL?.appendingPathComponent("\(jobId.uuidString).stream.wav")
     }
 
-    /// Returns the expected per-frame VAD telemetry file URL for the given job
+    /// Returns the expected per-frame chunk splitter telemetry file URL for the given job
     /// ID, or nil if the directory is unavailable.
     func streamTelemetryURL(for jobId: UUID) -> URL? {
         directoryURL?.appendingPathComponent("\(jobId.uuidString)-vad.jsonl")
     }
 
-    /// Returns retained streaming VAD telemetry files newest-first by modification
+    /// Returns retained chunk splitter telemetry files newest-first by modification
     /// time.
     func streamTelemetryURLs(limit: Int = 20) -> [URL] {
         guard limit > 0,
@@ -80,7 +80,7 @@ final class RecordingStore {
         }.prefix(limit).map { $0 }
     }
 
-    /// Returns the newest retained streaming VAD telemetry file, if any.
+    /// Returns the newest retained chunk splitter telemetry file, if any.
     func newestStreamTelemetryURL() -> URL? {
         streamTelemetryURLs(limit: 1).first
     }

@@ -377,10 +377,10 @@ function render({ summaries, globalSettings, budget, exportedAt, timelineStride,
   const telemetryValue = globalSettings.find(([key]) => key === 'telemetryEnabled')?.[1] ?? 'ON';
   const budgetKilobytes = Math.ceil(budget / 1024);
   const lines = [
-    `Ritoras VAD digest v1 — exported ${formatUtc(exportedAt)}`,
+    `Ritoras Chunk Splitter digest v1 — exported ${formatUtc(exportedAt)}`,
     `recordings: ${summaries.length} retained (telemetry toggle currently ${telemetryValue}) | budget: ${budgetKilobytes} KB`,
     '',
-    '== Current global VAD settings ==',
+    '== Current global chunk splitter settings ==',
     globalSettings.map(([key, value]) => `${key}=${value}`).join(' '),
     '',
   ];

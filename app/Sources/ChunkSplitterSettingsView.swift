@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-struct VADSettingsView: View {
+struct ChunkSplitterSettingsView: View {
     @EnvironmentObject private var settings: AppSettings
     @StateObject private var tester = AudioLevelTesterViewModel()
     @State private var isCopyingDigest = false
@@ -14,7 +14,7 @@ struct VADSettingsView: View {
 
     var body: some View {
         formWithTesterRebuildHandlers
-        .navigationTitle("Streaming VAD")
+        .navigationTitle("Chunk Splitter")
         .onDisappear {
             stopTester()
         }
@@ -25,13 +25,13 @@ struct VADSettingsView: View {
 
     private var formWithTesterRebuildHandlers: some View {
         formContent
-            .onChange(of: settings.streamVadMode) { _, _ in
+        .onChange(of: settings.chunkSplitterMode) { _, _ in
                 rebuildTesterGate()
             }
-            .onChange(of: settings.streamVadSpeechRms) { _, _ in
+        .onChange(of: settings.chunkSplitterSpeechRms) { _, _ in
                 rebuildTesterGate()
             }
-            .onChange(of: settings.streamVadAbsoluteSpeechFloorDb) { _, _ in
+        .onChange(of: settings.chunkSplitterAbsoluteSpeechFloorDb) { _, _ in
                 rebuildTesterGate()
             }
     }
@@ -42,13 +42,13 @@ struct VADSettingsView: View {
             controlsSection
             resetSection
         }
-        .alert("Reset VAD Settings?", isPresented: $isShowingResetConfirmation) {
+        .alert("Reset Chunk Splitter Settings?", isPresented: $isShowingResetConfirmation) {
             Button("Reset to Defaults", role: .destructive) {
-                settings.resetVadSettingsToDefaults()
+                settings.resetChunkSplitterSettingsToDefaults()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("VAD settings will be restored to their defaults.")
+            Text("Chunk splitter settings will be restored to their defaults.")
         }
     }
 
@@ -91,7 +91,7 @@ struct VADSettingsView: View {
                 meterRow
             }
         } footer: {
-            Text("Use the live meter to check microphone levels and tune VAD sensitivity. Green means an utterance is in progress; brief noise bumps stay red.")
+            Text("Use the live meter to check microphone levels and tune the chunk splitter's voice sensitivity. Green means an utterance is in progress; brief noise bumps stay red.")
         }
     }
 
@@ -235,7 +235,7 @@ struct VADSettingsView: View {
         } header: {
             Text("Basics")
         } footer: {
-            Text("Sensitivity adjusts voice detection for your environment. Silence duration controls how long the VAD listens in silence before closing the utterance. 700 ms is the default; 450 ms is the minimum.")
+            Text("Sensitivity adjusts voice detection for your environment. Silence duration controls how long the chunk splitter waits in silence before closing the utterance. 700 ms is the default; 450 ms is the minimum.")
         }
     }
 
@@ -244,13 +244,13 @@ struct VADSettingsView: View {
             HStack {
                 Text("Silence Duration")
                 Spacer()
-                Text("\(settings.streamVadSilenceMs) ms")
+                Text("\(settings.chunkSplitterSilenceMs) ms")
                     .foregroundColor(.secondary)
             }
             Slider(
                 value: Binding(
-                    get: { Double(settings.streamVadSilenceMs) },
-                    set: { settings.streamVadSilenceMs = Int($0) }
+                    get: { Double(settings.chunkSplitterSilenceMs) },
+                    set: { settings.chunkSplitterSilenceMs = Int($0) }
                 ),
                 in: 450...5000,
                 step: 50
@@ -263,10 +263,10 @@ struct VADSettingsView: View {
             HStack {
                 Text("Minimum speech level")
                 Spacer()
-                Text(String(format: "%.0f dB", settings.streamVadAbsoluteSpeechFloorDb))
+                Text(String(format: "%.0f dB", settings.chunkSplitterAbsoluteSpeechFloorDb))
                     .foregroundColor(.secondary)
             }
-            Slider(value: $settings.streamVadAbsoluteSpeechFloorDb, in: -80...(-30), step: 1)
+            Slider(value: $settings.chunkSplitterAbsoluteSpeechFloorDb, in: -80...(-30), step: 1)
             Text("Sets the quietest level that can count as speech. Lower values can hear whisper-quiet speech in quiet rooms, but may pick up faint background noise. Values above the room's noise floor have no effect. Try −65 dB for whisper testing.")
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -275,7 +275,7 @@ struct VADSettingsView: View {
 
     private var resetSection: some View {
         Section {
-            Button("Reset VAD Settings to Defaults", role: .destructive) {
+            Button("Reset Chunk Splitter Settings to Defaults", role: .destructive) {
                 isShowingResetConfirmation = true
             }
         }
@@ -283,7 +283,7 @@ struct VADSettingsView: View {
 
     private var modeSection: some View {
         Section {
-            Picker("Detection", selection: $settings.streamVadMode) {
+            Picker("Detection", selection: $settings.chunkSplitterMode) {
                 ForEach(VADMode.allCases, id: \.self) { mode in
                     switch mode {
                     case .staticMode:
@@ -295,7 +295,7 @@ struct VADSettingsView: View {
             }
             .pickerStyle(.segmented)
 
-            if settings.streamVadMode == .staticMode {
+            if settings.chunkSplitterMode == .staticMode {
                 speechRmsRow
             }
         } header: {
@@ -306,7 +306,7 @@ struct VADSettingsView: View {
     }
 
     private var modeHelpText: some View {
-        switch settings.streamVadMode {
+        switch settings.chunkSplitterMode {
         case .staticMode:
             Text("One fixed level bar. Retune it when your environment changes.")
         case .adaptive:
@@ -319,7 +319,7 @@ struct VADSettingsView: View {
             HStack {
                 Text("Speech RMS Threshold")
                 Spacer()
-                TextField("0.025", value: $settings.streamVadSpeechRms, format: .number.precision(.fractionLength(3...4)))
+                TextField("0.025", value: $settings.chunkSplitterSpeechRms, format: .number.precision(.fractionLength(3...4)))
                     .keyboardType(.decimalPad)
                     .textFieldStyle(.roundedBorder)
                     .multilineTextAlignment(.trailing)
@@ -328,7 +328,7 @@ struct VADSettingsView: View {
             Text("lower = more sensitive")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            Slider(value: $settings.streamVadSpeechRms, in: 0.005...0.10, step: 0.001)
+            Slider(value: $settings.chunkSplitterSpeechRms, in: 0.005...0.10, step: 0.001)
         }
     }
 
@@ -338,7 +338,7 @@ struct VADSettingsView: View {
             staticRms: SharedConfig.streamVadSpeechRms(),
             adaptiveDeltaDb: SharedConfig.streamVadAdaptiveDeltaDb(),
             adaptiveContinuationDeltaDb: SharedConfig.streamVadAdaptiveContinuationDeltaDb(),
-            adaptiveAbsoluteSpeechFloorDb: settings.streamVadAbsoluteSpeechFloorDb,
+            adaptiveAbsoluteSpeechFloorDb: settings.chunkSplitterAbsoluteSpeechFloorDb,
             adaptiveRiseSpeedMultiplier: 1.0,
             adaptiveSilenceDeltaDb: SharedConfig.streamVadAdaptiveSilenceDeltaDb(),
             adaptiveStaleFloorSeconds: SharedConfig.streamVadStaleFloorSeconds(),
@@ -353,13 +353,13 @@ struct VADSettingsView: View {
         let telemetryURLs = RecordingStore.shared.streamTelemetryURLs()
 
         return Section {
-            Toggle("VAD Telemetry", isOn: $settings.streamVadTelemetryEnabled)
-            Text("Records per-frame VAD decisions to a file next to the session audio, for offline replay and tuning.")
+            Toggle("Chunk Splitter Telemetry", isOn: $settings.chunkSplitterTelemetryEnabled)
+            Text("Records per-frame chunk-splitting decisions to a file next to the session audio, for offline replay and tuning.")
                 .font(.caption)
                 .foregroundColor(.secondary)
 
             Toggle("Full Recording Upload", isOn: $settings.fullRecordingUploadEnabled)
-            Text("Uploads the complete pre-VAD session recording for diagnostics after each streamed transcription.")
+            Text("Uploads the complete session recording before chunk splitting for diagnostics after each streamed transcription.")
                 .font(.caption)
                 .foregroundColor(.secondary)
 
@@ -376,10 +376,10 @@ struct VADSettingsView: View {
                     Label(digestCopied ? "Copied ✓" : "Copy Digest — Last 20 Recordings", systemImage: "doc.on.doc")
                 }
             }
-            .disabled(!settings.streamVadTelemetryEnabled || telemetryURLs.isEmpty || isCopyingDigest)
+            .disabled(!settings.chunkSplitterTelemetryEnabled || telemetryURLs.isEmpty || isCopyingDigest)
 
-            if !settings.streamVadTelemetryEnabled {
-                Text("Enable VAD Telemetry to copy a digest.")
+            if !settings.chunkSplitterTelemetryEnabled {
+                Text("Enable Chunk Splitter Telemetry to copy a digest.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             } else if telemetryURLs.isEmpty {
@@ -456,8 +456,8 @@ struct VADSettingsView: View {
         formatter.dateFormat = "yyyyMMdd-HHmmss"
         let stamp = formatter.string(from: Date())
         let temporaryDirectory = FileManager.default.temporaryDirectory
-        let stagedDirectory = temporaryDirectory.appendingPathComponent("ritoras-vad-telemetry-\(stamp)", isDirectory: true)
-        let zipURL = temporaryDirectory.appendingPathComponent("ritoras-vad-telemetry-\(stamp).zip")
+        let stagedDirectory = temporaryDirectory.appendingPathComponent("ritoras-chunk-splitter-telemetry-\(stamp)", isDirectory: true)
+        let zipURL = temporaryDirectory.appendingPathComponent("ritoras-chunk-splitter-telemetry-\(stamp).zip")
         let fileManager = FileManager.default
 
         try fileManager.createDirectory(at: stagedDirectory, withIntermediateDirectories: true)
@@ -499,13 +499,13 @@ struct VADSettingsView: View {
     private func copyDigest(files: [URL]) {
         isCopyingDigest = true
         digestCopied = false
-        let globalSettings = globalVADSettings()
+        let globalSettings = globalChunkSplitterSettings()
         Task {
             let text = await Task.detached(priority: .userInitiated) {
-                VADTelemetryDigest.buildText(
+                ChunkSplitterTelemetryDigest.buildText(
                     files: files,
                     globalSettings: globalSettings,
-                    budget: VADTelemetryDigest.defaultBudget
+                    budget: ChunkSplitterTelemetryDigest.defaultBudget
                 )
             }.value
             UIPasteboard.general.string = text
@@ -517,14 +517,14 @@ struct VADSettingsView: View {
         }
     }
 
-    private func globalVADSettings() -> [(String, String)] {
+    private func globalChunkSplitterSettings() -> [(String, String)] {
         // This list intentionally mirrors the sessionStart config keys.
         [
-            ("telemetryEnabled", SharedConfig.streamVadTelemetryEnabled() ? "ON" : "OFF"),
+            ("telemetryEnabled", SharedConfig.chunkSplitterTelemetryEnabled() ? "ON" : "OFF"),
             ("mode", SharedConfig.streamVadMode().rawValue),
-            ("pause", SharedConfig.streamVadPauseProfile().rawValue),
+            ("pause", SharedConfig.chunkSplitterPauseProfile().rawValue),
             ("staticRms", "\(SharedConfig.streamVadSpeechRms())"),
-            ("endpointSilence", "\(SharedConfig.streamVadSilenceMs())ms"),
+            ("endpointSilence", "\(SharedConfig.chunkSplitterSilenceMs())ms"),
             ("onset", "\(SharedConfig.streamVadOnsetMs())ms"),
             ("endEvidence", "\(SharedConfig.streamVadEndEvidenceMs())ms"),
             ("resume", "\(SharedConfig.streamVadResumeMs())ms"),

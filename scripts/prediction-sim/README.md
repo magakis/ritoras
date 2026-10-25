@@ -17,7 +17,7 @@ Pure-logic components only:
 - `PredictionEngine` fusion (Apple boost + KenLM min-max normalization + two-tier threshold + absolute-floor gate)
 - duration-scaled transcription timeout budgets and retry eligibility
 - streaming transcription timeouts (WebSocket connect, liveness silence, final/drain)
-- VAD telemetry digest reduction (bounded summaries from retained JSONL recordings)
+- Chunk splitter telemetry digest reduction (bounded summaries from retained JSONL recordings)
 
 ## What this does NOT cover
 
@@ -27,7 +27,7 @@ Pure-logic components only:
 - The 48 MB Jetsam memory cap (runtime measurement only — use `ritoras-ios-debugging`)
 - Real KenLM scoring (the `.klm` binary cannot run in Node — see *KenLM proxy* below)
 
-## Chunk slicer semantics
+## Chunk splitter semantics
 
 The recorder mirror segments continuous audio into streaming-ASR chunks; it does not strip silence.
 Only voiceless gaps longer than `maxNoiseSec` with under 100 ms of strong/continuing evidence are shed.

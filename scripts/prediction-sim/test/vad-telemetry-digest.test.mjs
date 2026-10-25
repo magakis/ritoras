@@ -123,7 +123,7 @@ describe('VAD telemetry digest', () => {
     ]);
 
     const text = digest([file]);
-    assert.match(text, /^Ritoras VAD digest v1 — exported 2026-09-23T14:02:11Z/m);
+    assert.match(text, /^Ritoras Chunk Splitter digest v1 — exported 2026-09-23T14:02:11Z/m);
     assert.match(text, /job=12345678-1234-1234-1234-123456789abc started=2026-09-23T13:58:02Z dur=0\.4s outcome=success/);
     assert.match(text, /chunks=1 emitted speech=0\.1s\/0\.2s/);
     assert.match(text, /params\(onset=70ms endpointSilence=700ms mode=adaptive\)/);

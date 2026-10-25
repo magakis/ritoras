@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeRecorderHarness } from '../lib/recorder-sim.mjs';
 
-describe('recorder chunk-slicer retention', () => {
+describe('recorder chunk-splitter retention', () => {
   it('sheds a voiceless idle gap only after it exceeds the six-second cap', () => {
     const silenceEvents = [];
     const maxNoiseSamples = 6 * 16_000;
