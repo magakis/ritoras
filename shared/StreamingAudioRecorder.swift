@@ -179,19 +179,18 @@ struct ChunkSplitterFrameState: Sendable {
 
 // MARK: - VAD Context (Thread-safe via internal lock)
 
-/// This is a chunk SLICER, not a silence-stripping VAD. It segments a continuous
-/// audio stream into chunks for streaming ASR while retaining all audio except
-/// voiceless slabs over maxNoiseSec. Speech is never trimmed from chunks; do not
-/// add silence-stripping or aggressive speech-gating here.
-/// Active chunks split at 30 s and honor the existing spill path. This runs in
-/// the container app process, not the keyboard extension.
+/// This chunk splitter retains all audio except voiceless slabs over maxNoiseSec
+/// and finalizes utterances only at silence endpoints or an explicit stop.
+/// Speech is never trimmed from chunks; do not add silence-stripping or
+/// aggressive speech-gating here. During capture, the spill path keeps long
+/// utterances bounded in memory. This runs in the container app process, not the
+/// keyboard extension.
 ///
 /// Thread safety through internal locking via `os_unfair_lock`.
 /// All mutable state is protected — callers call `process()`/`flush()` directly.
 private final class VADContext: @unchecked Sendable {
     // MARK: Configuration (constants)
     let gate: VADThresholdGate
-    let effectiveFlatSpreadDb: Double
     let silenceThresholdSamples: Int
     let minSpeechSamples: Int
     let minChunkSamples: Int
@@ -203,12 +202,7 @@ private final class VADContext: @unchecked Sendable {
     let loudFlatTerminateSeconds: Double
     let loudFlatTerminateEnabled: Bool
     let accumulatorSpillSamples: Int
-    let accumulatorCapEnabled: Bool
-    var maxAccumulatorSamples: Int { accumulatorSpillSamples * 2 }
-    let maxChunkSamples = 30 * 16_000
     let postRollSamples = 400 * 16
-    let splitSearchSamples = 3 * 16_000
-    let minimumSplitSilenceSamples = 100 * 16
     let analysisHpf: VADHighPassFilter?
 
     // MARK: Lock
@@ -221,12 +215,9 @@ private final class VADContext: @unchecked Sendable {
     private var retainedGapBuffer: [Float] = []
     private var retainedGapStartSessionSamples: Int?
     private var retainedGapEvidenceSamples = 0
-    private var retainedGapSplitEnergyFrames: [(samples: Int, isLowEnergy: Bool)] = []
     private var accumulatorSpillURL: URL?
     private var accumulatorSpillHandle: FileHandle?
     private var spilledSampleCount = 0
-    private var splitEnergyFrames: [(samples: Int, isLowEnergy: Bool)] = []
-    private var splitEnergySamples = 0
     private var contiguousTrailingSilenceSamples = 0
     private var contiguousTrailingSilenceMinimumDb: Double?
     private var chunkStartSessionSamples: Int?
@@ -269,14 +260,11 @@ private final class VADContext: @unchecked Sendable {
         let gate = VADThresholdGate(config: gateConfig)
         self.gate = gate
         self.primingComplete = gate.snapshot.floorDb == nil
-        self.effectiveFlatSpreadDb = (gate.effectiveParameters["flatSpreadDb"] as? Double)
-            ?? SharedConfig.Defaults.streamVadFlatSpreadDbDefault
         self.silenceThresholdSamples = silenceThresholdSamples
         self.minSpeechSamples = minSpeechSamples
         self.minChunkSamples = minChunkSamples
         self.maxNoiseSamples = maxNoiseSamples
         self.accumulatorSpillSamples = SharedConfig.streamVadAccumulatorSpillSamples()
-        self.accumulatorCapEnabled = SharedConfig.streamVadAccumulatorCapEnabled()
         self.endpointMachineEnabled = endpointMachineEnabled
         self.endpoint = StreamingEndpoint(configuration: StreamingEndpointConfiguration(
             onsetSamples: Int(Double(SharedConfig.streamVadOnsetMs()) * 16.0),
@@ -326,9 +314,9 @@ private final class VADContext: @unchecked Sendable {
         config["loudFlatStreakMs"] = loudFlatStreakMs
         config["loudFlatTerminatorActive"] = loudFlatTerminatorActive
         config["accumulatorSpillSamples"] = accumulatorSpillSamples
-        config["maxChunkMs"] = Double(maxChunkSamples) / 16.0
-        config["splitSearchWindowMs"] = Double(splitSearchSamples) / 16.0
-        config["minSilenceAtSplitMs"] = Double(minimumSplitSilenceSamples) / 16.0
+        config["maxChunkMs"] = 0
+        config["splitSearchWindowMs"] = 0
+        config["minSilenceAtSplitMs"] = 0
         config["silenceMs"] = Double(silenceThresholdSamples) / 16.0
         config["minSpeechMs"] = Double(minSpeechSamples) / 16.0
         config["minChunkMs"] = Double(minChunkSamples) / 16.0
@@ -546,10 +534,6 @@ private final class VADContext: @unchecked Sendable {
             }
             appendAccumulator(frame)
             bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
-            indexSplitFrame(
-                samples: frameLength,
-                isLowEnergy: output.evidence == .silence || frameDb < output.silenceThresholdDb
-            )
         }
         if output.isSpeech {
             speechSamples += frameLength
@@ -749,8 +733,6 @@ private final class VADContext: @unchecked Sendable {
                 reason: "noise_guard"
             ))
             clearAccumulator()
-            splitEnergyFrames.removeAll(keepingCapacity: true)
-            splitEnergySamples = 0
             chunkStartSessionSamples = nil
             speechSamples = 0
             silenceSamples = 0
@@ -759,13 +741,6 @@ private final class VADContext: @unchecked Sendable {
             bufferHighWaterSamples = 0
             FileLogger.shared.debug(.audio, "Chunk splitter: shed voiceless pending audio")
             return nil
-        }
-
-        if let split = splitEmissionIfNeeded(endpointState: endpoint.state.rawValue) {
-            return split
-        }
-        if let split = splitAccumulatorAtCap(endpointState: endpoint.state.rawValue) {
-            return split
         }
 
         diagnosticElapsed += frameDuration
@@ -794,8 +769,7 @@ private final class VADContext: @unchecked Sendable {
     private func appendRetainedGapFrame(
         _ samples: [Float],
         startSamples: Int,
-        evidence: VADEvidence,
-        isLowEnergy: Bool
+        evidence: VADEvidence
     ) {
         if retainedGapBuffer.isEmpty {
             retainedGapStartSessionSamples = startSamples
@@ -804,7 +778,6 @@ private final class VADContext: @unchecked Sendable {
         if evidence == .strong || evidence == .continuing {
             retainedGapEvidenceSamples += samples.count
         }
-        retainedGapSplitEnergyFrames.append((samples.count, isLowEnergy))
         bufferHighWaterSamples = max(
             bufferHighWaterSamples,
             accumulatorSampleCount + retainedGapBuffer.count
@@ -817,13 +790,9 @@ private final class VADContext: @unchecked Sendable {
             chunkStartSessionSamples = retainedGapStartSessionSamples
         }
         appendAccumulator(retainedGapBuffer)
-        for frame in retainedGapSplitEnergyFrames {
-            indexSplitFrame(samples: frame.samples, isLowEnergy: frame.isLowEnergy)
-        }
         retainedGapBuffer.removeAll(keepingCapacity: true)
         retainedGapStartSessionSamples = nil
         retainedGapEvidenceSamples = 0
-        retainedGapSplitEnergyFrames.removeAll(keepingCapacity: true)
         bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
     }
 
@@ -837,7 +806,6 @@ private final class VADContext: @unchecked Sendable {
         retainedGapBuffer.removeAll(keepingCapacity: true)
         retainedGapStartSessionSamples = nil
         retainedGapEvidenceSamples = 0
-        retainedGapSplitEnergyFrames.removeAll(keepingCapacity: true)
         if accumulatorSampleCount == 0 {
             chunkStartSessionSamples = nil
             speechSamples = 0
@@ -948,111 +916,6 @@ private final class VADContext: @unchecked Sendable {
         return samples
     }
 
-    private func indexSplitFrame(samples: Int, isLowEnergy: Bool) {
-        splitEnergyFrames.append((samples, isLowEnergy))
-        splitEnergySamples += samples
-        while splitEnergySamples > splitSearchSamples, !splitEnergyFrames.isEmpty {
-            splitEnergySamples -= splitEnergyFrames.removeFirst().samples
-        }
-    }
-
-    private func splitEmissionIfNeeded(endpointState: String) -> VADEmission? {
-        guard accumulatorSampleCount >= maxChunkSamples else { return nil }
-        var runSamples = 0
-        var samplesAfterGap = 0
-        var qualifyingGapTailSamples: Int?
-        for index in splitEnergyFrames.indices.reversed() {
-            let frame = splitEnergyFrames[index]
-            if frame.isLowEnergy {
-                runSamples += frame.samples
-                if runSamples >= minimumSplitSilenceSamples {
-                    qualifyingGapTailSamples = samplesAfterGap
-                    break
-                }
-            } else {
-                samplesAfterGap += runSamples + frame.samples
-                runSamples = 0
-            }
-        }
-        let reason = qualifyingGapTailSamples == nil ? "split_hardcut" : "split_gap"
-        if accumulatorSampleCount == maxChunkSamples, qualifyingGapTailSamples == nil {
-            return nil
-        }
-        let requestedCutCount = qualifyingGapTailSamples.map { accumulatorSampleCount - $0 } ?? maxChunkSamples
-        let cutCount = min(requestedCutCount, maxChunkSamples)
-        let gapSamples = qualifyingGapTailSamples == nil ? 0 : runSamples
-        guard cutCount > 0, cutCount <= accumulatorSampleCount else { return nil }
-        return splitEmissionAtCutCount(cutCount, endpointState: endpointState, reason: reason,
-                                       gapSamples: gapSamples)
-    }
-
-    private func splitEmissionAtCutCount(
-        _ requestedCutCount: Int,
-        endpointState: String,
-        reason: String,
-        gapSamples: Int = 0
-    ) -> VADEmission? {
-        let samples = assembledAccumulator()
-        let cutCount = min(requestedCutCount, samples.count)
-        guard cutCount > 0 else { return nil }
-        let emittedSamples = Array(samples[..<cutCount])
-        let carry = Array(samples[cutCount...])
-        let id = chunkId
-        let startSamples = chunkStartSessionSamples ?? (sessionElapsedSamples - samples.count)
-        let startMs = Double(startSamples) / 16.0
-        let endMs = startMs + Double(cutCount) / 16.0
-        chunkId &+= 1
-        pendingEmissionSummary = EmissionSummary(
-            chunkId: id,
-            reason: reason,
-            silenceMs: Double(gapSamples) / 16.0,
-            totalMs: Double(cutCount) / 16.0,
-            speechMs: Double(speechSamples) / 16.0
-        )
-        telemetrySink?.event(VADTelemetryEvent(
-            kind: .split,
-            chunkId: id,
-            samples: cutCount,
-            reason: reason,
-            startMs: startMs,
-            endMs: endMs,
-            endpointState: endpointState,
-            metadata: ["gapSamples": gapSamples, "boundaryOffsetSamples": cutCount]
-        ))
-        telemetrySink?.event(VADTelemetryEvent(
-            kind: .emit, chunkId: id, samples: cutCount, reason: reason,
-            speechMs: Double(speechSamples) / 16.0, totalMs: Double(cutCount) / 16.0,
-            startMs: startMs, endMs: endMs, endpointState: endpointState
-        ))
-        clearAccumulator()
-        accumulator = carry
-        if carry.count < contiguousTrailingSilenceSamples {
-            contiguousTrailingSilenceMinimumDb = nil
-        }
-        contiguousTrailingSilenceSamples = min(contiguousTrailingSilenceSamples, carry.count)
-        chunkStartSessionSamples = startSamples + cutCount
-        splitEnergyFrames.removeAll(keepingCapacity: true)
-        splitEnergySamples = 0
-        bufferHighWaterSamples = accumulatorSampleCount
-        return VADEmission(chunkId: id, samples: emittedSamples)
-    }
-
-    private func splitAccumulatorAtCap(endpointState: String) -> VADEmission? {
-        guard accumulatorCapEnabled,
-              accumulatorSampleCount >= maxAccumulatorSamples else { return nil }
-        FileLogger.shared.warn(.audio, "VAD accumulator cap reached; forcing chunk emission",
-                               payload: ["sampleCount": accumulatorSampleCount,
-                                         "capSamples": maxAccumulatorSamples])
-        telemetrySink?.event(VADTelemetryEvent(
-            kind: .split,
-            samples: accumulatorSampleCount,
-            reason: "accumulator_cap",
-            endpointState: endpointState
-        ))
-        return splitEmissionAtCutCount(maxChunkSamples, endpointState: endpointState,
-                                       reason: "accumulator_cap")
-    }
-
     /// Emit the retained accumulator, carrying post-roll-trimmed silence into the next span.
     func emit(
         reason: String,
@@ -1077,7 +940,6 @@ private final class VADContext: @unchecked Sendable {
                 retainedGapBuffer = trimmedTail
                 retainedGapStartSessionSamples = startSamples + sampleCount
                 retainedGapEvidenceSamples = 0
-                retainedGapSplitEnergyFrames = [(retainedTailSamples, true)]
             }
         }
         let emittedTotalMs = Double(sampleCount) / 16.0
@@ -1094,8 +956,6 @@ private final class VADContext: @unchecked Sendable {
         clearAccumulator()
         contiguousTrailingSilenceSamples = 0
         contiguousTrailingSilenceMinimumDb = nil
-        splitEnergyFrames.removeAll(keepingCapacity: true)
-        splitEnergySamples = 0
         chunkStartSessionSamples = nil
         silenceSamples = 0
         speechSamples = 0
@@ -1171,8 +1031,6 @@ private final class VADContext: @unchecked Sendable {
             FileLogger.shared.debug(.audio, "Chunk splitter: flush dropped sub-250 ms tail",
                                     payload: ["sampleCount": sampleCount])
             clearAccumulator()
-            splitEnergyFrames.removeAll(keepingCapacity: true)
-            splitEnergySamples = 0
             chunkStartSessionSamples = nil
             speechSamples = 0
             silenceSamples = 0

@@ -291,6 +291,11 @@ chunk; clients must treat chunk size as unbounded.
 
 ## 8. Failure and retry
 
+Telemetry retains the existing `maxChunkMs`, `splitSearchWindowMs`, and
+`minSilenceAtSplitMs` configuration keys for capture compatibility, with the
+numeric value `0` indicating that no duration cap or split search is active.
+These metadata values do not limit the `/stream` audio payload.
+
 Connection retries continue throughout the streaming session. While recording,
 queued streaming chunk sends retry without a fixed attempt limit, using the
 client's backoff between attempts.

@@ -11,11 +11,6 @@ import {
   replaySession,
   SHIPPING_SESSION_CONFIG,
 } from './replay-vad.mjs';
-import {
-  VAD_MAX_CHUNK_SAMPLES,
-  VAD_MIN_SILENCE_AT_SPLIT_SAMPLES,
-  VAD_SPLIT_SEARCH_SAMPLES,
-} from '../lib/recorder-sim.mjs';
 import { GapRetentionPolicy } from '../lib/gap-retention-policy.mjs';
 
 const SAMPLE_RATE = 16_000;
@@ -152,11 +147,7 @@ function scheduleChunksFromCurrentReplay(replay, sampleCount) {
         ? 'endpoint-silence'
         : event.r === 'flush'
           ? 'stop-flush'
-          : event.r === 'split_gap'
-            ? '30s-split-gap'
-            : event.r === 'split_hardcut'
-              ? '30s-split-hardcut'
-              : String(event.r ?? 'unknown');
+          : String(event.r ?? 'unknown');
       return {
         chunk_index: index,
         start_sample: startSample,
@@ -184,7 +175,6 @@ function scheduleChunksFromGapPolicy(policy) {
     finalize_ms: chunk.finalizeSample / 16,
     finalize_reason: chunk.reason,
     endpoint_finalize_index: chunk.endpointFinalizeIndex,
-    split_index: chunk.splitIndex,
     voice_ms: chunk.voiceSamples / 16,
     above_silence_ms: chunk.aboveSilenceSamples / 16,
   }));
@@ -311,9 +301,6 @@ function simulateGapRetention(replay, config, sampleCount) {
     maxNoiseSamples: normalized.maxNoiseSamples,
     minSpeechSamples: normalized.minSpeechSamples,
     minChunkSamples: normalized.minChunkSamples,
-    maxChunkSamples: VAD_MAX_CHUNK_SAMPLES,
-    splitSearchSamples: VAD_SPLIT_SEARCH_SAMPLES,
-    minimumSplitSilenceSamples: VAD_MIN_SILENCE_AT_SPLIT_SAMPLES,
   });
   let sampleCursor = 0;
   for (const frame of replay.frames) {

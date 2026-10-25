@@ -110,4 +110,51 @@ describe('recorder chunk-splitter retention', () => {
       + harness.shedSampleCount
       + harness.tailFloorSampleCount, harness.sessionElapsedSamples);
   });
+
+  it('retains speech beyond the spill and former accumulator caps until endpoint silence', () => {
+    const events = [];
+    const speechFrameCount = 1_400;
+    const expectedSpeechSamples = speechFrameCount * 1_600;
+    const harness = makeRecorderHarness({
+      frameMs: 100,
+      endpointSilenceMs: 300,
+      endpointConfig: {
+        onsetMs: 70,
+        endEvidenceMs: 100,
+        endpointSilenceMs: 300,
+        resumeMs: 120,
+        ambiguousRescueMs: 320,
+      },
+      minChunkSamples: 300 * 16,
+      minSpeechSamples: 300 * 16,
+      gateConfig: { mode: 'static', staticRms: 0.025 },
+      recorderConfig: { postRollSamples: 0 },
+      onEvent: event => events.push(event),
+    });
+
+    for (let index = 0; index < speechFrameCount; index += 1) harness.drive(-20);
+
+    assert.ok(harness.accumulatorSamples > 2 * 1_048_576);
+    assert.ok(harness.spilledSampleCount > 0);
+    assert.equal(harness.endpoint.state, 'speechActive');
+    assert.equal(harness.chunkCount, 0);
+    assert.equal(events.some(event => event.k === 'emit' || event.k === 'split'), false);
+
+    for (let index = 0; index < 20 && harness.chunkCount === 0; index += 1) {
+      harness.drive(-80);
+    }
+
+    const emissions = events.filter(event => event.k === 'emit');
+    assert.equal(emissions.length, 1);
+    assert.equal(emissions[0].r, 'endpoint');
+    assert.equal(emissions[0].n, expectedSpeechSamples);
+    assert.equal(harness.emittedSampleCount, expectedSpeechSamples);
+    assert.equal(harness.spilledSampleCount, 0);
+    assert.equal(harness.spillOccurred, true);
+    assert.deepEqual([
+      harness.sessionConfig.maxChunkMs,
+      harness.sessionConfig.splitSearchWindowMs,
+      harness.sessionConfig.minSilenceAtSplitMs,
+    ], [0, 0, 0]);
+  });
 });

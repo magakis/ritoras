@@ -1,8 +1,5 @@
 const SAMPLE_RATE = 16_000;
 const DEFAULT_MIN_VOICE_EVIDENCE_SAMPLES = SAMPLE_RATE / 10;
-export const VAD_MAX_CHUNK_SAMPLES = 30 * SAMPLE_RATE;
-export const VAD_SPLIT_SEARCH_SAMPLES = 3 * SAMPLE_RATE;
-export const VAD_MIN_SILENCE_AT_SPLIT_SAMPLES = 100 * 16;
 const STOP_FLUSH_MIN_SAMPLES = 250 * 16;
 
 function isVoiceEvidence(evidence) {
@@ -13,41 +10,23 @@ function sampleCount(frames, field) {
   return frames.reduce((total, frame) => total + frame[field], 0);
 }
 
-function makeFrameSlice(frame, startSample, endSample) {
-  return {
-    ...frame,
-    startSample,
-    endSample,
-    sampleCount: endSample - startSample,
-  };
-}
-
 export class GapRetentionPolicy {
   constructor({
     maxNoiseSamples = 6 * SAMPLE_RATE,
     minVoiceEvidenceSamples = DEFAULT_MIN_VOICE_EVIDENCE_SAMPLES,
     minSpeechSamples = 300 * 16,
     minChunkSamples = 300 * 16,
-    maxChunkSamples = VAD_MAX_CHUNK_SAMPLES,
-    splitSearchSamples = VAD_SPLIT_SEARCH_SAMPLES,
-    minimumSplitSilenceSamples = VAD_MIN_SILENCE_AT_SPLIT_SAMPLES,
   } = {}) {
     this.maxNoiseSamples = maxNoiseSamples;
     this.minVoiceEvidenceSamples = minVoiceEvidenceSamples;
     this.minSpeechSamples = minSpeechSamples;
     this.minChunkSamples = minChunkSamples;
-    this.maxChunkSamples = maxChunkSamples;
-    this.splitSearchSamples = splitSearchSamples;
-    this.minimumSplitSilenceSamples = minimumSplitSilenceSamples;
 
     for (const [name, value] of Object.entries({
       maxNoiseSamples,
       minVoiceEvidenceSamples,
       minSpeechSamples,
       minChunkSamples,
-      maxChunkSamples,
-      splitSearchSamples,
-      minimumSplitSilenceSamples,
     })) {
       if (!Number.isSafeInteger(value) || value < 0) {
         throw new Error(`${name} must be a non-negative integer sample count`);
@@ -59,7 +38,6 @@ export class GapRetentionPolicy {
     this.onsetSample = null;
     this.lastSample = null;
     this.endpointFinalizeCount = 0;
-    this.splitCount = 0;
     this.chunks = [];
     this.shedSlabs = [];
     this.tailFloorDrops = [];
@@ -131,7 +109,7 @@ export class GapRetentionPolicy {
         });
       }
       this.onsetSample = null;
-      return { emitted, shed: false, split: false };
+      return { emitted, shed: false };
     }
 
     let shed = false;
@@ -139,10 +117,7 @@ export class GapRetentionPolicy {
       shed = this.shedVoicelessBuffer(endSample);
     }
 
-    const split = this.active && this.bufferSampleCount >= this.maxChunkSamples
-      ? this.splitLongChunk(endSample)
-      : false;
-    return { emitted: false, shed, split };
+    return { emitted: false, shed };
   }
 
   emitEndpointChunk(finalizeSample) {
@@ -174,88 +149,6 @@ export class GapRetentionPolicy {
     this.events.push({ type: 'shed', ...slab });
     this.clearBuffer(endSample);
     return true;
-  }
-
-  splitLongChunk(finalizeSample) {
-    const hardBoundary = this.bufferStartSample + this.maxChunkSamples;
-    const gap = this.latestQualifyingGapEnd(hardBoundary);
-    if (gap !== null
-      && this.emitSplit(gap.endSample, finalizeSample, '30s-split-gap', gap.gapSamples)) {
-      return true;
-    }
-    return this.emitSplit(hardBoundary, finalizeSample, '30s-split-hardcut', 0);
-  }
-
-  latestQualifyingGapEnd(hardBoundary) {
-    const windowStart = Math.max(
-      this.bufferStartSample,
-      this.bufferEndSample - this.splitSearchSamples,
-    );
-    let runEnd = null;
-    let runSamples = 0;
-    let candidate = null;
-
-    for (const frame of this.bufferFrames) {
-      const start = Math.max(frame.startSample, windowStart);
-      const end = Math.min(frame.endSample, this.bufferEndSample);
-      if (end <= start) continue;
-      const isLow = frame.evidence === 'silence' || frame.db < frame.silenceThresholdDb;
-      if (isLow) {
-        runEnd = end;
-        runSamples += end - start;
-      } else {
-        if (runSamples >= this.minimumSplitSilenceSamples
-          && runEnd > this.bufferStartSample
-          && runEnd < end
-          && runEnd <= hardBoundary) {
-          candidate = { endSample: runEnd, gapSamples: runSamples };
-        }
-        runEnd = null;
-        runSamples = 0;
-      }
-    }
-    return candidate;
-  }
-
-  emitSplit(endSample, finalizeSample, reason, gapSamples) {
-    const splitFrames = this.splitFramesAt(endSample);
-    const prefix = splitFrames.prefix;
-    const prefixSamples = sampleCount(prefix, 'sampleCount');
-    const prefixVoiceSamples = sampleCount(prefix, 'voiceSamples');
-    if (prefixSamples < this.minChunkSamples
-      || prefixVoiceSamples < this.minSpeechSamples) {
-      return false;
-    }
-
-    this.splitCount += 1;
-    this.chunks.push(this.makeChunk({
-      startSample: this.bufferStartSample,
-      endSample,
-      finalizeSample,
-      reason,
-      onsetSample: this.onsetSample,
-      splitIndex: this.splitCount,
-      gapSamples,
-    }));
-    this.bufferStartSample = endSample;
-    this.bufferFrames = splitFrames.carry;
-    return true;
-  }
-
-  splitFramesAt(boundarySample) {
-    const prefix = [];
-    const carry = [];
-    for (const frame of this.bufferFrames) {
-      if (frame.endSample <= boundarySample) {
-        prefix.push(frame);
-      } else if (frame.startSample >= boundarySample) {
-        carry.push(frame);
-      } else {
-        prefix.push(makeFrameSlice(frame, frame.startSample, boundarySample));
-        carry.push(makeFrameSlice(frame, boundarySample, frame.endSample));
-      }
-    }
-    return { prefix, carry };
   }
 
   flush({ endSample = this.lastSample } = {}) {
@@ -336,9 +229,7 @@ export class GapRetentionPolicy {
     reason,
     onsetSample = null,
     endpointFinalizeIndex = null,
-    splitIndex = null,
     aboveSilenceSamples = null,
-    gapSamples = 0,
   }) {
     return {
       startSample,
@@ -351,8 +242,6 @@ export class GapRetentionPolicy {
         ? onsetSample
         : null,
       endpointFinalizeIndex,
-      splitIndex,
-      gapSamples,
       voiceSamples: sampleCount(
         this.framesInRange(startSample, endSample),
         'voiceSamples',

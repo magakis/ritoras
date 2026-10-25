@@ -270,7 +270,6 @@ struct SharedConfig {
         static let streamVadAccumulatorSpillSamplesKey = "streamVadAccumulatorSpillSamples"
         static let streamVadAccumulatorSpillSamplesDefault: Int = 1_048_576
         static let streamVadAccumulatorCapEnabledKey = "streamVadAccumulatorCapEnabled"
-        static let streamVadAccumulatorCapEnabledDefault = true
         static let stalePendingJobSweepEnabledKey = "stalePendingJobSweepEnabled"
         static let stalePendingJobSweepEnabledDefault = true
         static let stalePendingJobAgeLimit: TimeInterval = 7 * 24 * 60 * 60
@@ -1075,15 +1074,6 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.streamEndpointMachineEnabledKey) as? Bool)
             ?? Defaults.streamEndpointMachineEnabledDefault
-    }
-
-    /// Reads the VAD accumulator hard-cap kill switch from the App Group.
-    static func streamVadAccumulatorCapEnabled() -> Bool {
-        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return Defaults.streamVadAccumulatorCapEnabledDefault
-        }
-        return (defaults.object(forKey: Defaults.streamVadAccumulatorCapEnabledKey) as? Bool)
-            ?? Defaults.streamVadAccumulatorCapEnabledDefault
     }
 
     /// Reads the stale-job cleanup kill switch from the App Group.

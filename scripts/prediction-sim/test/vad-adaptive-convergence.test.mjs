@@ -111,7 +111,7 @@ describe('adaptive VAD convergence', () => {
     assert.ok(Math.abs(gate.snapshot.floorDb - -25) <= 0.5);
   });
 
-  it('N1/N6: continuous speech stays one chunk until a real pause', () => {
+  it('N1/N6: continuous speech emits one chunk only after a real pause', () => {
     const harness = makeRecorderHarness({ endpointSilenceMs: 700 });
     const monologueMs = 60_000;
     let initialFloor = null;
@@ -134,7 +134,7 @@ describe('adaptive VAD convergence', () => {
       }
     }
     assert.strictEqual(harness.reanchorEventCount, 0);
-    assert.ok(harness.chunkCount > 0);
+    assert.strictEqual(harness.chunkCount, 0);
     assert.ok(harness.accumulatorSamples > 0);
 
     let pauseMs = 0;
@@ -154,7 +154,7 @@ describe('adaptive VAD convergence', () => {
     assert.strictEqual(finalizeCount, 1);
     assert.ok(finalized !== null);
     assert.strictEqual(finalized.discarded, false);
-    assert.ok(harness.chunkCount > 0);
+    assert.strictEqual(harness.chunkCount, 1);
     assert.ok(onsetMs !== null);
     // The sim now credits actual head fill at first onset, not the old flat 500 ms pre-roll.
     assert.ok(harness.emittedTotalMs > 0);
@@ -899,12 +899,10 @@ describe('adaptive VAD convergence', () => {
     }
 
     assert.strictEqual(harness.reanchorEventCount, 0);
-    assert.ok(harness.chunkCount > 0);
+    assert.strictEqual(harness.chunkCount, 0);
     assert.strictEqual(harness.endpoint.state, 'speechActive');
-    const splitsBeforePause = events.filter(event => event.k === 'split');
-    assert.equal(splitsBeforePause.length, 2);
-    assert.ok(splitsBeforePause.every(event => event.r === 'split_gap' && event.es !== 'idle'),
-      JSON.stringify(splitsBeforePause));
+    const prematureEmissions = events.filter(event => event.k === 'emit' || event.k === 'split');
+    assert.equal(prematureEmissions.length, 0);
 
     let finalized = null;
     for (let i = 0; i < 400; i++) {
@@ -917,10 +915,10 @@ describe('adaptive VAD convergence', () => {
 
     assert.ok(finalized !== null);
     assert.strictEqual(finalized.discarded, false);
-    assert.strictEqual(harness.chunkCount, 3);
+    assert.strictEqual(harness.chunkCount, 1);
     assert.strictEqual(harness.endpoint.state, 'idle');
     const emittedChunks = events.filter(event => event.k === 'emit');
-    assert.equal(emittedChunks.length, 3);
+    assert.equal(emittedChunks.length, 1);
     assert.equal(harness.emittedSampleCount,
       emittedChunks.reduce((total, event) => total + event.n, 0));
     for (let index = 1; index < emittedChunks.length; index += 1) {

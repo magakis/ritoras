@@ -270,43 +270,33 @@ describe('gap-retention boundary policy', () => {
     );
   });
 
-  it('splits at a qualified low-energy gap and carries the later audio forward', () => {
+  it('retains a long active utterance until endpoint finalization', () => {
     const policy = new GapRetentionPolicy({
-      minSpeechSamples: 10,
-      minChunkSamples: 10,
-      maxChunkSamples: 100,
-      splitSearchSamples: 100,
-      minimumSplitSilenceSamples: 10,
+      minSpeechSamples: 300 * 16,
+      minChunkSamples: 300 * 16,
     });
-    appendFrame(policy, 0, 30, {
-      db: -20,
-      evidence: 'strong',
-      decision: 'start_utterance',
-      endpointState: 'speechActive',
-    });
-    appendFrame(policy, 30, 50);
-    const firstSplit = appendFrame(policy, 50, 100, {
-      db: -20,
-      evidence: 'continuing',
-      endpointState: 'speechActive',
+    const speechEndSample = 40 * 16_000;
+    for (let startSample = 0; startSample < speechEndSample; startSample += 1_600) {
+      appendFrame(policy, startSample, startSample + 1_600, {
+        db: -20,
+        evidence: startSample === 0 ? 'strong' : 'continuing',
+        decision: startSample === 0 ? 'start_utterance' : 'none',
+        endpointState: 'speechActive',
+      });
+    }
+
+    assert.equal(policy.chunks.length, 0);
+    assert.equal(policy.snapshot().pending.sampleCount, speechEndSample);
+
+    appendFrame(policy, speechEndSample, speechEndSample + 1_600, {
+      decision: 'finalize_endpoint',
+      endpointState: 'idle',
     });
 
-    assert.equal(firstSplit.split, true);
+    assert.equal(policy.chunks.length, 1);
     assert.deepEqual(
-      [policy.chunks[0].startSample, policy.chunks[0].endSample, policy.chunks[0].reason],
-      [0, 50, '30s-split-gap'],
+      [policy.chunks[0].startSample, policy.chunks[0].endSample],
+      [0, speechEndSample + 1_600],
     );
-    assert.equal(policy.chunks[0].finalizeSample, 100);
-    assert.equal(policy.snapshot().pending.startSample, 50);
-    appendFrame(policy, 100, 150, {
-      db: -20,
-      evidence: 'continuing',
-      endpointState: 'speechActive',
-    });
-    assert.deepEqual(
-      [policy.chunks[1].startSample, policy.chunks[1].endSample, policy.chunks[1].reason],
-      [50, 150, '30s-split-hardcut'],
-    );
-    assert.equal(policy.chunks[1].finalizeSample, 150);
   });
 });
