@@ -1,7 +1,7 @@
 import Foundation
 
-// Pure-logic endpoint decisions. Audio storage and pre-roll buffering remain
-// owned by StreamingAudioRecorder.
+// Pure-logic endpoint decisions; continuous audio retention remains owned by
+// StreamingAudioRecorder.
 
 enum StreamingEndpointEvidence: String {
     case strong
@@ -24,7 +24,7 @@ enum StreamingEndpointFinalizeKind: String {
 
 enum StreamingEndpointDecision {
     case none
-    case startUtterance(withPreRollSamples: Int)
+    case startUtterance
     case continueUtterance
     case finalizeUtterance(kind: StreamingEndpointFinalizeKind)
 }
@@ -35,15 +35,13 @@ struct StreamingEndpointConfiguration {
     let endpointSilenceSamples: Int
     let resumeSamples: Int
     let ambiguousRescueSamples: Int
-    let preRollSamples: Int
 
     init(
         onsetSamples: Int = 1_120,
         endEvidenceSamples: Int = 1_600,
         endpointSilenceSamples: Int = 11_200,
         resumeSamples: Int = 1_920,
-        ambiguousRescueSamples: Int = 5_120,
-        preRollSamples: Int = 14_400
+        ambiguousRescueSamples: Int = 5_120
     ) {
         let normalizedOnsetSamples = max(160, onsetSamples)
         let normalizedEndEvidenceSamples = max(160, endEvidenceSamples)
@@ -52,7 +50,6 @@ struct StreamingEndpointConfiguration {
         // are mutually exclusive, so endpoint silence wins before resume can accrue.
         let normalizedResumeSamples = max(160, resumeSamples)
         let normalizedAmbiguousRescueSamples = max(160, ambiguousRescueSamples)
-        let normalizedPreRollSamples = max(160, preRollSamples)
 
         self.onsetSamples = normalizedOnsetSamples
         self.endEvidenceSamples = min(
@@ -62,7 +59,6 @@ struct StreamingEndpointConfiguration {
         self.endpointSilenceSamples = normalizedEndpointSilenceSamples
         self.resumeSamples = normalizedResumeSamples
         self.ambiguousRescueSamples = normalizedAmbiguousRescueSamples
-        self.preRollSamples = normalizedPreRollSamples
     }
 }
 
@@ -145,11 +141,11 @@ final class StreamingEndpoint {
 
     private func beginUtterance() -> StreamingEndpointDecision {
         state = .speechActive
-        utteranceDurationSamples = configuration.preRollSamples + onsetEvidenceSamples
+        utteranceDurationSamples = onsetEvidenceSamples
         accumulatedSilenceSamples = 0
         resumeEvidenceSamples = 0
         ambiguousEvidenceSamples = 0
-        return .startUtterance(withPreRollSamples: configuration.preRollSamples)
+        return .startUtterance
     }
 
     private func processActive(

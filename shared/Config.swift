@@ -253,14 +253,6 @@ struct SharedConfig {
         static let streamVadLoudRiseDbPerSecDefault: Double = 12.0
         static let streamVadLoudDynamicsSpreadDbKey = "streamVadLoudDynamicsSpreadDb"
         static let streamVadLoudDynamicsSpreadDbDefault: Double = 9.0
-        static let streamVadLoudLatchMsKey = "streamVadLoudLatchMs"
-        static let streamVadLoudLatchMsDefault: Int = 400
-        static let streamVadLoudLatchAmbiguousEnabledKey = "streamVadLoudLatchAmbiguousEnabled"
-        static let streamVadLoudLatchAmbiguousEnabledDefault = false
-        static let streamVadLoudLatchWitnessDbKey = "streamVadLoudLatchWitnessDb"
-        static let streamVadLoudLatchWitnessDbDefault: Double = 3.0
-        static let streamVadLoudPreRollMsKey = "streamVadLoudPreRollMs"
-        static let streamVadLoudPreRollMsDefault: Int = 500
         static let streamVadLoudFlatSpreadDbKey = "streamVadLoudFlatSpreadDb"
         static let streamVadLoudFlatSpreadDbDefault: Double = 2.5
         static let streamVadLoudFlatTerminateSecondsKey = "streamVadLoudFlatTerminateSeconds"
@@ -275,8 +267,6 @@ struct SharedConfig {
         static let streamVadResumeMsDefault: Int = 120
         static let streamVadAmbiguousRescueMsKey = "streamVadAmbiguousRescueMs"
         static let streamVadAmbiguousRescueMsDefault: Int = 320
-        static let streamVadPreRollMsKey = "streamVadPreRollMs"
-        static let streamVadPreRollMsDefault: Int = 900
         static let streamVadAccumulatorSpillSamplesKey = "streamVadAccumulatorSpillSamples"
         static let streamVadAccumulatorSpillSamplesDefault: Int = 1_048_576
         static let streamVadAccumulatorCapEnabledKey = "streamVadAccumulatorCapEnabled"
@@ -285,7 +275,6 @@ struct SharedConfig {
         static let stalePendingJobSweepEnabledDefault = true
         static let stalePendingJobAgeLimit: TimeInterval = 7 * 24 * 60 * 60
         static let multipartBodyAgeLimit: TimeInterval = 7 * 24 * 60 * 60
-        static let sessionHeadBufferMsDefault: Int = 2500
         static let streamVadPauseProfileKey = "streamVadPauseProfile"
         static let streamVadPauseProfileDefault: VADPauseProfile = .balanced
         /// Enables the sample-count endpoint state machine for streaming VAD.
@@ -309,13 +298,13 @@ struct SharedConfig {
         static let streamVadHpfCutoffHzDefault: Double = 100.0
         static let streamVadAnalysisHpfEnabledKey = "streamVadAnalysisHpfEnabled"
         static let streamVadAnalysisHpfEnabledDefault = true
-        /// Minimum speech duration (ms) to accept a chunk.
+        /// Minimum speech evidence (ms) required before an endpoint finalize emits.
         static let streamVadMinSpeechMsKey = "streamVadMinSpeechMs"
         static let streamVadMinSpeechMsDefault: Int = 300
-        /// Minimum total chunk length (speech + silence, ms) before a chunk can be sent.
+        /// Minimum retained duration (ms) required before an endpoint finalize emits.
         static let streamVadMinChunkMsKey = "streamVadMinChunkMs"
         static let streamVadMinChunkMsDefault: Int = 300
-        /// Discard buffered audio if no speech is detected within this window (seconds).
+        /// Shed an entire idle buffer above this duration only when voice evidence is under 100 ms.
         static let streamVadMaxNoiseSecKey = "streamVadMaxNoiseSec"
         static let streamVadMaxNoiseSecDefault: Double = 6.0
         /// WebSocket connection timeout.
@@ -941,44 +930,6 @@ struct SharedConfig {
         return value.isFinite ? max(0, value) : Defaults.streamVadLoudDynamicsSpreadDbDefault
     }
 
-    static func streamVadLoudLatchMs() -> Int {
-        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return Defaults.streamVadLoudLatchMsDefault
-        }
-        let value = (defaults.object(
-            forKey: Defaults.streamVadLoudLatchMsKey
-        ) as? NSNumber)?.intValue ?? Defaults.streamVadLoudLatchMsDefault
-        return min(max(value, 1), 3_000)
-    }
-
-    static func streamVadLoudLatchAmbiguousEnabled() -> Bool {
-        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return Defaults.streamVadLoudLatchAmbiguousEnabledDefault
-        }
-        return (defaults.object(forKey: Defaults.streamVadLoudLatchAmbiguousEnabledKey) as? Bool)
-            ?? Defaults.streamVadLoudLatchAmbiguousEnabledDefault
-    }
-
-    static func streamVadLoudLatchWitnessDb() -> Double {
-        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return Defaults.streamVadLoudLatchWitnessDbDefault
-        }
-        let value = (defaults.object(
-            forKey: Defaults.streamVadLoudLatchWitnessDbKey
-        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadLoudLatchWitnessDbDefault
-        return value.isFinite ? max(0, value) : Defaults.streamVadLoudLatchWitnessDbDefault
-    }
-
-    static func streamVadLoudPreRollMs() -> Int {
-        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return Defaults.streamVadLoudPreRollMsDefault
-        }
-        let value = (defaults.object(
-            forKey: Defaults.streamVadLoudPreRollMsKey
-        ) as? NSNumber)?.intValue ?? Defaults.streamVadLoudPreRollMsDefault
-        return min(max(value, 100), 1_000)
-    }
-
     static func streamVadLoudFlatSpreadDb() -> Double {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
             return Defaults.streamVadLoudFlatSpreadDbDefault
@@ -1048,17 +999,6 @@ struct SharedConfig {
         let value = (defaults.object(
             forKey: Defaults.streamVadAmbiguousRescueMsKey
         ) as? NSNumber)?.intValue ?? Defaults.streamVadAmbiguousRescueMsDefault
-        return min(max(value, 100), 1_000)
-    }
-
-    /// Reads the endpoint pre-roll window (ms) from the App Group.
-    static func streamVadPreRollMs() -> Int {
-        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return Defaults.streamVadPreRollMsDefault
-        }
-        let value = (defaults.object(
-            forKey: Defaults.streamVadPreRollMsKey
-        ) as? NSNumber)?.intValue ?? Defaults.streamVadPreRollMsDefault
         return min(max(value, 100), 1_000)
     }
 
@@ -1247,8 +1187,7 @@ struct SharedConfig {
         )
     }
 
-    /// Reads the streaming VAD minimum speech duration (ms) from the App Group.
-    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Reads the minimum voice evidence (ms) required for endpoint emission.
     /// Returns the default (`300`) when the App Group is unavailable or the key is unset.
     static func streamVadMinSpeechMs() -> Int {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
@@ -1258,8 +1197,7 @@ struct SharedConfig {
             ?? Defaults.streamVadMinSpeechMsDefault
     }
 
-    /// Reads the streaming VAD minimum total chunk duration (ms) from the App Group.
-    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Reads the minimum retained duration (ms) required for endpoint emission.
     /// Returns the default (`300`) when the App Group is unavailable or the key is unset.
     static func streamVadMinChunkMs() -> Int {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
@@ -1269,8 +1207,7 @@ struct SharedConfig {
             ?? Defaults.streamVadMinChunkMsDefault
     }
 
-    /// Reads the streaming VAD max-noise discard window (seconds) from the App Group.
-    /// Used by the keyboard extension, which cannot link `AppSettings`.
+    /// Reads the maximum idle pending-buffer duration before the voiceless shed check.
     /// Returns the default (`6.0`) when the App Group is unavailable or the key is unset.
     static func streamVadMaxNoiseSec() -> Double {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {

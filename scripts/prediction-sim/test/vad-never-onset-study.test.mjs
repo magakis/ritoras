@@ -38,7 +38,6 @@ function runTrace(frames, {
       onsetMs: 70,
       endEvidenceMs: 100,
       endpointSilenceMs: 700,
-      preRollMs: 500,
     },
     gateConfig: {
       mode: 'adaptive',
@@ -74,14 +73,17 @@ function framesForTrace(fixture) {
 }
 
 describe('never-onset slow-path validation', () => {
-  it('overrides only normal deltas for quiet evaluation and preserves loud-regime caps', () => {
+  it('offers retained zero-onset audio at stop and preserves loud-regime caps', () => {
     const { session, baselineConfig, evaluationConfig } = createQuietProfileEvaluationFixture();
     const baseline = replaySession(session, baselineConfig, { compare: false });
     const evaluation = replaySession(session, evaluationConfig, { compare: false });
     const normalized = normalizeConfig(evaluationConfig);
 
-    assert.equal(baseline.events.some(event => event.k === 'emit'), false);
-    assert.equal(evaluation.events.filter(event => event.k === 'emit').length, 1);
+    assert.deepEqual(baseline.events.filter(event => event.k === 'emit').map(event => event.r), ['flush']);
+    assert.deepEqual(evaluation.events.filter(event => event.k === 'emit').map(event => event.r), [
+      'endpoint',
+      'flush',
+    ]);
     assert.equal(evaluationConfig.strongDeltaDb, 7);
     assert.equal(evaluationConfig.continuationDeltaDb, 4);
     assert.equal(normalized.config.loudRegimeEnterDb, -35);

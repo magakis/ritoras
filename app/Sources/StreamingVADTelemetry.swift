@@ -133,10 +133,10 @@ final class StreamingVADTelemetry: @unchecked Sendable, VADTelemetrySink, VADTel
                 var item: [String: Any] = ["q": frame.seq, "dt": frame.frameDuration, "db": frame.frameDb,
                     "e": frame.evidence, "sp": frame.isSpeech, "fc": frame.floorConverged,
                     "th": frame.strongThresholdDb, "ct": frame.continuationThresholdDb,
-                    "st": frame.silenceThresholdDb, "ps": frame.endpointPreviousState,
-                    "es": frame.endpointState, "d": frame.endpointDecision,
-                    "ss": frame.decisionSilenceSamples, "us": frame.utteranceDurationSamples,
-                    "ls": frame.latchStreakMs, "ll": frame.latchLatched, "lr": frame.isLoudRegime]
+                     "st": frame.silenceThresholdDb, "ps": frame.endpointPreviousState,
+                     "es": frame.endpointState, "d": frame.endpointDecision,
+                     "ss": frame.decisionSilenceSamples, "us": frame.utteranceDurationSamples,
+                     "lr": frame.isLoudRegime]
                 if let floorDb = frame.floorDb { item["fl"] = floorDb }
                 if let spread = frame.dynamicsSpreadDb { item["dy"] = spread }
                 return item
@@ -154,10 +154,10 @@ final class StreamingVADTelemetry: @unchecked Sendable, VADTelemetrySink, VADTel
                 var item: [String: Any] = ["q": frame.seq, "dt": frame.frameDuration, "db": frame.frameDb,
                     "e": frame.evidence, "sp": frame.isSpeech, "fc": frame.floorConverged,
                     "th": frame.strongThresholdDb, "ct": frame.continuationThresholdDb,
-                    "st": frame.silenceThresholdDb, "ps": frame.endpointPreviousState,
-                    "es": frame.endpointState, "d": frame.endpointDecision,
-                    "ss": frame.decisionSilenceSamples, "us": frame.utteranceDurationSamples,
-                    "ls": frame.latchStreakMs, "ll": frame.latchLatched, "lr": frame.isLoudRegime]
+                     "st": frame.silenceThresholdDb, "ps": frame.endpointPreviousState,
+                     "es": frame.endpointState, "d": frame.endpointDecision,
+                     "ss": frame.decisionSilenceSamples, "us": frame.utteranceDurationSamples,
+                     "lr": frame.isLoudRegime]
                 if let floorDb = frame.floorDb { item["fl"] = floorDb }
                 if let spread = frame.dynamicsSpreadDb { item["dy"] = spread }
                 return item

@@ -91,18 +91,14 @@ describe('adaptive VAD absolute speech guard', () => {
       const events = [];
       const harness = makeRecorderHarness({ endpointSilenceMs: 700, onEvent: event => events.push(event) });
       const speechFrames = 150;
-      let onsetAtMs = null;
 
       for (let i = 0; i < speechFrames; i++) {
         const frameDb = i % 8 === 0
           ? (ambientDb > -50 ? ambientDb : -42)
           : -30;
-        const frame = harness.drive(frameDb);
-        if (harness.accumulatorSamples > 0 && onsetAtMs === null) {
-          onsetAtMs = (i + 1) * FRAME_MS;
-        }
+        harness.drive(frameDb);
       }
-      assert.ok(onsetAtMs !== null && onsetAtMs >= 450);
+      assert.equal(harness.chunkStartSessionSamples, 0);
 
       let finalized = false;
       for (let i = 0; i < 100; i++) {
@@ -115,8 +111,7 @@ describe('adaptive VAD absolute speech guard', () => {
       assert.strictEqual(finalized, true);
       assert.strictEqual(harness.chunkCount, 1);
       assert.ok(events.find(event => event.k === 'emit')?.s0 <= 0);
-      assert.ok(harness.headPrependedAtOnset >= onsetAtMs * 16 - FRAME_MS * 16);
-      assert.ok(Math.abs(harness.emittedTotalMs - (speechFrames * FRAME_MS + 400)) <= 50);
+      assert.ok(Math.abs(harness.emittedTotalMs - (speechFrames * FRAME_MS + 700)) <= 50);
       assert.strictEqual(harness.endpoint.state, 'idle');
     }
   });

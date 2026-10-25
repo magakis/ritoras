@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {
   makeRecorderHarness,
   VAD_MIN_SILENCE_AT_SPLIT_SAMPLES,
-  VAD_POST_ROLL_SAMPLES,
   VAD_SPLIT_SEARCH_SAMPLES,
 } from '../lib/recorder-sim.mjs';
 
@@ -75,7 +74,6 @@ describe('recorder max-chunk splitting', () => {
     const harness = makeRecorderHarness({
       frameMs: 10,
       endpointSilenceMs: 3_000,
-      headBufferSamples: 0,
       gateConfig: { mode: 'static', staticRms: 0.025 },
       recorderConfig: {
         maxChunkSamples: 13_000,
@@ -98,7 +96,6 @@ describe('recorder max-chunk splitting', () => {
     const harness = makeRecorderHarness({
       frameMs: 10,
       endpointSilenceMs: 3_000,
-      headBufferSamples: 0,
       gateConfig: { mode: 'static', staticRms: 0.025 },
       recorderConfig: {
         maxChunkSamples: 6_880,
@@ -116,7 +113,7 @@ describe('recorder max-chunk splitting', () => {
     assert.notEqual(harness.endpoint.state, 'idle');
   });
 
-  it('caps endpoint post-roll at 400ms while stop flush retains its full trailing audio', () => {
+  it('emits the complete endpoint block while stop flush retains its full tail', () => {
     const pauseEvents = [];
     const pauseHarness = makeRecorderHarness({
       frameMs: 10,
@@ -128,8 +125,7 @@ describe('recorder max-chunk splitting', () => {
     const pauseEmit = pauseEvents.find(event => event.k === 'emit');
     assert.ok(pauseEmit);
     assert.equal(pauseEmit.r, 'endpoint');
-    assert.equal(pauseEmit.n, 3_400 * 16);
-    assert.equal(pauseHarness.lastUntrimmedEmitSampleCount - pauseEmit.n, 600 * 16);
+    assert.equal(pauseEmit.n, 4_000 * 16);
     assert.equal(pauseEmit.n, pauseEmit.tm * 16);
 
     const flushEvents = [];
@@ -171,10 +167,9 @@ describe('recorder max-chunk splitting', () => {
     assert.equal(emission.n, 3_800 * 16);
     assert.equal(emission.s0, 0);
     assert.equal(emission.s1, 3_800);
-    assert.equal(harness.lastUntrimmedEmitSampleCount, emission.n);
   });
 
-  it('caps endpoint post-roll after carrying a trailing silence suffix through a split', () => {
+  it('carries split audio and retains the complete trailing endpoint silence', () => {
     const events = [];
     const harness = makeRecorderHarness({
       frameMs: 10,
@@ -195,8 +190,9 @@ describe('recorder max-chunk splitting', () => {
     assert.equal(split.r, 'split_gap');
     assert.equal(split.s1, 29_800);
     assert.ok(endpointEmission);
-    assert.equal(endpointEmission.s1, 30_350);
-    assert.equal(harness.lastUntrimmedEmitSampleCount - endpointEmission.n, 2_600 * 16);
+    assert.equal(endpointEmission.s0, split.s1);
+    assert.equal(endpointEmission.s1, 32_950);
+    assert.equal(endpointEmission.n, 3_150 * 16);
   });
 
   it('applies the same split policy to synthesized and real chunk starts', () => {
@@ -205,7 +201,6 @@ describe('recorder max-chunk splitting', () => {
       const harness = makeRecorderHarness({
         frameMs: 10,
         endpointSilenceMs: 1_000,
-        headBufferSamples: 0,
         recorderConfig: {
           maxChunkSamples: 8_000,
           splitSearchSamples: 3_200,
@@ -230,7 +225,7 @@ describe('recorder max-chunk splitting', () => {
     const harness = makeRecorderHarness();
     assert.equal(harness.splitSearchSamples, VAD_SPLIT_SEARCH_SAMPLES);
     assert.equal(harness.minimumSplitSilenceSamples, VAD_MIN_SILENCE_AT_SPLIT_SAMPLES);
-    assert.equal(harness.postRollSamples, VAD_POST_ROLL_SAMPLES);
-    assert.ok(harness.splitEnergySamples <= harness.splitSearchSamples);
+    assert.equal(harness.retentionPolicy.splitSearchSamples, VAD_SPLIT_SEARCH_SAMPLES);
+    assert.equal(harness.retentionPolicy.minimumSplitSilenceSamples, VAD_MIN_SILENCE_AT_SPLIT_SAMPLES);
   });
 });

@@ -31,7 +31,6 @@ describe('StreamingEndpoint', () => {
       endpointSilenceMs: 450,
       resumeMs: 1,
       ambiguousRescueMs: 1,
-      preRollMs: 1,
     });
 
     assert.strictEqual(configuration.onsetSamples, 160);
@@ -39,7 +38,6 @@ describe('StreamingEndpoint', () => {
     assert.strictEqual(configuration.endpointSilenceSamples, 450 * 16);
     assert.strictEqual(configuration.resumeSamples, 160);
     assert.strictEqual(configuration.ambiguousRescueSamples, 160);
-    assert.strictEqual(configuration.preRollSamples, 160);
   });
 
   it('applies the ten-millisecond floor to direct sample configuration', () => {
@@ -49,7 +47,6 @@ describe('StreamingEndpoint', () => {
       endpointSilenceSamples: 2,
       resumeSamples: 3,
       ambiguousRescueSamples: 4,
-      preRollSamples: 5,
     });
 
     assert.deepStrictEqual(
@@ -59,7 +56,6 @@ describe('StreamingEndpoint', () => {
         endpointSilence: configuration.endpointSilenceSamples,
         resume: configuration.resumeSamples,
         rescue: configuration.ambiguousRescueSamples,
-        preRoll: configuration.preRollSamples,
       },
       {
         onset: 160,
@@ -67,7 +63,6 @@ describe('StreamingEndpoint', () => {
         endpointSilence: 160,
         resume: 160,
         rescue: 160,
-        preRoll: 160,
       },
     );
   });
@@ -237,14 +232,13 @@ describe('StreamingEndpoint', () => {
     assert.ok(gate.snapshot.floorDb < initialFloor);
   });
 
-  it('requires about 70ms of strong onset and requests 900ms of pre-roll', () => {
+  it('requires about 70ms of strong onset', () => {
     const endpoint = new StreamingEndpoint();
     for (let i = 0; i < 6; i++) {
       assert.strictEqual(feed(endpoint, E.strong, 10).type, 'none');
     }
     const decision = feed(endpoint, E.strong, 10);
     assert.strictEqual(decision.type, 'startUtterance');
-    assert.strictEqual(decision.withPreRollSamples, 14_400);
   });
 
   it('silence still finalizes after the full endpoint duration', () => {

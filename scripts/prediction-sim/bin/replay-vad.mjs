@@ -33,7 +33,6 @@ export const SHIPPING_SESSION_CONFIG = Object.freeze({
   endpointSilenceMs: 700,
   endpointResumeMs: 120,
   endpointAmbiguousRescueMs: 320,
-  endpointPreRollMs: 900,
   silenceMs: 700,
   minSpeechMs: 300,
   minChunkMs: 300,
@@ -50,29 +49,16 @@ export const SHIPPING_SESSION_CONFIG = Object.freeze({
   loudSilenceDeltaDb: 2,
   loudDynamicsSpreadDb: 9,
   loudRiseDbPerSec: 12,
-  quietLatchMs: 1000,
-  quietLatchWitnessDb: 3.0,
-  quietLatchWitnessEnabled: false,
-  quietLatchDutyCycle: 1.0,
-  quietLatchAmbiguousEnabled: false,
   quietRiseCapAppliesToAmbiguous: false,
   quietRiseCapWitnessDb: 3.0,
   quietContinuationRiseCapDbPerSec: 12.0,
-  softOnsetPreRollMs: 500,
-  softOnsetPreRollEnabled: false,
   slowOnsetEnabled: false,
   slowOnsetDeltaDb: 6,
   slowOnsetEvidenceMs: 400,
   slowOnsetWindowSeconds: 1.5,
-  loudLatchMs: 400,
-  loudLatchAmbiguousEnabled: false,
-  loudLatchWitnessDb: 3,
-  latchAmbiguousGraceMs: 0,
-  dynamicsWitnessDb: null,
   loudFlatTerminateEnabled: false,
   loudFlatSpreadDb: 2.5,
   loudFlatTerminateSeconds: 3,
-  loudPreRollMs: 500,
 });
 
 export const DEFAULT_SESSION_CONFIG = Object.freeze({
@@ -266,13 +252,6 @@ export function normalizeConfig(rawConfig = {}) {
     throw new Error(`mode must be static or adaptive; got ${raw.mode}`);
   }
 
-  // The sweep knob lowers the shared normal/loud dynamics spread gate; the
-  // separate 3 dB loudLatchWitnessDb remains at its current value.
-  const dynamicsWitnessDb = raw.dynamicsWitnessDb === null
-    || raw.dynamicsWitnessDb === undefined
-    ? null
-    : asFiniteNumber(raw.dynamicsWitnessDb, 'dynamicsWitnessDb');
-
   const gateConfig = makeVadGateConfig({
     mode: raw.mode,
     adaptiveDeltaDb: asFiniteNumber(raw.strongDeltaDb, 'strongDeltaDb'),
@@ -282,10 +261,7 @@ export function normalizeConfig(rawConfig = {}) {
     ),
     adaptiveContinuationDeltaDb: asFiniteNumber(raw.continuationDeltaDb, 'continuationDeltaDb'),
     adaptiveSilenceDeltaDb: asFiniteNumber(raw.silenceDeltaDb, 'silenceDeltaDb'),
-    adaptiveDynamicsSpreadDb: asFiniteNumber(
-      dynamicsWitnessDb ?? raw.dynamicsSpreadDb,
-      dynamicsWitnessDb === null ? 'dynamicsSpreadDb' : 'dynamicsWitnessDb',
-    ),
+    adaptiveDynamicsSpreadDb: asFiniteNumber(raw.dynamicsSpreadDb, 'dynamicsSpreadDb'),
     adaptiveFlatSpreadDb: asFiniteNumber(raw.flatSpreadDb, 'flatSpreadDb'),
     adaptiveDynamicsEnabled: Boolean(raw.dynamicsEnabled),
     adaptiveStaleFloorSeconds: asFiniteNumber(raw.staleFloorSeconds, 'staleFloorSeconds'),
@@ -299,10 +275,7 @@ export function normalizeConfig(rawConfig = {}) {
     loudStrongDeltaDb: asFiniteNumber(raw.loudStrongDeltaDb, 'loudStrongDeltaDb'),
     loudContinuationDeltaDb: asFiniteNumber(raw.loudContinuationDeltaDb, 'loudContinuationDeltaDb'),
     loudSilenceDeltaDb: asFiniteNumber(raw.loudSilenceDeltaDb, 'loudSilenceDeltaDb'),
-    loudDynamicsSpreadDb: asFiniteNumber(
-      dynamicsWitnessDb ?? raw.loudDynamicsSpreadDb,
-      dynamicsWitnessDb === null ? 'loudDynamicsSpreadDb' : 'dynamicsWitnessDb',
-    ),
+    loudDynamicsSpreadDb: asFiniteNumber(raw.loudDynamicsSpreadDb, 'loudDynamicsSpreadDb'),
     loudRiseDbPerSec: asFiniteNumber(raw.loudRiseDbPerSec, 'loudRiseDbPerSec'),
     quietContinuationRiseCapDbPerSec: asFiniteNumber(
       raw.quietContinuationRiseCapDbPerSec,
@@ -317,7 +290,6 @@ export function normalizeConfig(rawConfig = {}) {
     endpointSilenceMs,
     resumeMs: asFiniteNumber(raw.endpointResumeMs, 'endpointResumeMs'),
     ambiguousRescueMs: asFiniteNumber(raw.endpointAmbiguousRescueMs, 'endpointAmbiguousRescueMs'),
-    preRollMs: asFiniteNumber(raw.endpointPreRollMs, 'endpointPreRollMs'),
   }));
   const minimum = key => Math.max(0, Math.floor(asFiniteNumber(raw[key], key) * 16));
   const maxNoiseSamples = Math.max(0, Math.floor(
@@ -331,7 +303,6 @@ export function normalizeConfig(rawConfig = {}) {
     silenceDeltaDb: gate.effectiveSilenceDeltaDb,
     dynamicsSpreadDb: gate.effectiveDynamicsSpreadDb,
     loudDynamicsSpreadDb: gate.config.loudDynamicsSpreadDb,
-    dynamicsWitnessDb: dynamicsWitnessDb ?? gate.effectiveDynamicsSpreadDb,
     flatSpreadDb: gate.effectiveFlatSpreadDb,
     dynamicsEnabled: gate.config.adaptiveDynamicsEnabled,
     staleFloorSeconds: gate.effectiveStaleFloorSeconds,
@@ -343,28 +314,15 @@ export function normalizeConfig(rawConfig = {}) {
     endpointSilenceMs: endpoint.configuration.endpointSilenceSamples / 16,
     endpointResumeMs: endpoint.configuration.resumeSamples / 16,
     endpointAmbiguousRescueMs: endpoint.configuration.ambiguousRescueSamples / 16,
-    endpointPreRollMs: endpoint.configuration.preRollSamples / 16,
     silenceMs: endpoint.configuration.endpointSilenceSamples / 16,
     minSpeechMs: minimum('minSpeechMs') / 16,
     minChunkMs: minimum('minChunkMs') / 16,
     maxNoiseSec: maxNoiseSamples / 16000,
-    loudPreRollMs: asFiniteNumber(raw.loudPreRollMs, 'loudPreRollMs'),
-    loudLatchMs: asFiniteNumber(raw.loudLatchMs, 'loudLatchMs'),
-    loudLatchAmbiguousEnabled: Boolean(raw.loudLatchAmbiguousEnabled),
-    loudLatchWitnessDb: asFiniteNumber(raw.loudLatchWitnessDb, 'loudLatchWitnessDb'),
     loudFlatTerminateEnabled: Boolean(raw.loudFlatTerminateEnabled),
     loudFlatSpreadDb: asFiniteNumber(raw.loudFlatSpreadDb, 'loudFlatSpreadDb'),
     loudFlatTerminateSeconds: asFiniteNumber(raw.loudFlatTerminateSeconds, 'loudFlatTerminateSeconds'),
-    quietLatchMs: asFiniteNumber(raw.quietLatchMs, 'quietLatchMs'),
-    quietLatchWitnessDb: asFiniteNumber(raw.quietLatchWitnessDb, 'quietLatchWitnessDb'),
-    quietLatchWitnessEnabled: Boolean(raw.quietLatchWitnessEnabled),
-    quietLatchDutyCycle: asFiniteNumber(raw.quietLatchDutyCycle, 'quietLatchDutyCycle'),
-    quietLatchAmbiguousEnabled: Boolean(raw.quietLatchAmbiguousEnabled),
-    latchAmbiguousGraceMs: Math.max(0, asFiniteNumber(raw.latchAmbiguousGraceMs, 'latchAmbiguousGraceMs')),
     quietRiseCapAppliesToAmbiguous: Boolean(raw.quietRiseCapAppliesToAmbiguous),
     quietRiseCapWitnessDb: asFiniteNumber(raw.quietRiseCapWitnessDb, 'quietRiseCapWitnessDb'),
-    softOnsetPreRollMs: asFiniteNumber(raw.softOnsetPreRollMs, 'softOnsetPreRollMs'),
-    softOnsetPreRollEnabled: Boolean(raw.softOnsetPreRollEnabled),
     slowOnsetEnabled: Boolean(raw.slowOnsetEnabled),
     slowOnsetDeltaDb: asFiniteNumber(raw.slowOnsetDeltaDb, 'slowOnsetDeltaDb'),
     slowOnsetEvidenceMs: asFiniteNumber(raw.slowOnsetEvidenceMs, 'slowOnsetEvidenceMs'),
@@ -374,28 +332,15 @@ export function normalizeConfig(rawConfig = {}) {
     ),
   };
   return { config: normalized, endpoint, gateConfig, minSpeechSamples: minimum('minSpeechMs'), minChunkSamples: minimum('minChunkMs'), maxNoiseSamples, recorderConfig: {
-    loudPreRollMs: normalized.loudPreRollMs,
-    loudLatchMs: normalized.loudLatchMs,
-    loudLatchAmbiguousEnabled: normalized.loudLatchAmbiguousEnabled,
-    loudLatchWitnessDb: normalized.loudLatchWitnessDb,
     loudFlatTerminateEnabled: normalized.loudFlatTerminateEnabled,
     loudFlatSpreadDb: normalized.loudFlatSpreadDb,
     loudFlatTerminateSeconds: normalized.loudFlatTerminateSeconds,
-    quietLatchMs: normalized.quietLatchMs,
-    quietLatchWitnessDb: normalized.quietLatchWitnessDb,
-    quietLatchWitnessEnabled: normalized.quietLatchWitnessEnabled,
-    quietLatchDutyCycle: normalized.quietLatchDutyCycle,
-    quietLatchAmbiguousEnabled: normalized.quietLatchAmbiguousEnabled,
-    latchAmbiguousGraceMs: normalized.latchAmbiguousGraceMs,
     quietRiseCapAppliesToAmbiguous: normalized.quietRiseCapAppliesToAmbiguous,
     quietRiseCapWitnessDb: normalized.quietRiseCapWitnessDb,
-    softOnsetPreRollMs: normalized.softOnsetPreRollMs,
-    softOnsetPreRollEnabled: normalized.softOnsetPreRollEnabled,
     slowOnsetEnabled: normalized.slowOnsetEnabled,
     slowOnsetDeltaDb: normalized.slowOnsetDeltaDb,
     slowOnsetEvidenceMs: normalized.slowOnsetEvidenceMs,
     slowOnsetWindowSeconds: normalized.slowOnsetWindowSeconds,
-    dynamicsWitnessDb: normalized.dynamicsWitnessDb,
   } };
 }
 
@@ -729,7 +674,6 @@ export function replaySession(session, configInput = session.config, {
     meanOnsetLatencySeconds: labelMetrics.meanOnsetLatencySeconds,
     terminatorActivationCount: generatedEvents.filter(event =>
       event.k === 'flat_terminate' || event.k === 'loud_flat_terminate').length,
-    latchMissingDynamicsWitnessCount: harness.latchMissingDynamicsWitnessCount,
   };
   const recordedFrames = session.recordedFrames ?? session.frames;
   const divergence = compare && !fromWav

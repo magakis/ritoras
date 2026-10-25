@@ -1,5 +1,5 @@
 // Pure-logic JS mirror of shared/StreamingEndpoint.swift. This module owns
-// timing decisions only; the recorder owns audio buffers and pre-roll storage.
+// endpoint timing only; the recorder owns continuous audio retention.
 
 export const STREAM_ENDPOINT_SILENCE_MS = 700;
 
@@ -7,7 +7,6 @@ export const STREAM_ENDPOINT_ONSET_SAMPLES = 1120;
 export const STREAM_ENDPOINT_END_EVIDENCE_SAMPLES = 1600;
 export const STREAM_ENDPOINT_RESUME_SAMPLES = 1920;
 export const STREAM_ENDPOINT_AMBIGUOUS_RESCUE_SAMPLES = 5120;
-export const STREAM_ENDPOINT_PREROLL_SAMPLES = 14_400;
 const STREAM_ENDPOINT_MIN_SAMPLES = 160;
 
 export const StreamingEndpointEvidence = Object.freeze({
@@ -36,14 +35,12 @@ export function makeStreamingEndpointConfig(partial = {}) {
     endpointSilenceSamples: STREAM_ENDPOINT_SILENCE_MS * 16,
     resumeSamples: STREAM_ENDPOINT_RESUME_SAMPLES,
     ambiguousRescueSamples: STREAM_ENDPOINT_AMBIGUOUS_RESCUE_SAMPLES,
-    preRollSamples: STREAM_ENDPOINT_PREROLL_SAMPLES,
     ...(partial ?? {}),
   };
   const millisecondFields = [
     ['onsetMs', 'onsetSamples'],
     ['endEvidenceMs', 'endEvidenceSamples'],
     ['endpointSilenceMs', 'endpointSilenceSamples'],
-    ['preRollMs', 'preRollSamples'],
   ];
   for (const [millisecondsKey, samplesKey] of millisecondFields) {
     if (partial?.[millisecondsKey] !== undefined) {
@@ -91,7 +88,6 @@ export function makeStreamingEndpointConfig(partial = {}) {
     STREAM_ENDPOINT_MIN_SAMPLES,
     config.ambiguousRescueSamples,
   );
-  config.preRollSamples = Math.max(STREAM_ENDPOINT_MIN_SAMPLES, config.preRollSamples);
   return config;
 }
 
@@ -163,14 +159,11 @@ export class StreamingEndpoint {
 
   beginUtterance() {
     this.state = StreamingEndpointState.speechActive;
-    this.utteranceDurationSamples = this.configuration.preRollSamples + this.onsetEvidenceSamples;
+    this.utteranceDurationSamples = this.onsetEvidenceSamples;
     this.accumulatedSilenceSamples = 0;
     this.resumeEvidenceSamples = 0;
     this.ambiguousEvidenceSamples = 0;
-    return {
-      type: 'startUtterance',
-      withPreRollSamples: this.configuration.preRollSamples,
-    };
+    return { type: 'startUtterance' };
   }
 
   processActive(evidence, durationSamples) {

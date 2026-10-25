@@ -1,24 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import { makeRecorderHarness as makeRecorderHarnessBase } from '../lib/recorder-sim.mjs';
 import { VADThresholdGate, makeVadGateConfig as makeVadGateConfigBase } from '../lib/vad-gate.mjs';
-import { parseSession, replaySession } from '../bin/replay-vad.mjs';
-
-const DEFAULT_QUIET_CONFIG = {
-  strongDeltaDb: 10,
-  continuationDeltaDb: 6,
-  quietLatchMs: 1000,
-  quietLatchWitnessDb: 3,
-  quietLatchWitnessEnabled: false,
-  quietLatchDutyCycle: 1,
-  quietLatchAmbiguousEnabled: false,
-  quietRiseCapAppliesToAmbiguous: false,
-  quietRiseCapWitnessDb: 3,
-  quietContinuationRiseCapDbPerSec: 12,
-  softOnsetPreRollMs: 500,
-  softOnsetPreRollEnabled: false,
-};
 
 // These mechanics fixtures were calibrated against the pre-change 10/6 gate.
 function makeVadGateConfig(partial = {}) {
@@ -29,48 +11,7 @@ function makeVadGateConfig(partial = {}) {
   });
 }
 
-function makeRecorderHarness(options = {}) {
-  return makeRecorderHarnessBase({
-    ...options,
-    gateConfig: {
-      adaptiveDeltaDb: 10,
-      adaptiveContinuationDeltaDb: 6,
-      ...options.gateConfig,
-    },
-  });
-}
-
-function fixture(filename) {
-  return fs.readFileSync(new URL(`../fixtures/vad-telemetry/${filename}`, import.meta.url), 'utf8');
-}
-
-function quietHarness({ dutyCycle, frameMs = 100 } = {}) {
-  const events = [];
-  const frames = [];
-  const harness = makeRecorderHarness({
-    frameMs,
-    endpointSilenceMs: 2000,
-    gateConfig: { loudRegimeEnabled: false },
-    recorderConfig: {
-      quietLatchMs: 1000,
-      quietLatchWitnessDb: 3,
-      quietLatchWitnessEnabled: true,
-      quietLatchDutyCycle: dutyCycle ?? 0.6,
-      quietLatchAmbiguousEnabled: false,
-    },
-    onEvent: event => events.push(event),
-    onFrame: frame => frames.push(frame),
-  });
-  for (let index = 0; index < (frameMs === 100 ? 30 : 300); index += 1) {
-    harness.drive(-52, frameMs / 1000);
-  }
-  harness.gate.floorDb = -52;
-  harness.gate.isLoudRegime = false;
-  harness.gate.updateFloorTracking = () => {};
-  return { harness, events, frames };
-}
-
-describe('quiet-path VAD mirror knobs', () => {
+describe('quiet-path VAD floor behavior', () => {
   it('keeps the quiet continuation rise cap at the former 12 dB/s default', () => {
     const defaults = new VADThresholdGate(makeVadGateConfig({ mode: 'adaptive' }));
     assert.equal(defaults.config.quietContinuationRiseCapDbPerSec, 12);
@@ -133,30 +74,6 @@ describe('quiet-path VAD mirror knobs', () => {
     assert.equal(output.evidence, 'silence');
   });
 
-  it('keeps default-off decisions and emissions invariant across telemetry fixtures', () => {
-    const filenames = [
-      'E31F3FEF-15A6-467B-AF05-7C7D7D9ACD06-vad.jsonl',
-      'EF51BED5-74A4-4D34-A643-D270191219DB-vad.jsonl',
-      '0091E171-E047-4908-8E6A-1AA5400785C3-vad.jsonl',
-    ];
-    for (const filename of filenames) {
-      const session = parseSession(fixture(filename));
-      const mechanicsConfig = {
-        ...session.config,
-        strongDeltaDb: 10,
-        continuationDeltaDb: 6,
-      };
-      const baseline = replaySession(session, mechanicsConfig, { compare: false });
-      const configured = replaySession(session, {
-        ...mechanicsConfig,
-        ...DEFAULT_QUIET_CONFIG,
-      }, { compare: false });
-      assert.deepEqual(configured.frames, baseline.frames, filename);
-      assert.deepEqual(configured.events.filter(event => event.k !== 'session_start'),
-        baseline.events.filter(event => event.k !== 'session_start'), filename);
-    }
-  });
-
   it('keeps a speech-shaped Tele1 whisper margin under the configured rise cap', () => {
     function floorAfter(capDbPerSecond) {
       const gate = new VADThresholdGate(makeVadGateConfig({
@@ -202,68 +119,4 @@ describe('quiet-path VAD mirror knobs', () => {
     assert.ok(Math.abs(floorAfter({ applies: true, witness: 2, spread: 2.5, cap: 3 }) - -49.7) < 0.001);
   });
 
-  it('bridges one 108 ms breath hiccup at duty 0.6 but not duty 1.0', () => {
-    function driveBreathBridge(dutyCycle) {
-      const { harness, events } = quietHarness({ dutyCycle });
-      for (let index = 0; index < 8; index += 1) harness.drive(-42.5, 0.1);
-      harness.drive(-80, 0.108);
-      for (let index = 0; index < 2; index += 1) harness.drive(-42.5, 0.1);
-      return events.some(event => event.k === 'start_utterance' && event.softOnset === true);
-    }
-
-    assert.equal(driveBreathBridge(0.6), true);
-    assert.equal(driveBreathBridge(1.0), false);
-  });
-
-  it('rejects sparse continuing bursts below the configured duty cycle', () => {
-    const { harness, frames } = quietHarness({ dutyCycle: 0.6 });
-    let frameIndex = 0;
-    for (let cycle = 0; cycle < 20; cycle += 1) {
-      const continuing = harness.drive(-42.5, 0.1);
-      assert.equal(continuing.output.evidence, 'continuing');
-      frameIndex += 1;
-      for (let silence = 0; silence < 4; silence += 1) {
-        harness.drive(-80, 0.1);
-        frameIndex += 1;
-      }
-    }
-    assert.equal(frames.some(frame => frame.ll), false);
-    assert.equal(harness.endpoint.state, 'idle');
-    assert.ok(frameIndex > 0);
-  });
-
-  it('uses the soft-onset pre-roll only for quiet latch-mediated starts', () => {
-    function startSampleCount(enabled) {
-      const events = [];
-      const harness = makeRecorderHarness({
-        frameMs: 100,
-        endpointSilenceMs: 2000,
-        endpointConfig: { onsetMs: 70, preRollMs: 100 },
-        gateConfig: { loudRegimeEnabled: false },
-        recorderConfig: {
-          loudPreRollMs: 100,
-          quietLatchWitnessEnabled: true,
-          quietLatchMs: 1000,
-          quietLatchDutyCycle: 0.6,
-          softOnsetPreRollMs: 900,
-          softOnsetPreRollEnabled: enabled,
-        },
-        onEvent: event => events.push(event),
-      });
-      for (let index = 0; index < 30; index += 1) harness.drive(-52, 0.1);
-      harness.headLive = false;
-      harness.gate.floorDb = -52;
-      harness.gate.isLoudRegime = false;
-      harness.gate.updateFloorTracking = () => {};
-      for (let index = 0; index < 20; index += 1) harness.drive(-42.5, 0.1);
-      const start = events.find(event => event.k === 'start_utterance');
-      return { samples: start?.n, softOnset: start?.softOnset === true };
-    }
-
-    const normal = startSampleCount(false);
-    const soft = startSampleCount(true);
-    assert.equal(normal.softOnset, true);
-    assert.equal(soft.softOnset, true);
-    assert.ok(soft.samples > normal.samples + 5000);
-  });
 });

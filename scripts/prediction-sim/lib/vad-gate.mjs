@@ -7,7 +7,6 @@ export const VAD_STATIC_CONTINUATION_OFFSET_DB = 4.0;
 export const VAD_STATIC_SILENCE_OFFSET_DB = 6.0;
 export const VAD_ELEVATED_RISE_DB_PER_SECOND = 12.0;
 export const VAD_SPEECH_CEILING_MARGIN_DB = 2.0;
-export const VAD_SUSTAINED_CONTINUING_ONSET_S = 0.3;
 // Keep the end-floor correction bounded until the residual post-finalize bump decays.
 const VAD_UTTERANCE_END_FLOOR_RESEED_MAX_DROP_DB = 4.0;
 const VAD_UTTERANCE_END_FLOOR_RISE_HOLD_S = 1.2;

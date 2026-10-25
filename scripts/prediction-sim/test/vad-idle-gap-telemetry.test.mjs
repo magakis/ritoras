@@ -11,7 +11,6 @@ function makeHarness(events) {
       onsetMs: 70,
       endEvidenceMs: 100,
       endpointSilenceMs: 700,
-      preRollMs: 500,
     },
     gateConfig: {
       mode: 'adaptive',

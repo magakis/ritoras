@@ -8,7 +8,7 @@ function run(harness, levels) {
 }
 
 describe('recorder-layer adaptive VAD priming', () => {
-  it('rejects the 152356 burst entirely inside priming with one priming-window discard', () => {
+  it('retains audio captured before adaptive priming completes', () => {
     const events = [];
     const harness = makeRecorderHarness({
       frameMs: 10,
@@ -16,12 +16,15 @@ describe('recorder-layer adaptive VAD priming', () => {
       onEvent: event => events.push(event),
     });
     run(harness, [...Array(14).fill(-70), ...Array(20).fill(-43), ...Array(20).fill(-80)]);
-    assert.equal(harness.chunkCount, 0);
-    assert.equal(events.filter(event => event.k === 'emit').length, 0);
-    assert.equal(events.filter(event => event.k === 'discard' && event.r === 'priming_window').length, 1);
+    harness.flush();
+
+    assert.equal(events.some(event => event.r === 'priming_window'), false);
+    assert.ok(harness.emittedSampleCount + harness.shedSampleCount
+      + harness.tailFloorSampleCount + harness.accumulatorSamples
+      === harness.sessionElapsedSamples);
   });
 
-  it('retains frame-zero speech in the synthesized first chunk', () => {
+  it('retains frame-zero speech in the first continuous chunk', () => {
     const events = [];
     const harness = makeRecorderHarness({
       frameMs: 10,
@@ -32,7 +35,7 @@ describe('recorder-layer adaptive VAD priming', () => {
     run(harness, Array(20).fill(-80));
     const emitted = events.find(event => event.k === 'emit');
     assert.ok(emitted);
-    assert.ok(emitted.s0 <= 0);
+    assert.equal(emitted.s0, 0);
   });
 
   it('keeps gate and endpoint learning bit-identical with recorder priming disabled', () => {
@@ -148,12 +151,13 @@ describe('recorder-layer adaptive VAD priming', () => {
     assert.equal(enabled.utteranceQuietestStrongDb, null);
   });
 
-  it('discards stop flush inside priming without emitting a chunk', () => {
+  it('accounts a stop tail inside priming below the 250 ms floor', () => {
     const events = [];
     const harness = makeRecorderHarness({ frameMs: 10, onEvent: event => events.push(event) });
     run(harness, Array(12).fill(-30));
     harness.flush();
     assert.equal(events.filter(event => event.k === 'emit').length, 0);
-    assert.equal(events.find(event => event.k === 'stop_flush')?.r, 'priming_window');
+    assert.equal(events.find(event => event.k === 'stop_flush')?.r, 'tail_floor');
+    assert.ok(events.some(event => event.k === 'discard' && event.r === 'tail_floor'));
   });
 });

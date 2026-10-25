@@ -27,6 +27,13 @@ Pure-logic components only:
 - The 48 MB Jetsam memory cap (runtime measurement only — use `ritoras-ios-debugging`)
 - Real KenLM scoring (the `.klm` binary cannot run in Node — see *KenLM proxy* below)
 
+## Chunk slicer semantics
+
+The recorder mirror segments continuous audio into streaming-ASR chunks; it does not strip silence.
+Only voiceless gaps longer than `maxNoiseSec` with under 100 ms of strong/continuing evidence are shed.
+Retained gaps bridge into the next utterance, and stop offers pending audio of at least 250 ms without a voice gate.
+Speech is never trimmed from chunks; do not add silence-stripping or aggressive speech-gating here.
+
 ## Running
 
 ```bash

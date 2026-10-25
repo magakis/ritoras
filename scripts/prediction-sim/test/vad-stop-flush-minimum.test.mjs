@@ -26,7 +26,7 @@ describe('VAD stop-flush minimum speech evidence', () => {
     assert.equal(events.find(event => event.k === 'stop_flush')?.r, 'flush');
   });
 
-  it('drops a stop tail with zero speech evidence', () => {
+  it('offers a stop tail with zero speech evidence when it clears the 250 ms floor', () => {
     const events = [];
     const harness = makeHarness(events);
     for (let i = 0; i < 50; i++) harness.drive(-80);
@@ -34,11 +34,14 @@ describe('VAD stop-flush minimum speech evidence', () => {
 
     harness.flush();
 
-    assert.equal(events.find(event => event.k === 'stop_flush')?.r, 'empty');
-    assert.equal(events.some(event => event.k === 'emit' && event.r === 'flush'), false);
+    assert.equal(events.find(event => event.k === 'stop_flush')?.r, 'flush');
+    const emitted = events.find(event => event.k === 'emit' && event.r === 'flush');
+    assert.ok(emitted);
+    assert.equal(emitted.sm, 0);
+    assert.equal(emitted.n, 1_300 * 16);
   });
 
-  it('keeps the 300 ms minimum for endpoint emission', () => {
+  it('holds a below-minimum endpoint finalize without discarding its audio', () => {
     const events = [];
     const harness = makeHarness(events, { endpointSilenceMs: 100 });
     for (let i = 0; i < 50; i++) harness.drive(-80);
@@ -46,6 +49,7 @@ describe('VAD stop-flush minimum speech evidence', () => {
     for (let i = 0; i < 20; i++) harness.drive(-80);
 
     assert.equal(events.some(event => event.k === 'emit'), false);
-    assert.ok(events.some(event => event.k === 'discard' && event.r === 'below_minimums'));
+    assert.ok(events.some(event => event.k === 'outcome' && event.r === 'below_minimums_held'));
+    assert.ok(harness.accumulatorSamples > 0);
   });
 });
