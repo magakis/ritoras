@@ -525,8 +525,7 @@ private final class VADContext: @unchecked Sendable {
             appendRetainedGapFrame(
                 frame,
                 startSamples: frameStartSamples,
-                evidence: output.evidence,
-                isLowEnergy: output.evidence == .silence || frameDb < output.silenceThresholdDb
+                evidence: output.speechShaped ? .continuing : output.evidence
             )
         } else {
             if accumulatorSampleCount == 0 {
@@ -581,12 +580,25 @@ private final class VADContext: @unchecked Sendable {
                 loudFlatTerminatorActive = false
             }
 
+            // Keep gate/floor evidence level-based; shape only controls the endpoint silence clock.
+            if output.speechShaped, endpointEvidence == .silence {
+                endpointEvidence = .continuing
+            }
+
+            // Suppress only an abrupt high-spread frame; a locally flat follow-up may resume.
             if previousState == .endPending,
-               let shortSpreadDb = output.shortSpreadDb,
+               output.shortSpreadDb != nil,
+               output.dynamicsSpreadDb != nil,
+               !output.speechShaped,
                let dynamicsSpreadDb = output.dynamicsSpreadDb,
-               shortSpreadDb < effectiveFlatSpreadDb,
-               dynamicsSpreadDb < VADThresholdGate.adaptiveEndPendingWindDispersionDb,
-               endpointEvidence == .continuing || endpointEvidence == .ambiguous {
+               dynamicsSpreadDb >= VADThresholdGate.adaptiveEndPendingWindDispersionDb,
+               endpointEvidence == .strong {
+                endpointEvidence = .silence
+            } else if previousState == .endPending,
+                      output.shortSpreadDb != nil,
+                      output.dynamicsSpreadDb != nil,
+                      !output.speechShaped,
+                      endpointEvidence == .continuing || endpointEvidence == .ambiguous {
                 endpointEvidence = .silence
             }
 

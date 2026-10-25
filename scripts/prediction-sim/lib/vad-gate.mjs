@@ -15,6 +15,7 @@ export const VAD_ADAPTIVE_COLD_START_GRACE_S = 0.4;
 export const VAD_ADAPTIVE_PRIMING_MAX_S = 0.45;
 export const VAD_ADAPTIVE_PRIMING_QUIET_S = 0.10;
 export const VAD_ADAPTIVE_COLD_START_DISPERSION_WINDOW_S = 0.4;
+const VAD_SPEECH_SHAPE_WINDOW_S = 0.1;
 export const VAD_ADAPTIVE_ROLLING_WINDOW_DURATION_S = 3.0;
 export const VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY = 256;
 export const VAD_FLOOR_MIN_DB = -80;
@@ -44,6 +45,26 @@ const TIME_BOUNDARY_EPSILON_S = 1e-9;
 
 function clamp(value, lower, upper) {
   return Math.min(Math.max(value, lower), upper);
+}
+
+// Gradual spread is speech-shaped; abrupt spread remains eligible as a gust.
+export function isSpeechShaped({
+  dynamicsSpreadDb,
+  shortSpreadDb,
+  flatSpreadDb,
+  adjacentStepDb = 0,
+  allowWindBoundaryStep = false,
+}) {
+  // Quiet frames keep the strict wind boundary; other evidence accepts exactly 6 dB.
+  const stepIsWithinSpeechBoundary = allowWindBoundaryStep
+    ? adjacentStepDb <= VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB
+    : adjacentStepDb < VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB;
+  return Number.isFinite(dynamicsSpreadDb)
+    && Number.isFinite(shortSpreadDb)
+    && Number.isFinite(adjacentStepDb)
+    && stepIsWithinSpeechBoundary
+    && (dynamicsSpreadDb >= VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB
+      || shortSpreadDb >= flatSpreadDb);
 }
 
 export function dbFromRms(rms) {
@@ -168,6 +189,7 @@ export class VADThresholdGate {
     this.lastOutput = {
       isSpeech: false,
       evidence: 'silence',
+      speechShaped: false,
       thresholdDb: this.thresholdDb,
       continuationThresholdDb: this.config.mode === 'adaptive'
         ? Math.max(
@@ -193,11 +215,11 @@ export class VADThresholdGate {
   process(frameDb, frameDuration) {
     switch (this.behaviorMode) {
       case 'static':
-        return this.processStatic(frameDb);
+        return this.processStatic(frameDb, frameDuration);
       case 'adaptive':
         return this.processAdaptive(frameDb, frameDuration);
       default:
-        return this.processStatic(frameDb);
+        return this.processStatic(frameDb, frameDuration);
     }
   }
 
@@ -251,7 +273,8 @@ export class VADThresholdGate {
     this.resetAdaptiveRollingWindow();
   }
 
-  processStatic(frameDb) {
+  processStatic(frameDb, frameDuration) {
+    this.appendAdaptiveRollingFrame(frameDb, frameDuration);
     const levels = this.classify(
       frameDb,
       this.thresholdDb,
@@ -261,6 +284,7 @@ export class VADThresholdGate {
     return this.emit({
       ...levels,
       isSpeech: levels.evidence === 'strong',
+      speechShaped: levels.speechShaped,
       thresholdDb: levels.strongThresholdDb,
       floorDb: null,
     });
@@ -276,6 +300,7 @@ export class VADThresholdGate {
       ? (windowMax ?? frameDb)
         - (this.adaptiveRollingMinDb(VAD_ADAPTIVE_COLD_START_DISPERSION_WINDOW_S) ?? frameDb)
       : null;
+    const adjacentStepDb = this.adaptiveRollingAdjacentStepDb();
     this.adaptiveRollingPercentileCache = rollingPercentile;
     if (!this.adaptiveRefinementComplete) {
       return this.processAdaptiveRefinement(
@@ -308,6 +333,9 @@ export class VADThresholdGate {
       thresholds.strongThresholdDb,
       thresholds.continuationThresholdDb,
       thresholds.silenceThresholdDb,
+      this.config.adaptiveDynamicsEnabled ? dispersionDb : null,
+      shortSpreadDb,
+      adjacentStepDb,
     );
     if (levels.evidence === 'silence') {
       this.elapsedSinceSilenceEvidence = 0;
@@ -352,6 +380,9 @@ export class VADThresholdGate {
               thresholds.strongThresholdDb,
               thresholds.continuationThresholdDb,
               thresholds.silenceThresholdDb,
+              this.config.adaptiveDynamicsEnabled ? dispersionDb : null,
+              shortSpreadDb,
+              adjacentStepDb,
             );
           } else {
             this.hasRefusedReanchorSinceLastAcceptance = true;
@@ -370,6 +401,7 @@ export class VADThresholdGate {
       ...levels,
       evidence,
       isSpeech: evidence === 'strong' || evidence === 'continuing',
+      speechShaped: levels.speechShaped,
       thresholdDb: levels.strongThresholdDb,
       floorDb: this.floorDb,
       floorConverged: this.coldStartConverged,
@@ -425,11 +457,15 @@ export class VADThresholdGate {
 
     const currentFloor = this.floorDb ?? VAD_FLOOR_MIN_DB;
     const thresholds = this.adaptiveThresholds(currentFloor);
+    const adjacentStepDb = this.adaptiveRollingAdjacentStepDb();
     const levels = this.classify(
       frameDb,
       thresholds.strongThresholdDb,
       thresholds.continuationThresholdDb,
       thresholds.silenceThresholdDb,
+      this.config.adaptiveDynamicsEnabled ? dispersionDb : null,
+      shortSpreadDb,
+      adjacentStepDb,
     );
     const evidence = this.dynamicsGatedEvidence(
       levels.evidence,
@@ -445,6 +481,7 @@ export class VADThresholdGate {
       ...levels,
       evidence,
       isSpeech,
+      speechShaped: levels.speechShaped,
       thresholdDb: levels.strongThresholdDb,
       continuationThresholdDb: levels.continuationThresholdDb,
       silenceThresholdDb: levels.silenceThresholdDb,
@@ -629,6 +666,7 @@ export class VADThresholdGate {
     this.lastOutput = {
       isSpeech: false,
       evidence: 'silence',
+      speechShaped: false,
       thresholdDb: this.thresholdDb,
       continuationThresholdDb: resetAdaptiveThresholds.continuationThresholdDb,
       silenceThresholdDb: resetAdaptiveThresholds.silenceThresholdDb,
@@ -731,6 +769,51 @@ export class VADThresholdGate {
     return minimum;
   }
 
+  adaptiveRollingAdjacentStepDb() {
+    if (this.adaptiveRollingCount < 2) return null;
+    const currentIndex = (this.adaptiveRollingWriteIndex - 1
+      + VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY) % VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY;
+    const previousIndex = (this.adaptiveRollingWriteIndex - 2
+      + VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY) % VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY;
+    return Math.abs(this.adaptiveRollingDbs[currentIndex] - this.adaptiveRollingDbs[previousIndex]);
+  }
+
+  adaptiveQuietShapeSpreads(silenceThresholdDb) {
+    if (this.adaptiveRollingCount === 0) {
+      return { dynamicsSpreadDb: null, shortSpreadDb: null, adjacentStepDb: null };
+    }
+    const quietValues = [];
+    let adjacentStepDb = null;
+    let newerFrameDb = null;
+    let coveredSeconds = 0;
+    for (let offset = 0; offset < this.adaptiveRollingCount; offset += 1) {
+      const index = (this.adaptiveRollingWriteIndex - 1 - offset
+        + VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY) % VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY;
+      const frameDb = this.adaptiveRollingDbs[index];
+      if (frameDb >= silenceThresholdDb) break;
+      if (newerFrameDb !== null) {
+        const stepDb = Math.abs(newerFrameDb - frameDb);
+        if (adjacentStepDb === null) adjacentStepDb = stepDb;
+        // Do not let modulation before an abrupt transition keep settled quiet speech-shaped.
+        if (stepDb >= VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB) break;
+      }
+      quietValues.push(frameDb);
+      newerFrameDb = frameDb;
+      coveredSeconds += this.adaptiveRollingDurations[index];
+      if (coveredSeconds > VAD_SPEECH_SHAPE_WINDOW_S) break;
+    }
+    if (quietValues.length === 0) {
+      return { dynamicsSpreadDb: null, shortSpreadDb: null, adjacentStepDb: null };
+    }
+    const maximum = Math.max(...quietValues);
+    const minimum = Math.min(...quietValues);
+    return {
+      dynamicsSpreadDb: maximum - this.percentile(quietValues, VAD_ADAPTIVE_ROLLING_PERCENTILE),
+      shortSpreadDb: maximum - minimum,
+      adjacentStepDb,
+    };
+  }
+
   adaptiveRollingPercentileAtLeast(floorDb) {
     if (this.adaptiveRollingCount === 0) return false;
 
@@ -823,19 +906,57 @@ export class VADThresholdGate {
     };
   }
 
-  classify(frameDb, strongThresholdDb, continuationThresholdDb, silenceThresholdDb) {
+  classify(
+    frameDb,
+    strongThresholdDb,
+    continuationThresholdDb,
+    silenceThresholdDb,
+    dynamicsSpreadDb = null,
+    shortSpreadDb = null,
+    adjacentStepDb = null,
+  ) {
     let evidence;
+    let speechShaped;
     if (frameDb >= strongThresholdDb) {
       evidence = 'strong';
+      speechShaped = isSpeechShaped({
+        dynamicsSpreadDb,
+        shortSpreadDb,
+        flatSpreadDb: this.effectiveFlatSpreadDb,
+        adjacentStepDb,
+        allowWindBoundaryStep: true,
+      });
     } else if (frameDb >= continuationThresholdDb) {
       evidence = 'continuing';
+      speechShaped = isSpeechShaped({
+        dynamicsSpreadDb,
+        shortSpreadDb,
+        flatSpreadDb: this.effectiveFlatSpreadDb,
+        adjacentStepDb,
+        allowWindBoundaryStep: true,
+      });
     } else if (frameDb < silenceThresholdDb) {
+      const quietShapeSpreads = this.adaptiveQuietShapeSpreads(silenceThresholdDb);
+      speechShaped = isSpeechShaped({
+        dynamicsSpreadDb: quietShapeSpreads.dynamicsSpreadDb,
+        shortSpreadDb: quietShapeSpreads.shortSpreadDb,
+        flatSpreadDb: this.effectiveFlatSpreadDb,
+        adjacentStepDb: quietShapeSpreads.adjacentStepDb,
+      });
       evidence = 'silence';
     } else {
       evidence = 'ambiguous';
+      speechShaped = isSpeechShaped({
+        dynamicsSpreadDb,
+        shortSpreadDb,
+        flatSpreadDb: this.effectiveFlatSpreadDb,
+        adjacentStepDb,
+        allowWindBoundaryStep: true,
+      });
     }
     return {
       evidence,
+      speechShaped,
       strongThresholdDb,
       continuationThresholdDb,
       silenceThresholdDb,
@@ -857,6 +978,7 @@ export class VADThresholdGate {
     floorConverged = false,
     dynamicsSpreadDb = null,
     shortSpreadDb = null,
+    speechShaped = false,
     isLoudRegime = this.isLoudRegime,
     didReanchor = false,
     didCompletePriming = false,
@@ -873,6 +995,7 @@ export class VADThresholdGate {
       floorConverged,
       dynamicsSpreadDb,
       shortSpreadDb,
+      speechShaped,
       isLoudRegime,
       didReanchor,
       didCompletePriming,

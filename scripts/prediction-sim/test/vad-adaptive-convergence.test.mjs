@@ -840,6 +840,7 @@ describe('adaptive VAD convergence', () => {
     }
 
     let finalized = null;
+    // Two quiet frames settle the recent shape; the 1 s pause covers the 800 ms window.
     for (let i = 0; i < 100; i++) {
       const frame = harness.drive(-80);
       if (frame.decision.type === 'finalizeUtterance') {
@@ -953,13 +954,15 @@ describe('adaptive VAD convergence', () => {
     for (let i = 0; i < 30; i++) harness.drive(-80);
     assert.strictEqual(harness.endpoint.state, 'endPending');
 
-    let sawAmbiguousEndPending = false;
+    let sawAbruptGustBankSilence = false;
     let emitted = false;
     for (let i = 0; i < 500; i++) {
       const frame = harness.drive(i % 10 === 9 ? -72 : -78);
-      if (harness.endpoint.state === 'endPending' && frame.output.evidence === 'ambiguous') {
-        sawAmbiguousEndPending = true;
-        assert.ok(frame.output.shortSpreadDb >= 5);
+      if (harness.endpoint.state === 'endPending'
+        && frame.output.shortSpreadDb >= 5
+        && !frame.output.speechShaped
+        && frame.endpointEvidence === 'silence') {
+        sawAbruptGustBankSilence = true;
       }
       if (frame.decision.type === 'finalizeUtterance') {
         emitted = true;
@@ -967,7 +970,7 @@ describe('adaptive VAD convergence', () => {
       }
     }
 
-    assert.strictEqual(sawAmbiguousEndPending, true);
+    assert.strictEqual(sawAbruptGustBankSilence, true);
     assert.strictEqual(emitted, true);
     assert.strictEqual(harness.chunkCount, 1);
     assert.strictEqual(harness.gate.speechCeilingDb, -49);
@@ -1085,7 +1088,8 @@ describe('adaptive VAD convergence', () => {
       const frame = harness.drive(i % 2 === 0 ? gustDb : lullDb);
       if (frame.output.dynamicsSpreadDb >= 8) {
         sawDynamicGust = true;
-        assert.strictEqual(frame.endpointEvidence, frame.output.evidence);
+        assert.strictEqual(frame.output.speechShaped, false);
+        assert.strictEqual(frame.endpointEvidence, 'silence');
       }
       if (frame.decision.type === 'finalizeUtterance') {
         finalized = true;

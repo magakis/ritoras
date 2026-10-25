@@ -1,4 +1,5 @@
 import {
+  isSpeechShaped,
   makeVadGateConfig,
   VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB,
   VAD_LOUD_FLOOR_REGIME_DB,
@@ -43,27 +44,42 @@ function makeEndpoint(endpointSilenceMs = DEFAULT_ENDPOINT_SILENCE_MS, partial =
 export function classifyEndPendingEvidence({
   endpointState,
   evidence,
+  speechShaped,
   shortSpreadDb,
   dynamicsSpreadDb,
   flatSpreadDb,
+  adjacentStepDb = 0,
   accumulatedSilenceSamples,
   endpointSilenceSamples,
   ambiguousRescueSamples,
   rescueAwareWindowsEnabled,
 }) {
   if (endpointState !== 'endPending'
-    || (evidence !== 'continuing' && evidence !== 'ambiguous')
     || shortSpreadDb === null
     || shortSpreadDb === undefined
     || dynamicsSpreadDb === null
-    || dynamicsSpreadDb === undefined
-    || shortSpreadDb >= flatSpreadDb
-    || dynamicsSpreadDb >= VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB) {
+    || dynamicsSpreadDb === undefined) {
     return evidence;
   }
 
-  // Swift currently erases this low-spread evidence to silence at
-  // StreamingAudioRecorder.swift:737–744. Preserve the existing wind filter
+  const shapedEvidence = speechShaped ?? isSpeechShaped({
+    dynamicsSpreadDb,
+    shortSpreadDb,
+    flatSpreadDb,
+    adjacentStepDb,
+  });
+  if (evidence === 'strong'
+    && !shapedEvidence
+    && dynamicsSpreadDb >= VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB) {
+    // Suppress only an abrupt high-spread frame; a locally flat follow-up may resume.
+    return 'silence';
+  }
+  if ((evidence !== 'continuing' && evidence !== 'ambiguous') || shapedEvidence) {
+    return evidence;
+  }
+
+  // Flat soft evidence may bank silence; the shared shape predicate above keeps
+  // modulated soft evidence on the speech path. Preserve the existing wind filter
   // until the remaining silence is within one rescue window; after that,
   // continuing evidence must reach the endpoint as ambiguous or the widened
   // rescue threshold can never fire. The aperture is opt-in via sweep ratios;
@@ -699,9 +715,14 @@ export function makeRecorderHarness({
         this.flatFrameStreakStartTime = null;
         this.flatTerminatorActive = false;
       }
+      // Keep gate/floor evidence level-based; shape only controls the endpoint silence clock.
+      if (output.speechShaped && endpointEvidence === 'silence') {
+        endpointEvidence = 'continuing';
+      }
       endpointEvidence = classifyEndPendingEvidence({
         endpointState: previousState,
         evidence: endpointEvidence,
+        speechShaped: output.speechShaped,
         shortSpreadDb: output.shortSpreadDb,
         dynamicsSpreadDb: output.dynamicsSpreadDb,
         flatSpreadDb: this.gate.effectiveFlatSpreadDb,
@@ -763,8 +784,7 @@ export function makeRecorderHarness({
           this.appendRetainedGap(
             frameSamples,
             frameStartSamples,
-            output.evidence,
-            output.evidence === 'silence' || frameDb < output.silenceThresholdDb,
+            output.speechShaped ? 'continuing' : output.evidence,
           );
           this.manageRetainedGapOverflow();
         }

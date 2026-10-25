@@ -259,9 +259,13 @@ chunk is emitted only when one of these events occurs:
 
 The minimum speech and total chunk durations below determine whether the
 accumulated utterance is eligible for emission; they do not create another
-boundary. On the adaptive path, the noise floor is frozen while an utterance is
-in flight and rises only while the endpoint machine is idle. Floor convergence
-therefore cannot create a mid-utterance chunk boundary. A legacy
+boundary. On the adaptive path, silence accrues only for level-quiet,
+non-speech-shaped energy: gradually modulated soft speech remains speech
+evidence even below the current silence threshold, while abrupt gusts and flat
+ambient noise remain eligible to bank silence. The static mode retains its
+fixed RMS classification. On the adaptive path, the noise floor is frozen while
+an utterance is in flight and rises only while the endpoint machine is idle.
+Floor convergence therefore cannot create a mid-utterance chunk boundary. A legacy
 consecutive-silence fallback remains behind the disabled-by-default
 `streamEndpointMachineEnabled` kill switch and uses the `streamVadSpeechRms`,
 `streamVadSilenceMs`, and `streamVadMaxNoiseSec` settings.
@@ -287,14 +291,14 @@ There is **no maximum chunk length** and no forced-finalization timer based on
 chunk duration. Unbounded continuous speech therefore produces one unbounded
 chunk; clients must treat chunk size as unbounded.
 
----
-
-## 8. Failure and retry
-
 Telemetry retains the existing `maxChunkMs`, `splitSearchWindowMs`, and
 `minSilenceAtSplitMs` configuration keys for capture compatibility, with the
 numeric value `0` indicating that no duration cap or split search is active.
 These metadata values do not limit the `/stream` audio payload.
+
+---
+
+## 8. Failure and retry
 
 Connection retries continue throughout the streaming session. While recording,
 queued streaming chunk sends retry without a fixed attempt limit, using the

@@ -365,6 +365,45 @@ describe('VADThresholdGate', () => {
       assert.ok(modulatedOutput.shortSpreadDb >= 13);
     });
 
+    it('keeps level evidence separate from quiet speech shape', () => {
+      const modulatedGate = seedAdaptiveGate({}, -60);
+      modulatedGate.floorDb = -60;
+      let modulatedOutput;
+      const speechShapedLevels = [-60, -62, -64, -66, -68, -67, -65, -63];
+      for (let index = 0; index < 20; index += 1) {
+        modulatedOutput = modulatedGate.process(
+          speechShapedLevels[index % speechShapedLevels.length],
+          0.01,
+        );
+      }
+      assert.ok(-66 < modulatedOutput.silenceThresholdDb);
+      assert.ok(modulatedOutput.dynamicsSpreadDb >= VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB
+        || modulatedOutput.shortSpreadDb >= modulatedGate.effectiveFlatSpreadDb);
+      assert.strictEqual(modulatedOutput.evidence, 'silence');
+      assert.strictEqual(modulatedOutput.speechShaped, true);
+
+      const flatGate = seedAdaptiveGate({}, -60);
+      flatGate.floorDb = -60;
+      let flatOutput;
+      for (let index = 0; index < 20; index += 1) {
+        flatOutput = flatGate.process(-60, 0.01);
+      }
+      assert.strictEqual(flatOutput.evidence, 'silence');
+      assert.strictEqual(flatOutput.shortSpreadDb, 0);
+      assert.strictEqual(flatOutput.speechShaped, false);
+
+      const squareGustGate = seedAdaptiveGate({}, -60);
+      squareGustGate.floorDb = -60;
+      let gustOutput;
+      for (let index = 0; index < 80; index += 1) {
+        gustOutput = squareGustGate.process(index % 2 === 0 ? -60 : -69, 0.01);
+      }
+      assert.ok(gustOutput.dynamicsSpreadDb >= VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB);
+      assert.ok(gustOutput.shortSpreadDb >= 8);
+      assert.strictEqual(gustOutput.evidence, 'silence');
+      assert.strictEqual(gustOutput.speechShaped, false);
+    });
+
     it('uses the inclusive dynamics spread boundary for strong evidence', () => {
       const belowBoundary = seedAdaptiveGate({}, -58.9);
       belowBoundary.floorDb = -70;

@@ -98,6 +98,7 @@ struct VADGateConfig {
 struct VADGateOutput {
     let isSpeech: Bool
     let evidence: VADEvidence
+    let speechShaped: Bool
     let thresholdDb: Double
     let continuationThresholdDb: Double
     let silenceThresholdDb: Double
@@ -130,6 +131,8 @@ final class VADThresholdGate: @unchecked Sendable {
     private static let adaptiveMinRefinementDuration = 1.0
     private static let adaptiveColdStartGraceSeconds = 0.4
     private static let adaptiveColdStartDispersionWindowSeconds = 0.4
+    // Keep shape evidence local so a completed speech tail cannot hold quiet open.
+    private static let speechShapeWindowSeconds = 0.1
     private static let adaptiveRollingWindowDuration = 3.0
     private static let adaptiveRollingWindowCapacity = 256
     private static let floorMinDb = -80.0
@@ -243,6 +246,7 @@ final class VADThresholdGate: @unchecked Sendable {
         self.lastOutput = VADGateOutput(
             isSpeech: false,
             evidence: .silence,
+            speechShaped: false,
             thresholdDb: initialThresholdDb,
             continuationThresholdDb: config.mode == .adaptive
                 ? max(Self.floorMinDb + effectiveAdaptiveContinuationDeltaDb, effectiveAbsoluteSpeechFloorDb)
@@ -270,7 +274,7 @@ final class VADThresholdGate: @unchecked Sendable {
 
         switch behaviorMode {
         case .staticMode:
-            return processStatic(frameDb: frameDb)
+            return processStatic(frameDb: frameDb, frameDuration: frameDuration)
         case .adaptive:
             return processAdaptive(frameDb: frameDb, frameDuration: frameDuration)
         }
@@ -369,7 +373,10 @@ final class VADThresholdGate: @unchecked Sendable {
         resetAdaptiveRollingWindow()
     }
 
-    private func processStatic(frameDb: Double) -> VADGateOutput {
+    private func processStatic(frameDb: Double, frameDuration: Double) -> VADGateOutput {
+        // Static evidence and floor behavior stay level-only; rolling history is
+        // used only as a quiet-shape witness.
+        appendAdaptiveRollingFrame(db: frameDb, duration: frameDuration)
         let levels = classify(
             frameDb: frameDb,
             strongThresholdDb: thresholdDb,
@@ -379,6 +386,7 @@ final class VADThresholdGate: @unchecked Sendable {
         return emit(
             evidence: levels.evidence,
             isSpeech: levels.evidence == .strong,
+            speechShaped: levels.speechShaped,
             thresholdDb: thresholdDb,
             continuationThresholdDb: levels.continuationThresholdDb,
             silenceThresholdDb: levels.silenceThresholdDb,
@@ -401,6 +409,7 @@ final class VADThresholdGate: @unchecked Sendable {
         } else {
             shortSpreadDb = nil
         }
+        let adjacentStepDb = adaptiveRollingAdjacentStepDb()
         adaptiveRollingPercentileCache = rollingPercentile
         if !adaptiveRefinementComplete {
             return processAdaptiveRefinement(
@@ -432,7 +441,10 @@ final class VADThresholdGate: @unchecked Sendable {
             frameDb: frameDb,
             strongThresholdDb: thresholds.strong,
             continuationThresholdDb: thresholds.continuation,
-            silenceThresholdDb: thresholds.silence
+            silenceThresholdDb: thresholds.silence,
+            dynamicsSpreadDb: config.adaptiveDynamicsEnabled ? dispersionDb : nil,
+            shortSpreadDb: shortSpreadDb,
+            adjacentStepDb: adjacentStepDb
         )
         if levels.evidence == .silence {
             elapsedSinceSilenceEvidence = 0
@@ -481,7 +493,10 @@ final class VADThresholdGate: @unchecked Sendable {
                         frameDb: frameDb,
                         strongThresholdDb: thresholds.strong,
                         continuationThresholdDb: thresholds.continuation,
-                        silenceThresholdDb: thresholds.silence
+                        silenceThresholdDb: thresholds.silence,
+                        dynamicsSpreadDb: config.adaptiveDynamicsEnabled ? dispersionDb : nil,
+                        shortSpreadDb: shortSpreadDb,
+                        adjacentStepDb: adjacentStepDb
                     )
                 } else {
                     hasRefusedReanchorSinceLastAcceptance = true
@@ -501,6 +516,7 @@ final class VADThresholdGate: @unchecked Sendable {
         return emit(
             evidence: evidence,
             isSpeech: evidence == .strong || evidence == .continuing,
+            speechShaped: levels.speechShaped,
             thresholdDb: levels.strongThresholdDb,
             continuationThresholdDb: levels.continuationThresholdDb,
             silenceThresholdDb: levels.silenceThresholdDb,
@@ -576,11 +592,15 @@ final class VADThresholdGate: @unchecked Sendable {
 
         let currentFloor = floorDb ?? Self.floorMinDb
         let thresholds = adaptiveThresholds(floor: currentFloor)
+        let adjacentStepDb = adaptiveRollingAdjacentStepDb()
         let levels = classify(
             frameDb: frameDb,
             strongThresholdDb: thresholds.strong,
             continuationThresholdDb: thresholds.continuation,
-            silenceThresholdDb: thresholds.silence
+            silenceThresholdDb: thresholds.silence,
+            dynamicsSpreadDb: config.adaptiveDynamicsEnabled ? dispersionDb : nil,
+            shortSpreadDb: shortSpreadDb,
+            adjacentStepDb: adjacentStepDb
         )
         let evidence = dynamicsGatedEvidence(
             levels.evidence,
@@ -595,6 +615,7 @@ final class VADThresholdGate: @unchecked Sendable {
         return emit(
             evidence: evidence,
             isSpeech: isSpeech,
+            speechShaped: levels.speechShaped,
             thresholdDb: levels.strongThresholdDb,
             continuationThresholdDb: levels.continuationThresholdDb,
             silenceThresholdDb: levels.silenceThresholdDb,
@@ -779,6 +800,7 @@ final class VADThresholdGate: @unchecked Sendable {
         lastOutput = VADGateOutput(
             isSpeech: false,
             evidence: .silence,
+            speechShaped: false,
             thresholdDb: thresholdDb,
             continuationThresholdDb: resetAdaptiveThresholds.continuation,
             silenceThresholdDb: resetAdaptiveThresholds.silence,
@@ -883,6 +905,52 @@ final class VADThresholdGate: @unchecked Sendable {
         return minimum
     }
 
+    private func adaptiveRollingAdjacentStepDb() -> Double? {
+        guard adaptiveRollingCount > 1 else { return nil }
+        // A past transient must not veto a locally flat speech run after the edge.
+        let currentIndex = (adaptiveRollingWriteIndex - 1 + Self.adaptiveRollingWindowCapacity)
+            % Self.adaptiveRollingWindowCapacity
+        let previousIndex = (adaptiveRollingWriteIndex - 2 + Self.adaptiveRollingWindowCapacity)
+            % Self.adaptiveRollingWindowCapacity
+        return abs(adaptiveRollingDbs[currentIndex] - adaptiveRollingDbs[previousIndex])
+    }
+
+    private func adaptiveQuietShapeSpreads(
+        below silenceThresholdDb: Double
+    ) -> (dynamics: Double?, short: Double?, adjacentStep: Double?) {
+        guard adaptiveRollingCount > 0 else { return (nil, nil, nil) }
+        var quietValues: [Double] = []
+        var adjacentStepDb: Double?
+        var newerFrameDb: Double?
+        var coveredSeconds = 0.0
+        for offset in 0..<adaptiveRollingCount {
+            let index = (adaptiveRollingWriteIndex - 1 - offset + Self.adaptiveRollingWindowCapacity)
+                % Self.adaptiveRollingWindowCapacity
+            let frameDb = adaptiveRollingDbs[index]
+            guard frameDb < silenceThresholdDb else { break }
+            if let newerFrameDb {
+                let stepDb = abs(newerFrameDb - frameDb)
+                if adjacentStepDb == nil {
+                    adjacentStepDb = stepDb
+                }
+                // Do not let modulation before an abrupt transition keep settled quiet speech-shaped.
+                if stepDb >= Self.adaptiveEndPendingWindDispersionDb { break }
+            }
+            quietValues.append(frameDb)
+            newerFrameDb = frameDb
+            coveredSeconds += adaptiveRollingDurations[index]
+            if coveredSeconds > Self.speechShapeWindowSeconds { break }
+        }
+        guard let maximum = quietValues.max(), let minimum = quietValues.min() else {
+            return (nil, nil, nil)
+        }
+        return (
+            dynamics: maximum - percentile(quietValues, percentile: Self.adaptiveRollingPercentile),
+            short: maximum - minimum,
+            adjacentStep: adjacentStepDb
+        )
+    }
+
     private func adaptiveRollingPercentileAtLeast(_ floorDb: Double) -> Bool {
         guard adaptiveRollingCount > 0 else { return false }
 
@@ -933,6 +1001,7 @@ final class VADThresholdGate: @unchecked Sendable {
         lastOutput = VADGateOutput(
             isSpeech: lastOutput.isSpeech,
             evidence: lastOutput.evidence,
+            speechShaped: lastOutput.speechShaped,
             thresholdDb: thresholds.strong,
             continuationThresholdDb: thresholds.continuation,
             silenceThresholdDb: thresholds.silence,
@@ -980,19 +1049,74 @@ final class VADThresholdGate: @unchecked Sendable {
         frameDb: Double,
         strongThresholdDb: Double,
         continuationThresholdDb: Double,
-        silenceThresholdDb: Double
-    ) -> (evidence: VADEvidence, strongThresholdDb: Double, continuationThresholdDb: Double, silenceThresholdDb: Double) {
+        silenceThresholdDb: Double,
+        dynamicsSpreadDb: Double? = nil,
+        shortSpreadDb: Double? = nil,
+        adjacentStepDb: Double? = nil
+    ) -> (
+        evidence: VADEvidence,
+        strongThresholdDb: Double,
+        continuationThresholdDb: Double,
+        silenceThresholdDb: Double,
+        speechShaped: Bool
+    ) {
         let evidence: VADEvidence
+        let speechShaped: Bool
         if frameDb >= strongThresholdDb {
             evidence = .strong
+            speechShaped = Self.isSpeechShaped(
+                dynamicsSpreadDb: dynamicsSpreadDb,
+                shortSpreadDb: shortSpreadDb,
+                flatSpreadDb: effectiveFlatSpreadDb,
+                adjacentStepDb: adjacentStepDb,
+                allowWindBoundaryStep: true
+            )
         } else if frameDb >= continuationThresholdDb {
             evidence = .continuing
+            speechShaped = Self.isSpeechShaped(
+                dynamicsSpreadDb: dynamicsSpreadDb,
+                shortSpreadDb: shortSpreadDb,
+                flatSpreadDb: effectiveFlatSpreadDb,
+                adjacentStepDb: adjacentStepDb,
+                allowWindBoundaryStep: true
+            )
         } else if frameDb < silenceThresholdDb {
+            let quietShapeSpreads = adaptiveQuietShapeSpreads(below: silenceThresholdDb)
+            speechShaped = Self.isSpeechShaped(
+                dynamicsSpreadDb: quietShapeSpreads.dynamics,
+                shortSpreadDb: quietShapeSpreads.short,
+                flatSpreadDb: effectiveFlatSpreadDb,
+                adjacentStepDb: quietShapeSpreads.adjacentStep
+            )
             evidence = .silence
         } else {
             evidence = .ambiguous
+            speechShaped = Self.isSpeechShaped(
+                dynamicsSpreadDb: dynamicsSpreadDb,
+                shortSpreadDb: shortSpreadDb,
+                flatSpreadDb: effectiveFlatSpreadDb,
+                adjacentStepDb: adjacentStepDb,
+                allowWindBoundaryStep: true
+            )
         }
-        return (evidence, strongThresholdDb, continuationThresholdDb, silenceThresholdDb)
+        return (evidence, strongThresholdDb, continuationThresholdDb, silenceThresholdDb, speechShaped)
+    }
+
+    // Require modulation without the abrupt jumps that characterize gusts.
+    static func isSpeechShaped(
+        dynamicsSpreadDb: Double?,
+        shortSpreadDb: Double?,
+        flatSpreadDb: Double,
+        adjacentStepDb: Double?,
+        allowWindBoundaryStep: Bool = false
+    ) -> Bool {
+        guard let dynamicsSpreadDb, let shortSpreadDb, let adjacentStepDb else { return false }
+        // Quiet frames keep the strict wind boundary; other evidence accepts exactly 6 dB.
+        let stepIsWithinSpeechBoundary = allowWindBoundaryStep
+            ? adjacentStepDb <= Self.adaptiveEndPendingWindDispersionDb
+            : adjacentStepDb < Self.adaptiveEndPendingWindDispersionDb
+        guard stepIsWithinSpeechBoundary else { return false }
+        return dynamicsSpreadDb >= Self.adaptiveEndPendingWindDispersionDb || shortSpreadDb >= flatSpreadDb
     }
 
     private func clampFloor(_ floor: Double) -> Double {
@@ -1002,6 +1126,7 @@ final class VADThresholdGate: @unchecked Sendable {
     private func emit(
         evidence: VADEvidence,
         isSpeech: Bool,
+        speechShaped: Bool = false,
         thresholdDb: Double,
         continuationThresholdDb: Double,
         silenceThresholdDb: Double,
@@ -1018,6 +1143,7 @@ final class VADThresholdGate: @unchecked Sendable {
         let output = VADGateOutput(
             isSpeech: isSpeech,
             evidence: evidence,
+            speechShaped: speechShaped,
             thresholdDb: thresholdDb,
             continuationThresholdDb: continuationThresholdDb,
             silenceThresholdDb: silenceThresholdDb,

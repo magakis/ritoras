@@ -171,4 +171,20 @@ describe('VAD sentence-interruption fault injection', () => {
     assert.equal(fixedRewritten.state, 'speechActive');
     assert.notEqual(feed(fixedRewritten, E.silence, 100).type, 'finalizeUtterance');
   });
+
+  it('never rewrites modulated soft evidence to silence while end-pending', () => {
+    const endpoint = startEndpoint(StreamingEndpoint, { endpointSilenceMs: 1000 });
+    enterEndPending(endpoint, 100);
+
+    const evidence = classifyEndPendingEvidence({
+      endpointState: endpoint.state,
+      evidence: E.continuing,
+      shortSpreadDb: 6,
+      dynamicsSpreadDb: 6.1,
+      flatSpreadDb: 5,
+      ...endPendingRewriteContext(endpoint),
+    });
+
+    assert.equal(evidence, E.continuing);
+  });
 });
