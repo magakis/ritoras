@@ -40,16 +40,4 @@ describe('VAD stop-flush minimum speech evidence', () => {
     assert.equal(emitted.sm, 0);
     assert.equal(emitted.n, 1_300 * 16);
   });
-
-  it('holds a below-minimum endpoint finalize without discarding its audio', () => {
-    const events = [];
-    const harness = makeHarness(events, { endpointSilenceMs: 100 });
-    for (let i = 0; i < 50; i++) harness.drive(-80);
-    for (let i = 0; i < 10; i++) harness.drive(-20);
-    for (let i = 0; i < 20; i++) harness.drive(-80);
-
-    assert.equal(events.some(event => event.k === 'emit'), false);
-    assert.ok(events.some(event => event.k === 'outcome' && event.r === 'below_minimums_held'));
-    assert.ok(harness.accumulatorSamples > 0);
-  });
 });

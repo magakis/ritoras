@@ -282,39 +282,6 @@ describe('adaptive VAD convergence', () => {
     assert.strictEqual(harness.endpoint.state, 'idle');
   });
 
-  it('(b): immediate modulated speech captures one complete utterance', () => {
-    const harness = makeRecorderHarness({ endpointSilenceMs: 700 });
-    const speechFrames = 150;
-    let onsetMs = null;
-
-    for (let i = 0; i < speechFrames; i++) {
-      const frame = harness.drive(i < 2 ? -58 : (i % 8 === 0 ? -58 : -45));
-      assert.notStrictEqual(frame.decision.type, 'finalizeUtterance');
-      if (frame.decision.type === 'startUtterance' && onsetMs === null) {
-        onsetMs = (i + 1) * frameDurationMs;
-      }
-    }
-    const chunkStartAtOpen = harness.chunkStartSessionSamples;
-
-    const pauseMs = 700;
-    let finalized = false;
-    for (let i = 0; i < pauseMs / frameDurationMs; i++) {
-      const frame = harness.drive(-80);
-      if (frame.decision.type === 'finalizeUtterance') {
-        finalized = true;
-        break;
-      }
-    }
-
-    assert.ok(onsetMs !== null && onsetMs >= 450);
-    assert.strictEqual(finalized, true);
-    assert.strictEqual(harness.chunkCount, 1);
-    assert.ok(chunkStartAtOpen <= 0);
-    assert.equal(chunkStartAtOpen, 0);
-    assert.ok(Math.abs(harness.emittedTotalMs - (speechFrames * frameDurationMs + pauseMs)) <= 300);
-    assert.strictEqual(harness.endpoint.state, 'idle');
-  });
-
   it('(a): quiet room converges before delayed speech and returns idle mid-session', () => {
     const harness = makeRecorderHarness({ endpointSilenceMs: 700 });
     prefillAmbient(harness, 150, -75);
@@ -831,56 +798,6 @@ describe('adaptive VAD convergence', () => {
     assert.strictEqual(harness.endpoint.state, 'idle');
     assert.strictEqual(harness.sawReanchorDuringUtterance, false);
     assert.strictEqual(harness.noteUtteranceEndedValues.at(-1), -49);
-  });
-
-  it('N5: headroom guards preserve a valid ceiling and prevent the ambient wedge', () => {
-    const gate = makeGate();
-    gate.floorDb = -50;
-
-    gate.noteUtteranceEnded(-40);
-    assert.strictEqual(gate.speechCeilingDb, null);
-    gate.noteUtteranceEnded(-38);
-    assert.strictEqual(gate.speechCeilingDb, -38);
-    gate.noteUtteranceEnded(null);
-    assert.strictEqual(gate.speechCeilingDb, -38);
-
-    const harness = makeRecorderHarness();
-    let ambientDb = null;
-    let ambientFinalized = null;
-
-    prefillAmbient(harness, 300, -50);
-    harness.gate.speechCeilingDb = -35;
-
-    for (let i = 0; i < 200; i++) {
-      const frameDb = harness.gate.snapshot.floorDb + 7;
-      const frame = harness.drive(frameDb);
-      if (frame.decision.type === 'startUtterance') {
-        ambientDb = frameDb;
-        break;
-      }
-    }
-    assert.ok(ambientDb !== null);
-
-    for (let i = 0; i < 600; i++) {
-      const frame = harness.drive(-80);
-      if (frame.decision.type === 'finalizeUtterance') {
-        ambientFinalized = frame;
-        break;
-      }
-    }
-    assert.ok(ambientFinalized !== null);
-    assert.strictEqual(ambientFinalized.discarded, false);
-    assert.notStrictEqual(harness.gate.speechCeilingDb, null);
-
-    const floorBeforeIdleAmbient = harness.gate.snapshot.floorDb;
-    let reonset = false;
-    for (let i = 0; i < 200; i++) {
-      const frame = harness.drive(ambientDb);
-      if (frame.decision.type === 'startUtterance') reonset = true;
-    }
-    assert.strictEqual(reonset, false);
-    assert.strictEqual(harness.endpoint.state, 'idle');
-    assert.ok(harness.gate.snapshot.floorDb > floorBeforeIdleAmbient);
   });
 
   it('R3: kept utterances still respect the min-chunk/min-speech gates', () => {

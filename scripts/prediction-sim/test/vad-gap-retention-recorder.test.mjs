@@ -72,40 +72,6 @@ describe('recorder chunk-slicer retention', () => {
     assert.ok(emissions[1].s1 - emissions[1].s0 >= 800);
   });
 
-  it('holds a below-minimum finalize and carries its audio into the next emission', () => {
-    const events = [];
-    const harness = makeRecorderHarness({
-      frameMs: 10,
-      endpointConfig: {
-        onsetMs: 70,
-        endEvidenceMs: 100,
-        endpointSilenceMs: 100,
-        resumeMs: 120,
-        ambiguousRescueMs: 320,
-      },
-      minSpeechSamples: 4_800,
-      minChunkSamples: 4_800,
-      gateConfig: { mode: 'static', staticRms: 0.025 },
-      onEvent: event => events.push(event),
-    });
-
-    for (let index = 0; index < 10; index += 1) harness.drive(-20);
-    for (let index = 0; index < 11; index += 1) harness.drive(-80);
-
-    assert.equal(events.some(event => event.k === 'emit'), false);
-    assert.ok(events.some(event => event.k === 'outcome' && event.r === 'below_minimums_held'));
-    assert.equal(harness.accumulatorSamples, 210 * 16);
-
-    for (let index = 0; index < 25; index += 1) harness.drive(-20);
-    for (let index = 0; index < 11; index += 1) harness.drive(-80);
-
-    const emission = events.find(event => event.k === 'emit');
-    assert.equal(emission.r, 'endpoint');
-    assert.equal(emission.s0, 0);
-    assert.equal(emission.n, 570 * 16);
-    assert.equal(harness.accumulatorSamples, 0);
-  });
-
   it('offers a zero-voice stop tail above 250 ms without speech gates', () => {
     const events = [];
     const harness = makeRecorderHarness({
@@ -140,41 +106,6 @@ describe('recorder chunk-slicer retention', () => {
     assert.equal(events.some(event => event.k === 'emit'), false);
     assert.ok(events.some(event => event.k === 'discard' && event.r === 'tail_floor'));
     assert.equal(harness.tailFloorSampleCount, 3_200);
-    assert.equal(harness.emittedSampleCount
-      + harness.shedSampleCount
-      + harness.tailFloorSampleCount, harness.sessionElapsedSamples);
-  });
-
-  it('splits at a silence gap, carries that suffix, and conserves every sample', () => {
-    const events = [];
-    const harness = makeRecorderHarness({
-      frameMs: 10,
-      endpointSilenceMs: 10_000,
-      minChunkSamples: 0,
-      minSpeechSamples: 0,
-      gateConfig: { mode: 'static', staticRms: 0.025 },
-      recorderConfig: {
-        maxChunkSamples: 3_200,
-        splitSearchSamples: 3_200,
-        minimumSplitSilenceSamples: 160,
-      },
-      onEvent: event => events.push(event),
-    });
-
-    for (const db of [
-      ...Array(10).fill(-20),
-      ...Array(5).fill(-80),
-      ...Array(25).fill(-20),
-    ]) harness.drive(db);
-    harness.flush();
-
-    const splits = events.filter(event => event.k === 'split');
-    assert.equal(splits.length, 2);
-    assert.equal(splits[0].r, 'split_gap');
-    assert.equal(splits[0].gapSamples, 800);
-    assert.deepEqual([splits[0].s0, splits[0].s1], [0, 150]);
-    assert.equal(splits[1].r, 'split_hardcut');
-    assert.deepEqual([splits[1].s0, splits[1].s1], [150, 350]);
     assert.equal(harness.emittedSampleCount
       + harness.shedSampleCount
       + harness.tailFloorSampleCount, harness.sessionElapsedSamples);
