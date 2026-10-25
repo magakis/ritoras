@@ -85,17 +85,23 @@ Two XcodeGen targets share one project:
 
 ## Hard constraints
 
-### No build-fixer subagent
+### Build-fixer command verification only
 
-Never dispatch the build-fixer subagent for this project. The orchestrator
-must always skip the default "end-of-session full build verification" step
-after coder phases complete.
+The build-fixer may be dispatched ONLY for command-based verification:
+the full `swiftc -parse` syntax sweep, invoked as
+`node scripts/parse-check.mjs`; the prediction-sim tests,
+`node --test 'scripts/prediction-sim/test/**/*.{js,cjs,mjs}'`;
+task-specific replay/verification runbooks under `scripts/`; and monitoring
+GitHub Actions CI after a push. The repo-level agent override at
+`.opencode/agent/build-fixer.md` carries the verification command list.
 
-Reason: the development environment is Linux with no local Xcode or
-`xcodebuild` (see [Environment constraint](#environment-constraint-read-first)
-above). Build-fixer cannot function here — any failure report it produces
-is about the missing toolchain, not about broken code. Do not attempt to
-substitute a local build check.
+It must NEVER attempt an iOS build or run `xcodebuild`: this Linux environment
+has no local Xcode or `xcodebuild` (see
+[Environment constraint](#environment-constraint-read-first) above). The
+orchestrator must still skip the default "end-of-session full build
+verification" step after coder phases complete. A local iOS build failure
+report would only be about the missing toolchain, not broken code. Do not
+substitute any local build check.
 
 The only real build gate is GitHub Actions CI on push. Wait for that.
 

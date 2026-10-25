@@ -25,7 +25,13 @@ build/
 Package.resolved
 
 # OpenCode internal state
+# Keep the project-level build-fixer override tracked; other state stays local.
 .opencode/
+!.opencode/
+.opencode/*
+!.opencode/agent/
+.opencode/agent/*
+!.opencode/agent/build-fixer.md
 scratch/
 
 # Local tooling state
@@ -83,4 +89,3 @@ logs/
 # Other OS
 Thumbs.db
 desktop.ini
-
