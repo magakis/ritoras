@@ -162,7 +162,6 @@ describe('VAD telemetry digest', () => {
           loudSilenceDeltaDb: 2,
           loudLatchMs: 400,
           loudLatchWitnessDb: 3,
-          loudPreRollMs: 500,
           loudFlatTerminateEnabled: true,
           loudFlatSpreadDb: 2.5,
           loudFlatTerminateSeconds: 3,

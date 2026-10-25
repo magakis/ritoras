@@ -65,7 +65,6 @@ enum VADTelemetryDigest {
         "endpointSilenceMs": "endpointSilence",
         "endpointResumeMs": "resume",
         "endpointAmbiguousRescueMs": "rescue",
-        "endpointPreRollMs": "preRoll",
         "strongDeltaDb": "strongDelta",
         "continuationDeltaDb": "continuationDelta",
         "silenceDeltaDb": "silenceDelta",
@@ -84,7 +83,6 @@ enum VADTelemetryDigest {
         "loudDynamicsSpreadDb": "loudDynamicsSpread",
         "loudLatchMs": "loudLatchMs",
         "loudLatchWitnessDb": "loudLatchWitness",
-        "loudPreRollMs": "loudPreRoll",
         "loudFlatTerminateEnabled": "loudFlatTerminate",
         "loudFlatSpreadDb": "loudFlatSpread",
         "loudFlatTerminateSeconds": "loudFlatSeconds",
@@ -96,7 +94,6 @@ enum VADTelemetryDigest {
         "endpointSilenceMs",
         "endpointResumeMs",
         "endpointAmbiguousRescueMs",
-        "endpointPreRollMs",
         "minSpeechMs",
         "minChunkMs"
     ]

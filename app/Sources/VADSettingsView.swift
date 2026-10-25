@@ -529,7 +529,6 @@ struct VADSettingsView: View {
             ("endEvidence", "\(SharedConfig.streamVadEndEvidenceMs())ms"),
             ("resume", "\(SharedConfig.streamVadResumeMs())ms"),
             ("rescue", "\(SharedConfig.streamVadAmbiguousRescueMs())ms"),
-            ("preRoll", "\(SharedConfig.streamVadPreRollMs())ms"),
             ("minSpeech", "\(SharedConfig.streamVadMinSpeechMs())ms"),
             ("minChunk", "\(SharedConfig.streamVadMinChunkMs())ms"),
             ("adaptationSpeed", "1.0"),

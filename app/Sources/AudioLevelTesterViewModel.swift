@@ -177,8 +177,7 @@ final class AudioLevelTesterViewModel: ObservableObject {
             endEvidenceSamples: Int(Double(SharedConfig.streamVadEndEvidenceMs()) * 16.0),
             endpointSilenceSamples: Int(Double(SharedConfig.streamVadSilenceMs()) * 16.0),
             resumeSamples: Int(Double(SharedConfig.streamVadResumeMs()) * 16.0),
-            ambiguousRescueSamples: Int(Double(SharedConfig.streamVadAmbiguousRescueMs()) * 16.0),
-            preRollSamples: Int(Double(SharedConfig.streamVadPreRollMs()) * 16.0)
+            ambiguousRescueSamples: Int(Double(SharedConfig.streamVadAmbiguousRescueMs()) * 16.0)
         ))
         endpointMachineEnabled = SharedConfig.streamEndpointMachineEnabled()
 

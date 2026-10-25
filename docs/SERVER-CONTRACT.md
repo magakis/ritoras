@@ -278,7 +278,6 @@ The endpoint-machine defaults are:
 | `endpointSilenceSamples` | `11,200 samples` (**700 ms**) | Silence accumulation required to emit after a speech-to-silence transition |
 | `resumeSamples` | `1,920 samples` (**120 ms**) | Speech evidence required to resume a pending utterance |
 | `ambiguousRescueSamples` | `5,120 samples` (**320 ms**) | Ambiguous evidence required to rescue a pending endpoint |
-| `preRollSamples` | `4,000 samples` (**250 ms**) | Audio retained before onset |
 | `streamVadMinSpeechMs` | `300 ms` | Minimum detected speech in an emitted chunk or stop flush |
 | `streamVadMinChunkMs` | `300 ms` | Minimum total audio in an emitted chunk |
 

@@ -14,7 +14,6 @@ const PARAMETER_NAMES = Object.freeze({
   endpointSilenceMs: 'endpointSilence',
   endpointResumeMs: 'resume',
   endpointAmbiguousRescueMs: 'rescue',
-  endpointPreRollMs: 'preRoll',
   strongDeltaDb: 'strongDelta',
   continuationDeltaDb: 'continuationDelta',
   silenceDeltaDb: 'silenceDelta',
@@ -33,7 +32,6 @@ const PARAMETER_NAMES = Object.freeze({
   loudDynamicsSpreadDb: 'loudDynamicsSpread',
   loudLatchMs: 'loudLatchMs',
   loudLatchWitnessDb: 'loudLatchWitness',
-  loudPreRollMs: 'loudPreRoll',
   loudFlatTerminateEnabled: 'loudFlatTerminate',
   loudFlatSpreadDb: 'loudFlatSpread',
   loudFlatTerminateSeconds: 'loudFlatSeconds',
@@ -45,7 +43,6 @@ const PARAMETER_ORDER = [
   'endpointSilenceMs',
   'endpointResumeMs',
   'endpointAmbiguousRescueMs',
-  'endpointPreRollMs',
   'minSpeechMs',
   'minChunkMs',
 ];
