@@ -1903,11 +1903,37 @@ final class DictationViewModel: ObservableObject {
                         guard activeID == id else { return }
 
                         TranscriptionHistory.shared.add(text: text)
-                        if SharedConfig.fullRecordingUploadEnabled(),
-                           let recordingToken = receivedRecordingToken,
-                           !recordingToken.isEmpty {
-                            if let serverURL = selectedServer,
-                               let sourceURL = RecordingStore.shared.streamWavURL(for: id) {
+                        let fullRecordingUploadEnabled = SharedConfig.fullRecordingUploadEnabled()
+                        let recordingToken = receivedRecordingToken
+                        let recordingTokenPresent = recordingToken.map { !$0.isEmpty } ?? false
+                        let serverURLAvailable = selectedServer.map { !$0.isEmpty } ?? false
+                        let sourceWavURL = RecordingStore.shared.streamWavURL(for: id)
+                        let stagingGate: String
+                        if !fullRecordingUploadEnabled {
+                            stagingGate = "disabled"
+                        } else if !recordingTokenPresent {
+                            stagingGate = "recording_token_absent"
+                        } else if !serverURLAvailable {
+                            stagingGate = "server_unavailable"
+                        } else if sourceWavURL == nil {
+                            stagingGate = "source_url_unavailable"
+                        } else {
+                            stagingGate = "eligible"
+                        }
+                        FileLogger.shared.debug(.network, "Full recording upload staging gate", payload: [
+                            "enabled": fullRecordingUploadEnabled,
+                            "recordingTokenPresent": recordingTokenPresent,
+                            "recordingTokenLength": recordingToken?.count ?? 0,
+                            "serverAvailable": serverURLAvailable,
+                            "sourceURLAvailable": sourceWavURL != nil,
+                            "decision": stagingGate
+                        ])
+
+                        if fullRecordingUploadEnabled && recordingTokenPresent {
+                            if let recordingToken,
+                               let serverURL = selectedServer,
+                               !serverURL.isEmpty,
+                               let sourceURL = sourceWavURL {
                                 do {
                                     let stagedURL = try FullRecordingDiagnosticsUploader.stage(
                                         sourceURL: sourceURL,
@@ -1985,13 +2011,16 @@ final class DictationViewModel: ObservableObject {
 
             await streamClient?.disconnect()
             if let stagedDiagnosticsUpload {
-                Task.detached(priority: .utility) {
+                let uploadLease = FullRecordingDiagnosticsUploadLease.begin(sessionID: id)
+                let uploadTask = Task.detached(priority: .utility) {
                     await FullRecordingDiagnosticsUploader.upload(
                         stagedURL: stagedDiagnosticsUpload.url,
                         serverURL: stagedDiagnosticsUpload.serverURL,
                         recordingToken: stagedDiagnosticsUpload.token,
-                        sessionID: id)
+                        sessionID: id,
+                        backgroundTaskLease: uploadLease)
                 }
+                uploadLease.installUploadTask(uploadTask)
             }
             guard canContinueSession(id) else { return }
             streamClient = nil

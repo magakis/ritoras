@@ -1,9 +1,81 @@
 import Foundation
+import UIKit
+
+@MainActor
+final class FullRecordingDiagnosticsUploadLease {
+    private let sessionID: UUID
+    private var taskIdentifier: UIBackgroundTaskIdentifier = .invalid
+    private var uploadTask: Task<Void, Never>?
+    private var isEnded = false
+    private var didExpire = false
+
+    private init(sessionID: UUID) {
+        self.sessionID = sessionID
+    }
+
+    static func begin(sessionID: UUID) -> FullRecordingDiagnosticsUploadLease {
+        let lease = FullRecordingDiagnosticsUploadLease(sessionID: sessionID)
+        let identifier = UIApplication.shared.beginBackgroundTask(
+            withName: "FullRecordingDiagnosticsUpload") { [weak lease] in
+                lease?.expire()
+            }
+        lease.installBackgroundTask(identifier)
+        FileLogger.shared.debug(.network, "Full recording upload lease begin", payload: [
+            "jobId": sessionID.uuidString,
+            "active": lease.taskIdentifier != .invalid && !lease.isEnded
+        ])
+        return lease
+    }
+
+    func installUploadTask(_ task: Task<Void, Never>) {
+        guard !isEnded, !didExpire else {
+            task.cancel()
+            return
+        }
+        uploadTask = task
+    }
+
+    func end() {
+        guard !isEnded else { return }
+        isEnded = true
+        uploadTask = nil
+        let identifier = taskIdentifier
+        taskIdentifier = .invalid
+        guard identifier != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(identifier)
+    }
+
+    private func installBackgroundTask(_ identifier: UIBackgroundTaskIdentifier) {
+        guard identifier != .invalid else {
+            FileLogger.shared.warn(.network, "Full recording upload background lease unavailable", payload: [
+                "jobId": sessionID.uuidString
+            ])
+            return
+        }
+        guard !isEnded else {
+            UIApplication.shared.endBackgroundTask(identifier)
+            return
+        }
+        taskIdentifier = identifier
+    }
+
+    private func expire() {
+        guard !isEnded else { return }
+        didExpire = true
+        FileLogger.shared.warn(.network, "Full recording diagnostics upload lease expired mid-upload", payload: [
+            "jobId": sessionID.uuidString
+        ])
+        uploadTask?.cancel()
+        end()
+    }
+}
 
 enum FullRecordingDiagnosticsUploader {
     private static let maximumUploadBytes: UInt64 = 100 * 1024 * 1024
     private static let conversionChunkBytes = 256 * 1024
     private static let requestTimeout: TimeInterval = 600
+    private static let retryDelay: TimeInterval = 3
+    private static let maximumAttempts = 2
     private static let staleStagingAge: TimeInterval = 24 * 60 * 60
 
     private struct SourceWAVFormat {
@@ -22,6 +94,20 @@ enum FullRecordingDiagnosticsUploader {
         let truncated: Bool
         let sampleRate: UInt32
         let channelCount: UInt16
+    }
+
+    private struct UploadAttempt {
+        let response: HTTPURLResponse
+        let bytesSent: Int64
+    }
+
+    private struct UploadTransportError: LocalizedError {
+        let underlyingError: Error
+        let bytesSent: Int64
+
+        var errorDescription: String? {
+            underlyingError.localizedDescription
+        }
     }
 
     private enum UploadError: LocalizedError {
@@ -44,12 +130,15 @@ enum FullRecordingDiagnosticsUploader {
         private let lock = NSLock()
         private var task: URLSessionUploadTask?
         private var isCancelled = false
+        private var lastBytesSent: Int64 = 0
 
         func install(_ task: URLSessionUploadTask) {
             lock.lock()
             let shouldCancel = isCancelled
             if !shouldCancel {
                 self.task = task
+            } else {
+                lastBytesSent = max(lastBytesSent, max(0, task.countOfBytesSent))
             }
             lock.unlock()
 
@@ -62,9 +151,22 @@ enum FullRecordingDiagnosticsUploader {
             lock.lock()
             isCancelled = true
             let task = self.task
-            self.task = nil
+            if let task {
+                lastBytesSent = max(lastBytesSent, max(0, task.countOfBytesSent))
+            }
             lock.unlock()
             task?.cancel()
+        }
+
+        func completeAndGetBytesSent() -> Int64 {
+            lock.lock()
+            if let task {
+                lastBytesSent = max(lastBytesSent, max(0, task.countOfBytesSent))
+            }
+            self.task = nil
+            let bytesSent = lastBytesSent
+            lock.unlock()
+            return bytesSent
         }
     }
 
@@ -85,19 +187,24 @@ enum FullRecordingDiagnosticsUploader {
         return stagedURL
     }
 
-    /// Converts, uploads once, and removes both owned files without affecting the session flow.
+    /// Converts, retries a failed upload once, and removes both owned files without affecting the session flow.
     static func upload(
         stagedURL: URL,
         serverURL: String,
         recordingToken: String,
-        sessionID: UUID
+        sessionID: UUID,
+        backgroundTaskLease: FullRecordingDiagnosticsUploadLease
     ) async {
+        let uploadStartedAt = Date()
         let outputURL = convertedURL(for: stagedURL)
         var outcome = "failed"
         var reason: String?
         var statusCode: Int?
         var truncated = false
         var audioFormat: String?
+        var bytesSent: Int64 = 0
+        var attempts = 0
+        var attemptOutcomes: [String] = []
 
         do {
             sweepStaleStagingFiles(
@@ -112,27 +219,74 @@ enum FullRecordingDiagnosticsUploader {
             audioFormat = convertedAudioFormat
 
             try Task.checkCancellation()
-            let response = try await post(
-                fileURL: outputURL,
-                serverURL: serverURL,
-                recordingToken: recordingToken,
-                sessionID: sessionID,
-                truncated: conversion.truncated,
-                audioFormat: convertedAudioFormat)
-            statusCode = response.statusCode
-            outcome = (200..<300).contains(response.statusCode) ? "uploaded" : "http_failure"
-            if outcome == "http_failure" {
-                reason = "HTTP \(response.statusCode)"
+            for attempt in 1...maximumAttempts {
+                try Task.checkCancellation()
+                attempts = attempt
+                var retryableFailure = false
+
+                do {
+                    let uploadAttempt = try await post(
+                        fileURL: outputURL,
+                        serverURL: serverURL,
+                        recordingToken: recordingToken,
+                        sessionID: sessionID,
+                        truncated: conversion.truncated,
+                        audioFormat: convertedAudioFormat)
+                    bytesSent += max(0, uploadAttempt.bytesSent)
+                    statusCode = uploadAttempt.response.statusCode
+                    if (200..<300).contains(uploadAttempt.response.statusCode) {
+                        outcome = "uploaded"
+                        reason = nil
+                        attemptOutcomes.append("uploaded_\(uploadAttempt.response.statusCode)")
+                        break
+                    }
+
+                    outcome = "http_failure"
+                    reason = "HTTP \(uploadAttempt.response.statusCode)"
+                    attemptOutcomes.append("http_failure_\(uploadAttempt.response.statusCode)")
+                    retryableFailure = true
+                } catch is CancellationError {
+                    outcome = "cancelled"
+                    reason = "cancelled"
+                    attemptOutcomes.append("cancelled")
+                    break
+                } catch let transportError as UploadTransportError {
+                    bytesSent += max(0, transportError.bytesSent)
+                    if Task.isCancelled || isCancellation(transportError.underlyingError) {
+                        outcome = "cancelled"
+                        reason = "cancelled"
+                        attemptOutcomes.append("cancelled")
+                        break
+                    }
+
+                    outcome = "failed"
+                    reason = safeErrorDescription(
+                        transportError.underlyingError,
+                        recordingToken: recordingToken)
+                    attemptOutcomes.append("transport_failure")
+                    retryableFailure = true
+                }
+
+                guard retryableFailure, attempt < maximumAttempts else { break }
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
+                    try Task.checkCancellation()
+                } catch {
+                    outcome = "cancelled"
+                    reason = "cancelled"
+                    attemptOutcomes.append("cancelled_before_retry")
+                    break
+                }
             }
         } catch is CancellationError {
             outcome = "cancelled"
             reason = "cancelled"
         } catch {
-            if let urlError = error as? URLError, urlError.code == .cancelled {
+            if Task.isCancelled || isCancellation(error) {
                 outcome = "cancelled"
                 reason = "cancelled"
             } else {
-                reason = String(error.localizedDescription.prefix(120))
+                reason = safeErrorDescription(error, recordingToken: recordingToken)
             }
         }
 
@@ -142,7 +296,12 @@ enum FullRecordingDiagnosticsUploader {
             "jobId": sessionID.uuidString,
             "outcome": outcome,
             "truncated": truncated,
-            "cleanupSucceeded": outputRemoved && stagedRemoved
+            "cleanupSucceeded": outputRemoved && stagedRemoved,
+            "elapsed_ms": Date().timeIntervalSince(uploadStartedAt) * 1_000,
+            "bytesSent": bytesSent,
+            "attempts": attempts,
+            "retryAttempted": attempts > 1,
+            "attemptOutcomes": attemptOutcomes
         ]
         if let statusCode {
             payload["status"] = statusCode
@@ -153,7 +312,37 @@ enum FullRecordingDiagnosticsUploader {
         if let reason {
             payload["reason"] = reason
         }
-        FileLogger.shared.debug(.network, "Full recording diagnostics upload", payload: payload)
+        let retryExhausted = attempts == maximumAttempts
+            && (outcome == "http_failure" || outcome == "failed")
+        FileLogger.shared.log(
+            retryExhausted ? .warn : .debug,
+            .network,
+            "Full recording diagnostics upload",
+            payload: payload)
+        await backgroundTaskLease.end()
+    }
+
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return true }
+        return false
+    }
+
+    private static func safeErrorDescription(_ error: Error, recordingToken: String) -> String {
+        var description = error.localizedDescription
+        if !recordingToken.isEmpty {
+            description = description.replacingOccurrences(of: recordingToken, with: "<redacted>")
+            let tokenCharacters = CharacterSet(
+                charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
+            if let encodedToken = recordingToken.addingPercentEncoding(
+                withAllowedCharacters: tokenCharacters) {
+                description = description.replacingOccurrences(
+                    of: encodedToken,
+                    with: "<redacted>",
+                    options: .caseInsensitive)
+            }
+        }
+        return String(description.prefix(120))
     }
 
     private static func convertedURL(for stagedURL: URL) -> URL {
@@ -413,7 +602,7 @@ enum FullRecordingDiagnosticsUploader {
         sessionID: UUID,
         truncated: Bool,
         audioFormat: String
-    ) async throws -> HTTPURLResponse {
+    ) async throws -> UploadAttempt {
         guard var components = URLComponents(string: serverURL),
               let scheme = components.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
@@ -445,17 +634,24 @@ enum FullRecordingDiagnosticsUploader {
         let cancellation = UploadTaskCancellation()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation {
-                (continuation: CheckedContinuation<HTTPURLResponse, Error>) in
+                (continuation: CheckedContinuation<UploadAttempt, Error>) in
                 let task = URLSession.shared.uploadTask(
                     with: request,
                     fromFile: fileURL
                 ) { _, response, error in
+                    let bytesSent = cancellation.completeAndGetBytesSent()
                     if let error {
-                        continuation.resume(throwing: error)
+                        continuation.resume(throwing: UploadTransportError(
+                            underlyingError: error,
+                            bytesSent: bytesSent))
                     } else if let response = response as? HTTPURLResponse {
-                        continuation.resume(returning: response)
+                        continuation.resume(returning: UploadAttempt(
+                            response: response,
+                            bytesSent: bytesSent))
                     } else {
-                        continuation.resume(throwing: UploadError.invalidUploadResponse)
+                        continuation.resume(throwing: UploadTransportError(
+                            underlyingError: UploadError.invalidUploadResponse,
+                            bytesSent: bytesSent))
                     }
                 }
                 cancellation.install(task)
