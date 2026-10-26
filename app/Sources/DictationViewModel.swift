@@ -1,3 +1,4 @@
+import Dispatch
 import Foundation
 import AVFoundation
 import UIKit
@@ -1738,23 +1739,30 @@ final class DictationViewModel: ObservableObject {
                     drainContinuation.yield(outcome)
                     drainContinuation.finish()
                 }
-                let drainTimeoutTask = Task {
-                    try? await Task.sleep(nanoseconds: UInt64(
-                        SharedConfig.Defaults.streamFinalTimeout * 1_000_000_000))
-                    guard !Task.isCancelled else { return }
+                let drainTimeoutNanoseconds = Int(
+                    SharedConfig.Defaults.streamFinalTimeout * 1_000_000_000)
+                let drainTimeoutSource = DispatchSource.makeTimerSource(
+                    flags: .strict,
+                    queue: DispatchQueue.global(qos: .userInitiated))
+                drainTimeoutSource.schedule(
+                    deadline: .now() + .nanoseconds(drainTimeoutNanoseconds),
+                    leeway: .nanoseconds(0))
+                // Keep the deadline producer off MainActor while the consumer is suspended.
+                drainTimeoutSource.setEventHandler {
                     drainContinuation.yield(.timedOut)
                     drainContinuation.finish()
                 }
+                drainTimeoutSource.resume()
 
                 guard activeID == id else {
                     drainWaitTask.cancel()
-                    drainTimeoutTask.cancel()
+                    drainTimeoutSource.cancel()
                     return
                 }
                 queueDrainOutcome = await drainEvents.first(where: { _ in true }) ?? .timedOut
                 queueDrained = queueDrainOutcome == .drained
                 drainWaitTask.cancel()
-                drainTimeoutTask.cancel()
+                drainTimeoutSource.cancel()
                 guard canContinueSession(id) else { return }
 
                 if queueDrained, let client = streamClient,
@@ -2695,6 +2703,7 @@ final class DictationViewModel: ObservableObject {
         aacSourceSampleRate: Int
     ) async -> StreamChunkConsumerOutcome {
         let backoff = SharedConfig.Defaults.streamChunkRetryBackoffSeconds
+        var aacEncoder: StreamingAACChunkEncoder?
         while !Task.isCancelled {
             guard activeID == sessionID else { return .cancelled }
             do {
@@ -2756,13 +2765,22 @@ final class DictationViewModel: ObservableObject {
                     case .float32PCM:
                         try await client.sendChunk(id: chunkId, samples: samples)
                     case .aacM4A:
+                        let encoder: StreamingAACChunkEncoder
+                        if let aacEncoder {
+                            encoder = aacEncoder
+                        } else {
+                            encoder = await StreamingAACChunkEncoder.make(
+                                sourceSampleRate: aacSourceSampleRate)
+                            guard !Task.isCancelled, activeID == sessionID else {
+                                return .cancelled
+                            }
+                            aacEncoder = encoder
+                        }
                         let payload: Data
                         if let encodedAACPayload {
                             payload = encodedAACPayload
                         } else {
-                            payload = try await StreamingAACChunkEncoder.encode(
-                                samples: samples,
-                                sourceSampleRate: aacSourceSampleRate)
+                            payload = try await encoder.encode(samples: samples)
                             encodedAACPayload = payload
                         }
                         guard !Task.isCancelled, activeID == sessionID else {
