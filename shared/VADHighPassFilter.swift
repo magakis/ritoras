@@ -20,18 +20,33 @@ final class VADHighPassFilter {
         var filtered: [Float] = []
         filtered.reserveCapacity(samples.count)
         for sample in samples {
-            guard let previousInput else {
-                self.previousInput = sample
-                filtered.append(0)
-                continue
-            }
-
-            let output = alpha * (previousOutput + sample - previousInput)
-            self.previousInput = sample
-            previousOutput = output
-            filtered.append(output)
+            filtered.append(filter(sample))
         }
         return filtered
+    }
+
+    /// Measures the filtered RMS without allocating a second per-frame sample buffer.
+    func rms(_ samples: [Float]) -> Float {
+        guard !samples.isEmpty else { return 0 }
+
+        var sumSquares: Float = 0
+        for sample in samples {
+            let filteredSample = filter(sample)
+            sumSquares += filteredSample * filteredSample
+        }
+        return sqrt(sumSquares / Float(samples.count))
+    }
+
+    private func filter(_ sample: Float) -> Float {
+        guard let previousInput else {
+            self.previousInput = sample
+            return 0
+        }
+
+        let output = alpha * (previousOutput + sample - previousInput)
+        self.previousInput = sample
+        previousOutput = output
+        return output
     }
 
     func reset() {

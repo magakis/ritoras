@@ -67,6 +67,9 @@ struct VADTelemetryFrame: @unchecked Sendable {
     let continuationThresholdDb: Double
     let silenceThresholdDb: Double
     let dynamicsSpreadDb: Double?
+    let shortSpreadDb: Double?
+    let speechShaped: Bool
+    let highBandRatioDb: Double?
     let endpointPreviousState: String
     let endpointState: String
     let endpointDecision: String
@@ -189,6 +192,8 @@ struct ChunkSplitterFrameState: Sendable {
 /// Thread safety through internal locking via `os_unfair_lock`.
 /// All mutable state is protected — callers call `process()`/`flush()` directly.
 private final class VADContext: @unchecked Sendable {
+    private static let maximumStrongGustFrameDurationSeconds = 0.02
+
     // MARK: Configuration (constants)
     let gate: VADThresholdGate
     let silenceThresholdSamples: Int
@@ -204,6 +209,7 @@ private final class VADContext: @unchecked Sendable {
     let accumulatorSpillSamples: Int
     let postRollSamples = 400 * 16
     let analysisHpf: VADHighPassFilter?
+    let whisperAnalysisHpf: VADHighPassFilter
 
     // MARK: Lock
     private var unfairLock = os_unfair_lock()
@@ -220,6 +226,10 @@ private final class VADContext: @unchecked Sendable {
     private var spilledSampleCount = 0
     private var contiguousTrailingSilenceSamples = 0
     private var contiguousTrailingSilenceMinimumDb: Double?
+    private var contiguousTrailingSilencePeakAboveFloorDb: Double?
+    private var retainedGapPeakAboveFloorDb: Double?
+    private var accumulatorPeakAboveFloorDb: Double?
+    private var accumulatorHasSpeechEvidence = false
     private var chunkStartSessionSamples: Int?
     var silenceSamples: Int = 0
     var speechSamples: Int = 0
@@ -227,6 +237,7 @@ private final class VADContext: @unchecked Sendable {
     private var sessionElapsedSamples = 0
     private var diagnosticElapsed = 0.0
     private var lastFrameDb = 0.0
+    private var previousFrameDbForClassification: Double?
     private var pendingEmissionSummary: EmissionSummary?
     private var sawReanchorDuringUtterance = false
     private var bufferHighWaterSamples = 0
@@ -279,6 +290,9 @@ private final class VADContext: @unchecked Sendable {
         self.analysisHpf = analysisHpfEnabled
             ? VADHighPassFilter(cutoffHz: analysisHpfCutoffHz)
             : nil
+        self.whisperAnalysisHpf = VADHighPassFilter(
+            cutoffHz: SharedConfig.Defaults.streamVadWhisperHighPassCutoffHzDefault
+        )
     }
 
     deinit {
@@ -295,6 +309,7 @@ private final class VADContext: @unchecked Sendable {
         telemetrySequence = 0
         sessionElapsedSamples = 0
         chunkStartSessionSamples = nil
+        previousFrameDbForClassification = nil
         resetIdleGapRun()
         guard let sink else { return }
 
@@ -323,6 +338,8 @@ private final class VADContext: @unchecked Sendable {
         config["maxNoiseSec"] = Double(maxNoiseSamples) / 16000.0
         config["analysisHpfEnabled"] = analysisHpf != nil
         config["analysisHpfCutoffHz"] = SharedConfig.Defaults.streamVadHpfCutoffHzDefault
+        config["whisperHighPassCutoffHz"] = SharedConfig.Defaults.streamVadWhisperHighPassCutoffHzDefault
+        config["gapSpeechPeakAboveFloorDb"] = SharedConfig.Defaults.streamVadGapSpeechPeakAboveFloorDbDefault
         sink.event(VADTelemetryEvent(kind: .sessionStart, config: config))
     }
 
@@ -336,12 +353,16 @@ private final class VADContext: @unchecked Sendable {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         analysisHpf?.reset()
+        whisperAnalysisHpf.reset()
+        previousFrameDbForClassification = nil
     }
 
     func resetAfterRouteChange() {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         analysisHpf?.reset()
+        whisperAnalysisHpf.reset()
+        previousFrameDbForClassification = nil
         gate.resetFloorAfterRouteChange()
         primingComplete = gate.snapshot.floorDb == nil
         utteranceQuietestStrongDb = nil
@@ -351,6 +372,7 @@ private final class VADContext: @unchecked Sendable {
         loudFlatTerminatorActive = false
         contiguousTrailingSilenceSamples = 0
         contiguousTrailingSilenceMinimumDb = nil
+        contiguousTrailingSilencePeakAboveFloorDb = nil
     }
 
     func frameState(emissionSummary: EmissionSummary?) -> ChunkSplitterFrameState {
@@ -421,6 +443,9 @@ private final class VADContext: @unchecked Sendable {
             continuationThresholdDb: output.continuationThresholdDb,
             silenceThresholdDb: output.silenceThresholdDb,
             dynamicsSpreadDb: output.dynamicsSpreadDb,
+            shortSpreadDb: output.shortSpreadDb,
+            speechShaped: output.speechShaped,
+            highBandRatioDb: output.highBandRatioDb,
             endpointPreviousState: previousEndpointState.rawValue,
             endpointState: endpoint.state.rawValue,
             endpointDecision: telemetryDecisionLabel(decision),
@@ -495,11 +520,27 @@ private final class VADContext: @unchecked Sendable {
         sessionElapsedSamples += frameLength
         let frameStartSamples = sessionElapsedSamples - frameLength
         let analysisFrame = analysisHpf?.process(frame) ?? frame
-        let frameDb = Double(AudioMath.dbFromRms(AudioMath.dcCorrectedRMS(analysisFrame)))
+        let analysisRms = AudioMath.dcCorrectedRMS(analysisFrame)
+        let frameDb = Double(AudioMath.dbFromRms(analysisRms))
+        let adjacentStepDb = previousFrameDbForClassification.map { abs(frameDb - $0) }
+        previousFrameDbForClassification = frameDb
+        let previousGateEvidence = gate.snapshot.evidence
+        let highBandRms = whisperAnalysisHpf.rms(analysisFrame)
+        let highBandRatioDb = analysisRms > 1e-10
+            ? Double(AudioMath.dbFromRms(highBandRms / analysisRms))
+            : -100.0
         lastFrameDb = frameDb
         pendingEmissionSummary = nil
         let frameDuration = Double(frameLength) / 16_000.0
-        let output = gate.process(frameDb: frameDb, frameDuration: frameDuration)
+        let previousEndpointState = endpoint.state
+        let withinUtteranceContext = previousEndpointState == .speechActive
+            || previousEndpointState == .endPending
+        let output = gate.process(
+            frameDb: frameDb,
+            frameDuration: frameDuration,
+            highBandRatioDb: highBandRatioDb,
+            withinUtteranceContext: withinUtteranceContext
+        )
         if output.didCompletePriming {
             telemetrySink?.event(VADTelemetryEvent(
                 kind: .primingComplete,
@@ -511,7 +552,6 @@ private final class VADContext: @unchecked Sendable {
 
         let reanchorEvent = output.didReanchor
         _ = gate.takePendingReanchorEvent()
-        let previousEndpointState = endpoint.state
         if reanchorEvent {
             telemetrySink?.event(VADTelemetryEvent(kind: .reanchor, reason: "floor_moved"))
             if previousEndpointState == .speechActive || previousEndpointState == .endPending {
@@ -525,13 +565,18 @@ private final class VADContext: @unchecked Sendable {
             appendRetainedGapFrame(
                 frame,
                 startSamples: frameStartSamples,
-                evidence: output.speechShaped ? .continuing : output.evidence
+                evidence: output.speechShaped ? .continuing : output.evidence,
+                frameDb: frameDb,
+                floorDb: output.floorDb
             )
         } else {
             if accumulatorSampleCount == 0 {
                 chunkStartSessionSamples = frameStartSamples
             }
             appendAccumulator(frame)
+            if !endpointMachineEnabled {
+                trackAccumulatorSpeechEvidence(frameDb: frameDb, floorDb: output.floorDb, output: output)
+            }
             bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
         }
         if output.isSpeech {
@@ -572,7 +617,9 @@ private final class VADContext: @unchecked Sendable {
                     }
                 }
                 if loudFlatTerminatorActive {
-                    endpointEvidence = .silence
+                    if previousState != .endPending || output.evidence != .strong {
+                        endpointEvidence = .silence
+                    }
                 }
             } else {
                 loudFlatStreakMs = 0
@@ -585,20 +632,27 @@ private final class VADContext: @unchecked Sendable {
                 endpointEvidence = .continuing
             }
 
-            // Suppress only an abrupt high-spread frame; a locally flat follow-up may resume.
-            if previousState == .endPending,
+            // Bound wind suppression to one short strong edge after a non-strong frame.
+            let isTransientStrongGust = previousState == .endPending
+                && output.evidence == .strong
+                && previousGateEvidence != .strong
+                && !output.speechShaped
+                && adjacentStepDb.map {
+                    $0 >= VADThresholdGate.adaptiveEndPendingWindDispersionDb
+                } == true
+                && output.dynamicsSpreadDb.map {
+                    $0 >= VADThresholdGate.adaptiveEndPendingWindDispersionDb
+                } == true
+                && output.shortSpreadDb.map { $0 >= gate.effectiveFlatSpreadDb } == true
+                && frameDuration <= Self.maximumStrongGustFrameDurationSeconds
+            if isTransientStrongGust {
+                // Only the first short, abrupt strong edge is suppressed; a sustained run passes.
+                endpointEvidence = .silence
+            } else if previousState == .endPending,
                output.shortSpreadDb != nil,
                output.dynamicsSpreadDb != nil,
                !output.speechShaped,
-               let dynamicsSpreadDb = output.dynamicsSpreadDb,
-               dynamicsSpreadDb >= VADThresholdGate.adaptiveEndPendingWindDispersionDb,
-               endpointEvidence == .strong {
-                endpointEvidence = .silence
-            } else if previousState == .endPending,
-                      output.shortSpreadDb != nil,
-                      output.dynamicsSpreadDb != nil,
-                      !output.speechShaped,
-                      endpointEvidence == .continuing || endpointEvidence == .ambiguous {
+               (endpointEvidence == .continuing || endpointEvidence == .ambiguous) {
                 endpointEvidence = .silence
             }
 
@@ -608,10 +662,18 @@ private final class VADContext: @unchecked Sendable {
                     contiguousTrailingSilenceMinimumDb ?? frameDb,
                     frameDb
                 )
+                if let floorDb = output.floorDb {
+                    let peakAboveFloorDb = frameDb - floorDb
+                    if contiguousTrailingSilencePeakAboveFloorDb.map({ peakAboveFloorDb > $0 }) ?? true {
+                        contiguousTrailingSilencePeakAboveFloorDb = peakAboveFloorDb
+                    }
+                }
             } else {
                 contiguousTrailingSilenceSamples = 0
                 contiguousTrailingSilenceMinimumDb = nil
+                contiguousTrailingSilencePeakAboveFloorDb = nil
             }
+
             let silenceBeforeDecision = endpoint.accumulatedSilenceSamples
             decision = endpoint.process(evidence: endpointEvidence, durationSamples: frameLength)
             if loudFlatTerminatorActive && endpoint.state == .idle {
@@ -649,12 +711,21 @@ private final class VADContext: @unchecked Sendable {
             )
             if output.isSpeech {
                 silenceSamples = 0
+                contiguousTrailingSilenceSamples = 0
+                contiguousTrailingSilenceMinimumDb = nil
+                contiguousTrailingSilencePeakAboveFloorDb = nil
             } else {
                 contiguousTrailingSilenceSamples += frameLength
                 contiguousTrailingSilenceMinimumDb = min(
                     contiguousTrailingSilenceMinimumDb ?? frameDb,
                     frameDb
                 )
+                if let floorDb = output.floorDb {
+                    let peakAboveFloorDb = frameDb - floorDb
+                    if contiguousTrailingSilencePeakAboveFloorDb.map({ peakAboveFloorDb > $0 }) ?? true {
+                        contiguousTrailingSilencePeakAboveFloorDb = peakAboveFloorDb
+                    }
+                }
                 silenceSamples += frameLength
             }
             decisionSilenceSamples = silenceSamples
@@ -730,7 +801,7 @@ private final class VADContext: @unchecked Sendable {
         if endpointMachineEnabled,
            (endpoint.state == .idle || endpoint.state == .onsetPending),
            retainedGapBuffer.count > maxNoiseSamples {
-            if retainedGapEvidenceSamples < minimumVoiceEvidenceToRetainSamples {
+            if !retainedGapHasSpeechEvidence {
                 shedRetainedGap()
             } else {
                 moveRetainedGapToAccumulator()
@@ -738,7 +809,8 @@ private final class VADContext: @unchecked Sendable {
         } else if !endpointMachineEnabled,
                   endpoint.state == .idle,
                   accumulatorSampleCount > maxNoiseSamples,
-                  speechSamples < minimumVoiceEvidenceToRetainSamples {
+                  speechSamples < minimumVoiceEvidenceToRetainSamples,
+                  !accumulatorHasPlausibleSpeech {
             telemetrySink?.event(VADTelemetryEvent(
                 kind: .discard,
                 samples: accumulatorSampleCount,
@@ -750,6 +822,7 @@ private final class VADContext: @unchecked Sendable {
             silenceSamples = 0
             contiguousTrailingSilenceSamples = 0
             contiguousTrailingSilenceMinimumDb = nil
+            contiguousTrailingSilencePeakAboveFloorDb = nil
             bufferHighWaterSamples = 0
             FileLogger.shared.debug(.audio, "Chunk splitter: shed voiceless pending audio")
             return nil
@@ -781,12 +854,20 @@ private final class VADContext: @unchecked Sendable {
     private func appendRetainedGapFrame(
         _ samples: [Float],
         startSamples: Int,
-        evidence: VADEvidence
+        evidence: VADEvidence,
+        frameDb: Double,
+        floorDb: Double?
     ) {
         if retainedGapBuffer.isEmpty {
             retainedGapStartSessionSamples = startSamples
         }
         retainedGapBuffer.append(contentsOf: samples)
+        if let floorDb {
+            let peakAboveFloorDb = frameDb - floorDb
+            if retainedGapPeakAboveFloorDb.map({ peakAboveFloorDb > $0 }) ?? true {
+                retainedGapPeakAboveFloorDb = peakAboveFloorDb
+            }
+        }
         if evidence == .strong || evidence == .continuing {
             retainedGapEvidenceSamples += samples.count
         }
@@ -794,6 +875,37 @@ private final class VADContext: @unchecked Sendable {
             bufferHighWaterSamples,
             accumulatorSampleCount + retainedGapBuffer.count
         )
+    }
+
+    private var retainedGapHasSpeechEvidence: Bool {
+        if retainedGapEvidenceSamples > 0 { return true }
+        return retainedGapPeakAboveFloorDb.map {
+            $0 >= SharedConfig.Defaults.streamVadGapSpeechPeakAboveFloorDbDefault
+        } ?? false
+    }
+
+    private var accumulatorHasPlausibleSpeech: Bool {
+        if accumulatorHasSpeechEvidence { return true }
+        return accumulatorPeakAboveFloorDb.map {
+            $0 >= SharedConfig.Defaults.streamVadGapSpeechPeakAboveFloorDbDefault
+        } ?? false
+    }
+
+    private func trackAccumulatorSpeechEvidence(
+        frameDb: Double,
+        floorDb: Double?,
+        output: VADGateOutput
+    ) {
+        accumulatorHasSpeechEvidence = accumulatorHasSpeechEvidence
+            || output.evidence == .strong
+            || output.evidence == .continuing
+            || output.speechShaped
+        if let floorDb {
+            let peakAboveFloorDb = frameDb - floorDb
+            if accumulatorPeakAboveFloorDb.map({ peakAboveFloorDb > $0 }) ?? true {
+                accumulatorPeakAboveFloorDb = peakAboveFloorDb
+            }
+        }
     }
 
     private func moveRetainedGapToAccumulator() {
@@ -805,6 +917,7 @@ private final class VADContext: @unchecked Sendable {
         retainedGapBuffer.removeAll(keepingCapacity: true)
         retainedGapStartSessionSamples = nil
         retainedGapEvidenceSamples = 0
+        retainedGapPeakAboveFloorDb = nil
         bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
     }
 
@@ -818,12 +931,14 @@ private final class VADContext: @unchecked Sendable {
         retainedGapBuffer.removeAll(keepingCapacity: true)
         retainedGapStartSessionSamples = nil
         retainedGapEvidenceSamples = 0
+        retainedGapPeakAboveFloorDb = nil
         if accumulatorSampleCount == 0 {
             chunkStartSessionSamples = nil
             speechSamples = 0
             silenceSamples = 0
             contiguousTrailingSilenceSamples = 0
             contiguousTrailingSilenceMinimumDb = nil
+            contiguousTrailingSilencePeakAboveFloorDb = nil
             bufferHighWaterSamples = 0
         }
         FileLogger.shared.debug(.audio, "Chunk splitter: shed voiceless pending audio")
@@ -867,6 +982,8 @@ private final class VADContext: @unchecked Sendable {
         accumulatorSpillURL = nil
         spilledSampleCount = 0
         accumulator.removeAll(keepingCapacity: true)
+        accumulatorPeakAboveFloorDb = nil
+        accumulatorHasSpeechEvidence = false
     }
 
     private func appendAccumulator(_ samples: [Float]) {
@@ -952,6 +1069,7 @@ private final class VADContext: @unchecked Sendable {
                 retainedGapBuffer = trimmedTail
                 retainedGapStartSessionSamples = startSamples + sampleCount
                 retainedGapEvidenceSamples = 0
+                retainedGapPeakAboveFloorDb = contiguousTrailingSilencePeakAboveFloorDb
             }
         }
         let emittedTotalMs = Double(sampleCount) / 16.0
@@ -968,6 +1086,7 @@ private final class VADContext: @unchecked Sendable {
         clearAccumulator()
         contiguousTrailingSilenceSamples = 0
         contiguousTrailingSilenceMinimumDb = nil
+        contiguousTrailingSilencePeakAboveFloorDb = nil
         chunkStartSessionSamples = nil
         silenceSamples = 0
         speechSamples = 0
@@ -989,8 +1108,7 @@ private final class VADContext: @unchecked Sendable {
             endMs: endMs,
             endpointState: endpointState
         ))
-        if retainedGapBuffer.count > maxNoiseSamples,
-           retainedGapEvidenceSamples < minimumVoiceEvidenceToRetainSamples {
+        if retainedGapBuffer.count > maxNoiseSamples, !retainedGapHasSpeechEvidence {
             shedRetainedGap()
         }
         return VADEmission(chunkId: id, samples: snapshot)
@@ -1177,7 +1295,7 @@ private final class ConverterAccounting: @unchecked Sendable {
 
 // MARK: - Streaming Audio Recorder
 
-/// Captures microphone audio via `AVAudioEngine`, runs an energy-based voice detector
+/// Captures microphone audio via `AVAudioEngine`, runs a level- and shape-based voice detector
 /// state machine, and emits pause-bounded float32 PCM chunks via a callback.
 ///
 /// Chunks are delivered as `[Float]` at 16 kHz mono, one chunk per detected
@@ -1257,7 +1375,8 @@ actor StreamingAudioRecorder {
             loudContinuationDeltaDb: SharedConfig.streamVadLoudContinuationDeltaDb(),
             loudSilenceDeltaDb: SharedConfig.streamVadLoudSilenceDeltaDb(),
             loudRiseDbPerSec: SharedConfig.streamVadLoudRiseDbPerSec(),
-            loudDynamicsSpreadDb: SharedConfig.streamVadLoudDynamicsSpreadDb()
+            loudDynamicsSpreadDb: SharedConfig.streamVadLoudDynamicsSpreadDb(),
+            whisperHighBandRatioDb: SharedConfig.streamVadWhisperHighBandRatioDb()
         )
         self.vadGateConfig = vadGateConfig
         vad = VADContext(

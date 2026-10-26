@@ -3,6 +3,7 @@ import {
   makeVadGateConfig,
   VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB,
   VAD_LOUD_FLOOR_REGIME_DB,
+  VAD_WHISPER_HPF_CUTOFF_HZ,
   VADThresholdGate,
 } from './vad-gate.mjs';
 import { StreamingEndpoint } from './streaming-endpoint.mjs';
@@ -22,6 +23,8 @@ const DEFAULT_ENDPOINT_SILENCE_MS = 3000;
 const DEFAULT_MAX_NOISE_SAMPLES = 6 * 16000;
 const DEFAULT_HEAD_BUFFER_SAMPLES = 2500 * 16;
 const MINIMUM_VOICE_EVIDENCE_SAMPLES = 100 * 16;
+const GAP_SPEECH_PEAK_ABOVE_FLOOR_DB = 6;
+const MAX_STRONG_GUST_FRAME_DURATION_S = 0.02;
 const STOP_FLUSH_MINIMUM_SAMPLES = 250 * 16;
 const POST_FINALIZE_SOFT_LATCH_SUPPRESSION_SAMPLES = 700 * 16;
 export const VAD_POST_ROLL_SAMPLES = 400 * 16;
@@ -44,6 +47,7 @@ function makeEndpoint(endpointSilenceMs = DEFAULT_ENDPOINT_SILENCE_MS, partial =
 export function classifyEndPendingEvidence({
   endpointState,
   evidence,
+  previousEvidence = null,
   speechShaped,
   shortSpreadDb,
   dynamicsSpreadDb,
@@ -53,6 +57,7 @@ export function classifyEndPendingEvidence({
   endpointSilenceSamples,
   ambiguousRescueSamples,
   rescueAwareWindowsEnabled,
+  frameDuration = DEFAULT_FRAME_MS / 1000,
 }) {
   if (endpointState !== 'endPending'
     || shortSpreadDb === null
@@ -68,11 +73,15 @@ export function classifyEndPendingEvidence({
     flatSpreadDb,
     adjacentStepDb,
   });
-  if (evidence === 'strong'
-    && !shapedEvidence
-    && dynamicsSpreadDb >= VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB) {
-    // Suppress only an abrupt high-spread frame; a locally flat follow-up may resume.
-    return 'silence';
+  if (evidence === 'strong') {
+    // Only an unshaped edge that starts a short strong run is treated as a gust.
+    const isolatedAbruptGust = !shapedEvidence
+      && previousEvidence !== 'strong'
+      && adjacentStepDb >= VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB
+      && dynamicsSpreadDb >= VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB
+      && shortSpreadDb >= flatSpreadDb
+      && frameDuration <= MAX_STRONG_GUST_FRAME_DURATION_S;
+    return isolatedAbruptGust ? 'silence' : evidence;
   }
   if ((evidence !== 'continuing' && evidence !== 'ambiguous') || shapedEvidence) {
     return evidence;
@@ -110,6 +119,9 @@ function makeSessionConfig(harness) {
     dynamicsSpreadDb: gate.effectiveDynamicsSpreadDb,
     flatSpreadDb: gate.effectiveFlatSpreadDb,
     dynamicsEnabled: gate.config.adaptiveDynamicsEnabled,
+    whisperHighPassCutoffHz: VAD_WHISPER_HPF_CUTOFF_HZ,
+    whisperHighBandRatioDb: gate.effectiveWhisperHighBandRatioDb,
+    gapSpeechPeakAboveFloorDb: GAP_SPEECH_PEAK_ABOVE_FLOOR_DB,
     idleGapMinSeconds: IDLE_GAP_TELEMETRY_MIN_SECONDS,
     idleGapPeakAboveFloorDb: IDLE_GAP_TELEMETRY_PEAK_ABOVE_FLOOR_DB,
     idleGapEvidenceAboveFloorDb: IDLE_GAP_TELEMETRY_EVIDENCE_ABOVE_FLOOR_DB,
@@ -237,6 +249,7 @@ export function makeRecorderHarness({
     postRollSamples: recorderConfig.postRollSamples ?? VAD_POST_ROLL_SAMPLES,
     contiguousTrailingSilenceSamples: 0,
     contiguousTrailingSilenceMinimumDb: null,
+    contiguousTrailingSilencePeakAboveFloorDb: null,
     postFinalizeSoftLatchSuppressionSamplesRemaining: 0,
     chunkCount: 0,
     emittedSampleCount: 0,
@@ -251,10 +264,13 @@ export function makeRecorderHarness({
     reanchorEventCount: 0,
     utteranceQuietestStrongDb: null,
     accumulatorSamples: 0,
+    accumulatorPeakAboveFloorDb: null,
+    accumulatorHasSpeechEvidence: false,
     chunkStartSessionSamples: null,
     retainedGapSamples: 0,
     retainedGapStartSessionSamples: null,
     retainedGapEvidenceSamples: 0,
+    retainedGapPeakAboveFloorDb: null,
     retentionShedCount: 0,
     shedSampleCount: 0,
     tailFloorSampleCount: 0,
@@ -295,6 +311,7 @@ export function makeRecorderHarness({
       this.primingComplete = this.gate.snapshot.floorDb === null;
       this.contiguousTrailingSilenceSamples = 0;
       this.contiguousTrailingSilenceMinimumDb = null;
+      this.contiguousTrailingSilencePeakAboveFloorDb = null;
       this.postFinalizeSoftLatchSuppressionSamplesRemaining = 0;
       this.previousProcessedFrameDb = null;
       this.quietLatchRisingEdgeAtSessionSamples = null;
@@ -323,6 +340,9 @@ export function makeRecorderHarness({
       copyOptional(record, 'fl', output.floorDb);
       record.fc = output.floorConverged;
       copyOptional(record, 'dy', output.dynamicsSpreadDb);
+      record.sh = output.speechShaped;
+      copyOptional(record, 'sdy', output.shortSpreadDb);
+      copyOptional(record, 'hbr', output.highBandRatioDb);
       if (output.isLoudRegime) record.lr = true;
       this.frameSequence += 1;
       if (typeof onFrame === 'function') onFrame(record);
@@ -361,11 +381,18 @@ export function makeRecorderHarness({
       return false;
     },
 
-    appendRetainedGap(frameSamples, frameStartSamples, evidence) {
+    appendRetainedGap(frameSamples, frameStartSamples, evidence, frameDb, floorDb) {
       if (this.retainedGapSamples === 0) {
         this.retainedGapStartSessionSamples = frameStartSamples;
       }
       this.retainedGapSamples += frameSamples;
+      if (floorDb !== null && floorDb !== undefined) {
+        const peakAboveFloorDb = frameDb - floorDb;
+        if (this.retainedGapPeakAboveFloorDb === null
+          || peakAboveFloorDb > this.retainedGapPeakAboveFloorDb) {
+          this.retainedGapPeakAboveFloorDb = peakAboveFloorDb;
+        }
+      }
       if (evidence === 'strong' || evidence === 'continuing') {
         this.retainedGapEvidenceSamples += frameSamples;
       }
@@ -385,6 +412,32 @@ export function makeRecorderHarness({
       this.retainedGapSamples = 0;
       this.retainedGapStartSessionSamples = null;
       this.retainedGapEvidenceSamples = 0;
+      this.retainedGapPeakAboveFloorDb = null;
+    },
+
+    retainedGapHasSpeechEvidence() {
+      if (this.retainedGapEvidenceSamples > 0) return true;
+      return this.retainedGapPeakAboveFloorDb !== null
+        && this.retainedGapPeakAboveFloorDb >= GAP_SPEECH_PEAK_ABOVE_FLOOR_DB;
+    },
+
+    accumulatorHasPlausibleSpeech() {
+      if (this.accumulatorHasSpeechEvidence) return true;
+      return this.accumulatorPeakAboveFloorDb !== null
+        && this.accumulatorPeakAboveFloorDb >= GAP_SPEECH_PEAK_ABOVE_FLOOR_DB;
+    },
+
+    trackAccumulatorSpeechEvidence(output, frameDb) {
+      this.accumulatorHasSpeechEvidence ||= output.evidence === 'strong'
+        || output.evidence === 'continuing'
+        || output.speechShaped;
+      if (output.floorDb !== null && output.floorDb !== undefined) {
+        const peakAboveFloorDb = frameDb - output.floorDb;
+        if (this.accumulatorPeakAboveFloorDb === null
+          || peakAboveFloorDb > this.accumulatorPeakAboveFloorDb) {
+          this.accumulatorPeakAboveFloorDb = peakAboveFloorDb;
+        }
+      }
     },
 
     shedRetainedGap() {
@@ -402,6 +455,7 @@ export function makeRecorderHarness({
         this.silenceSamples = 0;
         this.contiguousTrailingSilenceSamples = 0;
         this.contiguousTrailingSilenceMinimumDb = null;
+        this.contiguousTrailingSilencePeakAboveFloorDb = null;
       }
     },
 
@@ -410,24 +464,32 @@ export function makeRecorderHarness({
         || (this.endpoint.state !== 'idle' && this.endpoint.state !== 'onsetPending')) {
         return;
       }
-      if (this.retainedGapEvidenceSamples < MINIMUM_VOICE_EVIDENCE_SAMPLES) {
+      if (!this.retainedGapHasSpeechEvidence()) {
         this.shedRetainedGap();
       } else {
         this.moveRetainedGapToAccumulator();
       }
     },
 
-    drive(frameDb, frameDuration = recorderFrameDuration) {
+    drive(frameDb, frameDuration = recorderFrameDuration, { highBandRatioDb = null } = {}) {
       const frameSamples = Math.round(frameDuration * 16000);
       const frameStartSamples = this.sessionElapsedSamples;
+      const previousState = this.endpoint.state;
       const previousFrameDb = this.previousProcessedFrameDb;
+      const previousGateEvidence = this.gate.snapshot.evidence;
+      const adjacentStepDb = previousFrameDb === null
+        ? null
+        : Math.abs(frameDb - previousFrameDb);
       this.previousProcessedFrameDb = frameDb;
       const hasRisingEdgeWitness = previousFrameDb !== null
         && frameDb - previousFrameDb >= this.gate.effectiveFlatSpreadDb;
       this.sessionElapsedSamples += frameSamples;
       this.slowOnsetTriggerTime = null;
       const primingWasComplete = this.primingComplete;
-      const output = this.gate.process(frameDb, frameDuration);
+      const output = this.gate.process(frameDb, frameDuration, {
+        highBandRatioDb,
+        withinUtteranceContext: previousState === 'speechActive' || previousState === 'endPending',
+      });
       const completedPrimingNow = output.didCompletePriming;
       this.primingComplete ||= completedPrimingNow;
       if (completedPrimingNow) {
@@ -466,7 +528,6 @@ export function makeRecorderHarness({
         }
       }
       const reanchorEvent = this.gate.takePendingReanchorEvent();
-      const previousState = this.endpoint.state;
       const endpointWasIdle = previousState === 'idle';
       const frameWasInRetainedGap = this.endpointMachineEnabled
         && (previousState === 'idle' || previousState === 'onsetPending');
@@ -709,7 +770,10 @@ export function makeRecorderHarness({
             }
           }
         }
-        if (this.flatTerminatorActive) endpointEvidence = 'silence';
+        if (this.flatTerminatorActive
+          && (previousState !== 'endPending' || output.evidence !== 'strong')) {
+          endpointEvidence = 'silence';
+        }
       } else {
         this.flatFrameStreakMs = 0;
         this.flatFrameStreakStartTime = null;
@@ -722,9 +786,11 @@ export function makeRecorderHarness({
       endpointEvidence = classifyEndPendingEvidence({
         endpointState: previousState,
         evidence: endpointEvidence,
+        previousEvidence: previousGateEvidence,
         speechShaped: output.speechShaped,
         shortSpreadDb: output.shortSpreadDb,
         dynamicsSpreadDb: output.dynamicsSpreadDb,
+        adjacentStepDb,
         flatSpreadDb: this.gate.effectiveFlatSpreadDb,
         accumulatedSilenceSamples: this.endpoint.accumulatedSilenceSamples,
         endpointSilenceSamples: this.endpoint.configuration.endpointSilenceSamples,
@@ -732,22 +798,47 @@ export function makeRecorderHarness({
         rescueAwareWindowsEnabled:
           this.endpoint.configuration.resumeToEndpointSilenceRatio !== undefined
           || this.endpoint.configuration.ambiguousRescueToEndpointSilenceRatio !== undefined,
+        frameDuration,
       });
       if (output.isSpeech) this.speechSamples += frameSamples;
       if (this.endpointMachineEnabled) {
-        this.contiguousTrailingSilenceSamples = endpointEvidence === 'silence'
+        const isTrailingSilence = endpointEvidence === 'silence';
+        this.contiguousTrailingSilenceSamples = isTrailingSilence
           ? this.contiguousTrailingSilenceSamples + frameSamples
           : 0;
-        this.contiguousTrailingSilenceMinimumDb = endpointEvidence === 'silence'
+        this.contiguousTrailingSilenceMinimumDb = isTrailingSilence
           ? Math.min(this.contiguousTrailingSilenceMinimumDb ?? frameDb, frameDb)
           : null;
+        if (isTrailingSilence) {
+          if (output.floorDb !== null && output.floorDb !== undefined) {
+            const peakAboveFloorDb = frameDb - output.floorDb;
+            if (this.contiguousTrailingSilencePeakAboveFloorDb === null
+              || peakAboveFloorDb > this.contiguousTrailingSilencePeakAboveFloorDb) {
+              this.contiguousTrailingSilencePeakAboveFloorDb = peakAboveFloorDb;
+            }
+          }
+        } else {
+          this.contiguousTrailingSilencePeakAboveFloorDb = null;
+        }
       } else {
-        this.contiguousTrailingSilenceSamples = output.isSpeech
-          ? 0
-          : this.contiguousTrailingSilenceSamples + frameSamples;
-        this.contiguousTrailingSilenceMinimumDb = output.isSpeech
-          ? null
-          : Math.min(this.contiguousTrailingSilenceMinimumDb ?? frameDb, frameDb);
+        const isTrailingSilence = !output.isSpeech;
+        this.contiguousTrailingSilenceSamples = isTrailingSilence
+          ? this.contiguousTrailingSilenceSamples + frameSamples
+          : 0;
+        this.contiguousTrailingSilenceMinimumDb = isTrailingSilence
+          ? Math.min(this.contiguousTrailingSilenceMinimumDb ?? frameDb, frameDb)
+          : null;
+        if (isTrailingSilence) {
+          if (output.floorDb !== null && output.floorDb !== undefined) {
+            const peakAboveFloorDb = frameDb - output.floorDb;
+            if (this.contiguousTrailingSilencePeakAboveFloorDb === null
+              || peakAboveFloorDb > this.contiguousTrailingSilencePeakAboveFloorDb) {
+              this.contiguousTrailingSilencePeakAboveFloorDb = peakAboveFloorDb;
+            }
+          }
+        } else {
+          this.contiguousTrailingSilencePeakAboveFloorDb = null;
+        }
       }
 
       let decision = { type: 'none' };
@@ -785,6 +876,8 @@ export function makeRecorderHarness({
             frameSamples,
             frameStartSamples,
             output.speechShaped ? 'continuing' : output.evidence,
+            frameDb,
+            output.floorDb,
           );
           this.manageRetainedGapOverflow();
         }
@@ -850,6 +943,7 @@ export function makeRecorderHarness({
           this.chunkStartSessionSamples = this.sessionElapsedSamples - frameSamples;
         }
         this.accumulatorSamples += frameSamples;
+        this.trackAccumulatorSpeechEvidence(output, frameDb);
         if (output.isSpeech) {
           this.silenceSamples = 0;
         } else {
@@ -860,7 +954,9 @@ export function makeRecorderHarness({
           && this.accumulatorSamples >= this.minChunkSamples
           && this.speechSamples >= this.minSpeechSamples) {
           decision = { type: 'finalizeUtterance', kind: 'pause' };
-        } else if (this.speechSamples < 1600 && this.accumulatorSamples > this.maxNoiseSamples) {
+        } else if (this.speechSamples < MINIMUM_VOICE_EVIDENCE_SAMPLES
+          && this.accumulatorSamples > this.maxNoiseSamples
+          && !this.accumulatorHasPlausibleSpeech()) {
           discarded = true;
           this.emitEvent({
             t: 'ev',
@@ -869,6 +965,8 @@ export function makeRecorderHarness({
             r: 'noise_guard',
           });
           this.accumulatorSamples = 0;
+          this.accumulatorPeakAboveFloorDb = null;
+          this.accumulatorHasSpeechEvidence = false;
           this.chunkStartSessionSamples = null;
           this.speechSamples = 0;
           this.silenceSamples = 0;
@@ -974,6 +1072,8 @@ export function makeRecorderHarness({
         if (this.accumulatorSamples < this.minChunkSamples
           || this.speechSamples < this.minSpeechSamples) {
           this.accumulatorSamples = 0;
+          this.accumulatorPeakAboveFloorDb = null;
+          this.accumulatorHasSpeechEvidence = false;
           this.chunkStartSessionSamples = null;
           this.speechSamples = 0;
           this.silenceSamples = 0;
@@ -1015,6 +1115,7 @@ export function makeRecorderHarness({
             // Keep the post-roll-trimmed silence contiguous with the next chunk.
             this.retainedGapSamples = trimmedTailSamples;
             this.retainedGapStartSessionSamples = emissionStartSamples + totalSamples;
+            this.retainedGapPeakAboveFloorDb = this.contiguousTrailingSilencePeakAboveFloorDb;
             this.manageRetainedGapOverflow();
           }
           this.headLive = false;
@@ -1022,6 +1123,8 @@ export function makeRecorderHarness({
           this.postHeadPreRollSamples = 0;
           this.utteranceQuietestStrongDb = null;
           this.accumulatorSamples = 0;
+          this.accumulatorPeakAboveFloorDb = null;
+          this.accumulatorHasSpeechEvidence = false;
           this.chunkStartSessionSamples = null;
           this.speechSamples = 0;
           this.silenceSamples = 0;
@@ -1301,6 +1404,8 @@ export function makeRecorderHarness({
         this.tailFloorSampleCount += sampleCount;
         this.emitEvent({ t: 'ev', k: 'discard', n: sampleCount, r: 'tail_floor' });
         this.accumulatorSamples = 0;
+        this.accumulatorPeakAboveFloorDb = null;
+        this.accumulatorHasSpeechEvidence = false;
         this.chunkStartSessionSamples = null;
         this.speechSamples = 0;
         this.silenceSamples = 0;
@@ -1335,6 +1440,8 @@ export function makeRecorderHarness({
       this.headLive = false;
       this.headSamples = 0;
       this.accumulatorSamples = 0;
+      this.accumulatorPeakAboveFloorDb = null;
+      this.accumulatorHasSpeechEvidence = false;
       this.chunkStartSessionSamples = null;
       this.speechSamples = 0;
       this.silenceSamples = 0;

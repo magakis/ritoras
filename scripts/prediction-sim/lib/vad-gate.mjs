@@ -41,6 +41,10 @@ export const VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB = 6.0;
 export const VAD_ADAPTIVE_FLAT_SPREAD_DB_MIN = 3.0;
 export const VAD_ADAPTIVE_FLAT_SPREAD_DB_MAX = 8.0;
 export const VAD_ADAPTIVE_IMPLAUSIBLE_SPEECH_S = 8.0;
+export const VAD_WHISPER_HPF_CUTOFF_HZ = 1800.0;
+export const VAD_WHISPER_HIGH_BAND_RATIO_DB_DEFAULT = -6.0;
+export const VAD_WHISPER_MODULATION_SPREAD_DB = 2.5;
+export const VAD_WHISPER_CONTEXT_MS = 150;
 const TIME_BOUNDARY_EPSILON_S = 1e-9;
 
 function clamp(value, lower, upper) {
@@ -76,6 +80,45 @@ export function rmsFromDb(db) {
   return 10 ** (db / 20);
 }
 
+export function highBandRatioDb(highBandRms, totalRms) {
+  if (!Number.isFinite(totalRms) || totalRms <= 1e-10) return -100;
+  return dbFromRms(highBandRms / totalRms);
+}
+
+export class VADHighBandRatioAnalyzer {
+  constructor({ cutoffHz = VAD_WHISPER_HPF_CUTOFF_HZ, sampleRate = 16000 } = {}) {
+    const cutoff = Math.max(0, cutoffHz);
+    const rc = cutoff > 0 ? 1 / (2 * Math.PI * cutoff) : Number.MAX_VALUE;
+    const dt = 1 / sampleRate;
+    this.alpha = rc / (rc + dt);
+    this.previousInput = null;
+    this.previousOutput = 0;
+  }
+
+  process(samples, totalRms) {
+    let sumSquares = 0;
+    for (const sample of samples) {
+      let filtered;
+      if (this.previousInput === null) {
+        this.previousInput = sample;
+        filtered = 0;
+      } else {
+        filtered = this.alpha * (this.previousOutput + sample - this.previousInput);
+        this.previousInput = sample;
+        this.previousOutput = filtered;
+      }
+      sumSquares += filtered * filtered;
+    }
+    const highBandRms = samples.length === 0 ? 0 : Math.sqrt(sumSquares / samples.length);
+    return highBandRatioDb(highBandRms, totalRms);
+  }
+
+  reset() {
+    this.previousInput = null;
+    this.previousOutput = 0;
+  }
+}
+
 export function makeVadGateConfig(partial = {}) {
   return {
     mode: 'static',
@@ -103,6 +146,9 @@ export function makeVadGateConfig(partial = {}) {
     primingMaximumSeconds: VAD_ADAPTIVE_PRIMING_MAX_S,
     primingQuietSeedSeconds: VAD_ADAPTIVE_PRIMING_QUIET_S,
     quietContinuationRiseCapDbPerSec: 12,
+    whisperHighBandRatioDb: VAD_WHISPER_HIGH_BAND_RATIO_DB_DEFAULT,
+    whisperModulationSpreadDb: VAD_WHISPER_MODULATION_SPREAD_DB,
+    whisperContextMs: VAD_WHISPER_CONTEXT_MS,
     ...(partial ?? {}),
   };
 }
@@ -155,6 +201,7 @@ export class VADThresholdGate {
       VAD_ADAPTIVE_FLAT_SPREAD_DB_MIN,
       VAD_ADAPTIVE_FLAT_SPREAD_DB_MAX,
     );
+    this.effectiveWhisperHighBandRatioDb = clamp(this.config.whisperHighBandRatioDb, -30, 0);
     this.behaviorMode = this.config.mode;
     this.adaptiveRefinementElapsed = 0;
     this.adaptivePrimingElapsed = 0;
@@ -186,6 +233,10 @@ export class VADThresholdGate {
     this.isLoudRegime = false;
     this.loudEnterElapsed = 0;
     this.loudExitElapsed = 0;
+    this.frameHighBandRatioDb = null;
+    this.frameWithinUtteranceContext = false;
+    this.whisperSpeechContextRemainingSeconds = 0;
+    this.whisperModulationObserved = false;
     this.lastOutput = {
       isSpeech: false,
       evidence: 'silence',
@@ -204,6 +255,7 @@ export class VADThresholdGate {
       floorConverged: false,
       dynamicsSpreadDb: null,
       shortSpreadDb: null,
+      highBandRatioDb: null,
       isLoudRegime: false,
       didReanchor: false,
       didCompletePriming: false,
@@ -212,15 +264,31 @@ export class VADThresholdGate {
     };
   }
 
-  process(frameDb, frameDuration) {
+  process(frameDb, frameDuration, {
+    highBandRatioDb: frameHighBandRatioDb = null,
+    withinUtteranceContext = false,
+  } = {}) {
+    this.frameHighBandRatioDb = Number.isFinite(frameHighBandRatioDb)
+      ? frameHighBandRatioDb
+      : null;
+    this.frameWithinUtteranceContext = withinUtteranceContext;
+    this.whisperModulationObserved = false;
+    let output;
     switch (this.behaviorMode) {
       case 'static':
-        return this.processStatic(frameDb, frameDuration);
+        output = this.processStatic(frameDb, frameDuration);
+        break;
       case 'adaptive':
-        return this.processAdaptive(frameDb, frameDuration);
+        output = this.processAdaptive(frameDb, frameDuration);
+        break;
       default:
-        return this.processStatic(frameDb, frameDuration);
+        output = this.processStatic(frameDb, frameDuration);
+        break;
     }
+    this.whisperSpeechContextRemainingSeconds = this.whisperModulationObserved
+      ? this.config.whisperContextMs / 1000
+      : Math.max(0, this.whisperSpeechContextRemainingSeconds - Math.max(0, frameDuration));
+    return output;
   }
 
   get snapshot() {
@@ -645,6 +713,7 @@ export class VADThresholdGate {
   }
 
   resetFloorAfterRouteChange() {
+    this.whisperSpeechContextRemainingSeconds = 0;
     if (this.config.mode !== 'adaptive') return;
     this.behaviorMode = 'adaptive';
     this.adaptiveRefinementElapsed = 0;
@@ -674,6 +743,7 @@ export class VADThresholdGate {
       floorConverged: false,
       dynamicsSpreadDb: null,
       shortSpreadDb: null,
+      highBandRatioDb: null,
       didReanchor: false,
       didCompletePriming: false,
       primingDurationSeconds: 0,
@@ -866,6 +936,7 @@ export class VADThresholdGate {
       floorConverged: this.coldStartConverged,
       dynamicsSpreadDb: this.lastOutput.dynamicsSpreadDb,
       shortSpreadDb: this.lastOutput.shortSpreadDb,
+      highBandRatioDb: this.lastOutput.highBandRatioDb,
       isLoudRegime: this.isLoudRegime,
       didReanchor: false,
       didCompletePriming: false,
@@ -917,6 +988,7 @@ export class VADThresholdGate {
   ) {
     let evidence;
     let speechShaped;
+    this.whisperModulationObserved = false;
     if (frameDb >= strongThresholdDb) {
       evidence = 'strong';
       speechShaped = isSpeechShaped({
@@ -937,12 +1009,24 @@ export class VADThresholdGate {
       });
     } else if (frameDb < silenceThresholdDb) {
       const quietShapeSpreads = this.adaptiveQuietShapeSpreads(silenceThresholdDb);
-      speechShaped = isSpeechShaped({
+      const temporalShape = isSpeechShaped({
         dynamicsSpreadDb: quietShapeSpreads.dynamicsSpreadDb,
         shortSpreadDb: quietShapeSpreads.shortSpreadDb,
         flatSpreadDb: this.effectiveFlatSpreadDb,
         adjacentStepDb: quietShapeSpreads.adjacentStepDb,
       });
+      const highBandWhisper = this.frameHighBandRatioDb !== null
+        && this.frameHighBandRatioDb >= this.effectiveWhisperHighBandRatioDb;
+      const modulatedWhisper = highBandWhisper
+        && (quietShapeSpreads.shortSpreadDb ?? 0) >= this.config.whisperModulationSpreadDb
+        && (quietShapeSpreads.adjacentStepDb ?? Infinity)
+          < VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB;
+      this.whisperModulationObserved = modulatedWhisper;
+      // Carry a syllabic HF witness briefly across valleys, not across steady hiss.
+      const recentWhisperContext = highBandWhisper
+        && this.frameWithinUtteranceContext
+        && this.whisperSpeechContextRemainingSeconds > 0;
+      speechShaped = temporalShape || modulatedWhisper || recentWhisperContext;
       evidence = 'silence';
     } else {
       evidence = 'ambiguous';
@@ -995,6 +1079,7 @@ export class VADThresholdGate {
       floorConverged,
       dynamicsSpreadDb,
       shortSpreadDb,
+      highBandRatioDb: this.frameHighBandRatioDb,
       speechShaped,
       isLoudRegime,
       didReanchor,

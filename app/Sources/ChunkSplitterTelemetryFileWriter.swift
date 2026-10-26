@@ -152,6 +152,7 @@ final class ChunkSplitterTelemetryFileWriter: @unchecked Sendable, VADTelemetryS
             "db": record.frameDb,
             "e": record.evidence,
             "sp": record.isSpeech,
+            "sh": record.speechShaped,
             "th": record.strongThresholdDb,
             "ct": record.continuationThresholdDb,
             "st": record.silenceThresholdDb,
@@ -167,6 +168,12 @@ final class ChunkSplitterTelemetryFileWriter: @unchecked Sendable, VADTelemetryS
         }
         if let dynamicsSpreadDb = record.dynamicsSpreadDb {
             object["dy"] = dynamicsSpreadDb
+        }
+        if let shortSpreadDb = record.shortSpreadDb {
+            object["sdy"] = shortSpreadDb
+        }
+        if let highBandRatioDb = record.highBandRatioDb {
+            object["hbr"] = highBandRatioDb
         }
         if record.isLoudRegime {
             object["lr"] = true

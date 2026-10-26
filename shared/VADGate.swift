@@ -41,6 +41,7 @@ struct VADGateConfig {
     let loudDynamicsSpreadDb: Double
     let primingMaximumSeconds: Double
     let primingQuietSeedSeconds: Double
+    let whisperHighBandRatioDb: Double
 
     init(
         mode: VADMode,
@@ -66,7 +67,9 @@ struct VADGateConfig {
         loudRiseDbPerSec: Double = 12.0,
         loudDynamicsSpreadDb: Double = 9.0,
         primingMaximumSeconds: Double = 0.45,
-        primingQuietSeedSeconds: Double = 0.10
+        primingQuietSeedSeconds: Double = 0.10,
+        whisperHighBandRatioDb: Double = SharedConfig.Defaults
+            .streamVadWhisperHighBandRatioDbDefault
     ) {
         self.mode = mode
         self.staticRms = staticRms
@@ -92,6 +95,7 @@ struct VADGateConfig {
         self.loudDynamicsSpreadDb = loudDynamicsSpreadDb
         self.primingMaximumSeconds = primingMaximumSeconds
         self.primingQuietSeedSeconds = primingQuietSeedSeconds
+        self.whisperHighBandRatioDb = whisperHighBandRatioDb
     }
 }
 
@@ -106,6 +110,7 @@ struct VADGateOutput {
     let floorConverged: Bool
     let dynamicsSpreadDb: Double?
     let shortSpreadDb: Double?
+    let highBandRatioDb: Double?
     let isLoudRegime: Bool
     let didReanchor: Bool
     let didCompletePriming: Bool
@@ -133,6 +138,8 @@ final class VADThresholdGate: @unchecked Sendable {
     private static let adaptiveColdStartDispersionWindowSeconds = 0.4
     // Keep shape evidence local so a completed speech tail cannot hold quiet open.
     private static let speechShapeWindowSeconds = 0.1
+    private static let whisperContextSeconds =
+        SharedConfig.Defaults.streamVadWhisperContextMsDefault / 1_000.0
     private static let adaptiveRollingWindowDuration = 3.0
     private static let adaptiveRollingWindowCapacity = 256
     private static let floorMinDb = -80.0
@@ -152,6 +159,7 @@ final class VADThresholdGate: @unchecked Sendable {
     private let effectiveFallTauSeconds: Double
     let effectiveDynamicsSpreadDb: Double
     let effectiveFlatSpreadDb: Double
+    private let effectiveWhisperHighBandRatioDb: Double
     private let effectiveLoudStrongDeltaDb: Double
     private let effectiveLoudContinuationDeltaDb: Double
     private let effectiveLoudSilenceDeltaDb: Double
@@ -181,6 +189,10 @@ final class VADThresholdGate: @unchecked Sendable {
     private var isLoudRegime = false
     private var loudRegimeEnterElapsed = 0.0
     private var loudRegimeExitElapsed = 0.0
+    private var frameHighBandRatioDb: Double?
+    private var frameWithinUtteranceContext = false
+    private var whisperSpeechContextRemainingSeconds = 0.0
+    private var whisperModulationObserved = false
     private var unfairLock = os_unfair_lock()
     private var lastOutput: VADGateOutput
 
@@ -206,6 +218,7 @@ final class VADThresholdGate: @unchecked Sendable {
         let effectiveFallTauSeconds = clamp(config.adaptiveFallTauSeconds, 0.2, 2.0)
         let effectiveDynamicsSpreadDb = clamp(config.adaptiveDynamicsSpreadDb, 6.0, 24.0)
         let effectiveFlatSpreadDb = clamp(config.adaptiveFlatSpreadDb, 3.0, 8.0)
+        let effectiveWhisperHighBandRatioDb = clamp(config.whisperHighBandRatioDb, -30.0, 0.0)
         let effectiveLoudStrongDeltaDb = min(
             effectiveAdaptiveDeltaDb,
             clamp(config.loudStrongDeltaDb, 3.0, 24.0)
@@ -235,6 +248,7 @@ final class VADThresholdGate: @unchecked Sendable {
         self.effectiveFallTauSeconds = effectiveFallTauSeconds
         self.effectiveDynamicsSpreadDb = effectiveDynamicsSpreadDb
         self.effectiveFlatSpreadDb = effectiveFlatSpreadDb
+        self.effectiveWhisperHighBandRatioDb = effectiveWhisperHighBandRatioDb
         self.effectiveLoudStrongDeltaDb = effectiveLoudStrongDeltaDb
         self.effectiveLoudContinuationDeltaDb = effectiveLoudContinuationDeltaDb
         self.effectiveLoudSilenceDeltaDb = effectiveLoudSilenceDeltaDb
@@ -258,6 +272,7 @@ final class VADThresholdGate: @unchecked Sendable {
             floorConverged: false,
             dynamicsSpreadDb: nil,
             shortSpreadDb: nil,
+            highBandRatioDb: nil,
             isLoudRegime: false,
             didReanchor: false,
             didCompletePriming: false,
@@ -268,16 +283,29 @@ final class VADThresholdGate: @unchecked Sendable {
         adaptiveRollingDurations = Array(repeating: 0, count: Self.adaptiveRollingWindowCapacity)
     }
 
-    func process(frameDb: Double, frameDuration: Double) -> VADGateOutput {
+    func process(
+        frameDb: Double,
+        frameDuration: Double,
+        highBandRatioDb: Double? = nil,
+        withinUtteranceContext: Bool = false
+    ) -> VADGateOutput {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
 
+        frameHighBandRatioDb = highBandRatioDb.flatMap { $0.isFinite ? $0 : nil }
+        frameWithinUtteranceContext = withinUtteranceContext
+        whisperModulationObserved = false
+        let output: VADGateOutput
         switch behaviorMode {
         case .staticMode:
-            return processStatic(frameDb: frameDb, frameDuration: frameDuration)
+            output = processStatic(frameDb: frameDb, frameDuration: frameDuration)
         case .adaptive:
-            return processAdaptive(frameDb: frameDb, frameDuration: frameDuration)
+            output = processAdaptive(frameDb: frameDb, frameDuration: frameDuration)
         }
+        whisperSpeechContextRemainingSeconds = whisperModulationObserved
+            ? Self.whisperContextSeconds
+            : max(0, whisperSpeechContextRemainingSeconds - max(0, frameDuration))
+        return output
     }
 
     var snapshot: VADGateOutput {
@@ -305,6 +333,7 @@ final class VADThresholdGate: @unchecked Sendable {
             "silenceDeltaDb": effectiveSilenceDeltaDb,
             "dynamicsSpreadDb": effectiveDynamicsSpreadDb,
             "flatSpreadDb": effectiveFlatSpreadDb,
+            "whisperHighBandRatioDb": effectiveWhisperHighBandRatioDb,
             "dynamicsEnabled": config.adaptiveDynamicsEnabled,
             "loudRegimeEnabled": config.loudRegimeEnabled,
             "loudRegimeEnterDb": config.loudRegimeEnterDb,
@@ -775,6 +804,7 @@ final class VADThresholdGate: @unchecked Sendable {
         isLoudRegime = false
         loudRegimeEnterElapsed = 0
         loudRegimeExitElapsed = 0
+        whisperSpeechContextRemainingSeconds = 0
         switch config.mode {
         case .adaptive:
             behaviorMode = .adaptive
@@ -808,6 +838,7 @@ final class VADThresholdGate: @unchecked Sendable {
             floorConverged: false,
             dynamicsSpreadDb: nil,
             shortSpreadDb: nil,
+            highBandRatioDb: nil,
             isLoudRegime: false,
             didReanchor: false,
             didCompletePriming: false,
@@ -1009,6 +1040,7 @@ final class VADThresholdGate: @unchecked Sendable {
             floorConverged: coldStartConverged,
             dynamicsSpreadDb: lastOutput.dynamicsSpreadDb,
             shortSpreadDb: lastOutput.shortSpreadDb,
+            highBandRatioDb: lastOutput.highBandRatioDb,
             isLoudRegime: isLoudRegime,
             didReanchor: false,
             didCompletePriming: false,
@@ -1062,6 +1094,7 @@ final class VADThresholdGate: @unchecked Sendable {
     ) {
         let evidence: VADEvidence
         let speechShaped: Bool
+        whisperModulationObserved = false
         if frameDb >= strongThresholdDb {
             evidence = .strong
             speechShaped = Self.isSpeechShaped(
@@ -1082,12 +1115,26 @@ final class VADThresholdGate: @unchecked Sendable {
             )
         } else if frameDb < silenceThresholdDb {
             let quietShapeSpreads = adaptiveQuietShapeSpreads(below: silenceThresholdDb)
-            speechShaped = Self.isSpeechShaped(
+            let temporalShape = Self.isSpeechShaped(
                 dynamicsSpreadDb: quietShapeSpreads.dynamics,
                 shortSpreadDb: quietShapeSpreads.short,
                 flatSpreadDb: effectiveFlatSpreadDb,
                 adjacentStepDb: quietShapeSpreads.adjacentStep
             )
+            let highBandWhisper = frameHighBandRatioDb.map {
+                $0 >= effectiveWhisperHighBandRatioDb
+            } ?? false
+            let modulatedWhisper = highBandWhisper
+                && (quietShapeSpreads.short ?? 0)
+                    >= SharedConfig.Defaults.streamVadWhisperModulationSpreadDbDefault
+                && (quietShapeSpreads.adjacentStep ?? .infinity)
+                    < Self.adaptiveEndPendingWindDispersionDb
+            whisperModulationObserved = modulatedWhisper
+            // Carry a syllabic HF witness briefly across valleys, not across steady hiss.
+            let recentWhisperContext = highBandWhisper
+                && frameWithinUtteranceContext
+                && whisperSpeechContextRemainingSeconds > 0
+            speechShaped = temporalShape || modulatedWhisper || recentWhisperContext
             evidence = .silence
         } else {
             evidence = .ambiguous
@@ -1151,6 +1198,7 @@ final class VADThresholdGate: @unchecked Sendable {
             floorConverged: floorConverged,
             dynamicsSpreadDb: dynamicsSpreadDb,
             shortSpreadDb: shortSpreadDb,
+            highBandRatioDb: frameHighBandRatioDb,
             isLoudRegime: isLoudRegime ?? self.isLoudRegime,
             didReanchor: didReanchor,
             didCompletePriming: didCompletePriming,

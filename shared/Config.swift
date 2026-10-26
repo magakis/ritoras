@@ -287,6 +287,14 @@ struct SharedConfig {
         static let streamVadIdleGapPeakAboveFloorDbDefault: Double = 3.0
         /// Evidence metric reported with idle-gap telemetry; does not affect gating.
         static let streamVadIdleGapEvidenceAboveFloorDbDefault: Double = 5.0
+        /// High-band/analysis RMS ratio that can identify modulated quiet whispers.
+        static let streamVadWhisperHighBandRatioDbKey = "streamVadWhisperHighBandRatioDb"
+        static let streamVadWhisperHighBandRatioDbDefault: Double = -6.0
+        static let streamVadWhisperHighPassCutoffHzDefault: Double = 1_800.0
+        static let streamVadWhisperModulationSpreadDbDefault: Double = 2.5
+        static let streamVadWhisperContextMsDefault: Double = 150.0
+        /// A retained gap above floor-level noise is carried, even without 100 ms of evidence.
+        static let streamVadGapSpeechPeakAboveFloorDbDefault: Double = 6.0
         /// Legacy silence duration key, retained for stored user preferences.
         static let streamVadSilenceMsKey = "streamVadSilenceMs"
         static let streamVadSilenceMsOverrideKey = "streamVadSilenceMsOverride"
@@ -303,7 +311,7 @@ struct SharedConfig {
         /// Minimum retained duration (ms) required before an endpoint finalize emits.
         static let streamVadMinChunkMsKey = "streamVadMinChunkMs"
         static let streamVadMinChunkMsDefault: Int = 300
-        /// Shed an entire idle buffer above this duration only when voice evidence is under 100 ms.
+        /// Duration above which a floor-level idle gap may be shed.
         static let streamVadMaxNoiseSecKey = "streamVadMaxNoiseSec"
         static let streamVadMaxNoiseSecDefault: Double = 6.0
         /// WebSocket connection timeout.
@@ -829,6 +837,17 @@ struct SharedConfig {
             forKey: Defaults.streamVadFlatSpreadDbKey
         ) as? NSNumber)?.doubleValue ?? Defaults.streamVadFlatSpreadDbDefault
         return value.isFinite ? min(max(value, 3.0), 8.0) : Defaults.streamVadFlatSpreadDbDefault
+    }
+
+    /// Reads the high-band ratio required for a spectral whisper witness.
+    static func streamVadWhisperHighBandRatioDb() -> Double {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadWhisperHighBandRatioDbDefault
+        }
+        let value = (defaults.object(
+            forKey: Defaults.streamVadWhisperHighBandRatioDbKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadWhisperHighBandRatioDbDefault
+        return value.isFinite ? min(max(value, -30.0), 0.0) : Defaults.streamVadWhisperHighBandRatioDbDefault
     }
 
     static func streamVadLoudRegimeEnabled() -> Bool {

@@ -106,6 +106,30 @@ describe('VADThresholdGate', () => {
       assert.strictEqual(reanchorEvent, false);
       assert.strictEqual(gate.snapshot.floorDb, null);
     });
+
+    it('clears whisper context on static-mode route reset', () => {
+      const gate = new VADThresholdGate(config({ mode: 'static' }));
+      const withinUtteranceContext = true;
+      gate.process(-60, 0.01, { highBandRatioDb: -3, withinUtteranceContext });
+      const modulatedWhisper = gate.process(-56, 0.01, {
+        highBandRatioDb: -3,
+        withinUtteranceContext,
+      });
+      assert.equal(modulatedWhisper.speechShaped, true);
+
+      for (let index = 0; index < 12; index += 1) {
+        gate.process(-60, 0.01, { highBandRatioDb: -30, withinUtteranceContext });
+      }
+      assert.ok(Math.abs(gate.whisperSpeechContextRemainingSeconds - 0.03) < 1e-9);
+
+      gate.resetFloorAfterRouteChange();
+      assert.equal(gate.whisperSpeechContextRemainingSeconds, 0);
+      const flatHighBandFrame = gate.process(-60, 0.01, {
+        highBandRatioDb: -3,
+        withinUtteranceContext,
+      });
+      assert.equal(flatHighBandFrame.speechShaped, false);
+    });
   });
 
   describe('adaptive mode', () => {
