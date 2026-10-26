@@ -95,6 +95,10 @@ actor WhisperStreamClient {
     /// The WebSocket URL derived from the HTTP base URL.
     private let url: URL
     private let dictationID: String
+    private let aacEnabled: Bool
+    private let aacSourceSampleRate: Int
+    /// Survives reconnects for this client/session after an ambiguous timeout or CONFIG error.
+    private var sessionLegacyPinned = false
 
     /// The active WebSocket task, or nil when disconnected.
     private var task: URLSessionWebSocketTask?
@@ -103,6 +107,8 @@ actor WhisperStreamClient {
     private var connectionGeneration: UInt64 = 0
     private var connectionAttempt: Task<Void, Error>?
     private var connectionAttemptID: UUID?
+    private var negotiatedAudioMode: StreamFormatNegotiation.AudioMode?
+    private var negotiationDeadline: Date?
     /// Server-minted token from the final message, when the server supports uploads.
     private(set) var finalRecordingToken: String?
     /// Stop-time telemetry starts finalization; reconnecting after it could orphan END.
@@ -129,8 +135,10 @@ actor WhisperStreamClient {
     /// - Parameter baseURL: Base URL of the Whisper server, e.g.
     ///   `"http://192.168.1.100:5000"`.
     /// - Returns: `nil` if the base URL cannot be parsed into a valid WebSocket URL.
-    init?(baseURL: String, dictationID: UUID) {
+    init?(baseURL: String, dictationID: UUID, aacEnabled: Bool, aacSourceSampleRate: Int) {
         self.dictationID = dictationID.uuidString
+        self.aacEnabled = aacEnabled
+        self.aacSourceSampleRate = aacSourceSampleRate
         var urlString = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 
         // Rewrite scheme: http → ws, https → wss
@@ -229,6 +237,8 @@ actor WhisperStreamClient {
         task = nil
         connectionReady = false
         receiveFailed = false
+        negotiatedAudioMode = nil
+        negotiationDeadline = nil
         finalizationStarted = false
         livenessEvaluator = StreamLivenessEvaluator()
         return connectionGeneration
@@ -238,6 +248,22 @@ actor WhisperStreamClient {
         using newTask: URLSessionWebSocketTask,
         generation: UInt64
     ) async throws {
+        let handshakeDeadline = Date().addingTimeInterval(
+            SharedConfig.Defaults.streamWsConnectTimeout)
+        let shouldNegotiateAAC = StreamFormatNegotiation.shouldSendConfig(
+            aacEnabled: aacEnabled,
+            sessionLegacyPinned: sessionLegacyPinned)
+        let configMessage: String?
+        if shouldNegotiateAAC {
+            guard let message = StreamFormatNegotiation.configMessage(
+                sampleRate: aacSourceSampleRate) else {
+                throw StreamFormatNegotiationError.unsupportedSourceSampleRate(aacSourceSampleRate)
+            }
+            configMessage = message
+        } else {
+            configMessage = nil
+        }
+
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
                 try await withTaskCancellationHandler {
@@ -251,6 +277,9 @@ actor WhisperStreamClient {
                                     guard await self.isCurrentConnection(
                                         newTask, generation: generation) else {
                                         throw WhisperStreamTransportError.superseded
+                                    }
+                                    if let configMessage {
+                                        try await newTask.send(.string(configMessage))
                                     }
                                     return
                                 }
@@ -274,9 +303,8 @@ actor WhisperStreamClient {
             }
 
             group.addTask {
-                try await Task.sleep(
-                    nanoseconds: UInt64(SharedConfig.Defaults.streamWsConnectTimeout * 1_000_000_000)
-                )
+                let remaining = max(0, handshakeDeadline.timeIntervalSinceNow)
+                try await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
                 guard await self.isCurrentConnection(
                     newTask, generation: generation) else {
                     throw WhisperStreamTransportError.superseded
@@ -293,6 +321,15 @@ actor WhisperStreamClient {
 
         guard isCurrentConnection(newTask, generation: generation) else {
             throw WhisperStreamTransportError.superseded
+        }
+
+        negotiatedAudioMode = StreamFormatNegotiation.initialMode(aacEnabled: shouldNegotiateAAC)
+        negotiationDeadline = negotiatedAudioMode == nil ? handshakeDeadline : nil
+        if configMessage != nil {
+            FileLogger.shared.debug(.network, "Stream: CONFIG sent", payload: [
+                "jobId": dictationID,
+                "sampleRate": aacSourceSampleRate
+            ])
         }
 
         FileLogger.shared.info(.network, "Connected (PONG received)",
@@ -399,6 +436,32 @@ actor WhisperStreamClient {
 
     // MARK: - Sending
 
+    /// Waits for the per-connection audio mode before the first binary frame.
+    /// The ACK deadline shares the original PING/PONG connection-setup budget;
+    /// expiry closes the ambiguous socket and pins future session connections to PCM.
+    func waitForNegotiatedAudioMode() async throws -> StreamFormatNegotiation.AudioMode {
+        let connection = try activeConnection()
+        while true {
+            guard isReadyConnection(connection.task, generation: connection.generation) else {
+                throw WhisperStreamTransportError.dead
+            }
+            if let negotiatedAudioMode {
+                return negotiatedAudioMode
+            }
+            guard let negotiationDeadline else {
+                throw WhisperStreamTransportError.notReady
+            }
+
+            let remaining = negotiationDeadline.timeIntervalSinceNow
+            guard remaining > 0 else {
+                closeAndPinLegacyAfterNegotiationTimeout()
+                throw WhisperStreamTransportError.dead
+            }
+
+            try await Task.sleep(nanoseconds: UInt64(min(remaining, 0.05) * 1_000_000_000))
+        }
+    }
+
     /// Sends one JSON telemetry text frame. The caller orders it before END.
     func sendTelemetry(_ data: Data) async throws {
         guard data.count <= 1_048_576, let text = String(data: data, encoding: .utf8) else {
@@ -438,7 +501,7 @@ actor WhisperStreamClient {
         isConnected()
     }
 
-    /// Sends a binary frame containing a PCM audio chunk.
+    /// Sends a binary frame containing a legacy Float32 PCM audio chunk.
     ///
     /// Wire format (pinned by `server.py:880-882`):
     /// ```
@@ -450,16 +513,40 @@ actor WhisperStreamClient {
     ///   - samples: Float PCM samples (16 kHz mono).
     /// - Throws: `WhisperError.networkError` if the transport fails.
     func sendChunk(id: UInt32, samples: [Float]) async throws {
+        guard negotiatedAudioMode == .float32PCM else {
+            throw WhisperStreamTransportError.notReady
+        }
+        try await sendChunkFrame(
+            id: id,
+            payloadByteCount: samples.count * MemoryLayout<Float>.size
+        ) { data in
+            // Float32 PCM samples are little-endian on ARM64, matching numpy default.
+            samples.withUnsafeBytes { data.append(contentsOf: $0) }
+        }
+    }
+
+    /// Sends one complete AAC/MPEG-4 container after the existing chunk ID prefix.
+    func sendAACChunk(id: UInt32, payload: Data) async throws {
+        guard negotiatedAudioMode == .aacM4A else {
+            throw WhisperStreamTransportError.notReady
+        }
+        try await sendChunkFrame(id: id, payloadByteCount: payload.count) { data in
+            data.append(payload)
+        }
+    }
+
+    private func sendChunkFrame(
+        id: UInt32,
+        payloadByteCount: Int,
+        appendPayload: (inout Data) -> Void
+    ) async throws {
         let connection = try activeConnection()
+        var data = Data(capacity: 4 + payloadByteCount)
 
-        var data = Data(capacity: 4 + samples.count * MemoryLayout<Float>.size)
-
-        // 4-byte big-endian chunk_id
+        // The chunk identifier remains a 4-byte big-endian prefix in both modes.
         var bigEndianId = id.bigEndian
         withUnsafeBytes(of: &bigEndianId) { data.append(contentsOf: $0) }
-
-        // float32 PCM samples (little-endian on ARM64, matching numpy default)
-        samples.withUnsafeBytes { data.append(contentsOf: $0) }
+        appendPayload(&data)
 
         let windowEvents = livenessEvaluator.recordFrameEnqueued(
             bytes: data.count,
@@ -638,6 +725,65 @@ actor WhisperStreamClient {
         guard isReadyConnection(task, generation: generation) else { return false }
         await callback?(id, kind, text)
         return isReadyConnection(task, generation: generation)
+    }
+
+    private func consumeNegotiationResponse(
+        _ text: String,
+        from task: URLSessionWebSocketTask,
+        generation: UInt64
+    ) -> Bool {
+        guard isReadyConnection(task, generation: generation),
+              negotiatedAudioMode == nil else {
+            return false
+        }
+        let deadlineExpired = negotiationDeadline.map { $0.timeIntervalSinceNow <= 0 } ?? false
+        switch StreamFormatNegotiation.decision(
+            forServerMessage: text,
+            aacEnabled: aacEnabled,
+            deadlineExpired: deadlineExpired) {
+        case .wait:
+            return true
+        case .select(.aacM4A):
+            negotiatedAudioMode = .aacM4A
+            negotiationDeadline = nil
+            FileLogger.shared.info(.network, "Stream: AAC format accepted", payload: [
+                "jobId": dictationID,
+                "sampleRate": aacSourceSampleRate
+            ])
+            return true
+        case .select(.float32PCM):
+            negotiatedAudioMode = .float32PCM
+            negotiationDeadline = nil
+            FileLogger.shared.info(.network, "Stream: AAC disabled; using Float32", payload: [
+                "jobId": dictationID
+            ])
+            return true
+        case .fallbackInPlaceAndPinLegacy:
+            sessionLegacyPinned = true
+            negotiatedAudioMode = .float32PCM
+            negotiationDeadline = nil
+            FileLogger.shared.warn(.network, "Stream: CONFIG rejected; using Float32", payload: [
+                "jobId": dictationID
+            ])
+            return true
+        case .closeConnectionAndPinLegacy:
+            closeAndPinLegacyAfterNegotiationTimeout()
+            return true
+        }
+    }
+
+    private func closeAndPinLegacyAfterNegotiationTimeout() {
+        guard negotiatedAudioMode == nil else { return }
+        guard case .closeConnectionAndPinLegacy = StreamFormatNegotiation.timeoutDecision() else {
+            return
+        }
+        sessionLegacyPinned = true
+        negotiationDeadline = nil
+        FileLogger.shared.warn(
+            .network,
+            "Stream: CONFIG ACK timed out; closing and pinning session to Float32",
+            payload: ["jobId": dictationID])
+        forceClose()
     }
 
     /// Returns staleness after accounting for upload time using wall-clock dates.
@@ -853,7 +999,20 @@ actor WhisperStreamClient {
                                     FileLogger.shared.debug(.network, "Received PONG")
                                     continue
 
+                                case "CONFIG_ACK":
+                                    _ = await self.consumeNegotiationResponse(
+                                        text,
+                                        from: task,
+                                        generation: generation)
+                                    continue
+
                                 case "error":
+                                    if await self.consumeNegotiationResponse(
+                                        text,
+                                        from: task,
+                                        generation: generation) {
+                                        continue
+                                    }
                                     let msg = try JSONDecoder().decode(
                                         StreamError.self, from: data)
                                     let elapsedSinceEndMs = await self.elapsedSinceEndMs()

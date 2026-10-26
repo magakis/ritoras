@@ -14,7 +14,7 @@ struct ChunkSplitterSettingsView: View {
 
     var body: some View {
         formWithTesterRebuildHandlers
-        .navigationTitle("Chunk Splitter")
+        .navigationTitle("Streaming")
         .onDisappear {
             stopTester()
         }
@@ -38,17 +38,18 @@ struct ChunkSplitterSettingsView: View {
 
     private var formContent: some View {
         Form {
+            aacSection
             testerSection
             controlsSection
             resetSection
         }
-        .alert("Reset Chunk Splitter Settings?", isPresented: $isShowingResetConfirmation) {
+        .alert("Reset Streaming Settings?", isPresented: $isShowingResetConfirmation) {
             Button("Reset to Defaults", role: .destructive) {
-                settings.resetChunkSplitterSettingsToDefaults()
+                settings.resetStreamingSettingsToDefaults()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Chunk splitter settings will be restored to their defaults.")
+            Text("Streaming and chunk splitter settings will be restored to their defaults.")
         }
     }
 
@@ -66,6 +67,29 @@ struct ChunkSplitterSettingsView: View {
             Task {
                 await tester.recheckPermission()
             }
+        }
+    }
+
+    // MARK: - Audio Format Section
+
+    private var aacSection: some View {
+        Section {
+            Toggle("AAC Streaming", isOn: $settings.streamAacEnabled)
+
+            Picker("Source Rate", selection: $settings.streamAacSourceSampleRate) {
+                Text("16 kHz").tag(16_000)
+                Text("48 kHz").tag(48_000)
+            }
+            .pickerStyle(.segmented)
+            .disabled(!settings.streamAacEnabled)
+        } header: {
+            Text("Audio Format")
+        } footer: {
+            Text(
+                "AAC chunks are negotiated with the server before audio is sent. "
+                    + "Unsupported servers continue with Float32 PCM. "
+                    + "Changes take effect next session."
+            )
         }
     }
 
@@ -275,7 +299,7 @@ struct ChunkSplitterSettingsView: View {
 
     private var resetSection: some View {
         Section {
-            Button("Reset Chunk Splitter Settings to Defaults", role: .destructive) {
+            Button("Reset Streaming Settings to Defaults", role: .destructive) {
                 isShowingResetConfirmation = true
             }
         }

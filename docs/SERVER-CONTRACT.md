@@ -1,7 +1,8 @@
 # Ritoras ↔ Whisper-compatible transcription server contract
 
-> Current client/server request, response, and streaming wire contract. This
-> document describes only behavior that the Ritoras client sends or observes.
+> Current client/server request and response contracts, with the streaming wire
+> protocol explicitly versioned. Protocol v1 records existing behavior;
+> Protocol v2 specifies additive format negotiation.
 
 ---
 
@@ -186,21 +187,29 @@ header. A rejected handshake is closed with code `1008` and reason
 
 Audio chunks produced while disconnected are held in a FIFO queue. Nothing is
 dropped because the WebSocket is not connected. A late successful connection is
-wired into the active session exactly once, and one WebSocket session spans one
-dictation.
+wired into the active session exactly once. A bounded reconnect can create a
+replacement WebSocket for the same dictation after a transport failure.
 
 ---
 
-## 5. Streaming wire protocol
+## 5. Streaming wire protocols
 
-### Client → server
+### Protocol v1 (frozen)
+
+Protocol v1 is the existing `/stream` wire contract. A client that sends no
+`CONFIG` uses this protocol; v2 servers continue to accept it without changing
+its binary layout.
+
+#### Client → server
 
 | Frame | Shape | Purpose |
 |-------|-------|---------|
 | Binary | `[4-byte BE uint32 chunk_id][float32 LE PCM @ 16 kHz mono]` | One audio chunk |
 | Text JSON | `{"type":"END"}` | Signals that no more audio chunks will follow |
 | Text JSON | `{"type":"PING"}` | Keepalive and connection probe |
-| Text JSON | `{"type":"CONTEXT","text":"..."}` | Defined protocol frame; unused by the Ritoras client |
+| Text JSON | `{"type":"CONTEXT","text":"..."}` | Context; supported by the referenced server, not sent by the current Ritoras client |
+| Text JSON | `{"type":"CANCEL"}` | Cancels recording; supported by the referenced server, not sent by the current Ritoras client |
+| Text JSON | `{"type":"TELEMETRY", ...}` | Client diagnostics; the current Ritoras client sends this before `END` when telemetry is available |
 
 The binary frame layout is:
 
@@ -209,21 +218,199 @@ The binary frame layout is:
 | 0 | 4 bytes | `chunk_id`, unsigned 32-bit integer, big-endian |
 | 4 | N × 4 bytes | Float32 PCM samples, little-endian, 16 kHz mono |
 
-Ritoras starts a connection with a PING/PONG handshake. A PONG confirms that
-the WebSocket connection is usable.
+Ritoras starts a connection with a `PING`/`PONG` handshake. A `PONG` confirms
+that the WebSocket connection is usable. The referenced server echoes
+`ping_seq` in its `PONG` when that optional field is present in a client's
+`PING`.
 
-### Server → client
+The referenced server-v2 implementation accepts `CANCEL` during the receive
+loop, discards queued audio, waits for any in-flight chunk, sends no `final`,
+and closes the WebSocket. The current Ritoras client does not send `CANCEL`.
 
-The client handles these text JSON response types:
+`TELEMETRY` is a JSON object with a `type` field; the current client uses this
+text-frame pattern for chunk-splitter diagnostics. The referenced server-v2
+implementation accepts frames up to 1 MiB of UTF-8 JSON, keeps the last
+accepted frame before `END`, and writes it as `client_telemetry.json` with the
+captured recording. It checks the JSON object and `type`, but does not validate
+a telemetry payload schema. Send it before `END`: after `END`, the server only
+handles `PING` while waiting to send the final response, so later telemetry is
+ignored. The client bounds its telemetry send wait and continues to `END` if
+that send fails or times out.
+
+#### `?format=` query
+
+The referenced server-v2 implementation selects a connection-wide v1 audio
+format from `?format=`. An absent or empty query value defaults to `pcm`; the
+server lowercases and trims non-empty values before lookup. Accepted values
+are `pcm`, `wav`, `wave`, `m4a`, `mp4`,
+`aac`, `mp3`, `ogg`, `opus`, and `flac`. `wave` aliases `wav`; `mp4` aliases
+`m4a`. `pcm` means the Float32 layout above. For every other accepted value,
+bytes after the four-byte chunk ID are container/compressed-audio bytes decoded
+by the server to 16 kHz mono Float32; the decoder content-sniffs the payload,
+and the mapped suffix is not currently used as a format hint. An unsupported
+query value produces `{"type":"error","message":"unsupported format: <value>"}`
+and closes the WebSocket with code `1003`.
+The current Ritoras client does not append this query; its Protocol v1 mode is
+the referenced server's default `pcm`.
+
+#### Server → client
 
 | Type | Shape | Meaning |
 |------|-------|---------|
 | `partial` | `{"type":"partial","transcription":"...","chunk_id":N}` | Result associated with one audio chunk |
-| `final` | `{"type":"final","transcription":"...","chunk_id":N}` | Terminal result after END and drain |
-| `PONG` | `{"type":"PONG"}` | Response to PING |
+| `final` | `{"type":"final","transcription":"...","chunk_id":N}` | Terminal result after `END` and drain |
+| `PONG` | `{"type":"PONG"}` | Response to `PING`; echoes `ping_seq` when supplied |
+| `error` | `{"type":"error","message":"..."}` | Server-reported failure; the current client treats it as terminal outside v2 negotiation |
 
-The receive-side liveness monitor sends PINGs every **5 seconds** and declares
-a timeout only after **60 seconds** without activity (PONG or partial response).
+Two independent client timers send PINGs after connection setup: the liveness
+monitor sends every **5 seconds**, and the application keepalive sends every
+**25 seconds**. Both cadences are active; they are not alternatives. The
+liveness monitor times out after **three consecutive 5-second intervals**
+without qualifying activity (nominally about **15 seconds**, with bounded
+upload-window pause credit). This corrects the earlier 60-second summary: the
+configured threshold is three intervals, not 60 seconds. A `PONG` or `partial`
+is qualifying activity while recording; after `END`, only a `PONG` qualifies.
+
+### Protocol v2 (additive)
+
+Protocol v2 adds per-connection audio-format negotiation on the same `/stream`
+endpoint. It adds JSON text control frames and preserves the four-byte chunk ID
+prefix. `CONFIG` follows the existing JSON text-frame precedent used by
+`TELEMETRY` in v1; it does not add another endpoint or transport. The existing
+`END`, `PING`, `partial`, `final`, and ordinary error behavior remains
+unchanged after negotiation.
+
+#### Negotiation and CONFIG
+
+With the AAC setting enabled (on by default), the client completes the existing
+`PING`/`PONG` probe, sends one `CONFIG` before any binary frame, and waits for
+`CONFIG_ACK`. The ACK wait is bounded inside the existing **32-second**
+`streamWsConnectTimeout` connection-setup budget; it does not add another
+32-second timeout.
+
+The client sends this JSON text frame (with `sampleRate` set to the active
+source rate):
+
+```json
+{"type":"CONFIG","format":"aac-m4a","sampleRate":16000,"channels":1,"bitrate":64000,"protocol":2}
+```
+
+`sampleRate` is `16000` or `48000`. Field meanings and server use:
+
+| Field | Value | Meaning |
+|-------|-------|---------|
+| `type` | `"CONFIG"` | Identifies the text frame. |
+| `format` | `"aac-m4a"` | The only field that selects the audio decode path; it is load-bearing. |
+| `sampleRate` | `16000` or `48000` | Advisory declaration of the client's configured AAC source rate. |
+| `channels` | `1` | Advisory channel count. |
+| `bitrate` | `64000` | Advisory bitrate in bits per second. |
+| `protocol` | `2` | Protocol version marker; it does not select the audio decode path. |
+
+`type` and `protocol` identify the message and version. Of the audio-format
+fields, `format` alone selects the decode path. `sampleRate`, `channels`, and
+`bitrate` are advisory; the server content-sniffs the selected container and
+decodes to 16 kHz mono Float32 regardless of the declared source rate. Both
+16 kHz and 48 kHz are valid (`16000` is the client setting's default). The
+decoded PCM is transcribed and appended to `audio.wav`; the capture does not
+store the incoming m4a payload. The client encodes AAC-LC, mono, at 64 kbps in
+a self-contained m4a container for each chunk, using the batch recorder's high
+encoder-quality setting. The server does not guess between PCM and container
+formats; `format` selects the decode branch. In 16 kHz mode the client encodes
+the chunk PCM directly. In 48 kHz mode it must explicitly convert the 16 kHz
+chunk PCM to 48 kHz before encoding; writing a buffer does not implicitly
+resample it.
+
+The format enum is extensible:
+
+| Format | Status and meaning |
+|--------|--------------------|
+| `f32le` | Supported alias for legacy `pcm` Float32; default with no `CONFIG`. An explicit request is ACKed as `f32le`. |
+| `aac-m4a` | Supported by v2; one complete m4a container per binary message. |
+| `pcm16` | Reserved; not implemented. |
+
+On an accepted request, the server replies with a JSON text frame. In this
+schema, `<accepted>` is replaced by the negotiated enum value:
+
+```json
+{"type":"CONFIG_ACK","format":"<accepted>","protocol":2}
+```
+
+For the Ritoras AAC request, the ACK is:
+
+```json
+{"type":"CONFIG_ACK","format":"aac-m4a","protocol":2}
+```
+
+The ACK's `format` is the format accepted for that connection. A matching v2
+ACK for the Ritoras AAC request is `format: "aac-m4a"` and `protocol: 2`.
+The client treats only a parseable `CONFIG_ACK` with protocol `2` and the
+requested format as success; other text frames do not authorize AAC. A received
+`error` frame selects the fallback below, while an unrecognized or non-matching
+ACK leaves the bounded wait running until it succeeds or times out.
+
+#### Server negotiation policy
+
+- The first `CONFIG` received before any binary frame wins, including an
+  unsupported-format request. Later `CONFIG` frames do not renegotiate that
+  connection.
+- Only a JSON object with `type: "CONFIG"` and `protocol: 2` is a v2 request.
+  A server that does not recognize the type or protocol version ignores it as
+  an unknown text frame; the client then reaches its bounded ACK timeout.
+- A `CONFIG` received after any binary frame is ignored with a server warning
+  and no ACK; the connection keeps the format already selected for it.
+- An accepted `CONFIG` overrides the `?format=` query for that connection only.
+  It does not change the query or any other connection's format.
+- An unknown or unimplemented format, including reserved `pcm16`, produces a
+  requester-safe `{"type":"error","message":"unsupported format: <value>"}`
+  frame without closing the WebSocket. The connection remains in `pcm` mode,
+  so the client can fall back to Float32 in place. This differs from an
+  unsupported `?format=` query, which closes with code `1003` as specified
+  above.
+- A connection with no `CONFIG` retains Protocol v1 behavior, including its
+  `?format=` selection.
+
+#### Client outcome matrix
+
+| Outcome | Connection | Client and wire behavior |
+|---------|------------|--------------------------|
+| Matching `CONFIG_ACK` | Open | Pin to `aac-m4a`; use one complete m4a payload per audio message. |
+| ACK timeout | Client closes | Pin session to `f32le`; bounded reconnect without `CONFIG`, then send v1 Float32. Later reconnects also omit `CONFIG`. |
+| CONFIG `error` frame | Still open | Use `f32le` in place and pin session legacy. Server stays `pcm`; later reconnects omit `CONFIG`. |
+| WebSocket close | Closed | Connection failure, not in-place fallback; an unpinned session re-runs negotiation on the replacement socket. |
+| AAC setting off | Open | Never send `CONFIG`; use the unchanged Protocol v1 Float32 format. |
+
+A server-side close during negotiation is handled by client lifecycle, not by
+an on-wire fallback. The existing bounded reconnect repeats `PING`/`PONG` and
+re-runs `CONFIG`/`CONFIG_ACK` unless the session was already legacy-pinned by a
+prior timeout or error frame. The client also closes after an ACK timeout:
+because the server may have committed `aac-m4a` before a delayed ACK, continuing
+with Float32 on that socket is unsafe. That close pins legacy before reconnect,
+so the replacement socket and any later reconnect omit `CONFIG`. If reconnect
+fails, streaming enters the existing terminal-failure path and preserves
+`.stream.wav` for saved-audio retry (see §8).
+
+The AAC toggle and source rate are captured once at session start; changes take
+effect on the next session. A connection uses one audio format only: PCM and
+AAC frames never mix, and there is no mid-connection renegotiation. On reconnect,
+AAC negotiation runs again unless a timeout or error frame has pinned the
+session to legacy Float32; a legacy-pinned session omits `CONFIG` on every
+replacement connection. The send queue keeps PCM samples as its source of truth
+and prepares each retry for the format selected on that connection.
+
+#### Protocol v2 binary frame
+
+The chunk ID prefix is unchanged; only the payload changes after a successful
+AAC ACK:
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 4 bytes | `chunk_id`, unsigned 32-bit integer, big-endian |
+| 4 | Remaining message | One complete, self-contained m4a container for this chunk |
+
+Each WebSocket binary message contains exactly one complete m4a payload after
+the prefix. Do not send ADTS, add another length prefix, or split one container
+across messages. The declared source rate may be 16 kHz or 48 kHz; server
+decoding normalizes either to 16 kHz mono Float32.
 
 ---
 
@@ -300,9 +487,11 @@ These metadata values do not limit the `/stream` audio payload.
 
 ## 8. Failure and retry
 
-Connection retries continue throughout the streaming session. While recording,
+Connection attempts continue throughout the streaming session. While recording,
 queued streaming chunk sends retry without a fixed attempt limit, using the
-client's backoff between attempts.
+client's backoff between attempts. A dead active transport gets one bounded
+reconnect per session; if it fails, the existing terminal-failure path
+preserves the `.stream.wav` for saved-audio retry.
 
 If streaming cannot complete, the continuous WAV recording is preserved for a
 later retry. The user-facing failure messages are:
@@ -312,8 +501,10 @@ later retry. The user-facing failure messages are:
 - `stream send failed — recording preserved for retry` when a connection exists
   but queued audio cannot be completed.
 
-The client sends a keepalive PING every **25 seconds**. The WebSocket connection
-attempt timeout is `streamWsConnectTimeout`, **32.0 seconds**.
+The **25-second** application keepalive PING runs in addition to the
+**5-second** liveness PING described in §5. The WebSocket connection-setup budget is
+`streamWsConnectTimeout`, **32.0 seconds**; Protocol v2 ACK negotiation shares
+that budget.
 
 HTTP 401 responses are non-retryable. The app surfaces them as
 `WhisperError.unauthorized` with an API-key error; the keyboard's job-poll path

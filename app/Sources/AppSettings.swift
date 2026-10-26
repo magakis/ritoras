@@ -22,6 +22,8 @@ class AppSettings: ObservableObject {
     @Published var chunkSplitterSpeechRms: Float = SharedConfig.Defaults.streamVadSpeechRmsDefault
     @Published var chunkSplitterAbsoluteSpeechFloorDb: Double = SharedConfig.Defaults.streamVadAbsoluteSpeechFloorDbDefault
     @Published var chunkSplitterTelemetryEnabled: Bool = SharedConfig.Defaults.streamVadTelemetryEnabledDefault
+    @Published var streamAacEnabled: Bool = SharedConfig.Defaults.streamAacEnabledDefault
+    @Published var streamAacSourceSampleRate: Int = SharedConfig.Defaults.streamAacSourceSampleRateDefault
     @Published var fullRecordingUploadEnabled: Bool = SharedConfig.Defaults.fullRecordingUploadEnabledDefault
 
     private var appGroupDefaults: UserDefaults?
@@ -52,6 +54,8 @@ class AppSettings: ObservableObject {
         chunkSplitterSpeechRms = SharedConfig.streamVadSpeechRms()
         chunkSplitterAbsoluteSpeechFloorDb = SharedConfig.streamVadAbsoluteSpeechFloorDb()
         chunkSplitterTelemetryEnabled = SharedConfig.chunkSplitterTelemetryEnabled()
+        streamAacEnabled = SharedConfig.streamAacEnabled()
+        streamAacSourceSampleRate = SharedConfig.streamAacSourceSampleRate()
         fullRecordingUploadEnabled = SharedConfig.fullRecordingUploadEnabled()
 
         $servers.dropFirst().sink { [weak self] newValue in
@@ -142,6 +146,12 @@ class AppSettings: ObservableObject {
                                    payload: ["value": newValue])
             self?.saveChunkSplitterTelemetryEnabled(newValue)
         }.store(in: &cancellables)
+        $streamAacEnabled.dropFirst().sink { [weak self] newValue in
+            self?.saveStreamAacEnabled(newValue)
+        }.store(in: &cancellables)
+        $streamAacSourceSampleRate.dropFirst().sink { [weak self] newValue in
+            self?.saveStreamAacSourceSampleRate(newValue)
+        }.store(in: &cancellables)
         $fullRecordingUploadEnabled.dropFirst().sink { [weak self] newValue in
             self?.saveFullRecordingUploadEnabled(newValue)
         }.store(in: &cancellables)
@@ -175,6 +185,8 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(chunkSplitterSpeechRms, forKey: SharedConfig.Defaults.streamVadSpeechRmsKey)
         saveChunkSplitterAbsoluteSpeechFloorDb(chunkSplitterAbsoluteSpeechFloorDb)
         appGroupDefaults?.set(chunkSplitterTelemetryEnabled, forKey: SharedConfig.Defaults.streamVadTelemetryEnabledKey)
+        saveStreamAacEnabled(streamAacEnabled)
+        saveStreamAacSourceSampleRate(streamAacSourceSampleRate)
         saveFullRecordingUploadEnabled(fullRecordingUploadEnabled)
         postSettingsChanged()
     }
@@ -267,6 +279,16 @@ class AppSettings: ObservableObject {
         postSettingsChanged()
     }
 
+    private func saveStreamAacEnabled(_ enabled: Bool) {
+        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.streamAacEnabledKey)
+        postSettingsChanged()
+    }
+
+    private func saveStreamAacSourceSampleRate(_ sampleRate: Int) {
+        appGroupDefaults?.set(sampleRate, forKey: SharedConfig.Defaults.streamAacSourceSampleRateKey)
+        postSettingsChanged()
+    }
+
     private func saveFullRecordingUploadEnabled(_ enabled: Bool) {
         appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.fullRecordingUploadEnabledKey)
         postSettingsChanged()
@@ -327,9 +349,11 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
         chunkSplitterSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
+        streamAacEnabled = SharedConfig.Defaults.streamAacEnabledDefault
+        streamAacSourceSampleRate = SharedConfig.Defaults.streamAacSourceSampleRateDefault
     }
 
-    func resetChunkSplitterSettingsToDefaults() {
+    func resetStreamingSettingsToDefaults() {
         chunkSplitterSilenceOverridePresent = false
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
@@ -338,6 +362,8 @@ class AppSettings: ObservableObject {
         chunkSplitterSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadAbsoluteSpeechFloorDbKey)
         chunkSplitterTelemetryEnabled = SharedConfig.Defaults.streamVadTelemetryEnabledDefault
+        streamAacEnabled = SharedConfig.Defaults.streamAacEnabledDefault
+        streamAacSourceSampleRate = SharedConfig.Defaults.streamAacSourceSampleRateDefault
         fullRecordingUploadEnabled = SharedConfig.Defaults.fullRecordingUploadEnabledDefault
         updatingDerivedChunkSplitterValue = true
         chunkSplitterSilenceMs = SharedConfig.Defaults.streamVadSilenceMsDefault

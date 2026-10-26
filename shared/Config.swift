@@ -209,6 +209,13 @@ struct SharedConfig {
         static let fullRecordingUploadEnabledKey = "fullRecordingUploadEnabled"
         static let fullRecordingUploadEnabledDefault = false
 
+        // MARK: - Streaming Audio Format
+
+        static let streamAacEnabledKey = "streamAacEnabled"
+        static let streamAacEnabledDefault = true
+        static let streamAacSourceSampleRateKey = "streamAacSourceSampleRate"
+        static let streamAacSourceSampleRateDefault = 16_000
+
         // MARK: - Streaming / Voice Detection Tunables
 
         /// RMS threshold for voice detection. Higher = less sensitive.
@@ -1139,6 +1146,26 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.streamVadTelemetryEnabledKey) as? Bool)
             ?? Defaults.streamVadTelemetryEnabledDefault
+    }
+
+    /// Reads the streaming AAC toggle from the App Group.
+    static func streamAacEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamAacEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.streamAacEnabledKey) as? Bool)
+            ?? Defaults.streamAacEnabledDefault
+    }
+
+    /// Reads the configured AAC source rate, accepting only 16 kHz or 48 kHz.
+    static func streamAacSourceSampleRate() -> Int {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamAacSourceSampleRateDefault
+        }
+        let sampleRate = (defaults.object(
+            forKey: Defaults.streamAacSourceSampleRateKey
+        ) as? NSNumber)?.intValue ?? Defaults.streamAacSourceSampleRateDefault
+        return sampleRate == 48_000 ? 48_000 : Defaults.streamAacSourceSampleRateDefault
     }
 
     /// Reads the full-recording diagnostics upload flag from the App Group.

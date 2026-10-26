@@ -185,14 +185,18 @@ struct SettingsView: View {
             .pickerStyle(.segmented)
 
             if settings.dictationMode == .stream {
-                NavigationLink("Chunk Splitter") {
+                NavigationLink("Streaming") {
                     ChunkSplitterSettingsView()
                 }
             }
         } header: {
             Text("Dictation")
         } footer: {
-            Text("Batch records the whole clip then transcribes (most reliable). Stream transcribes live as you pause — faster feedback, needs a stable connection. Chunk splitter settings only affect Stream mode.")
+            Text(
+                "Batch records the whole clip then transcribes (most reliable). "
+                    + "Stream transcribes live as you pause — faster feedback, "
+                    + "needs a stable connection. Streaming settings only affect Stream mode."
+            )
         }
     }
 

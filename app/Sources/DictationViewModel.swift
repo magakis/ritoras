@@ -960,6 +960,10 @@ final class DictationViewModel: ObservableObject {
         ])
 
         let mode = SharedConfig.dictationMode()
+        let streamAacEnabled = mode == .stream ? SharedConfig.streamAacEnabled() : false
+        let streamAacSourceSampleRate = mode == .stream
+            ? SharedConfig.streamAacSourceSampleRate()
+            : SharedConfig.Defaults.streamAacSourceSampleRateDefault
 
         // Selection runs while microphone permission and recording setup proceed.
         let probeConfig = SharedConfig.load()
@@ -1156,7 +1160,9 @@ final class DictationViewModel: ObservableObject {
                     await self?.runStreamConnectLoop(
                         sessionID: id,
                         recorder: recorder,
-                        servers: config.servers)
+                        servers: config.servers,
+                        aacEnabled: streamAacEnabled,
+                        aacSourceSampleRate: streamAacSourceSampleRate)
                 }
                 UIApplication.shared.isIdleTimerDisabled = true
                 return
@@ -1197,7 +1203,9 @@ final class DictationViewModel: ObservableObject {
     private func runStreamConnectLoop(
         sessionID: UUID,
         recorder: StreamingAudioRecorder,
-        servers: [String]
+        servers: [String],
+        aacEnabled: Bool,
+        aacSourceSampleRate: Int
     ) async {
         let selection = await serverSelectionTask?.value
         let probeResult = selection?.server
@@ -1259,7 +1267,11 @@ final class DictationViewModel: ObservableObject {
                     "attempt": attemptNumber,
                     "round": round
                 ])
-                guard let candidate = WhisperStreamClient(baseURL: server, dictationID: sessionID) else {
+                guard let candidate = WhisperStreamClient(
+                    baseURL: server,
+                    dictationID: sessionID,
+                    aacEnabled: aacEnabled,
+                    aacSourceSampleRate: aacSourceSampleRate) else {
                     let elapsed = Date().timeIntervalSince(attemptStart) * 1000
                     FileLogger.shared.debug(.network, "Stream: invalid server URL",
                                             payload: ["jobId": sessionID.uuidString,
@@ -1302,7 +1314,8 @@ final class DictationViewModel: ObservableObject {
                         client: candidate,
                         sessionID: sessionID,
                         recorder: recorder,
-                        serverURL: server)
+                        serverURL: server,
+                        aacSourceSampleRate: aacSourceSampleRate)
                     return
                 } catch {
                     let elapsed = Date().timeIntervalSince(attemptStart) * 1000
@@ -1334,7 +1347,8 @@ final class DictationViewModel: ObservableObject {
         client: WhisperStreamClient,
         sessionID: UUID,
         recorder: StreamingAudioRecorder,
-        serverURL: String
+        serverURL: String,
+        aacSourceSampleRate: Int
     ) async {
         // Accept a late client only while stop() is explicitly waiting for it.
         guard canAttemptStreamConnection(sessionID: sessionID, recorder: recorder),
@@ -1358,7 +1372,10 @@ final class DictationViewModel: ObservableObject {
         let consumerClient = client
         chunkConsumerTask = Task { [weak self] in
             guard let self else { return .cancelled }
-            return await self.runChunkConsumer(client: consumerClient, sessionID: sessionID)
+            return await self.runChunkConsumer(
+                client: consumerClient,
+                sessionID: sessionID,
+                aacSourceSampleRate: aacSourceSampleRate)
         }
 
         let sinceRecordingStartSec = recordingStartTime.map {
@@ -2674,15 +2691,37 @@ final class DictationViewModel: ObservableObject {
     /// bounded reconnect. Runs until the stopped queue drains or recovery fails.
     private func runChunkConsumer(
         client: WhisperStreamClient,
-        sessionID: UUID
+        sessionID: UUID,
+        aacSourceSampleRate: Int
     ) async -> StreamChunkConsumerOutcome {
         let backoff = SharedConfig.Defaults.streamChunkRetryBackoffSeconds
         while !Task.isCancelled {
             guard activeID == sessionID else { return .cancelled }
+            do {
+                _ = try await client.waitForNegotiatedAudioMode()
+                guard !Task.isCancelled, activeID == sessionID else { return .cancelled }
+            } catch {
+                guard !Task.isCancelled, activeID == sessionID else { return .cancelled }
+                let transportDead = await client.isTransportDead()
+                guard !Task.isCancelled, activeID == sessionID else { return .cancelled }
+                if transportDead {
+                    let reconnected = await reconnectStreamTransport(
+                        client: client,
+                        sessionID: sessionID,
+                        reason: "negotiation_transport_dead")
+                    guard activeID == sessionID, !Task.isCancelled else { return .cancelled }
+                    guard reconnected else { return .sendFailed }
+                    continue
+                }
+                return .sendFailed
+            }
+
             let entry = chunkSendQueue.dequeue()
 
             guard let (chunkId, samples) = entry else {
-                if await client.isTransportDead() {
+                let transportDead = await client.isTransportDead()
+                guard !Task.isCancelled, activeID == sessionID else { return .cancelled }
+                if transportDead {
                     let reconnected = await reconnectStreamTransport(
                         client: client,
                         sessionID: sessionID,
@@ -2707,10 +2746,31 @@ final class DictationViewModel: ObservableObject {
             var attempt = 0
             var transientAttempt = 0
             var sent = false
+            var encodedAACPayload: Data?
             while !sent && !Task.isCancelled {
                 guard activeID == sessionID else { return .cancelled }
                 do {
-                    try await client.sendChunk(id: chunkId, samples: samples)
+                    let audioMode = try await client.waitForNegotiatedAudioMode()
+                    guard !Task.isCancelled, activeID == sessionID else { return .cancelled }
+                    switch audioMode {
+                    case .float32PCM:
+                        try await client.sendChunk(id: chunkId, samples: samples)
+                    case .aacM4A:
+                        let payload: Data
+                        if let encodedAACPayload {
+                            payload = encodedAACPayload
+                        } else {
+                            payload = try await StreamingAACChunkEncoder.encode(
+                                samples: samples,
+                                sourceSampleRate: aacSourceSampleRate)
+                            encodedAACPayload = payload
+                        }
+                        guard !Task.isCancelled, activeID == sessionID else {
+                            return .cancelled
+                        }
+                        try await client.sendAACChunk(id: chunkId, payload: payload)
+                    }
+                    guard !Task.isCancelled, activeID == sessionID else { return .cancelled }
                     sent = true
                     chunksSentThisSession += 1
                     Task { @MainActor [weak self] in
@@ -2747,6 +2807,7 @@ final class DictationViewModel: ObservableObject {
                     } else {
                         transportDead = await client.isTransportDead()
                     }
+                    guard !Task.isCancelled, activeID == sessionID else { return .cancelled }
 
                     attempt += 1
                     if transportDead {
