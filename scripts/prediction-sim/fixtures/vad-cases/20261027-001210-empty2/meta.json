@@ -1,0 +1,19 @@
+{
+  "case_id": "20261027-001210-empty2",
+  "session": "20261027-001210",
+  "kind": "failure",
+  "mechanism": "emitted_unrecognized",
+  "source_start_sample": 251091,
+  "source_end_sample": 351841,
+  "sample_rate": 16000,
+  "evidence": [
+    "ASR chunk text is empty; VAD marks 16 sp frames and db max -49.2 dBFS.",
+    "Decoded AAC chunk sample anchor matches full source at sample 259091 (r=0.998); event source span is [259091,351841).",
+    "Core interval [259091,351841) samples; clip interval [251091,351841) (0.5 s margins where source permits), duration 6.297 s.",
+    "Full-source WAV sidecar truncated=false; byte-size match=true; SHA-256 match=true.",
+    "Decoded M4A 93120 samples; source sample alignment residual 0, anchor correlation 0.998."
+  ],
+  "limitations": [
+    "Speech-like evidence is acoustic/VAD only; no human listening or new ASR, so intended words are not verified."
+  ]
+}

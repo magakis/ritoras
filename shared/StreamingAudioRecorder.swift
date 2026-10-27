@@ -1,4 +1,5 @@
 import AVFoundation
+import Foundation
 import os
 
 // This chunk splitter segments a continuous
@@ -57,6 +58,9 @@ protocol VADTelemetryFlushable: AnyObject, Sendable {
 
 struct VADTelemetryFrame: @unchecked Sendable {
     let seq: UInt64
+    // Half-open source coordinates; frame duration and all sample counts are at 16 kHz.
+    let sourceStartSample: Int
+    let sourceEndSample: Int
     let frameDuration: Double
     let frameDb: Double
     let evidence: String
@@ -86,6 +90,7 @@ enum VADTelemetryEventKind: String, Sendable {
     case stopFlush = "stop_flush"
     case sessionEnd = "session_end"
     case outcome
+    case fullRecordingUpload = "full_recording_upload"
     case chunkReceived = "chunk_received"
     case flatTerminate = "flat_terminate"
     case reanchor
@@ -103,6 +108,7 @@ enum VADTelemetryEventKind: String, Sendable {
         case .stopFlush: return "stop"
         case .sessionEnd: return "ended"
         case .outcome: return "completed"
+        case .fullRecordingUpload: return "completed"
         case .chunkReceived: return "response_received"
         case .flatTerminate: return "flat_spread"
         case .reanchor: return "floor_moved"
@@ -124,6 +130,11 @@ struct VADTelemetryEvent: @unchecked Sendable {
     let config: [String: Any]?
     let startMs: Double?
     let endMs: Double?
+    // New timeline fields are additive; startMs/endMs retain their legacy meaning.
+    let timestampMs: Double?
+    let wallTimestampMs: Double?
+    let sourceStartSample: Int?
+    let sourceEndSample: Int?
     let endpointState: String?
     let latencyMs: Double?
     let chars: Int?
@@ -139,6 +150,10 @@ struct VADTelemetryEvent: @unchecked Sendable {
         config: [String: Any]? = nil,
         startMs: Double? = nil,
         endMs: Double? = nil,
+        timestampMs: Double? = nil,
+        wallTimestampMs: Double? = nil,
+        sourceStartSample: Int? = nil,
+        sourceEndSample: Int? = nil,
         endpointState: String? = nil,
         latencyMs: Double? = nil,
         chars: Int? = nil,
@@ -153,6 +168,10 @@ struct VADTelemetryEvent: @unchecked Sendable {
         self.config = config
         self.startMs = startMs
         self.endMs = endMs
+        self.timestampMs = timestampMs
+        self.wallTimestampMs = wallTimestampMs
+        self.sourceStartSample = sourceStartSample
+        self.sourceEndSample = sourceEndSample
         self.endpointState = endpointState
         self.latencyMs = latencyMs
         self.chars = chars
@@ -231,6 +250,7 @@ private final class VADContext: @unchecked Sendable {
     private var accumulatorPeakAboveFloorDb: Double?
     private var accumulatorHasSpeechEvidence = false
     private var chunkStartSessionSamples: Int?
+    private var chunkEndSessionSamples: Int?
     var silenceSamples: Int = 0
     var speechSamples: Int = 0
     var chunkId: UInt32 = 0
@@ -249,6 +269,8 @@ private final class VADContext: @unchecked Sendable {
     private var telemetrySink: VADTelemetrySink?
     private var primingComplete = false
     private var idleGapRunSamples = 0
+    private var idleGapStartSessionSamples: Int?
+    private var idleGapEndSessionSamples: Int?
     private var idleGapPeakLevelDb: Double?
     private var idleGapFloorDbAtPeak: Double?
     private var idleGapStrongThresholdDbAtPeak: Double?
@@ -309,6 +331,7 @@ private final class VADContext: @unchecked Sendable {
         telemetrySequence = 0
         sessionElapsedSamples = 0
         chunkStartSessionSamples = nil
+        chunkEndSessionSamples = nil
         previousFrameDbForClassification = nil
         resetIdleGapRun()
         guard let sink else { return }
@@ -339,7 +362,16 @@ private final class VADContext: @unchecked Sendable {
         config["analysisHpfEnabled"] = analysisHpf != nil
         config["analysisHpfCutoffHz"] = SharedConfig.Defaults.streamVadHpfCutoffHzDefault
         config["whisperHighPassCutoffHz"] = SharedConfig.Defaults.streamVadWhisperHighPassCutoffHzDefault
+        config["whisperModulationSpreadDb"] =
+            SharedConfig.Defaults.streamVadWhisperModulationSpreadDbDefault
+        config["whisperContextMs"] = SharedConfig.Defaults.streamVadWhisperContextMsDefault
         config["gapSpeechPeakAboveFloorDb"] = SharedConfig.Defaults.streamVadGapSpeechPeakAboveFloorDbDefault
+        if let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+            config["appShortVersion"] = appVersion
+        }
+        if let appBuildNumber = Bundle.main.infoDictionary?["CFBundleVersion"] as? String {
+            config["appBuildNumber"] = appBuildNumber
+        }
         sink.event(VADTelemetryEvent(kind: .sessionStart, config: config))
     }
 
@@ -425,6 +457,8 @@ private final class VADContext: @unchecked Sendable {
 
     private func recordTelemetryFrame(
         output: VADGateOutput,
+        sourceStartSample: Int,
+        sourceEndSample: Int,
         frameDuration: Double,
         previousEndpointState: StreamingEndpointState,
         decision: StreamingEndpointDecision,
@@ -433,6 +467,8 @@ private final class VADContext: @unchecked Sendable {
         guard let sink = telemetrySink else { return }
         let record = VADTelemetryFrame(
             seq: telemetrySequence,
+            sourceStartSample: sourceStartSample,
+            sourceEndSample: sourceEndSample,
             frameDuration: frameDuration,
             frameDb: lastFrameDb,
             evidence: output.evidence.rawValue,
@@ -457,9 +493,18 @@ private final class VADContext: @unchecked Sendable {
         sink.frame(record)
     }
 
-    private func trackIdleGapFrame(frameDb: Double, frameLength: Int, output: VADGateOutput) {
+    private func trackIdleGapFrame(
+        frameDb: Double,
+        frameStartSamples: Int,
+        frameLength: Int,
+        output: VADGateOutput
+    ) {
         guard telemetrySink != nil else { return }
+        if idleGapRunSamples == 0 {
+            idleGapStartSessionSamples = frameStartSamples
+        }
         idleGapRunSamples += frameLength
+        idleGapEndSessionSamples = frameStartSamples + frameLength
         guard let floorDb = output.floorDb else { return }
 
         if frameDb >= floorDb + SharedConfig.Defaults.streamVadIdleGapEvidenceAboveFloorDbDefault {
@@ -488,6 +533,10 @@ private final class VADContext: @unchecked Sendable {
         telemetrySink?.event(VADTelemetryEvent(
             kind: .discard,
             reason: "idle_gap",
+            timestampMs: Double(sessionElapsedSamples) / 16.0,
+            wallTimestampMs: Date().timeIntervalSince1970 * 1_000.0,
+            sourceStartSample: idleGapStartSessionSamples,
+            sourceEndSample: idleGapEndSessionSamples,
             metadata: [
                 "durationMs": durationMs,
                 "peakLevelDbFS": peakLevelDb,
@@ -505,11 +554,30 @@ private final class VADContext: @unchecked Sendable {
 
     private func resetIdleGapRun() {
         idleGapRunSamples = 0
+        idleGapStartSessionSamples = nil
+        idleGapEndSessionSamples = nil
         idleGapPeakLevelDb = nil
         idleGapFloorDbAtPeak = nil
         idleGapStrongThresholdDbAtPeak = nil
         idleGapContinuationThresholdDbAtPeak = nil
         idleGapEvidenceAboveFloor5Samples = 0
+    }
+
+    private func recordDiscard(
+        samples: Int,
+        reason: String,
+        sourceStartSample: Int?,
+        sourceEndSample: Int?
+    ) {
+        telemetrySink?.event(VADTelemetryEvent(
+            kind: .discard,
+            samples: samples,
+            reason: reason,
+            timestampMs: Double(sessionElapsedSamples) / 16.0,
+            wallTimestampMs: Date().timeIntervalSince1970 * 1_000.0,
+            sourceStartSample: sourceStartSample,
+            sourceEndSample: sourceEndSample
+        ))
     }
 
     /// Process one frame into the continuous pending chunk buffer.
@@ -565,7 +633,7 @@ private final class VADContext: @unchecked Sendable {
             appendRetainedGapFrame(
                 frame,
                 startSamples: frameStartSamples,
-                evidence: output.speechShaped ? .continuing : output.evidence,
+                evidence: output.isSpeech || output.speechShaped ? .continuing : output.evidence,
                 frameDb: frameDb,
                 floorDb: output.floorDb
             )
@@ -574,9 +642,8 @@ private final class VADContext: @unchecked Sendable {
                 chunkStartSessionSamples = frameStartSamples
             }
             appendAccumulator(frame)
-            if !endpointMachineEnabled {
-                trackAccumulatorSpeechEvidence(frameDb: frameDb, floorDb: output.floorDb, output: output)
-            }
+            chunkEndSessionSamples = frameStartSamples + frameLength
+            trackAccumulatorSpeechEvidence(frameDb: frameDb, floorDb: output.floorDb, output: output)
             bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
         }
         if output.isSpeech {
@@ -737,6 +804,8 @@ private final class VADContext: @unchecked Sendable {
 
         recordTelemetryFrame(
             output: output,
+            sourceStartSample: frameStartSamples,
+            sourceEndSample: sessionElapsedSamples,
             frameDuration: frameDuration,
             previousEndpointState: previousEndpointState,
             decision: decision,
@@ -751,7 +820,12 @@ private final class VADContext: @unchecked Sendable {
                     samples: accumulatorSampleCount
                 ))
             } else if previousEndpointState == .idle, endpoint.state == .idle {
-                trackIdleGapFrame(frameDb: frameDb, frameLength: frameLength, output: output)
+                trackIdleGapFrame(
+                    frameDb: frameDb,
+                    frameStartSamples: frameStartSamples,
+                    frameLength: frameLength,
+                    output: output
+                )
             }
         }
 
@@ -811,11 +885,12 @@ private final class VADContext: @unchecked Sendable {
                   accumulatorSampleCount > maxNoiseSamples,
                   speechSamples < minimumVoiceEvidenceToRetainSamples,
                   !accumulatorHasPlausibleSpeech {
-            telemetrySink?.event(VADTelemetryEvent(
-                kind: .discard,
+            recordDiscard(
                 samples: accumulatorSampleCount,
-                reason: "noise_guard"
-            ))
+                reason: "noise_guard",
+                sourceStartSample: chunkStartSessionSamples,
+                sourceEndSample: chunkEndSessionSamples
+            )
             clearAccumulator()
             chunkStartSessionSamples = nil
             speechSamples = 0
@@ -879,9 +954,12 @@ private final class VADContext: @unchecked Sendable {
 
     private var retainedGapHasSpeechEvidence: Bool {
         if retainedGapEvidenceSamples > 0 { return true }
-        return retainedGapPeakAboveFloorDb.map {
-            $0 >= SharedConfig.Defaults.streamVadGapSpeechPeakAboveFloorDbDefault
-        } ?? false
+        if let retainedGapPeakAboveFloorDb,
+           retainedGapPeakAboveFloorDb >= SharedConfig.Defaults.streamVadGapSpeechPeakAboveFloorDbDefault {
+            return true
+        }
+        // A held, VAD-accepted accumulator remains part of the un-emitted span.
+        return accumulatorHasSpeechEvidence
     }
 
     private var accumulatorHasPlausibleSpeech: Bool {
@@ -913,6 +991,10 @@ private final class VADContext: @unchecked Sendable {
         if accumulatorSampleCount == 0 {
             chunkStartSessionSamples = retainedGapStartSessionSamples
         }
+        accumulatorHasSpeechEvidence = accumulatorHasSpeechEvidence || retainedGapEvidenceSamples > 0
+        if let retainedGapStartSessionSamples {
+            chunkEndSessionSamples = retainedGapStartSessionSamples + retainedGapBuffer.count
+        }
         appendAccumulator(retainedGapBuffer)
         retainedGapBuffer.removeAll(keepingCapacity: true)
         retainedGapStartSessionSamples = nil
@@ -923,17 +1005,23 @@ private final class VADContext: @unchecked Sendable {
 
     private func shedRetainedGap() {
         let sampleCount = retainedGapBuffer.count
-        telemetrySink?.event(VADTelemetryEvent(
-            kind: .discard,
+        let sourceStartSample = retainedGapStartSessionSamples
+        let sourceEndSample = sourceStartSample.map { $0 + sampleCount }
+        recordDiscard(
             samples: sampleCount,
-            reason: "noise_guard"
-        ))
+            reason: "noise_guard",
+            sourceStartSample: sourceStartSample,
+            sourceEndSample: sourceEndSample
+        )
         retainedGapBuffer.removeAll(keepingCapacity: true)
         retainedGapStartSessionSamples = nil
         retainedGapEvidenceSamples = 0
         retainedGapPeakAboveFloorDb = nil
         if accumulatorSampleCount == 0 {
             chunkStartSessionSamples = nil
+            chunkEndSessionSamples = nil
+            accumulatorPeakAboveFloorDb = nil
+            accumulatorHasSpeechEvidence = false
             speechSamples = 0
             silenceSamples = 0
             contiguousTrailingSilenceSamples = 0
@@ -984,6 +1072,7 @@ private final class VADContext: @unchecked Sendable {
         accumulator.removeAll(keepingCapacity: true)
         accumulatorPeakAboveFloorDb = nil
         accumulatorHasSpeechEvidence = false
+        chunkEndSessionSamples = nil
     }
 
     private func appendAccumulator(_ samples: [Float]) {
@@ -1057,6 +1146,7 @@ private final class VADContext: @unchecked Sendable {
         let id = chunkId
         var sampleCount = accumulatorSampleCount
         let startSamples = chunkStartSessionSamples ?? (sessionElapsedSamples - sampleCount)
+        var sourceEndSamples = chunkEndSessionSamples ?? sessionElapsedSamples
         if trimToPostRoll {
             let trailingSamples = min(contiguousTrailingSilenceSamples, sampleCount)
             let excessTrailingSamples = max(0, trailingSamples - postRollSamples)
@@ -1065,15 +1155,17 @@ private final class VADContext: @unchecked Sendable {
                 let trimmedTail = Array(snapshot.suffix(retainedTailSamples))
                 snapshot.removeLast(retainedTailSamples)
                 sampleCount -= retainedTailSamples
+                sourceEndSamples -= retainedTailSamples
                 // Keep the post-roll-trimmed silence contiguous with the next chunk.
                 retainedGapBuffer = trimmedTail
-                retainedGapStartSessionSamples = startSamples + sampleCount
+                retainedGapStartSessionSamples = sourceEndSamples
                 retainedGapEvidenceSamples = 0
                 retainedGapPeakAboveFloorDb = contiguousTrailingSilencePeakAboveFloorDb
             }
         }
         let emittedTotalMs = Double(sampleCount) / 16.0
         let startMs = Double(startSamples) / 16.0
+        // Preserve legacy count-based endMs; sourceEndSamples is gap-aware.
         let endMs = startMs + Double(sampleCount) / 16.0
         chunkId &+= 1
         pendingEmissionSummary = EmissionSummary(
@@ -1106,6 +1198,8 @@ private final class VADContext: @unchecked Sendable {
             totalMs: emittedTotalMs,
             startMs: startMs,
             endMs: endMs,
+            sourceStartSample: startSamples,
+            sourceEndSample: sourceEndSamples,
             endpointState: endpointState
         ))
         if retainedGapBuffer.count > maxNoiseSamples, !retainedGapHasSpeechEvidence {
@@ -1128,6 +1222,7 @@ private final class VADContext: @unchecked Sendable {
         let sampleCount = accumulatorSampleCount
         let trailingSpeechMs = Double(speechSamples) / 16.0
         let startSamples = chunkStartSessionSamples ?? (sessionElapsedSamples - sampleCount)
+        let sourceEndSamples = chunkEndSessionSamples ?? sessionElapsedSamples
         let startMs = Double(startSamples) / 16.0
         let endMs = startMs + Double(sampleCount) / 16.0
         let flushReason: String
@@ -1146,6 +1241,10 @@ private final class VADContext: @unchecked Sendable {
             totalMs: Double(sampleCount) / 16.0,
             startMs: sampleCount > 0 ? startMs : nil,
             endMs: endMs,
+            timestampMs: Double(sessionElapsedSamples) / 16.0,
+            wallTimestampMs: Date().timeIntervalSince1970 * 1_000.0,
+            sourceStartSample: sampleCount > 0 ? startSamples : nil,
+            sourceEndSample: sampleCount > 0 ? sourceEndSamples : nil,
             endpointState: decisionTimeEndpointState
         ))
         if !primingComplete, accumulatorSampleCount == 0 { return nil }
@@ -1153,11 +1252,12 @@ private final class VADContext: @unchecked Sendable {
         // Sub-250 ms cannot contain an intelligible word, so the tail floor
         // prevents hallucinated tokens.
         guard sampleCount >= 250 * 16 else {
-            telemetrySink?.event(VADTelemetryEvent(
-                kind: .discard,
+            recordDiscard(
                 samples: sampleCount,
-                reason: "tail_floor"
-            ))
+                reason: "tail_floor",
+                sourceStartSample: startSamples,
+                sourceEndSample: sourceEndSamples
+            )
             FileLogger.shared.debug(.audio, "Chunk splitter: flush dropped sub-250 ms tail",
                                     payload: ["sampleCount": sampleCount])
             clearAccumulator()

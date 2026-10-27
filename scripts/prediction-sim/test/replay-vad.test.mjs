@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { makeRecorderHarness } from '../lib/recorder-sim.mjs';
 import {
   computeLabelMetrics,
+  compareDecisionParity,
   decodeWav,
   dcCorrectedRMS,
   dbFromSamples,
@@ -86,6 +87,123 @@ describe('VAD replay', () => {
     assert.equal(session.config.silenceMs, 1900);
     assert.equal(normalizeConfig(session.config).config.endpointSilenceMs, 1900);
     assert.equal(normalizeConfig({ silenceMs: 450 }).config.endpointSilenceMs, 450);
+  });
+
+  it('flags default-based replay when session telemetry has no effective config', () => {
+    const session = parseSession(serializeRecords([
+      { t: 'f', q: 0, dt: 0.01, db: -80 },
+    ]));
+    const replay = replaySession(session, session.config);
+
+    assert.equal(session.configIsTelemetry, false);
+    assert.ok(replay.decisionParity.knownDivergences.some(item => (
+      item.reason.includes('lacks effective VAD configuration')
+    )));
+  });
+
+  it('reports KD-3 for PCM16 WAV replay and tags near-threshold mismatches', () => {
+    const samples = Array.from({ length: 160 }, (_, index) => (
+      index % 2 === 0 ? 0.0255 : -0.0255
+    ));
+    const wav = decodeWav(makeWav({ audioFormat: 1, channels: 1, samples }));
+    const config = { ...SHIPPING_SESSION_CONFIG, mode: 'static', analysisHpfEnabled: false };
+    const session = {
+      frames: [{ t: 'f', q: 0, dt: 0.01, db: -32, sourceStartSample: 0, sourceEndSample: 160 }],
+      events: [{
+        t: 'ev',
+        k: 'emit',
+        r: 'endpoint',
+        sourceStartSample: 0,
+        sourceEndSample: 160,
+      }],
+      config,
+      configIsTelemetry: false,
+    };
+
+    const replay = replaySession(session, config, { fromWav: wav });
+    const report = JSON.parse(JSON.stringify(replay));
+    const divergence = report.knownDivergences.find(item => item.id === 'KD-3');
+
+    assert.ok(divergence);
+    assert.match(divergence.cause, /Float32→PCM16 round-toward-zero/);
+    assert.match(divergence.attributionHeuristic, /heuristic/i);
+    assert.ok(report.decisionParity.knownDivergences.some(item => item.id === 'KD-3'));
+    assert.ok(Math.abs(report.frames[0].db - report.frames[0].th) <= 1.0);
+    assert.equal(report.decisionParity.mismatches[0].kd, 'KD-3');
+  });
+
+  it('cascades KD-3 to count differences only when every other mismatch is attributed', () => {
+    const replayFrames = [
+      { sourceStartSample: 0, sourceEndSample: 160, db: -32, th: -32, st: -38 },
+      { sourceStartSample: 160, sourceEndSample: 320, db: -20, th: -32, st: -38 },
+      { sourceStartSample: 320, sourceEndSample: 480, db: -20, th: -32, st: -38 },
+      { sourceStartSample: 480, sourceEndSample: 640, db: -20, th: -32, st: -38 },
+    ];
+    const recordedEvents = [
+      { k: 'emit', r: 'original', sourceStartSample: 0, sourceEndSample: 160 },
+      { k: 'emit', r: 'legacy', s0: 10, s1: 20 },
+      { k: 'emit', r: 'stable', sourceStartSample: 320, sourceEndSample: 480 },
+      { k: 'emit', r: 'extra', sourceStartSample: 480, sourceEndSample: 640 },
+    ];
+    const replayEvents = [
+      { k: 'emit', r: 'replayed', sourceStartSample: 0, sourceEndSample: 160 },
+      { k: 'emit', r: 'legacy-replayed', sourceStartSample: 180, sourceEndSample: 340 },
+      { k: 'emit', r: 'stable', sourceStartSample: 320, sourceEndSample: 480 },
+    ];
+    const attributed = compareDecisionParity(recordedEvents, replayEvents, [{ dt: 0.01 }], {
+      pcm16Source: true,
+      replayFrames,
+    });
+    const countMismatch = attributed.mismatches.find(item => (
+      item.reason === 'decision count differs'
+    ));
+
+    assert.equal(attributed.mismatches[0].kd, 'KD-3');
+    assert.ok(attributed.knownDivergences.some(item => (
+      item.decision === 1 && item.category === 'legacy_coordinates'
+    )));
+    assert.equal(countMismatch.kd, 'KD-3');
+    assert.equal(attributed.knownDivergences[0].cascadeAttributionRule.includes(
+      'downstream cascade of near-threshold flips',
+    ), true);
+
+    const unattributed = compareDecisionParity([
+      { k: 'emit', r: 'original', sourceStartSample: 0, sourceEndSample: 160 },
+      { k: 'emit', r: 'unexplained', sourceStartSample: 160, sourceEndSample: 320 },
+      { k: 'emit', r: 'extra', sourceStartSample: 320, sourceEndSample: 480 },
+    ], [
+      { k: 'emit', r: 'replayed', sourceStartSample: 0, sourceEndSample: 160 },
+      { k: 'emit', r: 'different', sourceStartSample: 160, sourceEndSample: 320 },
+    ], [{ dt: 0.01 }], {
+      pcm16Source: true,
+      replayFrames: [
+        ...replayFrames.slice(0, 2),
+        { ...replayFrames[2], db: -32 },
+      ],
+    });
+    const unexplainedCountMismatch = unattributed.mismatches.find(item => (
+      item.reason === 'decision count differs'
+    ));
+
+    assert.equal(unattributed.mismatches[0].kd, 'KD-3');
+    assert.equal(unattributed.mismatches[1].kd, undefined);
+    assert.equal(unexplainedCountMismatch.kd, undefined);
+
+    const noKd3Evidence = compareDecisionParity([
+      { k: 'emit', r: 'extra', sourceStartSample: 0, sourceEndSample: 160 },
+    ], [], [{ dt: 0.01 }], {
+      pcm16Source: true,
+      replayFrames: [{
+        sourceStartSample: 0,
+        sourceEndSample: 160,
+        db: -20,
+        th: -32,
+        st: -38,
+      }],
+    });
+
+    assert.equal(noKd3Evidence.mismatches[0].reason, 'decision count differs');
+    assert.equal(noKd3Evidence.mismatches[0].kd, undefined);
   });
 
   it('parses the recorded 2026-10-24 session from the fixture JSONL convention', () => {
@@ -185,6 +303,8 @@ describe('VAD replay', () => {
     assert.equal(replay.divergence.matchedFrameCount, source.frames.length);
     assert.equal(replay.divergence.matchRate, 1);
     assert.deepEqual(replay.divergence.mismatches, []);
+    assert.equal(replay.decisionParity.status, 'matched');
+    assert.equal(replay.decisionParity.mismatchCount, 0);
     assert.equal(replay.metrics.utteranceCount, 1);
     assert.equal(replay.metrics.chunkCount, 1);
     assert.ok(Math.abs(replay.metrics.sessionDurationSeconds - 1) < 1e-9);

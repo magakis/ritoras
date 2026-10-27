@@ -1395,6 +1395,16 @@ final class DictationViewModel: ObservableObject {
         lastPublishedChunkSplitterState = nil
         let stopStartTime = Date()
         var stagedDiagnosticsUpload: (url: URL, serverURL: String, token: String)?
+        var fullRecordingUploadTelemetryWriter: ChunkSplitterTelemetryFileWriter?
+        var fullRecordingUploadTelemetry: FullRecordingUploadTelemetry?
+        var fullRecordingUploadTelemetryDelegated = false
+        defer {
+            if !fullRecordingUploadTelemetryDelegated,
+               let writer = fullRecordingUploadTelemetryWriter,
+               let telemetry = fullRecordingUploadTelemetry {
+                writer.recordFullRecordingUploadOutcome(telemetry)
+            }
+        }
         switch SharedConfig.dictationMode() {
         case .batch:
             guard let recorder = recorder, let id = activeID else { return }
@@ -1623,6 +1633,17 @@ final class DictationViewModel: ObservableObject {
             FileLogger.shared.info(.transcription, "stop mode: stream")
 
             guard let id = activeID else { return }
+            fullRecordingUploadTelemetryWriter = chunkSplitterTelemetryWriter
+            fullRecordingUploadTelemetry = FullRecordingUploadTelemetry(
+                uploadEnabled: SharedConfig.fullRecordingUploadEnabled(),
+                tokenPresent: false,
+                finalTextNonempty: false,
+                streamWavPresent: false,
+                stageOutcome: .notReached,
+                uploadAttempted: false,
+                uploadCompleted: false,
+                httpStatus: nil,
+                errorDomain: nil)
             let sessionRecorder = streamRecorder
             let clientAttachedAtStop = streamClient != nil
             var connectGraceEntered = false
@@ -1669,6 +1690,10 @@ final class DictationViewModel: ObservableObject {
 
             // Signal recording done and drain queue
             await sessionRecorder?.stop()
+            let streamWavURL = RecordingStore.shared.streamWavURL(for: id)
+            fullRecordingUploadTelemetry?.streamWavPresent = streamWavURL.map {
+                FileManager.default.fileExists(atPath: $0.path)
+            } ?? false
             if streamClient != nil, streamConnectGraceSessionID == id {
                 streamConnectGraceSessionID = nil
             }
@@ -1857,6 +1882,8 @@ final class DictationViewModel: ObservableObject {
                     let receivedRecordingToken = await client.finalRecordingToken
                     guard canContinueSession(id) else { return }
                     finalRecordingToken = receivedRecordingToken
+                    fullRecordingUploadTelemetry?.tokenPresent =
+                        receivedRecordingToken?.isEmpty == false
 
                     let mergeEnabled = SharedConfig.Defaults.chunkFinalMergeEnabled
                     let maxGapMs = min(max(SharedConfig.Defaults.chunkFinalMergeMaxGapMs, 500), 10_000)
@@ -1875,7 +1902,9 @@ final class DictationViewModel: ObservableObject {
                     // protect the session identity. Empty text remains a retryable
                     // failure (audio preserved via handleStreamTerminalFailure).
                     let transcriptionValid = !text.isEmpty
+                    fullRecordingUploadTelemetry?.finalTextNonempty = transcriptionValid
                     if !transcriptionValid {
+                        fullRecordingUploadTelemetry?.stageOutcome = .finalTextEmpty
                         FileLogger.shared.warn(.transcription,
                             "stream stop: no transcription delivered this session — treating as failure",
                             payload: ["jobId": id.uuidString,
@@ -1904,10 +1933,12 @@ final class DictationViewModel: ObservableObject {
 
                         TranscriptionHistory.shared.add(text: text)
                         let fullRecordingUploadEnabled = SharedConfig.fullRecordingUploadEnabled()
+                        fullRecordingUploadTelemetry?.uploadEnabled = fullRecordingUploadEnabled
                         let recordingToken = receivedRecordingToken
                         let recordingTokenPresent = recordingToken.map { !$0.isEmpty } ?? false
+                        fullRecordingUploadTelemetry?.tokenPresent = recordingTokenPresent
                         let serverURLAvailable = selectedServer.map { !$0.isEmpty } ?? false
-                        let sourceWavURL = RecordingStore.shared.streamWavURL(for: id)
+                        let sourceWavURL = streamWavURL
                         let stagingGate: String
                         if !fullRecordingUploadEnabled {
                             stagingGate = "disabled"
@@ -1929,7 +1960,8 @@ final class DictationViewModel: ObservableObject {
                             "decision": stagingGate
                         ])
 
-                        if fullRecordingUploadEnabled && recordingTokenPresent {
+                        if fullRecordingUploadEnabled,
+                           recordingTokenPresent {
                             if let recordingToken,
                                let serverURL = selectedServer,
                                !serverURL.isEmpty,
@@ -1938,26 +1970,35 @@ final class DictationViewModel: ObservableObject {
                                     let stagedURL = try FullRecordingDiagnosticsUploader.stage(
                                         sourceURL: sourceURL,
                                         sessionID: id)
+                                    fullRecordingUploadTelemetry?.stageOutcome = .staged
                                     stagedDiagnosticsUpload = (
                                         url: stagedURL,
                                         serverURL: serverURL,
                                         token: recordingToken)
                                 } catch {
                                     RecordingStore.shared.deleteStreamWav(for: id)
-                                    FileLogger.shared.debug(.network, "Full recording upload staging failed",
-                                                            payload: ["jobId": id.uuidString,
-                                                                      "reason": String(
-                                                                        error.localizedDescription.prefix(120))])
+                                    fullRecordingUploadTelemetry?.stageOutcome = .stagingFailed
+                                    fullRecordingUploadTelemetry?.errorDomain =
+                                        (error as NSError).domain
+                                    FileLogger.shared.warn(.network,
+                                        "Full recording upload staging failed",
+                                        payload: ["jobId": id.uuidString,
+                                                  "errorDomain": (error as NSError).domain])
                                 }
                             } else {
                                 RecordingStore.shared.deleteStreamWav(for: id)
-                                FileLogger.shared.debug(.network, "Full recording upload staging unavailable",
-                                                        payload: ["jobId": id.uuidString])
+                                fullRecordingUploadTelemetry?.stageOutcome = .sourceUnavailable
+                                FileLogger.shared.warn(.network,
+                                    "Full recording upload staging unavailable",
+                                    payload: ["jobId": id.uuidString])
                             }
                         } else {
+                            fullRecordingUploadTelemetry?.stageOutcome = fullRecordingUploadEnabled
+                                ? .missingToken
+                                : .uploadDisabled
                             RecordingStore.shared.deleteStreamWav(for: id)
-                            FileLogger.shared.debug(.audio, "stream wav deleted on success",
-                                                    payload: ["jobId": id.uuidString])
+                            FileLogger.shared.info(.audio, "stream wav deleted on success",
+                                                   payload: ["jobId": id.uuidString])
                         }
                         chunkSplitterTelemetryWriter?.recordOutcome("success")
                         phase = .done(text)
@@ -1965,7 +2006,8 @@ final class DictationViewModel: ObservableObject {
                 } catch WhisperError.cancelled {
                     guard canContinueSession(id) else { return }
                     // User cancelled — do not record as failure.
-                        chunkSplitterTelemetryWriter?.recordOutcome("cancelled")
+                    fullRecordingUploadTelemetry?.stageOutcome = .cancelled
+                    chunkSplitterTelemetryWriter?.recordOutcome("cancelled")
                     RecordingStore.shared.deleteStreamWav(for: id)
                     FileLogger.shared.debug(.app, "transcription cancelled, wav deleted",
                                             payload: ["jobId": id.uuidString])
@@ -2012,13 +2054,24 @@ final class DictationViewModel: ObservableObject {
             await streamClient?.disconnect()
             if let stagedDiagnosticsUpload {
                 let uploadLease = FullRecordingDiagnosticsUploadLease.begin(sessionID: id)
+                let uploadTelemetryWriter = fullRecordingUploadTelemetryWriter
+                let uploadTelemetry = fullRecordingUploadTelemetry
+                fullRecordingUploadTelemetryDelegated =
+                    uploadTelemetryWriter != nil && uploadTelemetry != nil
                 let uploadTask = Task.detached(priority: .utility) {
-                    await FullRecordingDiagnosticsUploader.upload(
+                    let result = await FullRecordingDiagnosticsUploader.upload(
                         stagedURL: stagedDiagnosticsUpload.url,
                         serverURL: stagedDiagnosticsUpload.serverURL,
                         recordingToken: stagedDiagnosticsUpload.token,
-                        sessionID: id,
-                        backgroundTaskLease: uploadLease)
+                        sessionID: id)
+                    if let uploadTelemetryWriter, var uploadTelemetry {
+                        uploadTelemetry.uploadAttempted = result.uploadAttempted
+                        uploadTelemetry.uploadCompleted = result.uploadCompleted
+                        uploadTelemetry.httpStatus = result.httpStatus
+                        uploadTelemetry.errorDomain = result.errorDomain
+                        uploadTelemetryWriter.recordFullRecordingUploadOutcome(uploadTelemetry)
+                    }
+                    await uploadLease.end()
                 }
                 uploadLease.installUploadTask(uploadTask)
             }

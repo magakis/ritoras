@@ -1,0 +1,36 @@
+{
+  "case_id": "20261027-003838-idle-gap",
+  "session": "20261027-003838",
+  "kind": "guard",
+  "mechanism": "non_speech",
+  "source_start_sample": 358155,
+  "source_end_sample": 467182,
+  "sample_rate": 16000,
+  "evidence": [
+    "6.013 s un-emitted interval between chunks 1 and 2 has zero sp frames, telemetry db max -78 dBFS; source RMS p50 -84.3, p90 -77.4, max -66.2 dBFS.",
+    "Windowed spectral flatness median 0.021, so this is near-silence/tonal floor, not a verified steady hiss/fan.",
+    "Core interval [366155,462361) samples; clip interval [358155,467182) (0.5 s margins where source permits), duration 6.814 s.",
+    "Full-source WAV sidecar truncated=false; byte-size match=true; SHA-256 match=true."
+  ],
+  "warmup": {
+    "prefix_samples": 8000,
+    "floor_db": -80,
+    "floor_converged": true,
+    "priming_complete": true,
+    "absolute_speech_floor_db": -70,
+    "endpoint_silence_ms": 2000,
+    "min_speech_ms": 300,
+    "min_chunk_ms": 300,
+    "analysis_hpf_enabled": true,
+    "analysis_hpf_cutoff_hz": 100,
+    "endpoint_state": "idle",
+    "after_emission": true,
+    "within_utterance_context": true,
+    "history_source": "clip_prefix"
+  },
+  "limitations": [
+    "Negative idle-gap control only; not evidence of speech loss.",
+    "The full session WAV/telemetry is unavailable locally; the -80 dB warmup floor is consistent with the -78 dB maximum and zero-sp gap evidence, but the case-specific floor and earlier rolling history are not preserved.",
+    "KD-2: the bounded idle clip omits the prior speech-retained gap, so replay from idle cannot reproduce the on-device noise_guard shed."
+  ]
+}

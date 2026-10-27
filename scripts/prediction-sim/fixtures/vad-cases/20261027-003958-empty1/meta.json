@@ -1,0 +1,18 @@
+{
+  "case_id": "20261027-003958-empty1",
+  "session": "20261027-003958",
+  "kind": "failure",
+  "mechanism": "unknown",
+  "source_start_sample": 169497,
+  "source_end_sample": 247870,
+  "sample_rate": 16000,
+  "evidence": [
+    "Blank 4.412 s chunk matches source start sample 177497 (r=0.998); 3 sp frames, db max -52.0; source p99 -52.7, max -47.5 dBFS.",
+    "Core interval [177497,247870) samples; clip interval [169497,247870) (0.5 s margins where source permits), duration 4.898 s.",
+    "Full-source WAV sidecar truncated=false; byte-size match=true; SHA-256 match=true.",
+    "Decoded M4A 70592 samples; source sample alignment residual 0, anchor correlation 0.998."
+  ],
+  "limitations": [
+    "Three active frames are insufficient to establish spoken words versus brief noise."
+  ]
+}

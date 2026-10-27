@@ -114,6 +114,7 @@ function makeSessionConfig(harness) {
   const config = {
     mode: gate.config.mode,
     strongDeltaDb: gate.effectiveAdaptiveDeltaDb,
+    absoluteSpeechFloorDb: gate.effectiveAbsoluteSpeechFloorDb,
     continuationDeltaDb: gate.effectiveAdaptiveContinuationDeltaDb,
     silenceDeltaDb: gate.effectiveSilenceDeltaDb,
     dynamicsSpreadDb: gate.effectiveDynamicsSpreadDb,
@@ -121,6 +122,8 @@ function makeSessionConfig(harness) {
     dynamicsEnabled: gate.config.adaptiveDynamicsEnabled,
     whisperHighPassCutoffHz: VAD_WHISPER_HPF_CUTOFF_HZ,
     whisperHighBandRatioDb: gate.effectiveWhisperHighBandRatioDb,
+    whisperModulationSpreadDb: gate.config.whisperModulationSpreadDb,
+    whisperContextMs: gate.config.whisperContextMs,
     gapSpeechPeakAboveFloorDb: GAP_SPEECH_PEAK_ABOVE_FLOOR_DB,
     idleGapMinSeconds: IDLE_GAP_TELEMETRY_MIN_SECONDS,
     idleGapPeakAboveFloorDb: IDLE_GAP_TELEMETRY_PEAK_ABOVE_FLOOR_DB,
@@ -255,6 +258,8 @@ export function makeRecorderHarness({
     emittedSampleCount: 0,
     nextChunkId: 0,
     idleGapRunSamples: 0,
+    idleGapStartSessionSamples: null,
+    idleGapEndSessionSamples: null,
     idleGapPeakLevelDb: null,
     idleGapFloorDbAtPeak: null,
     idleGapStrongThresholdDbAtPeak: null,
@@ -267,6 +272,7 @@ export function makeRecorderHarness({
     accumulatorPeakAboveFloorDb: null,
     accumulatorHasSpeechEvidence: false,
     chunkStartSessionSamples: null,
+    chunkEndSessionSamples: null,
     retainedGapSamples: 0,
     retainedGapStartSessionSamples: null,
     retainedGapEvidenceSamples: 0,
@@ -322,6 +328,8 @@ export function makeRecorderHarness({
       const record = {
         t: 'f',
         q: this.frameSequence,
+        sourceStartSample: this.sessionElapsedSamples - Math.round(frameDuration * 16000),
+        sourceEndSample: this.sessionElapsedSamples,
         dt: frameDuration,
         db: frameDb,
         e: output.evidence,
@@ -365,6 +373,7 @@ export function makeRecorderHarness({
         this.headPrependedAtOnset = this.accumulatorSamples;
         this.chunkStartSessionSamples = this.sessionElapsedSamples
           - this.headSamples + trimmedSamples;
+        this.chunkEndSessionSamples = this.sessionElapsedSamples;
       } else {
         let requestedPreRollMs = output.isLoudRegime
           ? Math.max(this.endpoint.configuration.preRollSamples / 16, this.loudPreRollMs)
@@ -376,6 +385,7 @@ export function makeRecorderHarness({
         const preRollSamples = Math.min(requestedPreRollSamples, this.postHeadPreRollSamples);
         this.accumulatorSamples = preRollSamples;
         this.chunkStartSessionSamples = this.sessionElapsedSamples - frameSamples - preRollSamples;
+        this.chunkEndSessionSamples = this.sessionElapsedSamples;
         this.postHeadPreRollSamples = 0;
       }
       return false;
@@ -403,6 +413,8 @@ export function makeRecorderHarness({
       if (this.accumulatorSamples === 0) {
         this.chunkStartSessionSamples = this.retainedGapStartSessionSamples;
       }
+      this.accumulatorHasSpeechEvidence ||= this.retainedGapEvidenceSamples > 0;
+      this.chunkEndSessionSamples = this.retainedGapStartSessionSamples + this.retainedGapSamples;
       this.accumulatorSamples += this.retainedGapSamples;
       this.clearRetainedGap();
       return true;
@@ -417,8 +429,9 @@ export function makeRecorderHarness({
 
     retainedGapHasSpeechEvidence() {
       if (this.retainedGapEvidenceSamples > 0) return true;
-      return this.retainedGapPeakAboveFloorDb !== null
-        && this.retainedGapPeakAboveFloorDb >= GAP_SPEECH_PEAK_ABOVE_FLOOR_DB;
+      if (this.retainedGapPeakAboveFloorDb !== null
+        && this.retainedGapPeakAboveFloorDb >= GAP_SPEECH_PEAK_ABOVE_FLOOR_DB) return true;
+      return this.accumulatorHasSpeechEvidence;
     },
 
     accumulatorHasPlausibleSpeech() {
@@ -444,13 +457,24 @@ export function makeRecorderHarness({
       const sampleCount = this.retainedGapSamples;
       this.retentionShedCount += 1;
       this.shedSampleCount += sampleCount;
-      this.emitEvent({ t: 'ev', k: 'discard', n: sampleCount, r: 'noise_guard' });
+      this.emitEvent({
+        t: 'ev',
+        k: 'discard',
+        n: sampleCount,
+        r: 'noise_guard',
+        timestampMs: this.sessionElapsedSamples / 16,
+        sourceStartSample: this.retainedGapStartSessionSamples,
+        sourceEndSample: this.retainedGapStartSessionSamples + sampleCount,
+      });
       this.clearRetainedGap();
       this.headSamples = 0;
       this.headSlices.length = 0;
       this.postHeadPreRollSamples = 0;
       if (this.accumulatorSamples === 0) {
         this.chunkStartSessionSamples = null;
+        this.chunkEndSessionSamples = null;
+        this.accumulatorPeakAboveFloorDb = null;
+        this.accumulatorHasSpeechEvidence = false;
         this.speechSamples = 0;
         this.silenceSamples = 0;
         this.contiguousTrailingSilenceSamples = 0;
@@ -875,7 +899,7 @@ export function makeRecorderHarness({
           this.appendRetainedGap(
             frameSamples,
             frameStartSamples,
-            output.speechShaped ? 'continuing' : output.evidence,
+            output.isSpeech || output.speechShaped ? 'continuing' : output.evidence,
             frameDb,
             output.floorDb,
           );
@@ -909,7 +933,11 @@ export function makeRecorderHarness({
             && latchedContinuingOnset
             && !output.isLoudRegime;
           const seededFromGap = this.seedChunkFromPreRoll(frameSamples, output, softOnset);
-          if (!this.headLive && !seededFromGap) this.accumulatorSamples += frameSamples;
+          if (!this.headLive && !seededFromGap) {
+            this.accumulatorSamples += frameSamples;
+            this.chunkEndSessionSamples = this.sessionElapsedSamples;
+          }
+          this.trackAccumulatorSpeechEvidence(output, frameDb);
           this.sustainedContinuingMs = 0;
           this.streakStartFloorDb = null;
           this.streakPeakDb = null;
@@ -922,7 +950,11 @@ export function makeRecorderHarness({
           this.silenceSamples = 0;
         } else if (this.primingComplete && (decision.type === 'continueUtterance'
           || decision.type === 'finalizeUtterance')) {
-          if (!synthesizedStartNow) this.accumulatorSamples += frameSamples;
+          if (!synthesizedStartNow) {
+            this.accumulatorSamples += frameSamples;
+            this.chunkEndSessionSamples = this.sessionElapsedSamples;
+          }
+          this.trackAccumulatorSpeechEvidence(output, frameDb);
         }
         if (adaptivePath && output.evidence === 'strong' && this.endpoint.state !== 'idle') {
           this.utteranceQuietestStrongDb = Math.min(
@@ -943,6 +975,7 @@ export function makeRecorderHarness({
           this.chunkStartSessionSamples = this.sessionElapsedSamples - frameSamples;
         }
         this.accumulatorSamples += frameSamples;
+        this.chunkEndSessionSamples = this.sessionElapsedSamples;
         this.trackAccumulatorSpeechEvidence(output, frameDb);
         if (output.isSpeech) {
           this.silenceSamples = 0;
@@ -963,11 +996,15 @@ export function makeRecorderHarness({
             k: 'discard',
             n: this.accumulatorSamples,
             r: 'noise_guard',
+            timestampMs: this.sessionElapsedSamples / 16,
+            sourceStartSample: this.chunkStartSessionSamples,
+            sourceEndSample: this.chunkEndSessionSamples,
           });
           this.accumulatorSamples = 0;
           this.accumulatorPeakAboveFloorDb = null;
           this.accumulatorHasSpeechEvidence = false;
           this.chunkStartSessionSamples = null;
+          this.chunkEndSessionSamples = null;
           this.speechSamples = 0;
           this.silenceSamples = 0;
         }
@@ -1071,25 +1108,24 @@ export function makeRecorderHarness({
         const speechMs = this.speechSamples / 16;
         if (this.accumulatorSamples < this.minChunkSamples
           || this.speechSamples < this.minSpeechSamples) {
-          this.accumulatorSamples = 0;
-          this.accumulatorPeakAboveFloorDb = null;
-          this.accumulatorHasSpeechEvidence = false;
-          this.chunkStartSessionSamples = null;
-          this.speechSamples = 0;
-          this.silenceSamples = 0;
-          this.sawReanchorDuringUtterance = false;
-          discarded = true;
+          // Swift keeps a below-minimum endpoint accumulator for later continuation or stop flush.
           this.emitEvent({
             t: 'ev',
-            k: 'discard',
-            n: totalSamples,
-            r: 'below_minimums',
+            k: 'outcome',
+            n: this.accumulatorSamples,
+            r: 'below_minimums_held',
+            sm: speechMs,
+            tm: this.accumulatorSamples / 16,
+            es: previousState,
           });
+          this.sawReanchorDuringUtterance = false;
         } else {
           const reason = decision.kind;
           const chunkId = this.nextChunkId;
           const emissionStartSamples = this.chunkStartSessionSamples
             ?? (this.sessionElapsedSamples - rawTotalSamples);
+          const sourceEndSamples = (this.chunkEndSessionSamples ?? this.sessionElapsedSamples)
+            - trimmedTailSamples;
           this.nextChunkId += 1;
           this.chunkCount += 1;
           this.emittedSampleCount += totalSamples;
@@ -1108,13 +1144,15 @@ export function makeRecorderHarness({
             tm: this.emittedTotalMs,
             s0: emissionStartSamples / 16,
             s1: (emissionStartSamples + totalSamples) / 16,
+            sourceStartSample: emissionStartSamples,
+            sourceEndSample: sourceEndSamples,
             es: previousState,
           });
           this.clearRetainedGap();
           if (trimmedTailSamples > 0) {
             // Keep the post-roll-trimmed silence contiguous with the next chunk.
             this.retainedGapSamples = trimmedTailSamples;
-            this.retainedGapStartSessionSamples = emissionStartSamples + totalSamples;
+            this.retainedGapStartSessionSamples = sourceEndSamples;
             this.retainedGapPeakAboveFloorDb = this.contiguousTrailingSilencePeakAboveFloorDb;
             this.manageRetainedGapOverflow();
           }
@@ -1126,6 +1164,7 @@ export function makeRecorderHarness({
           this.accumulatorPeakAboveFloorDb = null;
           this.accumulatorHasSpeechEvidence = false;
           this.chunkStartSessionSamples = null;
+          this.chunkEndSessionSamples = null;
           this.speechSamples = 0;
           this.silenceSamples = 0;
           this.sawReanchorDuringUtterance = false;
@@ -1182,7 +1221,11 @@ export function makeRecorderHarness({
 
     trackIdleGapFrame(frameDb, frameSamples, output) {
       if (typeof onEvent !== 'function') return;
+      if (this.idleGapRunSamples === 0) {
+        this.idleGapStartSessionSamples = this.sessionElapsedSamples - frameSamples;
+      }
       this.idleGapRunSamples += frameSamples;
+      this.idleGapEndSessionSamples = this.sessionElapsedSamples;
       if (output.floorDb === null) return;
       if (frameDb >= output.floorDb + IDLE_GAP_TELEMETRY_EVIDENCE_ABOVE_FLOOR_DB) {
         this.idleGapEvidenceAboveFloor5Samples += frameSamples;
@@ -1207,6 +1250,9 @@ export function makeRecorderHarness({
           t: 'ev',
           k: 'discard',
           r: 'idle_gap',
+          timestampMs: this.sessionElapsedSamples / 16,
+          sourceStartSample: this.idleGapStartSessionSamples,
+          sourceEndSample: this.idleGapEndSessionSamples,
           durationMs,
           peakLevelDbFS: this.idleGapPeakLevelDb,
           floorDbFSAtPeak: this.idleGapFloorDbAtPeak,
@@ -1216,6 +1262,8 @@ export function makeRecorderHarness({
         });
       }
       this.idleGapRunSamples = 0;
+      this.idleGapStartSessionSamples = null;
+      this.idleGapEndSessionSamples = null;
       this.idleGapPeakLevelDb = null;
       this.idleGapFloorDbAtPeak = null;
       this.idleGapStrongThresholdDbAtPeak = null;
@@ -1381,6 +1429,9 @@ export function makeRecorderHarness({
       const startMs = (this.chunkStartSessionSamples
         ?? (this.sessionElapsedSamples - sampleCount)) / 16;
       const endMs = startMs + sampleCount / 16;
+      const sourceStartSample = this.chunkStartSessionSamples
+        ?? (this.sessionElapsedSamples - sampleCount);
+      const sourceEndSample = this.chunkEndSessionSamples ?? this.sessionElapsedSamples;
       const reason = sampleCount === 0
         ? (this.primingComplete ? 'empty' : 'priming_window')
         : sampleCount < STOP_FLUSH_MINIMUM_SAMPLES ? 'tail_floor' : 'flush';
@@ -1394,6 +1445,8 @@ export function makeRecorderHarness({
         tm: sampleCount / 16,
         ...(sampleCount > 0 ? { s0: startMs } : {}),
         s1: endMs,
+        timestampMs: this.sessionElapsedSamples / 16,
+        ...(sampleCount > 0 ? { sourceStartSample, sourceEndSample } : {}),
         es: decisionTimeEndpointState,
       });
       if (!this.primingComplete && sampleCount === 0) return { type: 'none' };
@@ -1402,11 +1455,20 @@ export function makeRecorderHarness({
       // prevents hallucinated tokens.
       if (sampleCount < STOP_FLUSH_MINIMUM_SAMPLES) {
         this.tailFloorSampleCount += sampleCount;
-        this.emitEvent({ t: 'ev', k: 'discard', n: sampleCount, r: 'tail_floor' });
+        this.emitEvent({
+          t: 'ev',
+          k: 'discard',
+          n: sampleCount,
+          r: 'tail_floor',
+          timestampMs: this.sessionElapsedSamples / 16,
+          sourceStartSample,
+          sourceEndSample,
+        });
         this.accumulatorSamples = 0;
         this.accumulatorPeakAboveFloorDb = null;
         this.accumulatorHasSpeechEvidence = false;
         this.chunkStartSessionSamples = null;
+        this.chunkEndSessionSamples = null;
         this.speechSamples = 0;
         this.silenceSamples = 0;
         this.contiguousTrailingSilenceSamples = 0;
@@ -1435,6 +1497,8 @@ export function makeRecorderHarness({
         tm: sampleCount / 16,
         s0: startMs,
         s1: endMs,
+        sourceStartSample,
+        sourceEndSample,
         es: decisionTimeEndpointState,
       });
       this.headLive = false;
@@ -1443,6 +1507,7 @@ export function makeRecorderHarness({
       this.accumulatorPeakAboveFloorDb = null;
       this.accumulatorHasSpeechEvidence = false;
       this.chunkStartSessionSamples = null;
+      this.chunkEndSessionSamples = null;
       this.speechSamples = 0;
       this.silenceSamples = 0;
       this.utteranceQuietestStrongDb = null;

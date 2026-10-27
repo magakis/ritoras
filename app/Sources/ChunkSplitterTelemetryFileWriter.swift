@@ -1,8 +1,30 @@
 import Foundation
 
+enum FullRecordingUploadStageOutcome: String, Sendable {
+    case notReached = "not_reached"
+    case uploadDisabled = "upload_disabled"
+    case missingToken = "missing_token"
+    case finalTextEmpty = "final_text_empty"
+    case sourceUnavailable = "source_unavailable"
+    case stagingFailed = "staging_failed"
+    case staged
+    case cancelled
+}
+
+struct FullRecordingUploadTelemetry: Sendable {
+    var uploadEnabled: Bool
+    var tokenPresent: Bool
+    var finalTextNonempty: Bool
+    var streamWavPresent: Bool
+    var stageOutcome: FullRecordingUploadStageOutcome
+    var uploadAttempted: Bool
+    var uploadCompleted: Bool
+    var httpStatus: Int?
+    var errorDomain: String?
+}
+
 final class ChunkSplitterTelemetryFileWriter: @unchecked Sendable, VADTelemetrySink, VADTelemetryFlushable {
-    // 20 one-minute recordings at ~50 frames/s × ~180 B (~7.5 KB/s)
-    // stay under ~10 MB; app-target Application Support only.
+    // Retain at most 20 telemetry files in app-target Application Support.
     private static let maxFiles = 20
     private static let flushByteLimit = 64 * 1024
     private static let flushInterval: TimeInterval = 1.0
@@ -35,6 +57,9 @@ final class ChunkSplitterTelemetryFileWriter: @unchecked Sendable, VADTelemetryS
         if let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
             metadata["appVersion"] = appVersion
         }
+        if let appBuildNumber = Bundle.main.infoDictionary?["CFBundleVersion"] as? String {
+            metadata["appBuildNumber"] = appBuildNumber
+        }
         if let line = serialize(metadata) {
             pendingLines.append(line)
             pendingBytes += line.utf8.count
@@ -62,6 +87,26 @@ final class ChunkSplitterTelemetryFileWriter: @unchecked Sendable, VADTelemetryS
 
     func recordOutcome(_ outcome: String) {
         event(VADTelemetryEvent(kind: .outcome, reason: outcome))
+        flush(force: true)
+    }
+
+    func recordFullRecordingUploadOutcome(_ outcome: FullRecordingUploadTelemetry) {
+        var metadata: [String: Any] = [
+            "uploadEnabled": outcome.uploadEnabled,
+            "tokenPresent": outcome.tokenPresent,
+            "finalTextNonempty": outcome.finalTextNonempty,
+            "streamWavPresent": outcome.streamWavPresent,
+            "stageOutcome": outcome.stageOutcome.rawValue,
+            "uploadAttempted": outcome.uploadAttempted,
+            "uploadCompleted": outcome.uploadCompleted
+        ]
+        if let httpStatus = outcome.httpStatus {
+            metadata["httpStatus"] = httpStatus
+        }
+        if let errorDomain = outcome.errorDomain {
+            metadata["errorDomain"] = errorDomain
+        }
+        event(VADTelemetryEvent(kind: .fullRecordingUpload, metadata: metadata))
         flush(force: true)
     }
 
@@ -148,6 +193,8 @@ final class ChunkSplitterTelemetryFileWriter: @unchecked Sendable, VADTelemetryS
         var object: [String: Any] = [
             "t": "f",
             "q": Int(record.seq),
+            "sourceStartSample": record.sourceStartSample,
+            "sourceEndSample": record.sourceEndSample,
             "dt": record.frameDuration,
             "db": record.frameDb,
             "e": record.evidence,
@@ -209,6 +256,18 @@ final class ChunkSplitterTelemetryFileWriter: @unchecked Sendable, VADTelemetryS
         }
         if let endMs = record.endMs {
             object["s1"] = endMs
+        }
+        if let timestampMs = record.timestampMs {
+            object["timestampMs"] = timestampMs
+        }
+        if let wallTimestampMs = record.wallTimestampMs {
+            object["wallTimestampMs"] = wallTimestampMs
+        }
+        if let sourceStartSample = record.sourceStartSample {
+            object["sourceStartSample"] = sourceStartSample
+        }
+        if let sourceEndSample = record.sourceEndSample {
+            object["sourceEndSample"] = sourceEndSample
         }
         if let endpointState = record.endpointState {
             object["es"] = endpointState

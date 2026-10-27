@@ -1,0 +1,36 @@
+{
+  "case_id": "20261027-000217-noise-pulse",
+  "session": "20261027-000217",
+  "kind": "guard",
+  "mechanism": "non_speech",
+  "source_start_sample": 862182,
+  "source_end_sample": 922936,
+  "sample_rate": 16000,
+  "evidence": [
+    "Blank chunk 5 anchor matches source sample 870182 (r=0.999); q563 at 56.29 s starts VAD with db -42.1, fl -80, th -70 dB; 4 sp frames.",
+    "Source RMS p99 -38.6, max -37.1 dBFS; surrounding high-band ratio proxy median about -14 dB.",
+    "Core interval [870182,914936) samples; clip interval [862182,922936) (0.5 s margins where source permits), duration 3.797 s.",
+    "Full-source WAV sidecar truncated=false; byte-size match=true; SHA-256 match=true.",
+    "Decoded M4A 44992 samples; source sample alignment residual 0, anchor correlation 0.999."
+  ],
+  "warmup": {
+    "prefix_samples": 8000,
+    "floor_db": -80,
+    "floor_converged": true,
+    "priming_complete": true,
+    "absolute_speech_floor_db": -70,
+    "endpoint_silence_ms": 2000,
+    "min_speech_ms": 300,
+    "min_chunk_ms": 300,
+    "analysis_hpf_enabled": true,
+    "analysis_hpf_cutoff_hz": 100,
+    "endpoint_state": "idle",
+    "after_emission": true,
+    "within_utterance_context": true,
+    "history_source": "clip_prefix"
+  },
+  "limitations": [
+    "Transient/noise classification is provisional; no listening.",
+    "The full session WAV/telemetry is unavailable locally; warmup seeds the recorded q563 floor/threshold state and uses the clip's real 0.5 s prefix, but older rolling history is missing."
+  ]
+}

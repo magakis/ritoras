@@ -1,0 +1,18 @@
+{
+  "case_id": "20261027-003542-empty1",
+  "session": "20261027-003542",
+  "kind": "failure",
+  "mechanism": "unknown",
+  "source_start_sample": 377439,
+  "source_end_sample": 422065,
+  "sample_rate": 16000,
+  "evidence": [
+    "Blank 2.30 s chunk matches source start sample 385439 (r=0.942); one sp frame at q257, db -58.7; source p99 -60.4, max -48.8 dBFS.",
+    "Core interval [385439,422065) samples; clip interval [377439,422065) (0.5 s margins where source permits), duration 2.789 s.",
+    "Full-source WAV sidecar truncated=false; byte-size match=true; SHA-256 match=true.",
+    "Decoded M4A 36800 samples; source sample alignment residual 0, anchor correlation 0.942."
+  ],
+  "limitations": [
+    "Single active frame is insufficient to distinguish a clipped short word from a transient."
+  ]
+}

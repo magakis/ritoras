@@ -39,6 +39,43 @@ describe('recorder chunk-splitter retention', () => {
     assert.equal(voiced.speechSamples, 1_600);
   });
 
+  it('retains a six-second idle gap while a VAD-accepted endpoint accumulator is held', () => {
+    const events = [];
+    const maxNoiseSamples = 6 * 16_000;
+    const harness = makeRecorderHarness({
+      frameMs: 10,
+      endpointSilenceMs: 100,
+      endpointConfig: {
+        onsetMs: 70,
+        endEvidenceMs: 100,
+        endpointSilenceMs: 100,
+        resumeMs: 120,
+        ambiguousRescueMs: 320,
+      },
+      minChunkSamples: 300 * 16,
+      minSpeechSamples: 300 * 16,
+      maxNoiseSamples,
+      gateConfig: { mode: 'static', staticRms: 0.025 },
+      onEvent: event => events.push(event),
+    });
+
+    for (let index = 0; index < 20; index += 1) harness.drive(-20);
+    for (let index = 0; index < 20; index += 1) harness.drive(-80);
+    assert.equal(harness.endpoint.state, 'idle');
+    assert.ok(events.some(event => event.k === 'outcome' && event.r === 'below_minimums_held'));
+    assert.ok(harness.accumulatorHasSpeechEvidence);
+
+    for (let index = 0; index < 601; index += 1) harness.drive(-80);
+
+    assert.equal(harness.retentionShedCount, 0);
+    assert.ok(harness.accumulatorSamples > maxNoiseSamples);
+    assert.equal(events.some(event => event.k === 'discard' && event.r === 'noise_guard'), false);
+
+    harness.flush();
+
+    assert.ok(events.some(event => event.k === 'emit' && event.r === 'flush'));
+  });
+
   it('bridges a retained idle gap into the following chunk', () => {
     const events = [];
     const harness = makeRecorderHarness({

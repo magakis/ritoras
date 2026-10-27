@@ -1,0 +1,36 @@
+{
+  "case_id": "20261027-000217-shed",
+  "session": "20261027-000217",
+  "kind": "guard",
+  "mechanism": "never_emitted",
+  "source_start_sample": 470040,
+  "source_end_sample": 678303,
+  "sample_rate": 16000,
+  "evidence": [
+    "Full source 970846 samples; emission spans cover 778583 samples, leaving [478040,670303) = 192263 samples (12.016 s) not in any emitted chunk.",
+    "q312 maps to source sample 498880, 20840 samples/1.303 s into the gap; d=start_utterance, sp=true, db -66.3, fl -80, th -70 dB; gap includes 14 sp frames and raw source peaks above -60 dBFS.",
+    "Two noise_guard discard lengths are 96057+96206=192263 samples; their records lack absolute q/time, so only the gap union—not exact discard event ID—is aligned.",
+    "Core interval [478040,670303) samples; clip interval [470040,678303) (0.5 s margins where source permits), duration 13.016 s.",
+    "Full-source WAV sidecar truncated=false; byte-size match=true; SHA-256 match=true."
+  ],
+  "warmup": {
+    "prefix_samples": 8000,
+    "floor_db": -80,
+    "floor_converged": true,
+    "priming_complete": true,
+    "absolute_speech_floor_db": -70,
+    "endpoint_silence_ms": 2000,
+    "min_speech_ms": 300,
+    "min_chunk_ms": 300,
+    "analysis_hpf_enabled": true,
+    "analysis_hpf_cutoff_hz": 100,
+    "endpoint_state": "idle",
+    "after_emission": true,
+    "within_utterance_context": true,
+    "history_source": "clip_prefix"
+  },
+  "limitations": [
+    "The source waveform is speech-like but not intelligibility-confirmed; chunk 2 anchor correlation is low (r=0.101), so the emitted/gap boundary has reduced direct-waveform confidence.",
+    "The full session WAV and telemetry are unavailable locally; warmup seeds the recorded q312 floor/threshold state and uses the clip's real 0.5 s prefix, but older rolling history is missing."
+  ]
+}

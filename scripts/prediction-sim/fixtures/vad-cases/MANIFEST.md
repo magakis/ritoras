@@ -1,0 +1,33 @@
+# Tier-0 VAD fixture manifest
+
+Coordinates are 16 kHz PCM16 full_recording.wav sample indexes, start-inclusive/end-exclusive. Failure clips include up to 0.5 s guards and are capped at 30 s. Mechanism labels are evidence classifications, not human-verified word transcripts. No listening or ASR/model call was performed.
+
+| case_id | session | kind | mechanism | clip sample range | evidence basis | limitation |
+|---|---|---|---|---:|---|---|
+| 20261027-001210-empty2 | 20261027-001210 | failure | emitted_unrecognized | [251091,351841) (6.297s) | ASR chunk text is empty; VAD marks 16 sp frames and db max -49.2 dBFS. Decoded AAC chunk sample anchor matches full source at sample 259091 (r=0.998); event source span is [259091,351841). | Speech-like evidence is acoustic/VAD only; no human listening or new ASR, so intended words are not verified. |
+| 20261027-001745-empty1 | 20261027-001745 | failure | emitted_unrecognized | [137478,217516) (5.002s) | ASR chunk text is empty; 7 sp frames, q106 onset at 10.59 s db -69.5 vs th -70 dB; source p99 -56.4, max -48.7 dBFS. M4A sample anchor matches the full source at event sample 145478 (r=0.995). | Short post-utterance burst may be whisper speech or noise; lexical content unverified. |
+| 20261027-001745-empty2-tail | 20261027-001745 | guard | non_speech | [201516,225493) (1.499s) | Final 1.02 s chunk has no sp frames or start_utterance; source p99 -62.5, max -61.6 dBFS; ASR blank. | Provisional non-speech/tail-noise negative guard; not human-listened. |
+| 20261027-002045-empty3 | 20261027-002045 | failure | unknown | [306852,379039) (4.512s) | ASR chunk text empty; 4 sp frames, q212 at 21.19 s db -57.6 dB, th -70 dB; source p99 -56.5, max -44.7 dBFS. M4A anchor matches source start sample 314852 (r=0.992). | Four scattered active frames could be a short whisper or transient; no intelligibility judgment. |
+| 20261027-003542-empty1 | 20261027-003542 | failure | unknown | [377439,422065) (2.789s) | Blank 2.30 s chunk matches source start sample 385439 (r=0.942); one sp frame at q257, db -58.7; source p99 -60.4, max -48.8 dBFS. | Single active frame is insufficient to distinguish a clipped short word from a transient. |
+| 20261027-003838-empty1 | 20261027-003838 | failure | unknown | [145392,374155) (14.298s) | Blank 13.308 s chunk matches source start sample 153392 (r=1.000); 6 sp frames, db max -50.5; source max -39.7 dBFS. | Sparse activity in a long chunk; may be whisper speech or noise; no lexical ground truth. |
+| 20261027-003958-empty1 | 20261027-003958 | failure | unknown | [169497,247870) (4.898s) | Blank 4.412 s chunk matches source start sample 177497 (r=0.998); 3 sp frames, db max -52.0; source p99 -52.7, max -47.5 dBFS. | Three active frames are insufficient to establish spoken words versus brief noise. |
+| 20261027-005252-empty1 | 20261027-005252 | failure | emitted_unrecognized | [121287,223765) (6.405s) | ASR chunk text is empty; 11 sp frames, db max -54.5; source p99 -47.7, max -40.8 dBFS. M4A anchor matches the full source at sample 129287 (r=0.982). | Speech-like signal is not intelligibility-confirmed; could include non-speech. |
+| 20261027-010408-empty1 | 20261027-010408 | guard | non_speech | [71712,95689) (1.499s) | 1.02 s final blank chunk has zero sp frames and no onset; source p99 -60.4, max -57.2 dBFS. | Likely quiet tail/ambient noise; not human-listened. |
+| 20261027-003838-idle-gap | 20261027-003838 | guard | non_speech | [358155,467182) (6.814s) | 6.013 s un-emitted interval between chunks 1 and 2 has zero sp frames, telemetry db max -78 dBFS; source RMS p50 -84.3, p90 -77.4, max -66.2 dBFS. Windowed spectral flatness median 0.021, so this is near-silence/tonal floor, not a verified steady hiss/fan. | Negative idle-gap control only; not evidence of speech loss. |
+| 20261027-000217-shed | 20261027-000217 | guard | never_emitted | [470040,678303) (13.016s) | Full source 970846 samples; emission spans cover 778583 samples, leaving [478040,670303) = 192263 samples (12.016 s) not in any emitted chunk. q312 maps to source sample 498880, 20840 samples/1.303 s into the gap; d=start_utterance, sp=true, db -66.3, fl -80, th -70 dB; gap includes 14 sp frames and raw source peaks above -60 dBFS. Two noise_guard discard lengths are 96057+96206=192263 samples; their records lack absolute q/time, so only the gap union—not exact discard event ID—is aligned. | The source waveform is speech-like but not intelligibility-confirmed; chunk 2 anchor correlation is low (r=0.101), so the emitted/gap boundary has reduced direct-waveform confidence. |
+| 20261027-000217-noise-pulse | 20261027-000217 | guard | non_speech | [862182,922936) (3.797s) | Blank chunk 5 anchor matches source sample 870182 (r=0.999); q563 at 56.29 s starts VAD with db -42.1, fl -80, th -70 dB; 4 sp frames. Source RMS p99 -38.6, max -37.1 dBFS; surrounding high-band ratio proxy median about -14 dB. | Transient/noise classification is provisional; no listening. |
+| 20261026-214631-chunk6 | 20261026-214631 | not materialized | non_speech | N/A | Prior chunk-only analysis: ASR blank; q1091 onset db -37.1, floor -47, th -40; nearby 10 ms RMS peak -24.6 dBFS, window power 99.9% below 300 Hz. | No full source; only previous chunk/telemetry evidence. |
+| 20261026-214631-q1160-chunk7 | 20261026-214631 | not materialized | non_speech | N/A | Prior analysis: q1160/1161 short LF pulse, db -25.3/-31.5, floor -46.7, th -39.7; 10 ms RMS peak -15.5 dBFS; 90.1% nearby window power below 300 Hz; ASR blank. | No full source; user selected skip for this fixture. |
+| 20261026-214631-chunks12-13 | 20261026-214631 | not materialized | unknown | N/A | Both ASR-empty tail chunks; chunk 13 was final flush; prior chunk-only spectra are mixed/low-frequency. | No full source, no intelligibility ground truth. |
+| 20261027-000946-no-full | 20261027-000946 | not materialized | unknown | N/A | Complete 67.824 s, four chunks received/processed, all four ASR text segments non-empty; metadata and telemetry compare with neighboring sessions. | No full source for waveform coverage; no client build identifier present in session metadata. |
+
+## Coverage and artifacts
+
+See coverage.json for per-emission sample counts, decoded M4A sample positions/correlation, event source spans, and uncovered full-source intervals.
+
+## Guard candidates
+
+- 20261027-000217-noise-pulse is a low-frequency, VAD-started, ASR-empty guard.
+- 20261027-003838-idle-gap is a near-silent negative guard, not a steady hiss/fan.
+- No separate steady-hiss/flat-fan window was found with stable broadband noise; no such fixture was fabricated.
+- The q1160 214631 pulse clip is omitted per user choice; the old Pi directory is pruned.

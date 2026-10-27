@@ -1,0 +1,18 @@
+{
+  "case_id": "20261027-001745-empty2-tail",
+  "session": "20261027-001745",
+  "kind": "guard",
+  "mechanism": "non_speech",
+  "source_start_sample": 201516,
+  "source_end_sample": 225493,
+  "sample_rate": 16000,
+  "evidence": [
+    "Final 1.02 s chunk has no sp frames or start_utterance; source p99 -62.5, max -61.6 dBFS; ASR blank.",
+    "Core interval [209516,225493) samples; clip interval [201516,225493) (0.5 s margins where source permits), duration 1.499 s.",
+    "Full-source WAV sidecar truncated=false; byte-size match=true; SHA-256 match=true.",
+    "Decoded M4A 16320 samples; source sample alignment residual -2312, anchor correlation 0.108."
+  ],
+  "limitations": [
+    "Provisional non-speech/tail-noise negative guard; not human-listened."
+  ]
+}

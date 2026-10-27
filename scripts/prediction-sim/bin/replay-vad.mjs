@@ -6,7 +6,12 @@ import { fileURLToPath } from 'node:url';
 import {
   dbFromRms,
   makeVadGateConfig,
+  VADHighBandRatioAnalyzer,
   VADThresholdGate,
+  VAD_WHISPER_HPF_CUTOFF_HZ,
+  VAD_WHISPER_HIGH_BAND_RATIO_DB_DEFAULT,
+  VAD_WHISPER_MODULATION_SPREAD_DB,
+  VAD_WHISPER_CONTEXT_MS,
 } from '../lib/vad-gate.mjs';
 import {
   makeStreamingEndpointConfig,
@@ -14,6 +19,7 @@ import {
 } from '../lib/streaming-endpoint.mjs';
 import { VADHighPassFilter } from '../lib/vad-hpf.mjs';
 import { makeRecorderHarness } from '../lib/recorder-sim.mjs';
+import { loadVadFixtures } from '../lib/vad-fixtures.mjs';
 
 export const SHIPPING_SESSION_CONFIG = Object.freeze({
   mode: 'adaptive',
@@ -21,6 +27,10 @@ export const SHIPPING_SESSION_CONFIG = Object.freeze({
   absoluteSpeechFloorDb: -50,
   continuationDeltaDb: 4,
   silenceDeltaDb: 3,
+  whisperHighPassCutoffHz: VAD_WHISPER_HPF_CUTOFF_HZ,
+  whisperHighBandRatioDb: VAD_WHISPER_HIGH_BAND_RATIO_DB_DEFAULT,
+  whisperModulationSpreadDb: VAD_WHISPER_MODULATION_SPREAD_DB,
+  whisperContextMs: VAD_WHISPER_CONTEXT_MS,
   dynamicsSpreadDb: 9,
   flatSpreadDb: 5,
   dynamicsEnabled: true,
@@ -64,6 +74,18 @@ export const SHIPPING_SESSION_CONFIG = Object.freeze({
 export const DEFAULT_SESSION_CONFIG = Object.freeze({
   ...SHIPPING_SESSION_CONFIG,
   mode: 'static',
+});
+
+const PCM16_WAV_KNOWN_DIVERGENCE = Object.freeze({
+  id: 'KD-3',
+  cause: "replay source WAV is a Float32→PCM16 round-toward-zero quantization of the VAD's "
+    + 'unquantized analysis input; near-threshold whisper frames can shift ~0.1–0.6 dB and flip '
+    + 'evidence classes; decision-parity mismatches attributable to this are expected on knife-edge sessions',
+  attributionHeuristic: 'KD-3 mismatch tags are heuristic: the decision frame must be within 1.0 dB '
+    + 'of its strong or silence threshold; proximity does not prove causation.',
+  cascadeAttributionRule: 'aggregate count differences inherit KD-3 when the session shows KD-3 '
+    + 'evidence flips and no other unattributed mismatches — count differences are the downstream '
+    + 'cascade of near-threshold flips changing emit boundaries',
 });
 
 export function mergeSessionConfig(overrides = {}) {
@@ -110,6 +132,10 @@ export function parseArgs(argv = process.argv.slice(2)) {
     sweep: [],
     labels: [],
     fromWav: false,
+    onlyFixtures: false,
+    sample: null,
+    seed: 1,
+    stopOnFirstFail: false,
     jsonPath: null,
     labelsFile: null,
     help: false,
@@ -128,6 +154,31 @@ export function parseArgs(argv = process.argv.slice(2)) {
     }
     if (argument === '--from-wav') {
       options.fromWav = true;
+      continue;
+    }
+    if (argument === '--only-fixtures') {
+      options.onlyFixtures = true;
+      continue;
+    }
+    if (argument === '--stop-on-first-fail') {
+      options.stopOnFirstFail = true;
+      continue;
+    }
+    if (argument === '--sample' || argument === '--seed') {
+      const value = argv[++index];
+      if (value === undefined || value.startsWith('--')) {
+        throw new Error(`${argument} requires an integer`);
+      }
+      const number = Number(value);
+      if (!Number.isSafeInteger(number) || number < 0) {
+        throw new Error(`${argument} requires a non-negative safe integer`);
+      }
+      if (argument === '--sample') {
+        if (number === 0) throw new Error('--sample must be greater than zero');
+        options.sample = number;
+      } else {
+        options.seed = number;
+      }
       continue;
     }
     if (argument === '--set' || argument === '--sweep') {
@@ -165,8 +216,13 @@ export function parseArgs(argv = process.argv.slice(2)) {
     throw new Error(`unknown option: ${argument}`);
   }
 
-  if (options.fromWav) {
-    const legacyOrder = positional[0]?.endsWith('.jsonl');
+  if (options.onlyFixtures) {
+    if (options.fromWav) throw new Error('--from-wav cannot be combined with --only-fixtures');
+    if (positional.length > 0) throw new Error('--only-fixtures does not take positional paths');
+  } else if (options.fromWav) {
+    const telemetryFirst = /\.(?:jsonl?|ndjson)$/i.test(positional[0] ?? '');
+    const wavSecond = /\.wav$/i.test(positional[1] ?? '');
+    const legacyOrder = telemetryFirst || wavSecond;
     options.wavPath = positional[legacyOrder ? 1 : 0] ?? null;
     options.sessionPath = positional[legacyOrder ? 0 : 1] ?? null;
     if (positional.length > 2) throw new Error('expected WAV path and optional session JSONL path');
@@ -193,6 +249,33 @@ export function parseLabels(value) {
 }
 
 export function parseSession(text) {
+  let payload;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    payload = null;
+  }
+  if (payload && typeof payload === 'object'
+    && Array.isArray(payload.frames) && Array.isArray(payload.events)) {
+    const events = payload.events.map(event => ({ ...event, t: 'ev' }));
+    const frames = payload.frames.map(frame => ({ ...frame, t: 'f' }));
+    const config = payload.vad_config
+      ?? payload.config
+      ?? events.find(event => event.k === 'session_start')?.c
+      ?? null;
+    const session = {
+      frames,
+      events,
+      config: mergeSessionConfig(config ?? {}),
+      summary: payload.summary ?? null,
+    };
+    Object.defineProperty(session, 'configIsTelemetry', {
+      value: config !== null,
+      enumerable: false,
+    });
+    return session;
+  }
+
   const frames = [];
   const events = [];
   let config = null;
@@ -267,6 +350,15 @@ export function normalizeConfig(rawConfig = {}) {
     adaptiveStaleFloorSeconds: asFiniteNumber(raw.staleFloorSeconds, 'staleFloorSeconds'),
     adaptiveFallTauSeconds: asFiniteNumber(raw.fallTauSeconds, 'fallTauSeconds'),
     adaptiveRiseSpeedMultiplier: asFiniteNumber(raw.riseMultiplier, 'riseMultiplier'),
+    whisperHighBandRatioDb: asFiniteNumber(
+      raw.whisperHighBandRatioDb,
+      'whisperHighBandRatioDb',
+    ),
+    whisperModulationSpreadDb: asFiniteNumber(
+      raw.whisperModulationSpreadDb,
+      'whisperModulationSpreadDb',
+    ),
+    whisperContextMs: asFiniteNumber(raw.whisperContextMs, 'whisperContextMs'),
     loudRegimeEnabled: Boolean(raw.loudRegimeEnabled),
     loudRegimeEnterDb: asFiniteNumber(raw.loudRegimeEnterDb, 'loudRegimeEnterDb'),
     loudRegimeExitDb: asFiniteNumber(raw.loudRegimeExitDb, 'loudRegimeExitDb'),
@@ -308,6 +400,13 @@ export function normalizeConfig(rawConfig = {}) {
     staleFloorSeconds: gate.effectiveStaleFloorSeconds,
     fallTauSeconds: gate.effectiveFallTauSeconds,
     riseMultiplier: gate.effectiveRiseSpeedMultiplier,
+    whisperHighPassCutoffHz: asFiniteNumber(
+      raw.whisperHighPassCutoffHz,
+      'whisperHighPassCutoffHz',
+    ),
+    whisperHighBandRatioDb: gate.effectiveWhisperHighBandRatioDb,
+    whisperModulationSpreadDb: gate.config.whisperModulationSpreadDb,
+    whisperContextMs: gate.config.whisperContextMs,
     endpointMachineEnabled: Boolean(raw.endpointMachineEnabled),
     endpointOnsetMs: endpoint.configuration.onsetSamples / 16,
     endpointEndEvidenceMs: endpoint.configuration.endEvidenceSamples / 16,
@@ -437,28 +536,72 @@ function median(values) {
     : sorted[middle];
 }
 
+function sourceStartValue(record) {
+  return record.sourceStartSample ?? record.srcStartSample ?? record.src0;
+}
+
+function sourceEndValue(record) {
+  return record.sourceEndSample ?? record.srcEndSample ?? record.src1;
+}
+
 export function framesFromWav(wav, telemetryFrames = [], config = DEFAULT_SESSION_CONFIG) {
-  const durations = telemetryFrames.length > 0
-    ? telemetryFrames.map(frame => asFiniteNumber(frame.dt, 'frame dt'))
-    : [0.01];
-  const frames = telemetryFrames.length > 0
-    ? telemetryFrames.map(frame => ({ ...frame }))
-    : [];
+  const hasTelemetryFrames = telemetryFrames.length > 0;
+  if (hasTelemetryFrames && wav.sampleRate !== 16_000) {
+    throw new Error('session telemetry source coordinates require a 16 kHz WAV');
+  }
+  const frameDuration = hasTelemetryFrames
+    ? null
+    : 0.01;
   const filter = config.analysisHpfEnabled
     ? new VADHighPassFilter({ cutoffHz: asFiniteNumber(config.analysisHpfCutoffHz, 'analysisHpfCutoffHz') })
     : null;
-  let sampleOffset = 0;
+  const witness = new VADHighBandRatioAnalyzer({
+    cutoffHz: asFiniteNumber(config.whisperHighPassCutoffHz, 'whisperHighPassCutoffHz'),
+    sampleRate: wav.sampleRate,
+  });
+  const frames = [];
+  let sequentialSampleStart = 0;
+  let previousSequence = null;
   let frameIndex = 0;
-  while (sampleOffset < wav.samples.length && (telemetryFrames.length === 0 || frameIndex < frames.length)) {
-    const duration = durations[Math.min(frameIndex, durations.length - 1)];
+  while (hasTelemetryFrames ? frameIndex < telemetryFrames.length : sequentialSampleStart < wav.samples.length) {
+    const source = hasTelemetryFrames ? telemetryFrames[frameIndex] : null;
+    const duration = hasTelemetryFrames
+      ? asFiniteNumber(source.dt, 'frame dt')
+      : frameDuration;
     const sampleCount = Math.max(1, Math.round(duration * wav.sampleRate));
-    const end = Math.min(wav.samples.length, sampleOffset + sampleCount);
-    const raw = Array.from(wav.samples.slice(sampleOffset, end));
+    const explicitStart = source ? sourceStartValue(source) : undefined;
+    const explicitEnd = source ? sourceEndValue(source) : undefined;
+    const hasExplicitRange = Number.isInteger(explicitStart) && Number.isInteger(explicitEnd);
+    const sequence = Number.isInteger(source?.q) ? source.q : null;
+    const sourceStartSample = hasExplicitRange
+      ? explicitStart
+      : sequence !== null && previousSequence !== null && sequence !== previousSequence + 1
+        ? Math.round(sequence * sampleCount)
+        : sequentialSampleStart;
+    const sourceEndSample = hasExplicitRange
+      ? explicitEnd
+      : Math.min(sourceStartSample + sampleCount, wav.samples.length);
+    if (sourceStartSample < 0 || sourceEndSample <= sourceStartSample
+      || sourceEndSample > wav.samples.length) {
+      throw new Error(`frame ${source?.q ?? frameIndex} source range exceeds WAV sample data`);
+    }
+
+    if (sourceStartSample > sequentialSampleStart) {
+      const skipped = Array.from(wav.samples.slice(sequentialSampleStart, sourceStartSample));
+      const skippedAnalysis = filter ? filter.process(skipped) : skipped;
+      witness.process(skippedAnalysis, dcCorrectedRMS(skippedAnalysis));
+    }
+    const raw = Array.from(wav.samples.slice(sourceStartSample, sourceEndSample));
     const analysis = filter ? filter.process(raw) : raw;
-    const db = dbFromSamples(analysis);
-    if (telemetryFrames.length > 0) frames[frameIndex].db = db;
-    else frames.push({ t: 'f', q: frameIndex, dt: raw.length / wav.sampleRate, db });
-    sampleOffset = end;
+    const frame = source ? { ...source } : { t: 'f', q: frameIndex };
+    frame.dt = raw.length / wav.sampleRate;
+    frame.db = dbFromSamples(analysis);
+    frame.hbr = witness.process(analysis, dcCorrectedRMS(analysis));
+    frame.sourceStartSample = sourceStartSample;
+    frame.sourceEndSample = sourceEndSample;
+    frames.push(frame);
+    sequentialSampleStart = sourceEndSample;
+    previousSequence = sequence;
     frameIndex += 1;
   }
   return frames;
@@ -613,12 +756,291 @@ export function compareTelemetry(recordedFrames, replayFrames) {
   };
 }
 
+function eventSourceRange(event) {
+  const start = sourceStartValue(event);
+  const end = sourceEndValue(event);
+  if (Number.isInteger(start) && Number.isInteger(end)) {
+    return { start, end, estimated: false };
+  }
+  if (event.k === 'emit' && Number.isFinite(event.s0)) {
+    const legacyStart = Math.round(event.s0 * 16);
+    const legacyEnd = Number.isFinite(event.s1)
+      ? Math.round(event.s1 * 16)
+      : legacyStart + (Number.isFinite(event.n) ? event.n : 0);
+    return { start: legacyStart, end: legacyEnd, estimated: true };
+  }
+  return null;
+}
+
+function frameSequenceGaps(frames) {
+  let gapCount = 0;
+  if (Number.isInteger(frames[0]?.q) && frames[0].q > 0) gapCount += frames[0].q;
+  for (let index = 1; index < frames.length; index += 1) {
+    const previous = frames[index - 1].q;
+    const current = frames[index].q;
+    if (Number.isInteger(previous) && Number.isInteger(current) && current > previous + 1) {
+      gapCount += current - previous - 1;
+    }
+  }
+  return gapCount;
+}
+
+function decisionSample(event, sampleRate) {
+  if (!event) return null;
+  const range = eventSourceRange(event);
+  if (range) return range.end;
+  if (Number.isFinite(event.time)) return Math.round(event.time * sampleRate);
+  if (Number.isFinite(event.timestampMs)) {
+    return Math.round((event.timestampMs * sampleRate) / 1000);
+  }
+  return null;
+}
+
+function mismatchIsNearThreshold(expected, actual, replayFrames, sampleRate) {
+  const samplePositions = [expected, actual]
+    .map(event => decisionSample(event, sampleRate))
+    .filter(Number.isInteger);
+  return replayFrames.some(frame => {
+    const frameStart = sourceStartValue(frame);
+    const frameEnd = sourceEndValue(frame);
+    if (!Number.isInteger(frameStart) || !Number.isInteger(frameEnd)) return false;
+    const isDecisionFrame = samplePositions.some(sample => (
+      sample === frameEnd || (sample > frameStart && sample < frameEnd)
+    ));
+    if (!isDecisionFrame || !Number.isFinite(frame.db)) return false;
+    return [frame.th, frame.st].some(threshold => (
+      Number.isFinite(threshold) && Math.abs(frame.db - threshold) <= 1.0
+    ));
+  });
+}
+
+function isDecisionCountDifference(mismatch) {
+  return mismatch.reason === 'decision count differs';
+}
+
+function hasLegacyCoordinateKnownDivergence(mismatch, knownDivergences) {
+  return knownDivergences.some(divergence => (
+    divergence.decision === mismatch.decision
+      && divergence.category === 'legacy_coordinates'
+  ));
+}
+
+function isAttributedMismatch(mismatch, knownDivergences) {
+  return mismatch.kd === PCM16_WAV_KNOWN_DIVERGENCE.id
+    || hasLegacyCoordinateKnownDivergence(mismatch, knownDivergences);
+}
+
+export function compareDecisionParity(recordedEvents, replayEvents, recordedFrames = [], {
+  frameTolerance = 1,
+  sampleRate = 16_000,
+  retention = null,
+  totalFrameCount = null,
+  configurationRecorded = true,
+  replayFrames = [],
+  pcm16Source = false,
+} = {}) {
+  const isCoverageDecision = event => event.k === 'emit'
+    || (event.k === 'discard' && event.r !== 'priming_window');
+  const recorded = recordedEvents.filter(isCoverageDecision);
+  const replayed = replayEvents.filter(isCoverageDecision);
+  const maximumFrameSamples = recordedFrames.reduce((maximum, frame) => {
+    const start = sourceStartValue(frame);
+    const end = sourceEndValue(frame);
+    const samples = Number.isInteger(start) && Number.isInteger(end)
+      ? end - start
+      : Number.isFinite(frame.dt) ? Math.round(frame.dt * sampleRate) : 0;
+    return Math.max(maximum, samples);
+  }, 0);
+  const toleranceSamples = Math.max(maximumFrameSamples, Math.round(sampleRate * 0.01))
+    * frameTolerance;
+  const mismatches = [];
+  const knownDivergences = [];
+  const comparedCount = Math.max(recorded.length, replayed.length);
+  let matchedCount = 0;
+
+  if (!configurationRecorded) {
+    knownDivergences.push({
+      reason: 'session telemetry lacks effective VAD configuration; replay used defaults',
+    });
+  }
+  if (frameSequenceGaps(recordedFrames) > 0) {
+    knownDivergences.push({
+      reason: 'recorded telemetry omits frame sequence numbers; replay uses only retained frames',
+    });
+  }
+  if (Number(retention?.events_dropped ?? 0) > 0) {
+    knownDivergences.push({
+      reason: `uploaded telemetry reports ${retention.events_dropped} dropped events`,
+    });
+  }
+  if (Number.isFinite(totalFrameCount) && totalFrameCount > recordedFrames.length) {
+    knownDivergences.push({
+      reason: `uploaded telemetry retains ${recordedFrames.length} of ${totalFrameCount} frames`,
+    });
+  }
+  if (pcm16Source) knownDivergences.push(PCM16_WAV_KNOWN_DIVERGENCE);
+
+  const recordMismatch = (mismatch, expectedEvent, actualEvent) => {
+    if (pcm16Source
+      && !isDecisionCountDifference(mismatch)
+      && mismatchIsNearThreshold(expectedEvent, actualEvent, replayFrames, sampleRate)) {
+      mismatch.kd = PCM16_WAV_KNOWN_DIVERGENCE.id;
+    }
+    mismatches.push(mismatch);
+  };
+
+  for (let index = 0; index < comparedCount; index += 1) {
+    const expected = recorded[index];
+    const actual = replayed[index];
+    if (!expected || !actual) {
+      recordMismatch({
+        decision: index,
+        expected: expected?.k ?? null,
+        actual: actual?.k ?? null,
+        reason: 'decision count differs',
+      }, expected, actual);
+      continue;
+    }
+
+    const expectedRange = eventSourceRange(expected);
+    const actualRange = eventSourceRange(actual);
+    if (!expectedRange) {
+      knownDivergences.push({
+        decision: index,
+        category: 'legacy_coordinates',
+        reason: `recorded ${expected.k}/${expected.r ?? 'unknown'} lacks source sample coordinates`,
+      });
+      continue;
+    }
+    if (expectedRange.estimated) {
+      knownDivergences.push({
+        decision: index,
+        category: 'legacy_coordinates',
+        reason: `recorded ${expected.k} range is inferred from legacy millisecond fields`,
+      });
+    }
+    if (!actualRange) {
+      recordMismatch({
+        decision: index,
+        expected: expectedRange,
+        actual: null,
+        reason: 'replay range missing',
+      }, expected, actual);
+      continue;
+    }
+    const startDelta = Math.abs(expectedRange.start - actualRange.start);
+    const endDelta = Math.abs(expectedRange.end - actualRange.end);
+    const kindMatches = expected.k === actual.k;
+    const reasonMatches = (expected.r ?? '') === (actual.r ?? '');
+    if (kindMatches && reasonMatches && startDelta <= toleranceSamples && endDelta <= toleranceSamples) {
+      matchedCount += 1;
+    } else {
+      recordMismatch({
+        decision: index,
+        expected: { kind: expected.k, reason: expected.r ?? null, ...expectedRange },
+        actual: { kind: actual.k, reason: actual.r ?? null, ...actualRange },
+        startDeltaSamples: startDelta,
+        endDeltaSamples: endDelta,
+        reason: !kindMatches ? 'decision kind differs'
+          : !reasonMatches ? 'decision reason differs' : 'source range exceeds tolerance',
+      }, expected, actual);
+    }
+  }
+
+  const hasKD3EvidenceFlip = mismatches.some(mismatch => (
+    !isDecisionCountDifference(mismatch)
+      && mismatch.kd === PCM16_WAV_KNOWN_DIVERGENCE.id
+  ));
+  if (pcm16Source && hasKD3EvidenceFlip) {
+    const initiallyAttributed = new Set(mismatches.filter(mismatch => (
+      isAttributedMismatch(mismatch, knownDivergences)
+    )));
+    for (const mismatch of mismatches) {
+      if (!isDecisionCountDifference(mismatch)) continue;
+      const allOtherMismatchesAttributed = mismatches.every(other => (
+        other === mismatch || initiallyAttributed.has(other)
+      ));
+      if (allOtherMismatchesAttributed) mismatch.kd = PCM16_WAV_KNOWN_DIVERGENCE.id;
+    }
+  }
+
+  const mismatchCount = mismatches.length;
+  return {
+    frameTolerance,
+    toleranceSamples,
+    comparedCount,
+    matchedCount,
+    mismatchCount,
+    knownDivergences,
+    mismatches,
+    status: mismatchCount > 0 ? 'mismatch'
+      : knownDivergences.length > 0 ? 'known_divergence'
+        : comparedCount > 0 ? 'matched' : 'no_decisions',
+  };
+}
+
 function makeTimelineFrame(record, time) {
   return { ...record, time };
 }
 
+function primeReplayWarmup(harness, sourceFrames, warmup) {
+  if (!warmup) return 0;
+  if (harness.gate.config.mode !== 'adaptive' || warmup.endpoint_state !== 'idle'
+    || !warmup.after_emission) {
+    throw new Error('fixture warmup requires an adaptive post-emission idle state');
+  }
+
+  harness.gate.floorDb = asFiniteNumber(warmup.floor_db, 'warmup.floor_db');
+  harness.gate.coldStartConverged = warmup.floor_converged;
+  harness.gate.adaptiveRefinementComplete = warmup.floor_converged;
+  harness.gate.adaptivePrimed = warmup.priming_complete;
+  harness.primingComplete = warmup.priming_complete;
+  harness.gate.refreshAdaptiveOutput();
+
+  // Warm gate history from real clip-prefix frames, then start an empty recorder after emission.
+  let prefixEndSample = 0;
+  let prefixFrameCount = 0;
+  while (prefixEndSample < warmup.prefix_samples) {
+    const frame = sourceFrames[prefixFrameCount];
+    if (!frame) throw new Error('fixture warmup prefix extends beyond WAV data');
+    const frameStart = sourceStartValue(frame);
+    const frameEnd = sourceEndValue(frame);
+    if (frameStart !== prefixEndSample || frameEnd > warmup.prefix_samples) {
+      throw new Error('fixture warmup prefix must align with complete audio frames');
+    }
+    const duration = asFiniteNumber(frame.dt, 'warmup frame dt');
+    const frameDb = asFiniteNumber(frame.db, 'warmup frame db');
+    harness.gate.process(frameDb, duration, {
+      highBandRatioDb: Number.isFinite(frame.hbr) ? frame.hbr : null,
+      withinUtteranceContext: warmup.within_utterance_context,
+    });
+    harness.gate.updateFloorTracking(
+      frameDb,
+      duration,
+      false,
+      false,
+      harness.quietRiseCapAppliesToAmbiguous,
+      harness.quietRiseCapWitnessDb,
+    );
+    prefixEndSample = frameEnd;
+    prefixFrameCount += 1;
+  }
+
+  harness.endpoint.reset();
+  harness.sessionElapsedSamples = prefixEndSample;
+  harness.frameSequence = prefixFrameCount;
+  harness.previousProcessedFrameDb = sourceFrames[prefixFrameCount - 1]?.db ?? null;
+  harness.headLive = false;
+  harness.headSamples = 0;
+  harness.headSlices.length = 0;
+  harness.postHeadPreRollSamples = 0;
+  return prefixFrameCount;
+}
+
 export function replaySession(session, configInput = session.config, {
   fromWav = null,
+  sourceSampleOffset = 0,
+  warmup = null,
   labels = [],
   compare = true,
   onFrameDiagnostic = null,
@@ -628,9 +1050,11 @@ export function replaySession(session, configInput = session.config, {
       ? rawConfigFromTelemetry(configInput)
       : configInput,
   );
+  const inputFrames = session.frames;
+  const recordedFrames = session.recordedFrames ?? inputFrames;
   const sourceFrames = fromWav
-    ? framesFromWav(fromWav, session.frames, normalized.config)
-    : session.frames.map(frame => ({ ...frame }));
+    ? framesFromWav(fromWav, inputFrames, normalized.config)
+    : inputFrames.map(frame => ({ ...frame }));
   const generatedFrames = [];
   const generatedEvents = [];
   let time = 0;
@@ -640,10 +1064,14 @@ export function replaySession(session, configInput = session.config, {
     onFrame: record => generatedFrames.push(makeTimelineFrame(record, eventTime)),
     onEvent: event => generatedEvents.push({ ...event, time: event.time ?? eventTime }),
   });
-  for (const source of sourceFrames) {
+  if (warmup && !fromWav) throw new Error('fixture warmup requires WAV input');
+  const warmupFrameCount = primeReplayWarmup(harness, sourceFrames, warmup);
+  for (const source of sourceFrames.slice(warmupFrameCount)) {
     const duration = asFiniteNumber(source.dt, 'frame dt');
     eventTime = time + duration;
-    const frameResult = harness.drive(asFiniteNumber(source.db, 'frame db'), duration);
+    const frameResult = harness.drive(asFiniteNumber(source.db, 'frame db'), duration, {
+      highBandRatioDb: Number.isFinite(source.hbr) ? source.hbr : null,
+    });
     if (typeof onFrameDiagnostic === 'function') {
       onFrameDiagnostic({
         frameIndex: source.q ?? generatedFrames.length,
@@ -661,6 +1089,17 @@ export function replaySession(session, configInput = session.config, {
   eventTime = time;
   harness.end();
 
+  if (sourceSampleOffset !== 0) {
+    for (const frame of generatedFrames) {
+      frame.sourceStartSample += sourceSampleOffset;
+      frame.sourceEndSample += sourceSampleOffset;
+    }
+    for (const event of generatedEvents) {
+      if (Number.isInteger(event.sourceStartSample)) event.sourceStartSample += sourceSampleOffset;
+      if (Number.isInteger(event.sourceEndSample)) event.sourceEndSample += sourceSampleOffset;
+    }
+  }
+
   const openIntervals = buildOpenIntervals(generatedFrames, generatedEvents, time);
   const labelMetrics = computeLabelMetrics(openIntervals, labels);
   const emitted = generatedEvents.filter(event => event.k === 'emit');
@@ -675,10 +1114,21 @@ export function replaySession(session, configInput = session.config, {
     terminatorActivationCount: generatedEvents.filter(event =>
       event.k === 'flat_terminate' || event.k === 'loud_flat_terminate').length,
   };
-  const recordedFrames = session.recordedFrames ?? session.frames;
-  const divergence = compare && !fromWav
+  const divergence = compare
     ? compareTelemetry(recordedFrames, generatedFrames)
     : null;
+  const decisionParity = compare
+    ? compareDecisionParity(session.events, generatedEvents, inputFrames, {
+      retention: session.summary?.retention,
+      totalFrameCount: session.summary?.frame_count,
+      configurationRecorded: session.configIsTelemetry === true,
+      replayFrames: generatedFrames,
+      pcm16Source: fromWav?.audioFormat === 1 && fromWav.bitsPerSample === 16,
+    })
+    : null;
+  const knownDivergences = fromWav?.audioFormat === 1 && fromWav.bitsPerSample === 16
+    ? [PCM16_WAV_KNOWN_DIVERGENCE]
+    : [];
   return {
     config: normalized.config,
     frames: generatedFrames,
@@ -687,6 +1137,12 @@ export function replaySession(session, configInput = session.config, {
     utterances: utteranceReport(generatedEvents, labels),
     metrics,
     divergence,
+    decisionParity,
+    knownDivergences,
+    frameSequenceGapCount: frameSequenceGaps(inputFrames),
+    frameCoverageOmittedCount: Number.isFinite(session.summary?.frame_count)
+      ? Math.max(0, session.summary.frame_count - inputFrames.length)
+      : frameSequenceGaps(inputFrames),
     floorStats: floorStats(generatedFrames),
     thresholdsAtEnd: generatedFrames.length === 0 ? null : {
       strong: generatedFrames.at(-1).th,
@@ -750,6 +1206,19 @@ function printDefaultReport(result) {
     if (first) console.log(`First divergence: frame ${first.frame} (seq ${first.seq}), ${first.fields.join(', ')}`);
     else console.log('First divergence: none');
   }
+  if (result.decisionParity) {
+    const parity = result.decisionParity;
+    console.log('');
+    console.log(`Emit/discard parity (±${parity.frameTolerance} frame; ${parity.toleranceSamples} samples): `
+      + `${parity.matchedCount}/${parity.comparedCount} verified, status=${parity.status}`);
+    for (const divergence of parity.knownDivergences) {
+      const label = divergence.id ? ` ${divergence.id}` : '';
+      console.log(`Known divergence${label}: ${divergence.cause ?? divergence.reason}`);
+    }
+    for (const mismatch of parity.mismatches) {
+      console.log(`Decision mismatch #${mismatch.decision}: ${mismatch.reason}`);
+    }
+  }
 }
 
 function printSweepTable(results) {
@@ -770,6 +1239,130 @@ function printSweepTable(results) {
   for (const row of rows) console.log(render(row));
 }
 
+function seededRandom(seed) {
+  let state = seed >>> 0;
+  if (state === 0) state = 0x6d2b79f5;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
+
+export function selectSample(items, sampleCount, seed = 1) {
+  if (sampleCount === null || sampleCount >= items.length) return [...items];
+  const candidates = [...items];
+  const random = seededRandom(seed);
+  for (let index = candidates.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(random() * (index + 1));
+    [candidates[index], candidates[swapIndex]] = [candidates[swapIndex], candidates[index]];
+  }
+  return candidates.slice(0, sampleCount).sort((left, right) => (
+    left.caseId.localeCompare(right.caseId)
+  ));
+}
+
+function decodeFixtureWav(filePath) {
+  const wav = decodeWav(fs.readFileSync(filePath));
+  if (wav.audioFormat !== 1 || wav.bitsPerSample !== 16
+    || wav.channels !== 1 || wav.sampleRate !== 16_000) {
+    throw new Error(`${filePath} must be 16 kHz mono PCM16`);
+  }
+  return wav;
+}
+
+function fixtureReplayConfig(baseConfig, warmup, explicitKeys) {
+  const config = { ...baseConfig };
+  if (!warmup) return config;
+
+  for (const [configKey, warmupKey] of [
+    ['absoluteSpeechFloorDb', 'absolute_speech_floor_db'],
+    ['minSpeechMs', 'min_speech_ms'],
+    ['minChunkMs', 'min_chunk_ms'],
+    ['analysisHpfEnabled', 'analysis_hpf_enabled'],
+    ['analysisHpfCutoffHz', 'analysis_hpf_cutoff_hz'],
+  ]) {
+    if (!explicitKeys.has(configKey) && warmup[warmupKey] !== undefined) {
+      config[configKey] = warmup[warmupKey];
+    }
+  }
+  if (!explicitKeys.has('endpointSilenceMs') && !explicitKeys.has('silenceMs')) {
+    config.endpointSilenceMs = warmup.endpoint_silence_ms;
+    config.silenceMs = warmup.endpoint_silence_ms;
+  }
+  return config;
+}
+
+function replayFixtures(options, baseConfig) {
+  const fixtures = selectSample(loadVadFixtures(), options.sample, options.seed);
+  if (fixtures.length === 0) {
+    console.log(
+      'No VAD fixtures found; missing or empty fixtures/vad-cases is allowed in a fresh checkout.',
+    );
+    return;
+  }
+
+  const explicitKeys = new Set([
+    ...options.set.map(assignment => assignment.key),
+    ...options.sweep.map(sweep => sweep.key),
+  ]);
+  const runs = [];
+  let failures = 0;
+  for (const fixture of fixtures) {
+    try {
+      const wav = decodeFixtureWav(fixture.wavPath);
+      const fixtureConfig = fixtureReplayConfig(
+        baseConfig,
+        fixture.metadata.warmup,
+        explicitKeys,
+      );
+      const configs = expandSweep(fixtureConfig, options.sweep);
+      const session = {
+        frames: [],
+        events: [],
+        config: fixtureConfig,
+        configIsTelemetry: false,
+      };
+      for (const config of configs) {
+        const replay = replaySession(session, config, {
+          fromWav: wav,
+          sourceSampleOffset: fixture.metadata.source_start_sample,
+          warmup: fixture.metadata.warmup ?? null,
+          labels: options.labels,
+          compare: false,
+        });
+        const run = {
+          caseId: fixture.caseId,
+          kind: fixture.metadata.kind,
+          mechanism: fixture.metadata.mechanism,
+          sourceStartSample: fixture.metadata.source_start_sample,
+          sourceEndSample: fixture.metadata.source_end_sample,
+          config: replay.config,
+          replay,
+        };
+        runs.push(run);
+        console.log(
+          `${fixture.caseId} ${fixture.metadata.kind}/${fixture.metadata.mechanism}: `
+          + `${replay.metrics.utteranceCount} utterances, ${replay.metrics.chunkCount} emits, `
+          + `${replay.frames.length} frames`,
+        );
+      }
+    } catch (error) {
+      failures += 1;
+      console.error(`Fixture ${fixture.caseId} failed: ${error.message}`);
+      if (options.stopOnFirstFail) break;
+    }
+  }
+  console.log(`Fixtures replayed: ${runs.length}; failed cases: ${failures}; seed: ${options.seed}`);
+  if (options.jsonPath) {
+    fs.writeFileSync(path.resolve(options.jsonPath), `${JSON.stringify({ runs }, null, 2)}\n`);
+    console.log(`Timeline JSON: ${options.jsonPath}`);
+  }
+  if (failures > 0) process.exitCode = 1;
+}
+
 function usage() {
   return [
     'Usage: node bin/replay-vad.mjs <session.jsonl> [session.wav] [options]',
@@ -781,6 +1374,9 @@ function usage() {
     '  --labels-file path.txt     Read candidate speech intervals from a file',
     '  --from-wav                Recompute frame dB levels from the WAV',
     '  --json out.json           Write the full replay timeline',
+    '  --only-fixtures           Replay scripts/prediction-sim/fixtures/vad-cases/',
+    '  --sample N --seed S       Select N fixture cases reproducibly (seed defaults to 1)',
+    '  --stop-on-first-fail      Stop after a parity mismatch or invalid fixture',
   ].join('\n');
 }
 
@@ -789,6 +1385,9 @@ export function main(argv = process.argv.slice(2)) {
   if (options.help) {
     console.log(usage());
     return;
+  }
+  if (options.sample !== null && !options.onlyFixtures) {
+    throw new Error('--sample requires --only-fixtures');
   }
   validateAssignments(options.set);
   for (const sweep of options.sweep) validateAssignments([sweep]);
@@ -803,21 +1402,39 @@ export function main(argv = process.argv.slice(2)) {
     const labelText = fs.readFileSync(path.resolve(options.labelsFile), 'utf8').trim();
     options.labels = parseLabels(labelText);
   }
+  if (options.onlyFixtures) {
+    replayFixtures(options, baseConfig);
+    return;
+  }
   const configs = expandSweep(baseConfig, options.sweep);
-  const results = configs.map(config => ({
-    config,
-    replay: replaySession(session, config, {
+  const results = [];
+  for (const config of configs) {
+    const replay = replaySession(session, config, {
       fromWav: wav,
       labels: options.labels,
       compare: options.set.length === 0 && options.sweep.length === 0,
-    }),
-    label: configLabel(config, [...options.set.map(item => item.key), ...options.sweep.map(item => item.key)]),
-  }));
+    });
+    results.push({
+      config,
+      replay,
+      label: configLabel(config, [
+        ...options.set.map(item => item.key),
+        ...options.sweep.map(item => item.key),
+      ]),
+    });
+    const failed = replay.divergence?.mismatchCount > 0
+      || replay.decisionParity?.mismatchCount > 0;
+    if (options.stopOnFirstFail && failed) break;
+  }
 
   if (options.sweep.length > 0) {
     printSweepTable(results);
   } else {
     printDefaultReport(results[0].replay);
+  }
+  if (results.some(result => result.replay.divergence?.mismatchCount > 0
+    || result.replay.decisionParity?.mismatchCount > 0)) {
+    process.exitCode = 1;
   }
   if (options.jsonPath) {
     const payload = options.sweep.length > 0

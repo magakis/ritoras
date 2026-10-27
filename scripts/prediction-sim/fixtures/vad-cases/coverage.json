@@ -1,0 +1,1330 @@
+{
+  "schema_version": 1,
+  "sample_rate": 16000,
+  "interval_convention": "full_recording.wav PCM16 sample indices, [start,end); emit spans are telemetry source-time boundaries, matched M4A anchors independently checked",
+  "sessions": {
+    "20261027-001210": {
+      "full_source_available": true,
+      "full_source": {
+        "samples": 351841,
+        "rate": 16000,
+        "format": 1,
+        "channels": 1,
+        "bits": 16,
+        "duration_s": 21.99,
+        "bytes": 703726,
+        "sidecar_truncated": false,
+        "sidecar_bytes_match": true,
+        "sidecar_sha_match": true
+      },
+      "meta_duration_s": 22.068,
+      "telemetry_frame_duration_s": 21.99,
+      "telemetry_frames": 220,
+      "retention_dropped": 0,
+      "client_version_fields": [],
+      "vad_config": {
+        "absoluteSpeechFloorDb": -70,
+        "minSpeechMs": 300,
+        "endpointOnsetMs": 70,
+        "endpointSilenceMs": 1600,
+        "staleFloorSeconds": 1.5,
+        "whisperHighPassCutoffHz": 1800,
+        "whisperHighBandRatioDb": -6
+      },
+      "emitted_sample_sum": 351841,
+      "decoded_sample_sum": 353088,
+      "emissions": [
+        {
+          "chunk_id": 0,
+          "empty_asr": false,
+          "decoded_samples": 65472,
+          "meta_samples": 65472,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 0,
+          "emit_end_sample": 65249,
+          "emit_span_samples": 65249,
+          "matched_start_sample": 0,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 65472,
+          "end_residual_samples": 223,
+          "sample_correlation": 0.998,
+          "anchor_offset": 16800,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 17,
+          "db_max": -54.3,
+          "sp_starts": [
+            {
+              "q": 6,
+              "t": 0.58,
+              "sample": 9274,
+              "db": -66.8,
+              "fl": -77.4,
+              "th": -70
+            }
+          ],
+          "asr_text": "And now I"
+        },
+        {
+          "chunk_id": 1,
+          "empty_asr": false,
+          "decoded_samples": 194496,
+          "meta_samples": 194496,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 65249,
+          "emit_end_sample": 259091,
+          "emit_span_samples": 193842,
+          "matched_start_sample": 65249,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 259745,
+          "end_residual_samples": 654,
+          "sample_correlation": 0.994,
+          "anchor_offset": 56960,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 69,
+          "db_max": -49.7,
+          "sp_starts": [
+            {
+              "q": 55,
+              "t": 5.486,
+              "sample": 87775,
+              "db": -64.7,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": "sometimes I make fun of her in a way of telling to Athena what to ask from my mother."
+        },
+        {
+          "chunk_id": 2,
+          "empty_asr": true,
+          "decoded_samples": 93120,
+          "meta_samples": 93120,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 259091,
+          "emit_end_sample": 351841,
+          "emit_span_samples": 92750,
+          "matched_start_sample": 259091,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 352211,
+          "end_residual_samples": 370,
+          "sample_correlation": 0.998,
+          "anchor_offset": 47680,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 16,
+          "db_max": -49.2,
+          "sp_starts": [
+            {
+              "q": 186,
+              "t": 18.59,
+              "sample": 297445,
+              "db": -67.4,
+              "fl": -78.8,
+              "th": -70
+            }
+          ],
+          "asr_text": ""
+        }
+      ],
+      "uncovered_gaps": [],
+      "noise_guard_discards": []
+    },
+    "20261027-001745": {
+      "full_source_available": true,
+      "full_source": {
+        "samples": 225493,
+        "rate": 16000,
+        "format": 1,
+        "channels": 1,
+        "bits": 16,
+        "duration_s": 14.093,
+        "bytes": 451030,
+        "sidecar_truncated": false,
+        "sidecar_bytes_match": true,
+        "sidecar_sha_match": true
+      },
+      "meta_duration_s": 14.196,
+      "telemetry_frame_duration_s": 14.093,
+      "telemetry_frames": 141,
+      "retention_dropped": 0,
+      "client_version_fields": [],
+      "vad_config": {
+        "absoluteSpeechFloorDb": -70,
+        "minSpeechMs": 300,
+        "endpointOnsetMs": 70,
+        "endpointSilenceMs": 1600,
+        "staleFloorSeconds": 1.5,
+        "whisperHighPassCutoffHz": 1800,
+        "whisperHighBandRatioDb": -6
+      },
+      "emitted_sample_sum": 225493,
+      "decoded_sample_sum": 227136,
+      "emissions": [
+        {
+          "chunk_id": 0,
+          "empty_asr": false,
+          "decoded_samples": 146368,
+          "meta_samples": 146368,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 0,
+          "emit_end_sample": 145478,
+          "emit_span_samples": 145478,
+          "matched_start_sample": 0,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 146368,
+          "end_residual_samples": 890,
+          "sample_correlation": 0.987,
+          "anchor_offset": 52160,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 26,
+          "db_max": -58.3,
+          "sp_starts": [
+            {
+              "q": 8,
+              "t": 0.796,
+              "sample": 12730,
+              "db": -67.8,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": "My mother loves it and gets tired from it at the same time."
+        },
+        {
+          "chunk_id": 1,
+          "empty_asr": true,
+          "decoded_samples": 64448,
+          "meta_samples": 64448,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 145478,
+          "emit_end_sample": 209516,
+          "emit_span_samples": 64038,
+          "matched_start_sample": 145478,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 209926,
+          "end_residual_samples": 410,
+          "sample_correlation": 0.995,
+          "anchor_offset": 31360,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 7,
+          "db_max": -64.6,
+          "sp_starts": [
+            {
+              "q": 106,
+              "t": 10.586,
+              "sample": 169369,
+              "db": -69.5,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": ""
+        },
+        {
+          "chunk_id": 2,
+          "empty_asr": true,
+          "decoded_samples": 16320,
+          "meta_samples": 16320,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 209516,
+          "emit_end_sample": 225493,
+          "emit_span_samples": 15977,
+          "matched_start_sample": 207204,
+          "start_residual_samples": -2312,
+          "decoded_end_sample": 223524,
+          "end_residual_samples": -1969,
+          "sample_correlation": 0.108,
+          "anchor_offset": 12000,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 0,
+          "db_max": -73.2,
+          "sp_starts": [],
+          "asr_text": ""
+        }
+      ],
+      "uncovered_gaps": [],
+      "noise_guard_discards": []
+    },
+    "20261027-002045": {
+      "full_source_available": true,
+      "full_source": {
+        "samples": 379039,
+        "rate": 16000,
+        "format": 1,
+        "channels": 1,
+        "bits": 16,
+        "duration_s": 23.69,
+        "bytes": 758122,
+        "sidecar_truncated": false,
+        "sidecar_bytes_match": true,
+        "sidecar_sha_match": true
+      },
+      "meta_duration_s": 23.792,
+      "telemetry_frame_duration_s": 23.69,
+      "telemetry_frames": 237,
+      "retention_dropped": 0,
+      "client_version_fields": [],
+      "vad_config": {
+        "absoluteSpeechFloorDb": -70,
+        "minSpeechMs": 300,
+        "endpointOnsetMs": 70,
+        "endpointSilenceMs": 2000,
+        "staleFloorSeconds": 1.5,
+        "whisperHighPassCutoffHz": 1800,
+        "whisperHighBandRatioDb": -6
+      },
+      "emitted_sample_sum": 379039,
+      "decoded_sample_sum": 380672,
+      "emissions": [
+        {
+          "chunk_id": 0,
+          "empty_asr": false,
+          "decoded_samples": 136128,
+          "meta_samples": 136128,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 0,
+          "emit_end_sample": 135836,
+          "emit_span_samples": 135836,
+          "matched_start_sample": 0,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 136128,
+          "end_residual_samples": 292,
+          "sample_correlation": 0.991,
+          "anchor_offset": 48640,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 31,
+          "db_max": -56.1,
+          "sp_starts": [
+            {
+              "q": 2,
+              "t": 0.193,
+              "sample": 3088,
+              "db": -64.8,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": "Like you should have hurt my mom when she called me today when I was at this shop."
+        },
+        {
+          "chunk_id": 1,
+          "empty_asr": false,
+          "decoded_samples": 99264,
+          "meta_samples": 99264,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 135836,
+          "emit_end_sample": 234986,
+          "emit_span_samples": 99150,
+          "matched_start_sample": 135836,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 235100,
+          "end_residual_samples": 114,
+          "sample_correlation": 1,
+          "anchor_offset": 58080,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 13,
+          "db_max": -53.8,
+          "sp_starts": [
+            {
+              "q": 116,
+              "t": 11.598,
+              "sample": 185560,
+              "db": -69.3,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": "You could hear the desperation behind your voice."
+        },
+        {
+          "chunk_id": 2,
+          "empty_asr": false,
+          "decoded_samples": 80832,
+          "meta_samples": 80832,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 234986,
+          "emit_end_sample": 314852,
+          "emit_span_samples": 79866,
+          "matched_start_sample": 234986,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 315818,
+          "end_residual_samples": 966,
+          "sample_correlation": 1,
+          "anchor_offset": 55840,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 5,
+          "db_max": -55.9,
+          "sp_starts": [
+            {
+              "q": 179,
+              "t": 17.88,
+              "sample": 286075,
+              "db": -65,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": "She was telling me that."
+        },
+        {
+          "chunk_id": 3,
+          "empty_asr": true,
+          "decoded_samples": 64448,
+          "meta_samples": 64448,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 314852,
+          "emit_end_sample": 379039,
+          "emit_span_samples": 64187,
+          "matched_start_sample": 314852,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 379300,
+          "end_residual_samples": 261,
+          "sample_correlation": 0.992,
+          "anchor_offset": 24800,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 4,
+          "db_max": -57.6,
+          "sp_starts": [
+            {
+              "q": 212,
+              "t": 21.194,
+              "sample": 339106,
+              "db": -57.6,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": ""
+        }
+      ],
+      "uncovered_gaps": [],
+      "noise_guard_discards": []
+    },
+    "20261027-000217": {
+      "full_source_available": true,
+      "full_source": {
+        "samples": 970846,
+        "rate": 16000,
+        "format": 1,
+        "channels": 1,
+        "bits": 16,
+        "duration_s": 60.678,
+        "bytes": 1941736,
+        "sidecar_truncated": false,
+        "sidecar_bytes_match": true,
+        "sidecar_sha_match": true
+      },
+      "meta_duration_s": 48.868,
+      "telemetry_frame_duration_s": 60.678,
+      "telemetry_frames": 607,
+      "retention_dropped": 0,
+      "client_version_fields": [],
+      "vad_config": {
+        "absoluteSpeechFloorDb": -70,
+        "minSpeechMs": 300,
+        "endpointOnsetMs": 70,
+        "endpointSilenceMs": 1600,
+        "staleFloorSeconds": 1.5,
+        "whisperHighPassCutoffHz": 1800,
+        "whisperHighBandRatioDb": -6
+      },
+      "emitted_sample_sum": 778583,
+      "decoded_sample_sum": 781888,
+      "emissions": [
+        {
+          "chunk_id": 0,
+          "empty_asr": false,
+          "decoded_samples": 107456,
+          "meta_samples": 107456,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 0,
+          "emit_end_sample": 106910,
+          "emit_span_samples": 106910,
+          "matched_start_sample": 0,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 107456,
+          "end_residual_samples": 546,
+          "sample_correlation": 0.993,
+          "anchor_offset": 24960,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 22,
+          "db_max": -56.8,
+          "sp_starts": [
+            {
+              "q": 1,
+              "t": 0.085,
+              "sample": 1360,
+              "db": -60.4,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": "And it's funny, but I feel like there is a"
+        },
+        {
+          "chunk_id": 1,
+          "empty_asr": false,
+          "decoded_samples": 95168,
+          "meta_samples": 95168,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 106910,
+          "emit_end_sample": 201239,
+          "emit_span_samples": 94329,
+          "matched_start_sample": 106910,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 202078,
+          "end_residual_samples": 839,
+          "sample_correlation": 0.999,
+          "anchor_offset": 44320,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 13,
+          "db_max": -58.4,
+          "sp_starts": [
+            {
+              "q": 80,
+              "t": 7.982,
+              "sample": 127708,
+              "db": -67,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": "vibe between me and Athena."
+        },
+        {
+          "chunk_id": 2,
+          "empty_asr": false,
+          "decoded_samples": 277440,
+          "meta_samples": 277440,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 201239,
+          "emit_end_sample": 478040,
+          "emit_span_samples": 276801,
+          "matched_start_sample": 203359,
+          "start_residual_samples": 2120,
+          "decoded_end_sample": 480799,
+          "end_residual_samples": 2759,
+          "sample_correlation": 0.101,
+          "anchor_offset": 239200,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 2,
+          "db_max": -60.6,
+          "sp_starts": [
+            {
+              "q": 146,
+              "t": 14.588,
+              "sample": 233407,
+              "db": -64.2,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": "That is not being caught by the rest of the"
+        },
+        {
+          "chunk_id": 3,
+          "empty_asr": false,
+          "decoded_samples": 90048,
+          "meta_samples": 90048,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 670303,
+          "emit_end_sample": 759662,
+          "emit_span_samples": 89359,
+          "matched_start_sample": 670303,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 760351,
+          "end_residual_samples": 689,
+          "sample_correlation": 0.978,
+          "anchor_offset": 70240,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 3,
+          "db_max": -67.1,
+          "sp_starts": [
+            {
+              "q": 463,
+              "t": 46.283,
+              "sample": 740527,
+              "db": -67.1,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": "I feel like we have a"
+        },
+        {
+          "chunk_id": 4,
+          "empty_asr": false,
+          "decoded_samples": 110528,
+          "meta_samples": 110528,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 759662,
+          "emit_end_sample": 870182,
+          "emit_span_samples": 110520,
+          "matched_start_sample": 759662,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 870190,
+          "end_residual_samples": 8,
+          "sample_correlation": 0.998,
+          "anchor_offset": 94880,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 6,
+          "db_max": -55.5,
+          "sp_starts": [
+            {
+              "q": 501,
+              "t": 50.092,
+              "sample": 801472,
+              "db": -69.1,
+              "fl": -80,
+              "th": -70
+            },
+            {
+              "q": 528,
+              "t": 52.781,
+              "sample": 844498,
+              "db": -69.2,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": "more direct way of communicating."
+        },
+        {
+          "chunk_id": 5,
+          "empty_asr": true,
+          "decoded_samples": 44992,
+          "meta_samples": 44992,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 870182,
+          "emit_end_sample": 914936,
+          "emit_span_samples": 44754,
+          "matched_start_sample": 870182,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 915174,
+          "end_residual_samples": 238,
+          "sample_correlation": 0.999,
+          "anchor_offset": 30400,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 4,
+          "db_max": -42.1,
+          "sp_starts": [
+            {
+              "q": 563,
+              "t": 56.289,
+              "sample": 900622,
+              "db": -42.1,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": ""
+        },
+        {
+          "chunk_id": 6,
+          "empty_asr": true,
+          "decoded_samples": 56256,
+          "meta_samples": 56256,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 914936,
+          "emit_end_sample": 970846,
+          "emit_span_samples": 55910,
+          "matched_start_sample": 914936,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 971192,
+          "end_residual_samples": 346,
+          "sample_correlation": 0.504,
+          "anchor_offset": 18080,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 0,
+          "db_max": -79.1,
+          "sp_starts": [],
+          "asr_text": ""
+        }
+      ],
+      "uncovered_gaps": [
+        {
+          "start_sample": 478040,
+          "end_sample": 670303,
+          "samples": 192263,
+          "duration_s": 12.016,
+          "source_10ms_rms": null,
+          "sp_frames": 14,
+          "sp_starts": [
+            {
+              "q": 312,
+              "t": 31.177,
+              "sample": 498838,
+              "db": -66.3,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "db_max": -56.8
+        }
+      ],
+      "noise_guard_discards": [
+        {
+          "n": 96057
+        },
+        {
+          "n": 96206
+        }
+      ]
+    },
+    "20261027-000946": {
+      "full_source_available": false,
+      "full_source": null,
+      "meta_duration_s": 67.824,
+      "telemetry_frame_duration_s": 67.693,
+      "telemetry_frames": 677,
+      "retention_dropped": 0,
+      "client_version_fields": [],
+      "vad_config": {
+        "absoluteSpeechFloorDb": -70,
+        "minSpeechMs": 300,
+        "endpointOnsetMs": 70,
+        "endpointSilenceMs": 1600,
+        "staleFloorSeconds": 1.5,
+        "whisperHighPassCutoffHz": 1800,
+        "whisperHighBandRatioDb": -6
+      },
+      "emitted_sample_sum": 0,
+      "decoded_sample_sum": 0,
+      "emissions": [],
+      "uncovered_gaps": [],
+      "noise_guard_discards": []
+    },
+    "20261027-003542": {
+      "full_source_available": true,
+      "full_source": {
+        "samples": 422065,
+        "rate": 16000,
+        "format": 1,
+        "channels": 1,
+        "bits": 16,
+        "duration_s": 26.379,
+        "bytes": 844174,
+        "sidecar_truncated": false,
+        "sidecar_bytes_match": true,
+        "sidecar_sha_match": true
+      },
+      "meta_duration_s": 26.424,
+      "telemetry_frame_duration_s": 26.379,
+      "telemetry_frames": 264,
+      "retention_dropped": 0,
+      "client_version_fields": [],
+      "vad_config": {
+        "absoluteSpeechFloorDb": -70,
+        "minSpeechMs": 300,
+        "endpointOnsetMs": 70,
+        "endpointSilenceMs": 2000,
+        "staleFloorSeconds": 1.5,
+        "whisperHighPassCutoffHz": 1800,
+        "whisperHighBandRatioDb": -6
+      },
+      "emitted_sample_sum": 422065,
+      "decoded_sample_sum": 422784,
+      "emissions": [
+        {
+          "chunk_id": 0,
+          "empty_asr": false,
+          "decoded_samples": 385984,
+          "meta_samples": 385984,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 0,
+          "emit_end_sample": 385439,
+          "emit_span_samples": 385439,
+          "matched_start_sample": 0,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 385984,
+          "end_residual_samples": 545,
+          "sample_correlation": 0.996,
+          "anchor_offset": 47360,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 152,
+          "db_max": -21,
+          "sp_starts": [
+            {
+              "q": 10,
+              "t": 0.989,
+              "sample": 15823,
+              "db": -45.3,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": "But that's an example of them not doing any research or reading some bullshit online and then immediately acting as this is the way and this is how it is."
+        },
+        {
+          "chunk_id": 1,
+          "empty_asr": true,
+          "decoded_samples": 36800,
+          "meta_samples": 36800,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 385439,
+          "emit_end_sample": 422065,
+          "emit_span_samples": 36626,
+          "matched_start_sample": 385439,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 422239,
+          "end_residual_samples": 174,
+          "sample_correlation": 0.942,
+          "anchor_offset": 25440,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 1,
+          "db_max": -58.7,
+          "sp_starts": [],
+          "asr_text": ""
+        }
+      ],
+      "uncovered_gaps": [],
+      "noise_guard_discards": []
+    },
+    "20261027-003838": {
+      "full_source_available": true,
+      "full_source": {
+        "samples": 467182,
+        "rate": 16000,
+        "format": 1,
+        "channels": 1,
+        "bits": 16,
+        "duration_s": 29.199,
+        "bytes": 934408,
+        "sidecar_truncated": false,
+        "sidecar_bytes_match": true,
+        "sidecar_sha_match": true
+      },
+      "meta_duration_s": 23.22,
+      "telemetry_frame_duration_s": 29.199,
+      "telemetry_frames": 292,
+      "retention_dropped": 0,
+      "client_version_fields": [],
+      "vad_config": {
+        "absoluteSpeechFloorDb": -70,
+        "minSpeechMs": 300,
+        "endpointOnsetMs": 70,
+        "endpointSilenceMs": 2000,
+        "staleFloorSeconds": 1.5,
+        "whisperHighPassCutoffHz": 1800,
+        "whisperHighBandRatioDb": -6
+      },
+      "emitted_sample_sum": 370976,
+      "decoded_sample_sum": 371520,
+      "emissions": [
+        {
+          "chunk_id": 0,
+          "empty_asr": false,
+          "decoded_samples": 153536,
+          "meta_samples": 153536,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 0,
+          "emit_end_sample": 153392,
+          "emit_span_samples": 153392,
+          "matched_start_sample": -7695,
+          "start_residual_samples": -7695,
+          "decoded_end_sample": 145841,
+          "end_residual_samples": -7551,
+          "sample_correlation": 0.127,
+          "anchor_offset": 8000,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 33,
+          "db_max": -56.4,
+          "sp_starts": [
+            {
+              "q": 5,
+              "t": 0.494,
+              "sample": 7909,
+              "db": -67.9,
+              "fl": -79.6,
+              "th": -70
+            }
+          ],
+          "asr_text": "What is the point of voting for the legislation at 4:36 in the morning?"
+        },
+        {
+          "chunk_id": 1,
+          "empty_asr": true,
+          "decoded_samples": 212928,
+          "meta_samples": 212928,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 153392,
+          "emit_end_sample": 366155,
+          "emit_span_samples": 212763,
+          "matched_start_sample": 153392,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 366320,
+          "end_residual_samples": 165,
+          "sample_correlation": 1,
+          "anchor_offset": 198720,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 6,
+          "db_max": -50.5,
+          "sp_starts": [
+            {
+              "q": 216,
+              "t": 21.581,
+              "sample": 345292,
+              "db": -67.9,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": ""
+        },
+        {
+          "chunk_id": 2,
+          "empty_asr": false,
+          "decoded_samples": 5056,
+          "meta_samples": 5056,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 462361,
+          "emit_end_sample": 467182,
+          "emit_span_samples": 4821,
+          "matched_start_sample": 455617,
+          "start_residual_samples": -6744,
+          "decoded_end_sample": 460673,
+          "end_residual_samples": -6509,
+          "sample_correlation": 0.129,
+          "anchor_offset": 800,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 0,
+          "db_max": -81.6,
+          "sp_starts": [],
+          "asr_text": "Yeah."
+        }
+      ],
+      "uncovered_gaps": [
+        {
+          "start_sample": 366155,
+          "end_sample": 462361,
+          "samples": 96206,
+          "duration_s": 6.013,
+          "source_10ms_rms": null,
+          "sp_frames": 0,
+          "sp_starts": [],
+          "db_max": -78
+        }
+      ],
+      "noise_guard_discards": [
+        {
+          "n": 96206
+        }
+      ]
+    },
+    "20261027-003958": {
+      "full_source_available": true,
+      "full_source": {
+        "samples": 247870,
+        "rate": 16000,
+        "format": 1,
+        "channels": 1,
+        "bits": 16,
+        "duration_s": 15.492,
+        "bytes": 495784,
+        "sidecar_truncated": false,
+        "sidecar_bytes_match": true,
+        "sidecar_sha_match": true
+      },
+      "meta_duration_s": 15.544,
+      "telemetry_frame_duration_s": 15.492,
+      "telemetry_frames": 155,
+      "retention_dropped": 0,
+      "client_version_fields": [],
+      "vad_config": {
+        "absoluteSpeechFloorDb": -70,
+        "minSpeechMs": 300,
+        "endpointOnsetMs": 70,
+        "endpointSilenceMs": 2000,
+        "staleFloorSeconds": 1.5,
+        "whisperHighPassCutoffHz": 1800,
+        "whisperHighBandRatioDb": -6
+      },
+      "emitted_sample_sum": 247870,
+      "decoded_sample_sum": 248704,
+      "emissions": [
+        {
+          "chunk_id": 0,
+          "empty_asr": false,
+          "decoded_samples": 178112,
+          "meta_samples": 178112,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 0,
+          "emit_end_sample": 177497,
+          "emit_span_samples": 177497,
+          "matched_start_sample": 0,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 178112,
+          "end_residual_samples": 615,
+          "sample_correlation": 0.99,
+          "anchor_offset": 90720,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 46,
+          "db_max": -52.4,
+          "sp_starts": [
+            {
+              "q": 6,
+              "t": 0.58,
+              "sample": 9274,
+              "db": -69.5,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": "Yes, I have accepted that these people are done. Especially now with the AI, it's over."
+        },
+        {
+          "chunk_id": 1,
+          "empty_asr": true,
+          "decoded_samples": 70592,
+          "meta_samples": 70592,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 177497,
+          "emit_end_sample": 247870,
+          "emit_span_samples": 70373,
+          "matched_start_sample": 177497,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 248089,
+          "end_residual_samples": 219,
+          "sample_correlation": 0.998,
+          "anchor_offset": 37120,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 3,
+          "db_max": -52,
+          "sp_starts": [
+            {
+              "q": 134,
+              "t": 13.383,
+              "sample": 214123,
+              "db": -67.1,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": ""
+        }
+      ],
+      "uncovered_gaps": [],
+      "noise_guard_discards": []
+    },
+    "20261027-005252": {
+      "full_source_available": true,
+      "full_source": {
+        "samples": 223765,
+        "rate": 16000,
+        "format": 1,
+        "channels": 1,
+        "bits": 16,
+        "duration_s": 13.985,
+        "bytes": 447574,
+        "sidecar_truncated": false,
+        "sidecar_bytes_match": true,
+        "sidecar_sha_match": true
+      },
+      "meta_duration_s": 14.072,
+      "telemetry_frame_duration_s": 13.985,
+      "telemetry_frames": 140,
+      "retention_dropped": 0,
+      "client_version_fields": [],
+      "vad_config": {
+        "absoluteSpeechFloorDb": -70,
+        "minSpeechMs": 300,
+        "endpointOnsetMs": 70,
+        "endpointSilenceMs": 2000,
+        "staleFloorSeconds": 1.5,
+        "whisperHighPassCutoffHz": 1800,
+        "whisperHighBandRatioDb": -6
+      },
+      "emitted_sample_sum": 223765,
+      "decoded_sample_sum": 225152,
+      "emissions": [
+        {
+          "chunk_id": 0,
+          "empty_asr": false,
+          "decoded_samples": 129984,
+          "meta_samples": 129984,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 0,
+          "emit_end_sample": 129287,
+          "emit_span_samples": 129287,
+          "matched_start_sample": 0,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 129984,
+          "end_residual_samples": 697,
+          "sample_correlation": 0.995,
+          "anchor_offset": 24480,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 67,
+          "db_max": -32.8,
+          "sp_starts": [
+            {
+              "q": 1,
+              "t": 0.085,
+              "sample": 1360,
+              "db": -69.4,
+              "fl": -80,
+              "th": -70
+            }
+          ],
+          "asr_text": "I love you absolutely the most possible, and I'm looking forward so much to having you here."
+        },
+        {
+          "chunk_id": 1,
+          "empty_asr": true,
+          "decoded_samples": 95168,
+          "meta_samples": 95168,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 129287,
+          "emit_end_sample": 223765,
+          "emit_span_samples": 94478,
+          "matched_start_sample": 129287,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 224455,
+          "end_residual_samples": 690,
+          "sample_correlation": 0.982,
+          "anchor_offset": 31200,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 11,
+          "db_max": -54.5,
+          "sp_starts": [
+            {
+              "q": 100,
+              "t": 9.983,
+              "sample": 159727,
+              "db": -54.5,
+              "fl": -76.1,
+              "th": -69.1
+            }
+          ],
+          "asr_text": ""
+        }
+      ],
+      "uncovered_gaps": [],
+      "noise_guard_discards": []
+    },
+    "20261027-010408": {
+      "full_source_available": true,
+      "full_source": {
+        "samples": 95689,
+        "rate": 16000,
+        "format": 1,
+        "channels": 1,
+        "bits": 16,
+        "duration_s": 5.981,
+        "bytes": 191422,
+        "sidecar_truncated": false,
+        "sidecar_bytes_match": true,
+        "sidecar_sha_match": true
+      },
+      "meta_duration_s": 6.008,
+      "telemetry_frame_duration_s": 5.981,
+      "telemetry_frames": 60,
+      "retention_dropped": 0,
+      "client_version_fields": [],
+      "vad_config": {
+        "absoluteSpeechFloorDb": -70,
+        "minSpeechMs": 300,
+        "endpointOnsetMs": 70,
+        "endpointSilenceMs": 2000,
+        "staleFloorSeconds": 1.5,
+        "whisperHighPassCutoffHz": 1800,
+        "whisperHighBandRatioDb": -6
+      },
+      "emitted_sample_sum": 95689,
+      "decoded_sample_sum": 96128,
+      "emissions": [
+        {
+          "chunk_id": 0,
+          "empty_asr": false,
+          "decoded_samples": 79808,
+          "meta_samples": 79808,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 0,
+          "emit_end_sample": 79712,
+          "emit_span_samples": 79712,
+          "matched_start_sample": 0,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 79808,
+          "end_residual_samples": 96,
+          "sample_correlation": 0.994,
+          "anchor_offset": 48640,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 27,
+          "db_max": -53.2,
+          "sp_starts": [
+            {
+              "q": 11,
+              "t": 1.097,
+              "sample": 17551,
+              "db": -63.7,
+              "fl": -71,
+              "th": -64
+            }
+          ],
+          "asr_text": "And it described to me in plain, simple terms."
+        },
+        {
+          "chunk_id": 1,
+          "empty_asr": true,
+          "decoded_samples": 16320,
+          "meta_samples": 16320,
+          "stream": {
+            "codec": "aac",
+            "rate": 16000,
+            "channels": 1
+          },
+          "emit_start_sample": 79712,
+          "emit_end_sample": 95689,
+          "emit_span_samples": 15977,
+          "matched_start_sample": 79712,
+          "start_residual_samples": 0,
+          "decoded_end_sample": 96032,
+          "end_residual_samples": 343,
+          "sample_correlation": 0.971,
+          "anchor_offset": 0,
+          "anchor_length": 4096,
+          "source_10ms_rms": null,
+          "sp_frames": 0,
+          "db_max": -66.7,
+          "sp_starts": [],
+          "asr_text": ""
+        }
+      ],
+      "uncovered_gaps": [],
+      "noise_guard_discards": []
+    }
+  }
+}

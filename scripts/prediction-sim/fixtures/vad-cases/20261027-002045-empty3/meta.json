@@ -1,0 +1,19 @@
+{
+  "case_id": "20261027-002045-empty3",
+  "session": "20261027-002045",
+  "kind": "failure",
+  "mechanism": "unknown",
+  "source_start_sample": 306852,
+  "source_end_sample": 379039,
+  "sample_rate": 16000,
+  "evidence": [
+    "ASR chunk text empty; 4 sp frames, q212 at 21.19 s db -57.6 dB, th -70 dB; source p99 -56.5, max -44.7 dBFS.",
+    "M4A anchor matches source start sample 314852 (r=0.992).",
+    "Core interval [314852,379039) samples; clip interval [306852,379039) (0.5 s margins where source permits), duration 4.512 s.",
+    "Full-source WAV sidecar truncated=false; byte-size match=true; SHA-256 match=true.",
+    "Decoded M4A 64448 samples; source sample alignment residual 0, anchor correlation 0.992."
+  ],
+  "limitations": [
+    "Four scattered active frames could be a short whisper or transient; no intelligibility judgment."
+  ]
+}

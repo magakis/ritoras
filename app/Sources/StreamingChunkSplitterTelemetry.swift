@@ -123,6 +123,18 @@ final class StreamingChunkSplitterTelemetry: @unchecked Sendable, VADTelemetrySi
                 if let config = event.config { item["c"] = config }
                 if let startMs = event.startMs { item["s0"] = startMs }
                 if let endMs = event.endMs { item["s1"] = endMs }
+                if let timestampMs = event.timestampMs {
+                    item["timestampMs"] = timestampMs
+                }
+                if let wallTimestampMs = event.wallTimestampMs {
+                    item["wallTimestampMs"] = wallTimestampMs
+                }
+                if let sourceStartSample = event.sourceStartSample {
+                    item["sourceStartSample"] = sourceStartSample
+                }
+                if let sourceEndSample = event.sourceEndSample {
+                    item["sourceEndSample"] = sourceEndSample
+                }
                 if let endpointState = event.endpointState { item["es"] = endpointState }
                 if let latencyMs = event.latencyMs { item["lat"] = latencyMs }
                 if let chars = event.chars { item["ch"] = chars }
@@ -130,15 +142,20 @@ final class StreamingChunkSplitterTelemetry: @unchecked Sendable, VADTelemetrySi
                 return item
             },
             "frames": (historicalSnapshot + tailSnapshot).map { frame in
-                var item: [String: Any] = ["q": frame.seq, "dt": frame.frameDuration, "db": frame.frameDb,
+                var item: [String: Any] = ["q": frame.seq,
+                    "sourceStartSample": frame.sourceStartSample,
+                    "sourceEndSample": frame.sourceEndSample,
+                    "dt": frame.frameDuration, "db": frame.frameDb,
                     "e": frame.evidence, "sp": frame.isSpeech, "fc": frame.floorConverged,
                     "th": frame.strongThresholdDb, "ct": frame.continuationThresholdDb,
                      "st": frame.silenceThresholdDb, "ps": frame.endpointPreviousState,
                      "es": frame.endpointState, "d": frame.endpointDecision,
                      "ss": frame.decisionSilenceSamples, "us": frame.utteranceDurationSamples,
-                     "lr": frame.isLoudRegime]
+                     "lr": frame.isLoudRegime, "sh": frame.speechShaped]
                 if let floorDb = frame.floorDb { item["fl"] = floorDb }
                 if let spread = frame.dynamicsSpreadDb { item["dy"] = spread }
+                if let spread = frame.shortSpreadDb { item["sdy"] = spread }
+                if let ratio = frame.highBandRatioDb { item["hbr"] = ratio }
                 return item
             }
         ]
@@ -151,15 +168,20 @@ final class StreamingChunkSplitterTelemetry: @unchecked Sendable, VADTelemetrySi
         while true {
             let allFrames = historicalSnapshot.prefix(historyCount) + tailSnapshot.suffix(tailCount)
             metadata["frames"] = Array(allFrames).map { frame in
-                var item: [String: Any] = ["q": frame.seq, "dt": frame.frameDuration, "db": frame.frameDb,
+                var item: [String: Any] = ["q": frame.seq,
+                    "sourceStartSample": frame.sourceStartSample,
+                    "sourceEndSample": frame.sourceEndSample,
+                    "dt": frame.frameDuration, "db": frame.frameDb,
                     "e": frame.evidence, "sp": frame.isSpeech, "fc": frame.floorConverged,
                     "th": frame.strongThresholdDb, "ct": frame.continuationThresholdDb,
                      "st": frame.silenceThresholdDb, "ps": frame.endpointPreviousState,
                      "es": frame.endpointState, "d": frame.endpointDecision,
                      "ss": frame.decisionSilenceSamples, "us": frame.utteranceDurationSamples,
-                     "lr": frame.isLoudRegime]
+                     "lr": frame.isLoudRegime, "sh": frame.speechShaped]
                 if let floorDb = frame.floorDb { item["fl"] = floorDb }
                 if let spread = frame.dynamicsSpreadDb { item["dy"] = spread }
+                if let spread = frame.shortSpreadDb { item["sdy"] = spread }
+                if let ratio = frame.highBandRatioDb { item["hbr"] = ratio }
                 return item
             }
             let trimHistory = historicalSnapshot.count - historyCount

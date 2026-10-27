@@ -801,10 +801,12 @@ describe('adaptive VAD convergence', () => {
   });
 
   it('R3: kept utterances still respect the min-chunk/min-speech gates', () => {
+    const events = [];
     const quietestStrongDb = -35;
     const harness = makeRecorderHarness({
       minChunkSamples: 1,
       minSpeechSamples: Number.MAX_SAFE_INTEGER,
+      onEvent: event => events.push(event),
     });
 
     prefillAmbient(harness, 400, -65);
@@ -821,38 +823,52 @@ describe('adaptive VAD convergence', () => {
     }
 
     assert.ok(finalized !== null);
-    assert.strictEqual(finalized.discarded, true);
+    assert.strictEqual(finalized.discarded, false);
     assert.strictEqual(harness.chunkCount, 0);
     assert.strictEqual(harness.sawReanchorDuringUtterance, false);
-    assert.strictEqual(harness.accumulatorSamples, 0);
+    assert.ok(harness.accumulatorSamples > 0);
     assert.strictEqual(harness.endpoint.state, 'idle');
+
+    harness.flush();
+
+    assert.equal(harness.chunkCount, 1);
+    assert.ok(events.some(event => event.k === 'emit' && event.r === 'flush'));
   });
 
-  it('still discards an utterance below both minimum gates', () => {
+  it('holds an utterance below both gates, then applies the stop-flush floor', () => {
+    const events = [];
     const harness = makeRecorderHarness({
-      endpointSilenceMs: 800,
+      frameMs: 10,
+      endpointSilenceMs: 10,
+      endpointConfig: {
+        onsetMs: 70,
+        endEvidenceMs: 10,
+        endpointSilenceMs: 10,
+        resumeMs: 10,
+        ambiguousRescueMs: 20,
+      },
       minChunkSamples: Number.MAX_SAFE_INTEGER,
       minSpeechSamples: Number.MAX_SAFE_INTEGER,
+      gateConfig: { mode: 'static', staticRms: 0.025 },
+      onEvent: event => events.push(event),
     });
 
-    for (let i = 0; i < 100; i++) {
-      harness.drive(i % 8 === 0 ? -35 : -21);
-    }
+    for (let i = 0; i < 7; i++) harness.drive(-20);
+    const firstSilence = harness.drive(-80);
+    const finalized = harness.drive(-80);
 
-    let finalized = null;
-    // Two quiet frames settle the recent shape; the 1 s pause covers the 800 ms window.
-    for (let i = 0; i < 100; i++) {
-      const frame = harness.drive(-80);
-      if (frame.decision.type === 'finalizeUtterance') {
-        finalized = frame;
-        break;
-      }
-    }
-
-    assert.ok(finalized !== null);
-    assert.strictEqual(finalized.discarded, true);
+    assert.equal(firstSilence.decision.type, 'continueUtterance');
+    assert.equal(finalized.decision.type, 'finalizeUtterance');
+    assert.strictEqual(finalized.discarded, false);
     assert.strictEqual(harness.chunkCount, 0);
     assert.strictEqual(harness.endpoint.state, 'idle');
+    assert.equal(harness.accumulatorSamples, 9 * 160);
+
+    harness.flush();
+
+    assert.equal(harness.chunkCount, 0);
+    assert.equal(harness.tailFloorSampleCount, 9 * 160);
+    assert.ok(events.some(event => event.k === 'discard' && event.r === 'tail_floor'));
   });
 
   it('does not discard speech that starts on the first frame', () => {
