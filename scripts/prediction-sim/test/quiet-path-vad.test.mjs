@@ -55,7 +55,7 @@ describe('quiet-path VAD floor behavior', () => {
     assert.equal(speech.snapshot.floorDb, -50);
   });
 
-  it('tracks a stuck-low floor through flat D1-like noise until evidence returns to silence', () => {
+  it('does not admit flat D1-like noise while it is classified as non-silence', () => {
     const gate = new VADThresholdGate(makeVadGateConfig({
       mode: 'adaptive',
       loudRegimeEnabled: false,
@@ -64,14 +64,14 @@ describe('quiet-path VAD floor behavior', () => {
     gate.floorDb = -42.11;
     gate.adaptiveRefinementComplete = true;
     gate.coldStartConverged = true;
-    gate.adaptiveRollingPercentileCache = -36.8;
     let output;
     for (let index = 0; index < 10; index += 1) {
       output = gate.process(-36.8, 0.1);
       gate.updateFloorTracking(-36.8, 0.1, true, false, false, 3);
     }
-    assert.ok(Math.abs(gate.snapshot.floorDb - -36.8) < 0.5);
-    assert.equal(output.evidence, 'silence');
+    assert.equal(gate.snapshot.floorDb, -42.11);
+    assert.equal(gate.adaptiveRollingPercentileCache, null);
+    assert.equal(output.evidence, 'ambiguous');
   });
 
   it('keeps a speech-shaped Tele1 whisper margin under the configured rise cap', () => {

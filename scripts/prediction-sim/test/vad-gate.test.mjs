@@ -34,7 +34,10 @@ function seedAdaptiveGate(partial = {}, seedDb = -50) {
     mode: 'adaptive',
     ...partial,
   }));
-  for (let i = 0; i < 10; i++) gate.process(seedDb, 0.1);
+  gate.floorDb = gate.clampFloor(seedDb);
+  gate.coldStartConverged = true;
+  gate.adaptiveRefinementComplete = true;
+  for (let i = 0; i < 10; i++) gate.process(gate.floorDb, 0.1);
   return gate;
 }
 
@@ -52,7 +55,7 @@ describe('VADThresholdGate', () => {
       mode: 'adaptive',
       primingQuietSeedSeconds: 0.03,
     }));
-    const outputs = Array.from({ length: 100 }, () => gate.process(-70, 0.01));
+    const outputs = Array.from({ length: 100 }, () => gate.process(-80, 0.01));
     const completions = outputs.filter(output => output.didCompletePriming);
     assert.equal(completions.length, 1);
     assert.equal(completions[0].primingEndedAtCap, false);
@@ -174,14 +177,19 @@ describe('VADThresholdGate', () => {
       assert.ok(gate.snapshot.floorDb <= -45);
     });
 
-    it('tracks a quiet room toward ambient while the machine is idle', () => {
+    it('slews cold-start fallback toward frames above its silence threshold', () => {
       const gate = new VADThresholdGate(config({ mode: 'adaptive' }));
+      let previousFloorDb = gate.snapshot.floorDb;
       for (let i = 0; i < 50; i++) {
         gate.process(-65, 0.1);
         gate.updateFloorTracking(-65, 0.1, true);
+        const floorDb = gate.snapshot.floorDb;
+        assert.ok(floorDb - previousFloorDb <= 12 * 0.1 + 1e-9);
+        previousFloorDb = floorDb;
       }
-      assert.ok(Math.abs(gate.snapshot.floorDb - -65) <= 3);
-      assert.notStrictEqual(gate.process(-65, 0.1).evidence, 'strong');
+      assert.strictEqual(gate.snapshot.floorDb, -65);
+      assert.strictEqual(gate.coldStartConverged, true);
+      assert.strictEqual(gate.process(-65, 0.1).evidence, 'silence');
     });
 
     it('freezes strong evidence, caps continuing evidence, and elevates idle tracking', () => {
@@ -236,15 +244,16 @@ describe('VADThresholdGate', () => {
       assert.ok(Math.abs(allowed.gate.snapshot.floorDb - -68.8) < 0.001);
     });
 
-    it('uses rise-or-hold during ending-rise when rolling P10 is below the floor', () => {
+    it('uses rolling P10 for ending-rise fall when it is below the floor', () => {
       const gate = seedAdaptiveGate({}, -62);
       gate.floorDb = -60;
       gate.process(-61, 0.1);
       gate.updateFloorTracking(-61, 0.5, false, true);
-      assert.strictEqual(gate.snapshot.floorDb, -60);
+      const expectedFloor = -60 + (1 - Math.exp(-1)) * -2;
+      assert.ok(Math.abs(gate.snapshot.floorDb - expectedFloor) < 0.001);
     });
 
-    it('bypasses the speech ceiling only for ending-rise and enforces it for idle rise', () => {
+    it('enforces the speech ceiling during ending-rise and idle rise', () => {
       const endingGate = seedAdaptiveGate({}, -63);
       endingGate.floorDb = -70;
       endingGate.speechCeilingDb = -60;
@@ -252,16 +261,16 @@ describe('VADThresholdGate', () => {
         endingGate.process(-63, 0.1);
         endingGate.updateFloorTracking(-63, 0.1, false, true);
       }
-      assert.ok(Math.abs(endingGate.snapshot.floorDb - -63) < 0.001);
+      assert.strictEqual(endingGate.snapshot.floorDb, -68);
 
       const idleGate = seedAdaptiveGate({}, -63);
       idleGate.floorDb = -70;
       idleGate.speechCeilingDb = -60;
       idleGate.process(-63, 0.1);
       idleGate.updateFloorTracking(-63, 0.1, true, false);
-      assert.ok(idleGate.snapshot.floorDb < -68.8);
+      assert.ok(Math.abs(idleGate.snapshot.floorDb - -68.8) < 0.001);
       assert.ok(idleGate.snapshot.floorDb <= idleGate.speechCeilingDb
-        - idleGate.effectiveAdaptiveDeltaDb - 2 + 0.000001);
+        - idleGate.effectiveCeilingMarginDb + 0.000001);
     });
 
     it('keeps non-ending flat continuing evidence frozen while speech is active', () => {
@@ -289,11 +298,31 @@ describe('VADThresholdGate', () => {
         adaptiveAbsoluteSpeechFloorDb: -80,
       }, -63);
       gate.floorDb = -70;
-      const output = gate.process(-63, 0.1);
+      const output = gate.process(-61, 0.1);
       assert.strictEqual(output.evidence, 'continuing');
       assert.strictEqual(output.shortSpreadDb, null);
-      gate.updateFloorTracking(-63, 0.5, false, true);
+      gate.updateFloorTracking(-61, 0.5, false, true);
       assert.strictEqual(gate.snapshot.floorDb, -70);
+    });
+
+    it('parks an engaged implausible fallback above the guard and resumes for a lower target', () => {
+      const gate = seedAdaptiveGate({}, -45);
+      gate.floorDb = -45;
+      gate.adaptiveRollingPercentileCache = null;
+      gate.adaptiveSignalPercentileCache = -22;
+      gate.lastKnownMachineIsIdle = false;
+      gate.implausibleSpeechFallbackActive = true;
+      gate.implausibleFallbackSuspendsSpeechCeiling = true;
+      gate.speechCeilingDb = -35;
+
+      gate.updateFloorTracking(-22, 0.1, false, false);
+      assert.strictEqual(gate.snapshot.floorDb, -45);
+      assert.strictEqual(gate.implausibleSpeechFallbackActive, true);
+
+      gate.adaptiveSignalPercentileCache = -40;
+      gate.updateFloorTracking(-40, 0.1, false, false);
+      assert.ok(Math.abs(gate.snapshot.floorDb - -43.8) < 0.001);
+      assert.strictEqual(gate.implausibleSpeechFallbackActive, true);
     });
 
     it('uses the fast fall tau and capped upward movement while idle', () => {
@@ -317,6 +346,8 @@ describe('VADThresholdGate', () => {
       assert.strictEqual(config().adaptiveDynamicsEnabled, true);
       assert.strictEqual(config().adaptiveDynamicsSpreadDb, 9);
       assert.strictEqual(config().adaptiveFlatSpreadDb, 5);
+      assert.strictEqual(seedAdaptiveGate().effectiveCeilingMarginDb, 8);
+      assert.strictEqual(seedAdaptiveGate({ ceilingMarginDb: 30 }).effectiveCeilingMarginDb, 24);
 
       const wideSilenceBand = seedAdaptiveGate({
         adaptiveDeltaDb: 10,

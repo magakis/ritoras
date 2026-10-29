@@ -24,6 +24,7 @@ struct VADGateConfig {
     let adaptiveAbsoluteSpeechFloorDb: Double
     let adaptiveRiseSpeedMultiplier: Double
     let adaptiveSilenceDeltaDb: Double
+    let ceilingMarginDb: Double
     let adaptiveStaleFloorSeconds: Double
     let adaptiveFallTauSeconds: Double
     let adaptiveDynamicsEnabled: Bool
@@ -51,6 +52,7 @@ struct VADGateConfig {
         adaptiveAbsoluteSpeechFloorDb: Double,
         adaptiveRiseSpeedMultiplier: Double,
         adaptiveSilenceDeltaDb: Double,
+        ceilingMarginDb: Double = SharedConfig.Defaults.streamVadCeilingMarginDbDefault,
         adaptiveStaleFloorSeconds: Double,
         adaptiveFallTauSeconds: Double,
         adaptiveDynamicsEnabled: Bool,
@@ -78,6 +80,7 @@ struct VADGateConfig {
         self.adaptiveAbsoluteSpeechFloorDb = adaptiveAbsoluteSpeechFloorDb
         self.adaptiveRiseSpeedMultiplier = adaptiveRiseSpeedMultiplier
         self.adaptiveSilenceDeltaDb = adaptiveSilenceDeltaDb
+        self.ceilingMarginDb = ceilingMarginDb
         self.adaptiveStaleFloorSeconds = adaptiveStaleFloorSeconds
         self.adaptiveFallTauSeconds = adaptiveFallTauSeconds
         self.adaptiveDynamicsEnabled = adaptiveDynamicsEnabled
@@ -129,11 +132,11 @@ final class VADThresholdGate: @unchecked Sendable {
     private static let staticContinuationOffsetDb = 4.0
     private static let staticSilenceOffsetDb = 6.0
     private static let elevatedRiseDbPerSecond = 12.0
-    private static let speechCeilingMarginDb = 2.0
+    private static let speechCeilingQualificationMarginDb = 2.0
+    private static let adaptiveColdStartSpeechShapeMarginDb = 2.0
     // Bound the utterance-end correction and keep the residual breath bump from undoing it.
     private static let utteranceEndFloorReseedMaximumDropDb = 4.0
     private static let utteranceEndFloorRiseHoldSeconds = 1.2
-    private static let adaptiveMinRefinementDuration = 1.0
     private static let adaptiveColdStartGraceSeconds = 0.4
     private static let adaptiveColdStartDispersionWindowSeconds = 0.4
     // Keep shape evidence local so a completed speech tail cannot hold quiet open.
@@ -153,6 +156,7 @@ final class VADThresholdGate: @unchecked Sendable {
     let effectiveAdaptiveDeltaDb: Double
     private let effectiveAdaptiveContinuationDeltaDb: Double
     let effectiveAbsoluteSpeechFloorDb: Double
+    let effectiveCeilingMarginDb: Double
     private let effectiveSilenceDeltaDb: Double
     private let effectiveRiseSpeedMultiplier: Double
     private let effectiveStaleFloorSeconds: Double
@@ -179,13 +183,21 @@ final class VADThresholdGate: @unchecked Sendable {
     private var elapsedSinceSilenceEvidence = 0.0
     private var adaptiveRollingDbs: [Double] = []
     private var adaptiveRollingDurations: [Double] = []
+    private var adaptiveRollingFloorEligible: [Bool] = []
     private var adaptiveRollingWriteIndex = 0
     private var adaptiveRollingCount = 0
     private var adaptiveRollingElapsed = 0.0
     private var adaptiveRollingPercentileCache: Double?
+    private var adaptiveSignalPercentileCache: Double?
+    private var adaptiveSignalFallbackActive = false
+    private var implausibleSpeechFallbackActive = false
+    private var implausibleFallbackSuspendsSpeechCeiling = false
+    private var floorRiseAppliedThisFrameDb = 0.0
+    private var floorMovementAppliedThisFrame = false
     private var floorRiseSuppressionRemainingSeconds = 0.0
     private var lastKnownMachineIsIdle = true
     private var speechCeilingDb: Double?
+    private var utteranceSpeechLevelDb: Double?
     private var isLoudRegime = false
     private var loudRegimeEnterElapsed = 0.0
     private var loudRegimeExitElapsed = 0.0
@@ -207,6 +219,7 @@ final class VADThresholdGate: @unchecked Sendable {
             effectiveAdaptiveDeltaDb - 1.0
         )
         let effectiveAbsoluteSpeechFloorDb = clamp(config.adaptiveAbsoluteSpeechFloorDb, -80.0, -30.0)
+        let effectiveCeilingMarginDb = clamp(config.ceilingMarginDb, 0.0, 24.0)
         let effectiveSilenceDeltaDb = clamp(
             config.adaptiveSilenceDeltaDb,
             1.0,
@@ -242,6 +255,7 @@ final class VADThresholdGate: @unchecked Sendable {
         self.effectiveAdaptiveDeltaDb = effectiveAdaptiveDeltaDb
         self.effectiveAdaptiveContinuationDeltaDb = effectiveAdaptiveContinuationDeltaDb
         self.effectiveAbsoluteSpeechFloorDb = effectiveAbsoluteSpeechFloorDb
+        self.effectiveCeilingMarginDb = effectiveCeilingMarginDb
         self.effectiveSilenceDeltaDb = effectiveSilenceDeltaDb
         self.effectiveRiseSpeedMultiplier = effectiveRiseSpeedMultiplier
         self.effectiveStaleFloorSeconds = effectiveStaleFloorSeconds
@@ -281,6 +295,7 @@ final class VADThresholdGate: @unchecked Sendable {
         )
         adaptiveRollingDbs = Array(repeating: 0, count: Self.adaptiveRollingWindowCapacity)
         adaptiveRollingDurations = Array(repeating: 0, count: Self.adaptiveRollingWindowCapacity)
+        adaptiveRollingFloorEligible = Array(repeating: false, count: Self.adaptiveRollingWindowCapacity)
     }
 
     func process(
@@ -292,6 +307,8 @@ final class VADThresholdGate: @unchecked Sendable {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
 
+        floorRiseAppliedThisFrameDb = 0
+        floorMovementAppliedThisFrame = false
         frameHighBandRatioDb = highBandRatioDb.flatMap { $0.isFinite ? $0 : nil }
         frameWithinUtteranceContext = withinUtteranceContext
         whisperModulationObserved = false
@@ -372,8 +389,8 @@ final class VADThresholdGate: @unchecked Sendable {
         // floor below ambient and wedge the endpointer in speechActive.
         if let quietestStrongDb,
            let floorDb,
-           quietestStrongDb >= floorDb + effectiveAdaptiveDeltaDb + Self.speechCeilingMarginDb {
-            speechCeilingDb = quietestStrongDb
+           quietestStrongDb >= floorDb + effectiveAdaptiveDeltaDb + Self.speechCeilingQualificationMarginDb {
+            speechCeilingDb = min(speechCeilingDb ?? quietestStrongDb, quietestStrongDb)
         }
         // Rejected or nil: keep the previous ceiling (idle decay still releases it).
         if let trailingSilenceDb, trailingSilenceDb.isFinite, let floorDb {
@@ -399,6 +416,9 @@ final class VADThresholdGate: @unchecked Sendable {
         } else {
             floorRiseSuppressionRemainingSeconds = 0
         }
+        utteranceSpeechLevelDb = nil
+        implausibleSpeechFallbackActive = false
+        implausibleFallbackSuspendsSpeechCeiling = false
         resetAdaptiveRollingWindow()
     }
 
@@ -428,9 +448,10 @@ final class VADThresholdGate: @unchecked Sendable {
         var didCompletePriming = false
         var primingEndedAtCap = false
         appendAdaptiveRollingFrame(db: frameDb, duration: frameDuration)
-        let rollingPercentile = adaptiveRollingPercentile()
+        let signalPercentile = adaptiveSignalPercentile()
+        adaptiveSignalPercentileCache = signalPercentile
         let windowMax = adaptiveRollingMaxDb(coverSeconds: Self.adaptiveColdStartDispersionWindowSeconds)
-        let dispersionDb = (windowMax ?? frameDb) - (rollingPercentile ?? frameDb)
+        let dispersionDb = (windowMax ?? frameDb) - (signalPercentile ?? frameDb)
         let shortSpreadDb: Double?
         if config.adaptiveDynamicsEnabled {
             let windowMin = adaptiveRollingMinDb(coverSeconds: Self.adaptiveColdStartDispersionWindowSeconds)
@@ -439,12 +460,11 @@ final class VADThresholdGate: @unchecked Sendable {
             shortSpreadDb = nil
         }
         let adjacentStepDb = adaptiveRollingAdjacentStepDb()
-        adaptiveRollingPercentileCache = rollingPercentile
         if !adaptiveRefinementComplete {
             return processAdaptiveRefinement(
                 frameDb: frameDb,
                 frameDuration: frameDuration,
-                rollingPercentile: rollingPercentile,
+                signalPercentile: signalPercentile,
                 dispersionDb: dispersionDb,
                 shortSpreadDb: shortSpreadDb
             )
@@ -459,7 +479,7 @@ final class VADThresholdGate: @unchecked Sendable {
             return processAdaptiveRefinement(
                 frameDb: frameDb,
                 frameDuration: frameDuration,
-                rollingPercentile: rollingPercentile,
+                signalPercentile: signalPercentile,
                 dispersionDb: dispersionDb,
                 shortSpreadDb: shortSpreadDb
             )
@@ -475,8 +495,14 @@ final class VADThresholdGate: @unchecked Sendable {
             shortSpreadDb: shortSpreadDb,
             adjacentStepDb: adjacentStepDb
         )
+        if levels.evidence == .silence, frameDuration > 0 {
+            markLatestAdaptiveRollingFrameAsFloorEligible()
+        }
+        adaptiveRollingPercentileCache = adaptiveRollingPercentile()
         if levels.evidence == .silence {
             elapsedSinceSilenceEvidence = 0
+            implausibleSpeechFallbackActive = false
+            implausibleFallbackSuspendsSpeechCeiling = false
         } else {
             elapsedSinceSilenceEvidence += max(0, frameDuration)
             let elapsedSinceSilenceEvidenceWithEpsilon = elapsedSinceSilenceEvidence
@@ -488,50 +514,103 @@ final class VADThresholdGate: @unchecked Sendable {
             let viaStuckRun = !lastKnownMachineIsIdle
                 && elapsedSinceSilenceEvidenceWithEpsilon >= Self.adaptiveImplausibleSpeechSeconds
                 && flatSignal
-            let floorAtInitClamp = currentFloor <= Self.floorMinDb + Self.adaptiveFloorMovementEpsilonDb
-            if floorAtInitClamp || viaIdle || viaStuckRun, let target = rollingPercentile {
-                let elapsedBeforeReset = elapsedSinceSilenceEvidence
+            let wasImplausibleSpeechFallbackActive = implausibleSpeechFallbackActive
+            if wasImplausibleSpeechFallbackActive && !viaStuckRun {
                 elapsedSinceSilenceEvidence = 0
-                let reanchoredFloor: Double
-                if let speechCeilingDb {
-                    reanchoredFloor = clampFloor(min(
-                        target,
-                        speechCeilingDb - effectiveAdaptiveDeltaDb - Self.speechCeilingMarginDb
-                    ))
-                } else {
-                    reanchoredFloor = clampFloor(target)
-                }
+            }
+            implausibleSpeechFallbackActive = viaStuckRun
+            if !viaStuckRun {
+                implausibleFallbackSuspendsSpeechCeiling = false
+            }
+            let floorAtInitClamp = currentFloor <= Self.floorMinDb + Self.adaptiveFloorMovementEpsilonDb
+            if floorAtInitClamp || viaIdle || (viaStuckRun && !wasImplausibleSpeechFallbackActive),
+               let target = adaptiveRollingPercentileCache ?? adaptiveSignalPercentileCache {
+                let usesSignalFallback = adaptiveRollingPercentileCache == nil
+                let elapsedBeforeReset = elapsedSinceSilenceEvidence
                 let maximumReanchorFloor = Self.floorMaxDb - effectiveAdaptiveDeltaDb
-                if reanchoredFloor <= maximumReanchorFloor {
-                    let floorMoved = abs(reanchoredFloor - currentFloor) > Self.adaptiveFloorMovementEpsilonDb
-                    floorDb = reanchoredFloor
-                    if viaStuckRun && floorMoved {
-                        FileLogger.shared.warn(
-                            .audio,
-                            "VAD: stuck floor re-anchored after implausible speech run",
-                            payload: ["floorDb": reanchoredFloor, "runSeconds": elapsedBeforeReset]
-                        )
+                let refusesImplausibleFallbackTarget = viaStuckRun
+                    && usesSignalFallback
+                    && target > maximumReanchorFloor
+                if refusesImplausibleFallbackTarget {
+                    if !wasImplausibleSpeechFallbackActive {
+                        elapsedSinceSilenceEvidence = 0
+                        implausibleSpeechFallbackActive = false
+                        implausibleFallbackSuspendsSpeechCeiling = false
                     }
-                    if floorMoved && !hasRefusedReanchorSinceLastAcceptance {
-                        pendingReanchorEvent = true
-                        didReanchor = true
-                    }
-                    hasRefusedReanchorSinceLastAcceptance = false
-                    let thresholds = adaptiveThresholds(floor: reanchoredFloor)
-                    levels = classify(
-                        frameDb: frameDb,
-                        strongThresholdDb: thresholds.strong,
-                        continuationThresholdDb: thresholds.continuation,
-                        silenceThresholdDb: thresholds.silence,
-                        dynamicsSpreadDb: config.adaptiveDynamicsEnabled ? dispersionDb : nil,
-                        shortSpreadDb: shortSpreadDb,
-                        adjacentStepDb: adjacentStepDb
-                    )
-                } else {
                     hasRefusedReanchorSinceLastAcceptance = true
                     if !hasLoggedReanchorRefusal {
                         hasLoggedReanchorRefusal = true
                         FileLogger.shared.warn(.audio, "VAD: re-anchor refused")
+                    }
+                } else {
+                    if !viaStuckRun { elapsedSinceSilenceEvidence = 0 }
+                    let fallbackSpeechIsPlausible = utteranceSpeechLevelDb.map {
+                        target >= $0 - effectiveDynamicsSpreadDb
+                    } ?? false
+                    implausibleFallbackSuspendsSpeechCeiling = viaStuckRun
+                        && usesSignalFallback
+                        && !fallbackSpeechIsPlausible
+                    if implausibleFallbackSuspendsSpeechCeiling {
+                        self.speechCeilingDb = nil
+                        utteranceSpeechLevelDb = nil
+                    }
+                    let reanchoredFloor: Double
+                    if implausibleFallbackSuspendsSpeechCeiling {
+                        reanchoredFloor = clampFloor(target)
+                    } else if let speechCeilingDb {
+                        reanchoredFloor = clampFloor(min(
+                            target,
+                            speechCeilingDb - effectiveCeilingMarginDb
+                        ))
+                    } else {
+                        reanchoredFloor = clampFloor(target)
+                    }
+                    if reanchoredFloor <= maximumReanchorFloor {
+                        updateFloor(
+                            targetDb: reanchoredFloor,
+                            frameDuration: frameDuration,
+                            maximumRiseDbPerSecond: maximumFloorRiseDbPerSecond,
+                            enforceSpeechCeiling: !implausibleFallbackSuspendsSpeechCeiling
+                        )
+                        let appliedFloor = floorDb ?? currentFloor
+                        let floorMoved = abs(appliedFloor - currentFloor)
+                            > Self.adaptiveFloorMovementEpsilonDb
+                        if viaStuckRun && floorMoved {
+                            FileLogger.shared.warn(
+                                .audio,
+                                "VAD: stuck floor re-anchored after implausible speech run",
+                                payload: ["floorDb": appliedFloor, "runSeconds": elapsedBeforeReset]
+                            )
+                        }
+                        if floorMoved && !hasRefusedReanchorSinceLastAcceptance {
+                            pendingReanchorEvent = true
+                            didReanchor = true
+                        }
+                        adaptiveSignalFallbackActive = adaptiveSignalFallbackActive || usesSignalFallback
+                        hasRefusedReanchorSinceLastAcceptance = false
+                        let thresholds = adaptiveThresholds(floor: appliedFloor)
+                        levels = classify(
+                            frameDb: frameDb,
+                            strongThresholdDb: thresholds.strong,
+                            continuationThresholdDb: thresholds.continuation,
+                            silenceThresholdDb: thresholds.silence,
+                            dynamicsSpreadDb: config.adaptiveDynamicsEnabled ? dispersionDb : nil,
+                            shortSpreadDb: shortSpreadDb,
+                            adjacentStepDb: adjacentStepDb
+                        )
+                        if levels.evidence == .silence, frameDuration > 0 {
+                            elapsedSinceSilenceEvidence = 0
+                            implausibleSpeechFallbackActive = false
+                            implausibleFallbackSuspendsSpeechCeiling = false
+                            markLatestAdaptiveRollingFrameAsFloorEligible()
+                            adaptiveRollingPercentileCache = adaptiveRollingPercentile()
+                        }
+                    } else {
+                        hasRefusedReanchorSinceLastAcceptance = true
+                        if !hasLoggedReanchorRefusal {
+                            hasLoggedReanchorRefusal = true
+                            FileLogger.shared.warn(.audio, "VAD: re-anchor refused")
+                        }
                     }
                 }
             }
@@ -563,7 +642,7 @@ final class VADThresholdGate: @unchecked Sendable {
     private func processAdaptiveRefinement(
         frameDb: Double,
         frameDuration: Double,
-        rollingPercentile: Double?,
+        signalPercentile: Double?,
         dispersionDb: Double,
         shortSpreadDb: Double?
     ) -> VADGateOutput {
@@ -572,19 +651,37 @@ final class VADThresholdGate: @unchecked Sendable {
             floorDb = Self.floorMinDb
         }
 
+        let initialThresholds = adaptiveThresholds(floor: floorDb ?? Self.floorMinDb)
+        let initialLevels = classify(
+            frameDb: frameDb,
+            strongThresholdDb: initialThresholds.strong,
+            continuationThresholdDb: initialThresholds.continuation,
+            silenceThresholdDb: initialThresholds.silence,
+            dynamicsSpreadDb: config.adaptiveDynamicsEnabled ? dispersionDb : nil,
+            shortSpreadDb: shortSpreadDb,
+            adjacentStepDb: adaptiveRollingAdjacentStepDb()
+        )
+        if initialLevels.evidence == .silence, frameDuration > 0 {
+            markLatestAdaptiveRollingFrameAsFloorEligible()
+        }
+        let rollingFloorPercentile = adaptiveRollingPercentile()
+        adaptiveRollingPercentileCache = rollingFloorPercentile
+        let seedTarget = rollingFloorPercentile ?? signalPercentile
+
         let shapedThresholdDb = config.adaptiveDynamicsEnabled
             ? effectiveDynamicsSpreadDb
-            : effectiveAdaptiveDeltaDb + Self.speechCeilingMarginDb
+            : effectiveAdaptiveDeltaDb + Self.adaptiveColdStartSpeechShapeMarginDb
         coldStartSpeechShapedNow = dispersionDb >= shapedThresholdDb
 
         if adaptiveRefinementElapsed >= Self.adaptiveColdStartGraceSeconds,
-           let rollingPercentile {
-            // Do not cap the seed at the absolute speech floor: a loud room (for
-            // example, -25 dB) would be pinned near -56 dB and recreate the bug.
-            // The b025abd concern (prevent adaptive VAD from learning speech) is
-            // instead covered by guarded-grace onset, continuation sustain,
-            // floor-fall, and the head buffer.
-            floorDb = clampFloor(rollingPercentile)
+           let seedTarget {
+            updateFloor(
+                targetDb: seedTarget,
+                frameDuration: frameDuration,
+                maximumRiseDbPerSecond: maximumFloorRiseDbPerSecond
+            )
+            adaptiveSignalFallbackActive = adaptiveSignalFallbackActive
+                || rollingFloorPercentile == nil
             if !coldStartConverged {
                 coldStartConverged = true
                 FileLogger.shared.info(
@@ -593,31 +690,8 @@ final class VADThresholdGate: @unchecked Sendable {
                     payload: ["floorDb": floorDb ?? NSNull()]
                 )
             }
-        } else if !coldStartConverged {
-            if let floorDb {
-                self.floorDb = min(floorDb, clampFloor(frameDb))
-            } else {
-                floorDb = Self.floorMinDb
-            }
         }
-        let refinementCapReached = adaptiveRefinementElapsed + Self.timeBoundaryEpsilon
-            >= 2 * Self.adaptiveMinRefinementDuration
-        if refinementCapReached, !coldStartConverged {
-            let forcedSeedDb = rollingPercentile
-                ?? adaptiveRollingMinDb(coverSeconds: Self.adaptiveRollingWindowDuration)
-                ?? frameDb
-            let forcedFloor = clampFloor(forcedSeedDb)
-            floorDb = forcedFloor
-            coldStartConverged = true
-            FileLogger.shared.warn(
-                .audio,
-                "VAD: cold-start forced seed",
-                payload: ["floorDb": forcedFloor]
-            )
-        }
-        if coldStartConverged || refinementCapReached {
-            adaptiveRefinementComplete = true
-        }
+        adaptiveRefinementComplete = coldStartConverged
 
         let currentFloor = floorDb ?? Self.floorMinDb
         let thresholds = adaptiveThresholds(floor: currentFloor)
@@ -631,6 +705,10 @@ final class VADThresholdGate: @unchecked Sendable {
             shortSpreadDb: shortSpreadDb,
             adjacentStepDb: adjacentStepDb
         )
+        if levels.evidence == .silence, frameDuration > 0 {
+            markLatestAdaptiveRollingFrameAsFloorEligible()
+            adaptiveRollingPercentileCache = adaptiveRollingPercentile()
+        }
         let evidence = dynamicsGatedEvidence(
             levels.evidence,
             dispersionDb: shortSpreadDb ?? dispersionDb
@@ -716,9 +794,8 @@ final class VADThresholdGate: @unchecked Sendable {
         }
     }
 
-    /// Updates the adaptive floor using the current VAD evidence. The rolling
-    /// percentile remains populated by every processed frame, so a poisoned
-    /// floor cannot prevent ambient audio from becoming adaptation evidence.
+    /// Updates the adaptive floor using current VAD evidence and silence-only
+    /// percentile samples; a starved window never substitutes non-silence data.
     func updateFloorTracking(
         frameDb: Double,
         duration: Double,
@@ -727,9 +804,30 @@ final class VADThresholdGate: @unchecked Sendable {
     ) {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
+        let floorMovementAlreadyApplied = floorMovementAppliedThisFrame
+        floorMovementAppliedThisFrame = false
+        let wasMachineIsIdle = lastKnownMachineIsIdle
         lastKnownMachineIsIdle = machineIsIdle
         updateLoudRegime(duration: duration, machineIsIdle: machineIsIdle)
         guard behaviorMode == .adaptive else { return }
+        let hasSpeechLikeEvidence = lastOutput.evidence == .strong || lastOutput.evidence == .continuing
+        let tracksUtteranceSpeechLevel = frameWithinUtteranceContext
+            && hasSpeechLikeEvidence
+            && !implausibleSpeechFallbackActive
+        if !tracksUtteranceSpeechLevel, (machineIsIdle || wasMachineIsIdle) {
+            utteranceSpeechLevelDb = nil
+        }
+        let priorSpeechLevelDb = utteranceSpeechLevelDb
+        let speechLevelIsPlausible = priorSpeechLevelDb.map {
+            frameDb >= $0 - effectiveDynamicsSpreadDb
+        } ?? true
+        if tracksUtteranceSpeechLevel && speechLevelIsPlausible {
+            if wasMachineIsIdle { utteranceSpeechLevelDb = nil }
+            // Reject abrupt lower-level bursts; keep the quietest plausible speech sample as the ceiling.
+            let speechLevel = min(utteranceSpeechLevelDb ?? frameDb, frameDb)
+            utteranceSpeechLevelDb = speechLevel
+            speechCeilingDb = min(speechCeilingDb ?? speechLevel, speechLevel)
+        }
         guard floorDb != nil else { return }
         guard adaptiveRefinementComplete else { return }
         // Let residual post-finalize noise decay before it can lift the new quiet floor.
@@ -759,31 +857,49 @@ final class VADThresholdGate: @unchecked Sendable {
                     : 0
             }
         }
-        if machineIsIdle, let speechCeilingDb {
+        if machineIsIdle, !tracksUtteranceSpeechLevel, let speechCeilingDb {
             let decayedCeilingDb = speechCeilingDb
                 + Self.elevatedRiseDbPerSecond * effectiveRiseSpeedMultiplier * max(0, duration)
-            let clampBound = decayedCeilingDb - effectiveAdaptiveDeltaDb - Self.speechCeilingMarginDb
-            self.speechCeilingDb = clampBound > Self.floorMaxDb - effectiveAdaptiveDeltaDb
+            let clampBound = decayedCeilingDb - effectiveCeilingMarginDb
+            self.speechCeilingDb = clampBound > Self.floorMaxDb
                 ? nil
                 : decayedCeilingDb
+        }
+        if !implausibleFallbackSuspendsSpeechCeiling, enforceSpeechCeiling() {
+            refreshAdaptiveOutput()
+        }
+        if floorMovementAlreadyApplied { return }
+        if implausibleSpeechFallbackActive,
+           !machineIsEnding,
+           let fallbackTarget = adaptiveRollingPercentileCache ?? adaptiveSignalPercentileCache {
+            let maximumFallbackTarget = Self.floorMaxDb - effectiveAdaptiveDeltaDb
+            guard fallbackTarget <= maximumFallbackTarget else {
+                hasRefusedReanchorSinceLastAcceptance = true
+                return
+            }
+            updateFloor(
+                targetDb: fallbackTarget,
+                frameDuration: duration,
+                maximumRiseDbPerSecond: maximumFloorRiseDbPerSecond,
+                enforceSpeechCeiling: !implausibleFallbackSuspendsSpeechCeiling
+            )
+            hasRefusedReanchorSinceLastAcceptance = false
+            refreshAdaptiveOutput()
+            return
         }
         if machineIsEnding,
            !suppressReseededFloorRise,
            let shortSpreadDb = lastOutput.shortSpreadDb,
            let dynamicsSpreadDb = lastOutput.dynamicsSpreadDb,
            shortSpreadDb < effectiveFlatSpreadDb,
-           dynamicsSpreadDb < Self.adaptiveEndPendingWindDispersionDb,
-           lastOutput.evidence != .strong,
-           let floorDb {
-            let target = max(adaptiveRollingPercentileCache ?? frameDb, frameDb)
-            let risenFloor = max(
-                floorDb,
-                min(
-                    target,
-                    floorDb + Self.elevatedRiseDbPerSecond * effectiveRiseSpeedMultiplier * duration
-                )
+            dynamicsSpreadDb < Self.adaptiveEndPendingWindDispersionDb,
+            lastOutput.evidence != .strong,
+            let target = adaptiveRollingPercentileCache {
+            updateFloor(
+                targetDb: target,
+                frameDuration: duration,
+                maximumRiseDbPerSecond: maximumFloorRiseDbPerSecond
             )
-            self.floorDb = clampFloor(risenFloor)
             refreshAdaptiveOutput()
             return
         }
@@ -792,7 +908,12 @@ final class VADThresholdGate: @unchecked Sendable {
            adaptiveRollingPercentileAtLeast(floorDb) {
             return
         }
-        guard let target = adaptiveRollingPercentileCache else { return }
+        let target = adaptiveRollingPercentileCache
+            ?? (adaptiveSignalFallbackActive && machineIsIdle && !machineIsEnding
+                ? adaptiveSignalPercentileCache
+                : nil)
+        guard let target else { return }
+        riseCap = min(riseCap, maximumFloorRiseDbPerSecond)
         updateFloor(targetDb: target, frameDuration: duration, maximumRiseDbPerSecond: riseCap)
         refreshAdaptiveOutput()
     }
@@ -825,6 +946,12 @@ final class VADThresholdGate: @unchecked Sendable {
         pendingReanchorEvent = false
         hasRefusedReanchorSinceLastAcceptance = false
         speechCeilingDb = nil
+        utteranceSpeechLevelDb = nil
+        adaptiveSignalFallbackActive = false
+        implausibleSpeechFallbackActive = false
+        implausibleFallbackSuspendsSpeechCeiling = false
+        floorRiseAppliedThisFrameDb = 0
+        floorMovementAppliedThisFrame = false
         floorRiseSuppressionRemainingSeconds = 0
         resetAdaptiveRollingWindow()
         lastOutput = VADGateOutput(
@@ -850,19 +977,42 @@ final class VADThresholdGate: @unchecked Sendable {
     private func updateFloor(
         targetDb: Double,
         frameDuration: Double,
-        maximumRiseDbPerSecond: Double
+        maximumRiseDbPerSecond: Double,
+        enforceSpeechCeiling: Bool = true
     ) {
         guard var floor = floorDb else { return }
+        let previousFloor = floor
         if targetDb > floor {
-            floor = min(targetDb, floor + maximumRiseDbPerSecond * frameDuration)
+            let maximumRiseDb = max(0, maximumRiseDbPerSecond) * max(0, frameDuration)
+            let availableRiseDb = max(0, maximumRiseDb - floorRiseAppliedThisFrameDb)
+            let appliedRiseDb = min(targetDb - floor, availableRiseDb)
+            floor += appliedRiseDb
+            floorRiseAppliedThisFrameDb += appliedRiseDb
         } else {
             let alpha = 1.0 - exp(-frameDuration / effectiveFallTauSeconds)
             floor += alpha * (targetDb - floor)
         }
-        if let speechCeilingDb {
-            floor = min(floor, speechCeilingDb - effectiveAdaptiveDeltaDb - Self.speechCeilingMarginDb)
+        if enforceSpeechCeiling, let speechCeilingDb {
+            floor = min(floor, speechCeilingDb - effectiveCeilingMarginDb)
         }
-        floorDb = clampFloor(floor)
+        let updatedFloor = clampFloor(floor)
+        if abs(updatedFloor - previousFloor) > Self.adaptiveFloorMovementEpsilonDb {
+            floorMovementAppliedThisFrame = true
+        }
+        floorDb = updatedFloor
+    }
+
+    private var maximumFloorRiseDbPerSecond: Double {
+        Self.elevatedRiseDbPerSecond * effectiveRiseSpeedMultiplier
+    }
+
+    private func enforceSpeechCeiling() -> Bool {
+        guard let floorDb, let speechCeilingDb else { return false }
+        let ceilingBoundDb = speechCeilingDb - effectiveCeilingMarginDb
+        guard floorDb > ceilingBoundDb else { return false }
+        self.floorDb = clampFloor(ceilingBoundDb)
+        floorMovementAppliedThisFrame = true
+        return true
     }
 
     private func appendAdaptiveRollingFrame(db: Double, duration: Double) {
@@ -877,6 +1027,7 @@ final class VADThresholdGate: @unchecked Sendable {
 
         adaptiveRollingDbs[adaptiveRollingWriteIndex] = db
         adaptiveRollingDurations[adaptiveRollingWriteIndex] = duration
+        adaptiveRollingFloorEligible[adaptiveRollingWriteIndex] = false
         adaptiveRollingWriteIndex = (adaptiveRollingWriteIndex + 1) % Self.adaptiveRollingWindowCapacity
         adaptiveRollingElapsed += duration
 
@@ -889,14 +1040,22 @@ final class VADThresholdGate: @unchecked Sendable {
         }
     }
 
+    private func markLatestAdaptiveRollingFrameAsFloorEligible() {
+        guard adaptiveRollingCount > 0 else { return }
+        let latestIndex = (adaptiveRollingWriteIndex - 1 + Self.adaptiveRollingWindowCapacity)
+            % Self.adaptiveRollingWindowCapacity
+        adaptiveRollingFloorEligible[latestIndex] = true
+    }
+
     private func resetAdaptiveRollingWindow() {
         adaptiveRollingWriteIndex = 0
         adaptiveRollingCount = 0
         adaptiveRollingElapsed = 0
         adaptiveRollingPercentileCache = nil
+        adaptiveSignalPercentileCache = nil
     }
 
-    private func adaptiveRollingPercentile() -> Double? {
+    private func adaptiveSignalPercentile() -> Double? {
         guard adaptiveRollingCount > 0 else { return nil }
         var values: [Double] = []
         values.reserveCapacity(adaptiveRollingCount)
@@ -905,6 +1064,21 @@ final class VADThresholdGate: @unchecked Sendable {
                 % Self.adaptiveRollingWindowCapacity
             values.append(adaptiveRollingDbs[index])
         }
+        return percentile(values, percentile: Self.adaptiveRollingPercentile)
+    }
+
+    private func adaptiveRollingPercentile() -> Double? {
+        guard adaptiveRollingCount > 0 else { return nil }
+        var values: [Double] = []
+        values.reserveCapacity(adaptiveRollingCount)
+        for offset in 0..<adaptiveRollingCount {
+            let index = (adaptiveRollingWriteIndex - adaptiveRollingCount + offset
+                + Self.adaptiveRollingWindowCapacity) % Self.adaptiveRollingWindowCapacity
+            if adaptiveRollingFloorEligible[index] {
+                values.append(adaptiveRollingDbs[index])
+            }
+        }
+        guard !values.isEmpty else { return nil }
         return percentile(values, percentile: Self.adaptiveRollingPercentile)
     }
 
@@ -983,11 +1157,17 @@ final class VADThresholdGate: @unchecked Sendable {
     }
 
     private func adaptiveRollingPercentileAtLeast(_ floorDb: Double) -> Bool {
-        guard adaptiveRollingCount > 0 else { return false }
+        var eligibleCount = 0
+        for offset in 0..<adaptiveRollingCount {
+            let index = (adaptiveRollingWriteIndex - adaptiveRollingCount + offset
+                + Self.adaptiveRollingWindowCapacity) % Self.adaptiveRollingWindowCapacity
+            if adaptiveRollingFloorEligible[index] { eligibleCount += 1 }
+        }
+        guard eligibleCount > 0 else { return false }
 
-        let position = Self.adaptiveRollingPercentile * Double(adaptiveRollingCount - 1)
+        let position = Self.adaptiveRollingPercentile * Double(eligibleCount - 1)
         let lowerIndex = Int(position.rounded(.down))
-        let upperIndex = min(lowerIndex + 1, adaptiveRollingCount - 1)
+        let upperIndex = min(lowerIndex + 1, eligibleCount - 1)
         var belowCount = 0
         var maximumBelow = -Double.infinity
         var minimumAtOrAbove = Double.infinity
@@ -995,6 +1175,7 @@ final class VADThresholdGate: @unchecked Sendable {
         for offset in 0..<adaptiveRollingCount {
             let index = (adaptiveRollingWriteIndex - adaptiveRollingCount + offset + Self.adaptiveRollingWindowCapacity)
                 % Self.adaptiveRollingWindowCapacity
+            guard adaptiveRollingFloorEligible[index] else { continue }
             let value = adaptiveRollingDbs[index]
             if value < floorDb {
                 belowCount += 1

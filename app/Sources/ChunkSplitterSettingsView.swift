@@ -365,6 +365,7 @@ struct ChunkSplitterSettingsView: View {
             adaptiveAbsoluteSpeechFloorDb: settings.chunkSplitterAbsoluteSpeechFloorDb,
             adaptiveRiseSpeedMultiplier: 1.0,
             adaptiveSilenceDeltaDb: SharedConfig.streamVadAdaptiveSilenceDeltaDb(),
+            ceilingMarginDb: SharedConfig.streamVadCeilingMarginDb(),
             adaptiveStaleFloorSeconds: SharedConfig.streamVadStaleFloorSeconds(),
             adaptiveFallTauSeconds: SharedConfig.streamVadFallTauSeconds(),
             adaptiveDynamicsEnabled: SharedConfig.streamVadDynamicsEnabled(),

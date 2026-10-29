@@ -150,7 +150,13 @@ describe('chunk-splitter speech-free endpoint window', () => {
         minSpeechSamples: 300 * 16,
         gateConfig: { adaptiveAbsoluteSpeechFloorDb: -40 },
       });
-      for (let index = 0; index < 100; index += 1) harness.drive(ambientDb);
+      let previousFloorDb = harness.gate.snapshot.floorDb;
+      for (let index = 0; index < 500; index += 1) {
+        harness.drive(ambientDb);
+        const floorDb = harness.gate.snapshot.floorDb;
+        assert.ok(floorDb - previousFloorDb <= 12 * frameDuration + 1e-9);
+        previousFloorDb = floorDb;
+      }
 
       assert.equal(harness.endpoint.state, 'idle');
       assert.ok(Math.abs(harness.gate.snapshot.floorDb - ambientDb) < 1);

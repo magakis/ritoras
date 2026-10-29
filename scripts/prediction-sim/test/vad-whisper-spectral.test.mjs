@@ -142,6 +142,7 @@ function primeFloorAt(harness, floorDb = -60) {
 }
 
 function prefillAmbient(harness, frameCount = 300) {
+  primeFloorAt(harness, -60);
   for (let index = 0; index < frameCount; index += 1) harness.drive(-60);
 }
 

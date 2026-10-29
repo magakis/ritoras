@@ -6,7 +6,9 @@ const VAD_CONTINUATION_DELTA_DB = 6.0;
 export const VAD_STATIC_CONTINUATION_OFFSET_DB = 4.0;
 export const VAD_STATIC_SILENCE_OFFSET_DB = 6.0;
 export const VAD_ELEVATED_RISE_DB_PER_SECOND = 12.0;
-export const VAD_SPEECH_CEILING_MARGIN_DB = 2.0;
+export const VAD_SPEECH_CEILING_MARGIN_DB = 8.0;
+const VAD_SPEECH_CEILING_QUALIFICATION_MARGIN_DB = 2.0;
+const VAD_COLD_START_SPEECH_SHAPE_MARGIN_DB = 2.0;
 // Keep the end-floor correction bounded until the residual post-finalize bump decays.
 const VAD_UTTERANCE_END_FLOOR_RESEED_MAX_DROP_DB = 4.0;
 const VAD_UTTERANCE_END_FLOOR_RISE_HOLD_S = 1.2;
@@ -128,6 +130,7 @@ export function makeVadGateConfig(partial = {}) {
     adaptiveAbsoluteSpeechFloorDb: VAD_ABSOLUTE_SPEECH_FLOOR_DB,
     adaptiveRiseSpeedMultiplier: 1.0,
     adaptiveSilenceDeltaDb: 3.0,
+    ceilingMarginDb: VAD_SPEECH_CEILING_MARGIN_DB,
     adaptiveStaleFloorSeconds: 1.5,
     adaptiveFallTauSeconds: 0.5,
     adaptiveDynamicsEnabled: true,
@@ -171,6 +174,7 @@ export class VADThresholdGate {
       VAD_FLOOR_MIN_DB,
       -30,
     );
+    this.effectiveCeilingMarginDb = clamp(this.config.ceilingMarginDb, 0, 24);
     this.effectiveSilenceDeltaDb = clamp(
       this.config.adaptiveSilenceDeltaDb,
       VAD_ADAPTIVE_SILENCE_DELTA_DB_MIN,
@@ -222,12 +226,20 @@ export class VADThresholdGate {
     this.hasRefusedReanchorSinceLastAcceptance = false;
     this.elapsedSinceSilenceEvidence = 0;
     this.speechCeilingDb = null;
+    this.utteranceSpeechLevelDb = null;
     this.adaptiveRollingDbs = Array(VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY).fill(0);
     this.adaptiveRollingDurations = Array(VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY).fill(0);
+    this.adaptiveRollingFloorEligible = Array(VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY).fill(false);
     this.adaptiveRollingWriteIndex = 0;
     this.adaptiveRollingCount = 0;
     this.adaptiveRollingElapsed = 0;
     this.adaptiveRollingPercentileCache = null;
+    this.adaptiveSignalPercentileCache = null;
+    this.adaptiveSignalFallbackActive = false;
+    this.implausibleSpeechFallbackActive = false;
+    this.implausibleFallbackSuspendsSpeechCeiling = false;
+    this.floorRiseAppliedThisFrameDb = 0;
+    this.floorMovementAppliedThisFrame = false;
     this.floorRiseSuppressionRemainingSeconds = 0;
     this.lastKnownMachineIsIdle = true;
     this.isLoudRegime = false;
@@ -268,6 +280,8 @@ export class VADThresholdGate {
     highBandRatioDb: frameHighBandRatioDb = null,
     withinUtteranceContext = false,
   } = {}) {
+    this.floorRiseAppliedThisFrameDb = 0;
+    this.floorMovementAppliedThisFrame = false;
     this.frameHighBandRatioDb = Number.isFinite(frameHighBandRatioDb)
       ? frameHighBandRatioDb
       : null;
@@ -312,8 +326,8 @@ export class VADThresholdGate {
       && quietestStrongDb !== undefined
       && quietestStrongDb >= this.floorDb
         + this.effectiveAdaptiveDeltaDb
-        + VAD_SPEECH_CEILING_MARGIN_DB) {
-      this.speechCeilingDb = quietestStrongDb;
+        + VAD_SPEECH_CEILING_QUALIFICATION_MARGIN_DB) {
+      this.speechCeilingDb = Math.min(this.speechCeilingDb ?? quietestStrongDb, quietestStrongDb);
     }
     if (this.floorDb !== null && Number.isFinite(trailingSilenceDb)) {
       if (this.speechCeilingDb === null) {
@@ -338,6 +352,9 @@ export class VADThresholdGate {
     } else {
       this.floorRiseSuppressionRemainingSeconds = 0;
     }
+    this.utteranceSpeechLevelDb = null;
+    this.implausibleSpeechFallbackActive = false;
+    this.implausibleFallbackSuspendsSpeechCeiling = false;
     this.resetAdaptiveRollingWindow();
   }
 
@@ -361,7 +378,8 @@ export class VADThresholdGate {
   processAdaptive(frameDb, frameDuration) {
     let didReanchor = false;
     this.appendAdaptiveRollingFrame(frameDb, frameDuration);
-    const rollingPercentile = this.adaptiveRollingPercentile();
+    const rollingPercentile = this.adaptiveSignalPercentile();
+    this.adaptiveSignalPercentileCache = rollingPercentile;
     const windowMax = this.adaptiveRollingMaxDb(VAD_ADAPTIVE_COLD_START_DISPERSION_WINDOW_S);
     const dispersionDb = (windowMax ?? frameDb) - (rollingPercentile ?? frameDb);
     const shortSpreadDb = this.config.adaptiveDynamicsEnabled
@@ -369,7 +387,6 @@ export class VADThresholdGate {
         - (this.adaptiveRollingMinDb(VAD_ADAPTIVE_COLD_START_DISPERSION_WINDOW_S) ?? frameDb)
       : null;
     const adjacentStepDb = this.adaptiveRollingAdjacentStepDb();
-    this.adaptiveRollingPercentileCache = rollingPercentile;
     if (!this.adaptiveRefinementComplete) {
       return this.processAdaptiveRefinement(
         frameDb,
@@ -405,8 +422,14 @@ export class VADThresholdGate {
       shortSpreadDb,
       adjacentStepDb,
     );
+    if (levels.evidence === 'silence' && frameDuration > 0) {
+      this.markLatestAdaptiveRollingFrameAsFloorEligible();
+    }
+    this.adaptiveRollingPercentileCache = this.adaptiveRollingPercentile();
     if (levels.evidence === 'silence') {
       this.elapsedSinceSilenceEvidence = 0;
+      this.implausibleSpeechFallbackActive = false;
+      this.implausibleFallbackSuspendsSpeechCeiling = false;
     } else {
       this.elapsedSinceSilenceEvidence += Math.max(0, frameDuration);
       const elapsedSinceSilenceEvidence = this.elapsedSinceSilenceEvidence
@@ -418,43 +441,84 @@ export class VADThresholdGate {
       const viaStuckRun = !this.lastKnownMachineIsIdle
         && elapsedSinceSilenceEvidence >= VAD_ADAPTIVE_IMPLAUSIBLE_SPEECH_S
         && flatSignal;
+      const wasImplausibleSpeechFallbackActive = this.implausibleSpeechFallbackActive;
+      if (!viaStuckRun) {
+        if (wasImplausibleSpeechFallbackActive) this.elapsedSinceSilenceEvidence = 0;
+        this.implausibleSpeechFallbackActive = false;
+        this.implausibleFallbackSuspendsSpeechCeiling = false;
+      }
       const floorAtInitClamp = this.floorDb <= VAD_FLOOR_MIN_DB
         + VAD_ADAPTIVE_FLOOR_MOVEMENT_EPSILON_DB;
-      if (floorAtInitClamp || viaIdle || viaStuckRun) {
-        const target = rollingPercentile;
+      if (floorAtInitClamp || viaIdle || (viaStuckRun && !wasImplausibleSpeechFallbackActive)) {
+        const target = this.adaptiveRollingPercentileCache
+          ?? this.adaptiveSignalPercentileCache;
         if (target !== null) {
-          this.elapsedSinceSilenceEvidence = 0;
-          const reanchoredFloor = this.speechCeilingDb === null
-            ? this.clampFloor(target)
-            : this.clampFloor(Math.min(
-              target,
-              this.speechCeilingDb
-                - this.effectiveAdaptiveDeltaDb
-                - VAD_SPEECH_CEILING_MARGIN_DB,
-            ));
+          const usesSignalFallback = this.adaptiveRollingPercentileCache === null;
           const maximumReanchorFloor = VAD_FLOOR_MAX_DB - this.effectiveAdaptiveDeltaDb;
-          if (reanchoredFloor <= maximumReanchorFloor) {
-            const floorMoved = Math.abs(reanchoredFloor - this.floorDb)
-              > VAD_ADAPTIVE_FLOOR_MOVEMENT_EPSILON_DB;
-            this.floorDb = reanchoredFloor;
-            if (floorMoved && !this.hasRefusedReanchorSinceLastAcceptance) {
-              this.pendingReanchorEvent = true;
-              didReanchor = true;
+          if (viaStuckRun && usesSignalFallback && target > maximumReanchorFloor) {
+            if (!wasImplausibleSpeechFallbackActive) {
+              this.elapsedSinceSilenceEvidence = 0;
+              this.implausibleSpeechFallbackActive = false;
+              this.implausibleFallbackSuspendsSpeechCeiling = false;
             }
-            this.hasRefusedReanchorSinceLastAcceptance = false;
-            const thresholds = this.adaptiveThresholds(reanchoredFloor);
-            levels = this.classify(
-              frameDb,
-              thresholds.strongThresholdDb,
-              thresholds.continuationThresholdDb,
-              thresholds.silenceThresholdDb,
-              this.config.adaptiveDynamicsEnabled ? dispersionDb : null,
-              shortSpreadDb,
-              adjacentStepDb,
-            );
-          } else {
             this.hasRefusedReanchorSinceLastAcceptance = true;
             if (!this.hasLoggedReanchorRefusal) this.hasLoggedReanchorRefusal = true;
+          } else {
+            if (viaStuckRun) this.implausibleSpeechFallbackActive = true;
+            if (!viaStuckRun) this.elapsedSinceSilenceEvidence = 0;
+            const fallbackSpeechIsPlausible = this.utteranceSpeechLevelDb === null
+              ? false
+              : target >= this.utteranceSpeechLevelDb - this.effectiveDynamicsSpreadDb;
+            this.implausibleFallbackSuspendsSpeechCeiling = viaStuckRun
+              && usesSignalFallback
+              && !fallbackSpeechIsPlausible;
+            if (this.implausibleFallbackSuspendsSpeechCeiling) {
+              this.speechCeilingDb = null;
+              this.utteranceSpeechLevelDb = null;
+            }
+            const reanchoredFloor = this.speechCeilingDb === null
+              ? this.clampFloor(target)
+              : this.clampFloor(this.implausibleFallbackSuspendsSpeechCeiling
+                ? target
+                : Math.min(target, this.speechCeilingDb - this.effectiveCeilingMarginDb));
+            if (reanchoredFloor <= maximumReanchorFloor) {
+              const currentFloor = this.floorDb;
+              this.updateFloor(
+                reanchoredFloor,
+                frameDuration,
+                this.maximumFloorRiseDbPerSecond,
+                !this.implausibleFallbackSuspendsSpeechCeiling,
+              );
+              const appliedFloor = this.floorDb;
+              const floorMoved = Math.abs(appliedFloor - currentFloor)
+                > VAD_ADAPTIVE_FLOOR_MOVEMENT_EPSILON_DB;
+              if (floorMoved && !this.hasRefusedReanchorSinceLastAcceptance) {
+                this.pendingReanchorEvent = true;
+                didReanchor = true;
+              }
+              this.adaptiveSignalFallbackActive ||= usesSignalFallback;
+              this.hasRefusedReanchorSinceLastAcceptance = false;
+              const thresholds = this.adaptiveThresholds(appliedFloor);
+              levels = this.classify(
+                frameDb,
+                thresholds.strongThresholdDb,
+                thresholds.continuationThresholdDb,
+                thresholds.silenceThresholdDb,
+                this.config.adaptiveDynamicsEnabled ? dispersionDb : null,
+                shortSpreadDb,
+                adjacentStepDb,
+              );
+              if (levels.evidence === 'silence' && frameDuration > 0) {
+                this.elapsedSinceSilenceEvidence = 0;
+                this.implausibleSpeechFallbackActive = false;
+                this.implausibleFallbackSuspendsSpeechCeiling = false;
+                this.markLatestAdaptiveRollingFrameAsFloorEligible();
+                this.adaptiveRollingPercentileCache = this.adaptiveRollingPercentile();
+              }
+            } else {
+              this.hasRefusedReanchorSinceLastAcceptance = true;
+              if (!this.hasLoggedReanchorRefusal) this.hasLoggedReanchorRefusal = true;
+            }
           }
         }
       }
@@ -483,45 +547,43 @@ export class VADThresholdGate {
     });
   }
 
-  processAdaptiveRefinement(frameDb, frameDuration, rollingPercentile, dispersionDb, shortSpreadDb) {
+  processAdaptiveRefinement(frameDb, frameDuration, signalPercentile, dispersionDb, shortSpreadDb) {
     this.adaptiveRefinementElapsed += Math.max(0, frameDuration);
     if (this.floorDb === null) {
       this.floorDb = VAD_FLOOR_MIN_DB;
     }
 
+    const initialThresholds = this.adaptiveThresholds(this.floorDb);
+    const initialLevels = this.classify(
+      frameDb,
+      initialThresholds.strongThresholdDb,
+      initialThresholds.continuationThresholdDb,
+      initialThresholds.silenceThresholdDb,
+      this.config.adaptiveDynamicsEnabled ? dispersionDb : null,
+      shortSpreadDb,
+      this.adaptiveRollingAdjacentStepDb(),
+    );
+    if (initialLevels.evidence === 'silence' && frameDuration > 0) {
+      this.markLatestAdaptiveRollingFrameAsFloorEligible();
+    }
+    const rollingFloorPercentile = this.adaptiveRollingPercentile();
+    this.adaptiveRollingPercentileCache = rollingFloorPercentile;
+    const seedTarget = rollingFloorPercentile ?? signalPercentile;
+
     const shapedThresholdDb = this.config.adaptiveDynamicsEnabled
       ? this.effectiveDynamicsSpreadDb
-      : this.effectiveAdaptiveDeltaDb + VAD_SPEECH_CEILING_MARGIN_DB;
+      : this.effectiveAdaptiveDeltaDb + VAD_COLD_START_SPEECH_SHAPE_MARGIN_DB;
     this.coldStartSpeechShapedNow = dispersionDb >= shapedThresholdDb;
 
     if (this.adaptiveRefinementElapsed >= VAD_ADAPTIVE_COLD_START_GRACE_S
-      && rollingPercentile !== null) {
-      // Do not cap this seed at the absolute speech floor: loud-room ambient
-      // would be pinned artificially low and recreate the original failure.
-      this.floorDb = this.clampFloor(rollingPercentile);
+      && seedTarget !== null) {
+      this.updateFloor(seedTarget, frameDuration, this.maximumFloorRiseDbPerSecond);
+      this.adaptiveSignalFallbackActive ||= rollingFloorPercentile === null;
       if (!this.coldStartConverged) {
         this.coldStartConverged = true;
       }
-    } else if (!this.coldStartConverged) {
-      if (this.floorDb !== null) {
-        this.floorDb = Math.min(this.floorDb, this.clampFloor(frameDb));
-      } else {
-        this.floorDb = VAD_FLOOR_MIN_DB;
-      }
     }
-    const refinementCapReached = this.adaptiveRefinementElapsed
-      + TIME_BOUNDARY_EPSILON_S
-      >= 2 * VAD_ADAPTIVE_MIN_REFINEMENT_DURATION_S;
-    if (refinementCapReached && !this.coldStartConverged) {
-      const forcedSeedDb = rollingPercentile
-        ?? this.adaptiveRollingMinDb(VAD_ADAPTIVE_ROLLING_WINDOW_DURATION_S)
-        ?? frameDb;
-      this.floorDb = this.clampFloor(forcedSeedDb);
-      this.coldStartConverged = true;
-    }
-    if (this.coldStartConverged || refinementCapReached) {
-      this.adaptiveRefinementComplete = true;
-    }
+    this.adaptiveRefinementComplete = this.coldStartConverged;
 
     const currentFloor = this.floorDb ?? VAD_FLOOR_MIN_DB;
     const thresholds = this.adaptiveThresholds(currentFloor);
@@ -535,6 +597,10 @@ export class VADThresholdGate {
       shortSpreadDb,
       adjacentStepDb,
     );
+    if (levels.evidence === 'silence' && frameDuration > 0) {
+      this.markLatestAdaptiveRollingFrameAsFloorEligible();
+      this.adaptiveRollingPercentileCache = this.adaptiveRollingPercentile();
+    }
     const evidence = this.dynamicsGatedEvidence(
       levels.evidence,
       shortSpreadDb ?? dispersionDb,
@@ -605,6 +671,9 @@ export class VADThresholdGate {
 
   updateFloorTracking(frameDb, duration, machineIsIdle = true, machineIsEnding = false,
     quietRiseCapAppliesToAmbiguous = false, quietRiseCapWitnessDb = 3) {
+    const wasMachineIsIdle = this.lastKnownMachineIsIdle;
+    const floorMovementAlreadyApplied = this.floorMovementAppliedThisFrame;
+    this.floorMovementAppliedThisFrame = false;
     this.lastKnownMachineIsIdle = machineIsIdle;
     if (this.config.loudRegimeEnabled && this.floorDb !== null) {
       if (this.floorDb >= this.config.loudRegimeEnterDb) {
@@ -623,6 +692,24 @@ export class VADThresholdGate {
       }
     }
     if (this.behaviorMode !== 'adaptive') return;
+    const hasSpeechLikeEvidence = this.lastOutput.evidence === 'strong'
+      || this.lastOutput.evidence === 'continuing';
+    const tracksUtteranceSpeechLevel = this.frameWithinUtteranceContext
+      && hasSpeechLikeEvidence
+      && !this.implausibleSpeechFallbackActive;
+    if (!tracksUtteranceSpeechLevel && (machineIsIdle || wasMachineIsIdle)) {
+      this.utteranceSpeechLevelDb = null;
+    }
+    const priorSpeechLevelDb = this.utteranceSpeechLevelDb;
+    const speechLevelIsPlausible = priorSpeechLevelDb === null
+      || frameDb >= priorSpeechLevelDb - this.effectiveDynamicsSpreadDb;
+    if (tracksUtteranceSpeechLevel && speechLevelIsPlausible) {
+      if (wasMachineIsIdle) this.utteranceSpeechLevelDb = null;
+      // Reject abrupt lower-level bursts; keep the quietest plausible speech sample as the ceiling.
+      const speechLevel = Math.min(this.utteranceSpeechLevelDb ?? frameDb, frameDb);
+      this.utteranceSpeechLevelDb = speechLevel;
+      this.speechCeilingDb = Math.min(this.speechCeilingDb ?? speechLevel, speechLevel);
+    }
     if (this.floorDb === null) return;
     if (!this.adaptiveRefinementComplete) return;
     // Match the Swift hold while the recorder is idle after an utterance ends.
@@ -673,17 +760,39 @@ export class VADThresholdGate {
         break;
     }
     if (suppressReseededFloorRise) riseCap = 0;
-    if (machineIsIdle && this.speechCeilingDb !== null) {
+    if (machineIsIdle && !tracksUtteranceSpeechLevel && this.speechCeilingDb !== null) {
       const decayedCeilingDb = this.speechCeilingDb
         + VAD_ELEVATED_RISE_DB_PER_SECOND
           * this.effectiveRiseSpeedMultiplier
           * Math.max(0, duration);
-      const clampBound = decayedCeilingDb
-        - this.effectiveAdaptiveDeltaDb
-        - VAD_SPEECH_CEILING_MARGIN_DB;
-      this.speechCeilingDb = clampBound > VAD_FLOOR_MAX_DB - this.effectiveAdaptiveDeltaDb
+      const clampBound = decayedCeilingDb - this.effectiveCeilingMarginDb;
+      this.speechCeilingDb = clampBound > VAD_FLOOR_MAX_DB
         ? null
         : decayedCeilingDb;
+    }
+    if (!this.implausibleFallbackSuspendsSpeechCeiling && this.enforceSpeechCeiling()) {
+      this.refreshAdaptiveOutput();
+    }
+    if (floorMovementAlreadyApplied) return;
+    if (this.implausibleSpeechFallbackActive
+      && !machineIsEnding
+      && (this.adaptiveRollingPercentileCache ?? this.adaptiveSignalPercentileCache) !== null) {
+      const fallbackTarget = this.adaptiveRollingPercentileCache
+        ?? this.adaptiveSignalPercentileCache;
+      const maximumFallbackTarget = VAD_FLOOR_MAX_DB - this.effectiveAdaptiveDeltaDb;
+      if (fallbackTarget > maximumFallbackTarget) {
+        this.hasRefusedReanchorSinceLastAcceptance = true;
+        return;
+      }
+      this.updateFloor(
+        fallbackTarget,
+        duration,
+        this.maximumFloorRiseDbPerSecond,
+        !this.implausibleFallbackSuspendsSpeechCeiling,
+      );
+      this.hasRefusedReanchorSinceLastAcceptance = false;
+      this.refreshAdaptiveOutput();
+      return;
     }
     if (machineIsEnding
       && !suppressReseededFloorRise
@@ -691,23 +800,23 @@ export class VADThresholdGate {
       && this.lastOutput.dynamicsSpreadDb !== null
       && this.lastOutput.shortSpreadDb < this.effectiveFlatSpreadDb
       && this.lastOutput.dynamicsSpreadDb < VAD_ADAPTIVE_END_PENDING_WIND_DISPERSION_DB
-      && this.lastOutput.evidence !== 'strong') {
-      const target = Math.max(this.adaptiveRollingPercentileCache ?? frameDb, frameDb);
-      const risenFloor = Math.max(
-        this.floorDb,
-        Math.min(
-          target,
-          this.floorDb + VAD_ELEVATED_RISE_DB_PER_SECOND
-            * this.effectiveRiseSpeedMultiplier * duration,
-        ),
+      && this.lastOutput.evidence !== 'strong'
+      && this.adaptiveRollingPercentileCache !== null) {
+      this.updateFloor(
+        this.adaptiveRollingPercentileCache,
+        duration,
+        this.maximumFloorRiseDbPerSecond,
       );
-      this.floorDb = this.clampFloor(risenFloor);
       this.refreshAdaptiveOutput();
       return;
     }
     if (riseCap === 0 && this.adaptiveRollingPercentileAtLeast(this.floorDb)) return;
-    const target = this.adaptiveRollingPercentileCache;
+    const target = this.adaptiveRollingPercentileCache
+      ?? (this.adaptiveSignalFallbackActive && machineIsIdle && !machineIsEnding
+        ? this.adaptiveSignalPercentileCache
+        : null);
     if (target === null) return;
+    riseCap = Math.min(riseCap, this.maximumFloorRiseDbPerSecond);
     this.updateFloor(target, duration, riseCap);
     this.refreshAdaptiveOutput();
   }
@@ -730,6 +839,12 @@ export class VADThresholdGate {
     this.pendingReanchorEvent = false;
     this.hasRefusedReanchorSinceLastAcceptance = false;
     this.speechCeilingDb = null;
+    this.utteranceSpeechLevelDb = null;
+    this.adaptiveSignalFallbackActive = false;
+    this.implausibleSpeechFallbackActive = false;
+    this.implausibleFallbackSuspendsSpeechCeiling = false;
+    this.floorRiseAppliedThisFrameDb = 0;
+    this.floorMovementAppliedThisFrame = false;
     this.floorRiseSuppressionRemainingSeconds = 0;
     this.resetAdaptiveRollingWindow();
     this.lastOutput = {
@@ -751,21 +866,39 @@ export class VADThresholdGate {
     };
   }
 
-  updateFloor(targetDb, frameDuration, maximumRiseDbPerSecond) {
+  updateFloor(targetDb, frameDuration, maximumRiseDbPerSecond, enforceSpeechCeiling = true) {
     let floor = this.floorDb;
+    const previousFloor = floor;
     if (targetDb > floor) {
-      floor = Math.min(targetDb, floor + maximumRiseDbPerSecond * frameDuration);
+      const maximumRiseDb = Math.max(0, maximumRiseDbPerSecond) * Math.max(0, frameDuration);
+      const availableRiseDb = Math.max(0, maximumRiseDb - this.floorRiseAppliedThisFrameDb);
+      const appliedRiseDb = Math.min(targetDb - floor, availableRiseDb);
+      floor += appliedRiseDb;
+      this.floorRiseAppliedThisFrameDb += appliedRiseDb;
     } else {
       floor += (1 - Math.exp(-frameDuration / this.effectiveFallTauSeconds))
         * (targetDb - floor);
     }
-    if (this.speechCeilingDb !== null) {
-      floor = Math.min(
-        floor,
-        this.speechCeilingDb - this.effectiveAdaptiveDeltaDb - VAD_SPEECH_CEILING_MARGIN_DB,
-      );
+    if (enforceSpeechCeiling && this.speechCeilingDb !== null) {
+      floor = Math.min(floor, this.speechCeilingDb - this.effectiveCeilingMarginDb);
     }
     this.floorDb = this.clampFloor(floor);
+    if (Math.abs(this.floorDb - previousFloor) > VAD_ADAPTIVE_FLOOR_MOVEMENT_EPSILON_DB) {
+      this.floorMovementAppliedThisFrame = true;
+    }
+  }
+
+  get maximumFloorRiseDbPerSecond() {
+    return VAD_ELEVATED_RISE_DB_PER_SECOND * this.effectiveRiseSpeedMultiplier;
+  }
+
+  enforceSpeechCeiling() {
+    if (this.floorDb === null || this.speechCeilingDb === null) return false;
+    const ceilingBoundDb = this.speechCeilingDb - this.effectiveCeilingMarginDb;
+    if (this.floorDb <= ceilingBoundDb) return false;
+    this.floorDb = this.clampFloor(ceilingBoundDb);
+    this.floorMovementAppliedThisFrame = true;
+    return true;
   }
 
   appendAdaptiveRollingFrame(db, duration) {
@@ -780,6 +913,7 @@ export class VADThresholdGate {
 
     this.adaptiveRollingDbs[this.adaptiveRollingWriteIndex] = db;
     this.adaptiveRollingDurations[this.adaptiveRollingWriteIndex] = duration;
+    this.adaptiveRollingFloorEligible[this.adaptiveRollingWriteIndex] = false;
     this.adaptiveRollingWriteIndex = (this.adaptiveRollingWriteIndex + 1)
       % VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY;
     this.adaptiveRollingElapsed += duration;
@@ -793,14 +927,22 @@ export class VADThresholdGate {
     }
   }
 
+  markLatestAdaptiveRollingFrameAsFloorEligible() {
+    if (this.adaptiveRollingCount === 0) return;
+    const latestIndex = (this.adaptiveRollingWriteIndex - 1
+      + VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY) % VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY;
+    this.adaptiveRollingFloorEligible[latestIndex] = true;
+  }
+
   resetAdaptiveRollingWindow() {
     this.adaptiveRollingWriteIndex = 0;
     this.adaptiveRollingCount = 0;
     this.adaptiveRollingElapsed = 0;
     this.adaptiveRollingPercentileCache = null;
+    this.adaptiveSignalPercentileCache = null;
   }
 
-  adaptiveRollingPercentile() {
+  adaptiveSignalPercentile() {
     if (this.adaptiveRollingCount === 0) return null;
     const values = [];
     for (let offset = 0; offset < this.adaptiveRollingCount; offset++) {
@@ -809,6 +951,21 @@ export class VADThresholdGate {
       values.push(this.adaptiveRollingDbs[index]);
     }
     return this.percentile(values, VAD_ADAPTIVE_ROLLING_PERCENTILE);
+  }
+
+  adaptiveRollingPercentile() {
+    if (this.adaptiveRollingCount === 0) return null;
+    const values = [];
+    for (let offset = 0; offset < this.adaptiveRollingCount; offset++) {
+      const index = (this.adaptiveRollingWriteIndex - this.adaptiveRollingCount + offset
+        + VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY) % VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY;
+      if (this.adaptiveRollingFloorEligible[index]) {
+        values.push(this.adaptiveRollingDbs[index]);
+      }
+    }
+    return values.length === 0
+      ? null
+      : this.percentile(values, VAD_ADAPTIVE_ROLLING_PERCENTILE);
   }
 
   adaptiveRollingMaxDb(coverSeconds) {
@@ -885,11 +1042,17 @@ export class VADThresholdGate {
   }
 
   adaptiveRollingPercentileAtLeast(floorDb) {
-    if (this.adaptiveRollingCount === 0) return false;
+    let eligibleCount = 0;
+    for (let offset = 0; offset < this.adaptiveRollingCount; offset++) {
+      const index = (this.adaptiveRollingWriteIndex - this.adaptiveRollingCount + offset
+        + VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY) % VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY;
+      if (this.adaptiveRollingFloorEligible[index]) eligibleCount += 1;
+    }
+    if (eligibleCount === 0) return false;
 
-    const position = VAD_ADAPTIVE_ROLLING_PERCENTILE * (this.adaptiveRollingCount - 1);
+    const position = VAD_ADAPTIVE_ROLLING_PERCENTILE * (eligibleCount - 1);
     const lowerIndex = Math.floor(position);
-    const upperIndex = Math.min(lowerIndex + 1, this.adaptiveRollingCount - 1);
+    const upperIndex = Math.min(lowerIndex + 1, eligibleCount - 1);
     let belowCount = 0;
     let maximumBelow = -Infinity;
     let minimumAtOrAbove = Infinity;
@@ -897,6 +1060,7 @@ export class VADThresholdGate {
     for (let offset = 0; offset < this.adaptiveRollingCount; offset++) {
       const index = (this.adaptiveRollingWriteIndex - this.adaptiveRollingCount + offset
         + VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY) % VAD_ADAPTIVE_ROLLING_WINDOW_CAPACITY;
+      if (!this.adaptiveRollingFloorEligible[index]) continue;
       const value = this.adaptiveRollingDbs[index];
       if (value < floorDb) {
         belowCount += 1;

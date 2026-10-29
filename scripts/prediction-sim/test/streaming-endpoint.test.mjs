@@ -23,6 +23,16 @@ function startEndpoint() {
   return endpoint;
 }
 
+function primeGateFloor(gate, floorDb) {
+  gate.floorDb = floorDb;
+  gate.coldStartConverged = true;
+  gate.adaptiveRefinementComplete = true;
+  for (let i = 0; i < 30; i++) {
+    gate.process(floorDb, 0.1);
+    gate.updateFloorTracking(floorDb, 0.1, true);
+  }
+}
+
 describe('StreamingEndpoint', () => {
   it('normalizes millisecond inputs to the sample floor and orders end evidence', () => {
     const configuration = makeStreamingEndpointConfig({
@@ -182,6 +192,7 @@ describe('StreamingEndpoint', () => {
 
   it('stabilizes gradually rising background noise before endpoint classification', () => {
     const gate = new VADThresholdGate(makeVadGateConfig({ mode: 'adaptive' }));
+    primeGateFloor(gate, -70);
     const initialFloor = gate.snapshot.floorDb;
     for (let i = 0; i < 50; i++) {
       const frameDb = -70 + i * 0.1;
@@ -203,10 +214,7 @@ describe('StreamingEndpoint', () => {
   it('pins gate floor stability independent of endpoint state', () => {
     const gate = new VADThresholdGate(makeVadGateConfig({ mode: 'adaptive' }));
     const endpoint = new StreamingEndpoint();
-    for (let i = 0; i < 50; i++) {
-      gate.process(-50, 0.1);
-      gate.updateFloorTracking(-50, 0.1, true);
-    }
+    primeGateFloor(gate, -50);
     for (let i = 0; i < 7; i++) {
       const output = gate.process(-30, 0.01);
       endpoint.process(output.evidence, samples(10));

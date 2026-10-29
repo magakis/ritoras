@@ -21,7 +21,7 @@ export function createQuietProfileEvaluationFixture() {
   const session = adaptClientTelemetry({
     vad_config: baselineConfig,
     frames: [
-      ...Array(100).fill({ dt: 0.01, db: -60 }),
+      ...Array(300).fill({ dt: 0.01, db: -60 }),
       ...Array(100).fill({ dt: 0.01, db: -52.5 }),
       ...Array(100).fill({ dt: 0.01, db: -60 }),
     ],

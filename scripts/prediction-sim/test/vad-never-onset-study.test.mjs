@@ -28,6 +28,7 @@ function runTrace(frames, {
   slowOnsetEvidenceMs = 300,
   slowOnsetWindowSeconds = 1.5,
   adaptiveDynamicsEnabled = false,
+  initialFloorDb = null,
 } = {}) {
   const events = [];
   const harness = makeRecorderHarness({
@@ -55,6 +56,15 @@ function runTrace(frames, {
     },
     onEvent: event => events.push(event),
   });
+  if (initialFloorDb !== null) {
+    // These onset-policy traces assume the fixture's supplied ambient floor is settled.
+    harness.gate.floorDb = initialFloorDb;
+    harness.gate.coldStartConverged = true;
+    harness.gate.adaptiveRefinementComplete = true;
+    harness.gate.adaptivePrimed = true;
+    harness.primingComplete = true;
+    for (let index = 0; index < 30; index += 1) harness.gate.process(initialFloorDb, 0.01);
+  }
   let elapsed = 0;
   for (const frame of frames) {
     elapsed += frame.dt;
@@ -187,8 +197,11 @@ describe('never-onset slow-path validation', () => {
     const frames = framesForTrace(fixture);
     const softSegment = fixture.segments[1];
     const peakAboveFloorDb = softSegment.db - fixture.floorDb;
-    const baseline = runTrace(frames);
-    const candidate = runTrace(frames, { slowOnsetEnabled: true });
+    const baseline = runTrace(frames, { initialFloorDb: fixture.floorDb });
+    const candidate = runTrace(frames, {
+      slowOnsetEnabled: true,
+      initialFloorDb: fixture.floorDb,
+    });
 
     assert.ok(peakAboveFloorDb >= 7.3 && peakAboveFloorDb <= 8.5);
     assert.ok(softSegment.durationMs >= 1200 && softSegment.durationMs <= 3000);
@@ -200,8 +213,11 @@ describe('never-onset slow-path validation', () => {
 
   it('does not trigger on separated 100 ms transient spikes', () => {
     const fixture = readFixture('transient-spikes.json');
-    const baseline = runTrace(framesForTrace(fixture));
-    const candidate = runTrace(framesForTrace(fixture), { slowOnsetEnabled: true });
+    const baseline = runTrace(framesForTrace(fixture), { initialFloorDb: fixture.floorDb });
+    const candidate = runTrace(framesForTrace(fixture), {
+      slowOnsetEnabled: true,
+      initialFloorDb: fixture.floorDb,
+    });
 
     assert.equal(baseline.starts.length, 0);
     assert.equal(candidate.starts.length, 0);

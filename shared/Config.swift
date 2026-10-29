@@ -16,6 +16,7 @@ struct VADAdaptiveThresholds {
     let strongDeltaDb: Double
     let continuingDeltaDb: Double
     let silenceDeltaDb: Double
+    let ceilingMarginDb: Double
 }
 
 enum ChunkSplitterProfileResolver {
@@ -24,6 +25,7 @@ enum ChunkSplitterProfileResolver {
     static let defaultStrongDeltaDb = 7.0
     static let defaultContinuingDeltaDb = 4.0
     static let defaultSilenceDeltaDb = 3.0
+    static let defaultCeilingMarginDb = 8.0
     static let minimumAdaptiveDeltaDb = 3.0
     static let maximumAdaptiveDeltaDb = 24.0
     static let oldSilenceDefaultMs = 2_000
@@ -34,6 +36,7 @@ enum ChunkSplitterProfileResolver {
         profile: VADSensitivityProfile,
         rawAdaptiveDeltaDb: Double?,
         rawSilenceDeltaDb: Double? = nil,
+        rawCeilingMarginDb: Double? = nil,
         rawOverrideExplicit: Bool = false
     ) -> VADAdaptiveThresholds {
         let profileValues = (strong: 7.0, continuing: 4.0)
@@ -62,11 +65,17 @@ enum ChunkSplitterProfileResolver {
             max(rawSilence.isFinite ? rawSilence : defaultSilenceDeltaDb, 1.0),
             min(5.0, continuingDeltaDb - 1.0)
         )
+        let rawCeilingMargin = rawCeilingMarginDb ?? defaultCeilingMarginDb
+        let finiteCeilingMargin = rawCeilingMargin.isFinite
+            ? rawCeilingMargin
+            : defaultCeilingMarginDb
+        let ceilingMarginDb = min(max(finiteCeilingMargin, 0.0), 24.0)
 
         return VADAdaptiveThresholds(
             strongDeltaDb: strongDeltaDb,
             continuingDeltaDb: continuingDeltaDb,
-            silenceDeltaDb: silenceDeltaDb
+            silenceDeltaDb: silenceDeltaDb,
+            ceilingMarginDb: ceilingMarginDb
         )
     }
 
@@ -74,6 +83,7 @@ enum ChunkSplitterProfileResolver {
         profileRawValue: String?,
         rawAdaptiveDeltaDb: Double?,
         rawSilenceDeltaDb: Double? = nil,
+        rawCeilingMarginDb: Double? = nil,
         rawOverrideExplicit: Bool = false
     ) -> VADAdaptiveThresholds {
         sensitivity(
@@ -81,6 +91,7 @@ enum ChunkSplitterProfileResolver {
                 ?? defaultSensitivityProfile,
             rawAdaptiveDeltaDb: rawAdaptiveDeltaDb,
             rawSilenceDeltaDb: rawSilenceDeltaDb,
+            rawCeilingMarginDb: rawCeilingMarginDb,
             rawOverrideExplicit: rawOverrideExplicit
         )
     }
@@ -237,6 +248,8 @@ struct SharedConfig {
         static let streamVadAdaptiveDeltaDbOverrideKey = "streamVadAdaptiveDeltaDbOverride"
         static let streamVadAdaptiveSilenceDeltaDbKey = "streamVadAdaptiveSilenceDeltaDb"
         static let streamVadAdaptiveSilenceDeltaDbDefault: Double = 3.0
+        static let streamVadCeilingMarginDbKey = "streamVadCeilingMarginDb"
+        static let streamVadCeilingMarginDbDefault: Double = 8.0
         static let streamVadAbsoluteSpeechFloorDbKey = "streamVadAbsoluteSpeechFloorDb"
         static let streamVadAbsoluteSpeechFloorDbDefault: Double = -50.0
         static let streamVadStaleFloorSecondsKey = "streamVadStaleFloorSeconds"
@@ -861,6 +874,11 @@ struct SharedConfig {
         streamVadAdaptiveThresholds().silenceDeltaDb
     }
 
+    /// Reads the adaptive speech-ceiling margin (dB) from the App Group.
+    static func streamVadCeilingMarginDb() -> Double {
+        streamVadAdaptiveThresholds().ceilingMarginDb
+    }
+
     /// Reads the adaptive stale-floor window (seconds) from the App Group.
     /// VADGate divides the clamped value by the rise-speed multiplier for the effective stale window.
     static func streamVadStaleFloorSeconds() -> Double {
@@ -1143,7 +1161,8 @@ struct SharedConfig {
             return ChunkSplitterProfileResolver.sensitivity(
                 profile: .automatic,
                 rawAdaptiveDeltaDb: nil,
-                rawSilenceDeltaDb: Defaults.streamVadAdaptiveSilenceDeltaDbDefault
+                rawSilenceDeltaDb: Defaults.streamVadAdaptiveSilenceDeltaDbDefault,
+                rawCeilingMarginDb: Defaults.streamVadCeilingMarginDbDefault
             )
         }
         let rawAdaptiveDeltaDb = (defaults.object(
@@ -1155,10 +1174,14 @@ struct SharedConfig {
         let rawSilenceDeltaDb = (defaults.object(
             forKey: Defaults.streamVadAdaptiveSilenceDeltaDbKey
         ) as? NSNumber)?.doubleValue ?? Defaults.streamVadAdaptiveSilenceDeltaDbDefault
+        let rawCeilingMarginDb = (defaults.object(
+            forKey: Defaults.streamVadCeilingMarginDbKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadCeilingMarginDbDefault
         return ChunkSplitterProfileResolver.sensitivity(
             profile: .automatic,
             rawAdaptiveDeltaDb: rawAdaptiveDeltaDb,
             rawSilenceDeltaDb: rawSilenceDeltaDb,
+            rawCeilingMarginDb: rawCeilingMarginDb,
             rawOverrideExplicit: rawOverrideExplicit
         )
     }
