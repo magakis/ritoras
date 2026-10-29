@@ -20,24 +20,34 @@ export const STREAM_NEGOTIATION_DECISION = Object.freeze({
 
 export const STREAM_SOURCE_SAMPLE_RATES = Object.freeze([16_000, 48_000]);
 
-export function configMessage(sampleRate) {
-  if (!STREAM_SOURCE_SAMPLE_RATES.includes(sampleRate)) return null;
-  return JSON.stringify({
+export function configMessage(sampleRate, aacEnabled, cleanupPreferences) {
+  if (aacEnabled && !STREAM_SOURCE_SAMPLE_RATES.includes(sampleRate)) return null;
+
+  const message = {
     type: 'CONFIG',
-    format: STREAM_AUDIO_FORMAT.AAC_M4A,
-    sampleRate,
-    channels: 1,
-    bitrate: 64_000,
-    protocol: 2,
+    format: aacEnabled
+      ? STREAM_AUDIO_FORMAT.AAC_M4A
+      : STREAM_AUDIO_FORMAT.LEGACY_FLOAT32,
+  };
+  if (aacEnabled) {
+    message.sampleRate = sampleRate;
+    message.channels = 1;
+    message.bitrate = 64_000;
+  }
+  message.protocol = 2;
+  forEachCleanupWireField(cleanupPreferences, (field, value) => {
+    message[field] = value;
   });
+  return JSON.stringify(message);
 }
 
-export function initialMode(aacEnabled) {
-  return aacEnabled ? null : STREAM_AUDIO_MODE.FLOAT32_PCM;
+export function initialMode(configSent) {
+  return configSent ? null : STREAM_AUDIO_MODE.FLOAT32_PCM;
 }
 
-export function shouldSendConfig(aacEnabled, sessionLegacyPinned) {
-  return aacEnabled && !sessionLegacyPinned;
+export function shouldSendConfig(aacEnabled, sessionLegacyPinned, cleanupPreferences) {
+  if (sessionLegacyPinned) return false;
+  return aacEnabled || hasSelectedCleanupPreferences(cleanupPreferences);
 }
 
 export function timeoutDecision() {
@@ -48,19 +58,8 @@ export function timeoutDecision() {
 }
 
 export function decisionForServerMessage(text, aacEnabled, deadlineExpired = false) {
-  if (!aacEnabled) {
-    return { kind: STREAM_NEGOTIATION_DECISION.SELECT, mode: STREAM_AUDIO_MODE.FLOAT32_PCM };
-  }
-
-  let message;
-  try {
-    message = JSON.parse(text);
-  } catch {
-    return deadlineExpired
-      ? timeoutDecision()
-      : { kind: STREAM_NEGOTIATION_DECISION.WAIT };
-  }
-  if (message === null || typeof message !== 'object' || Array.isArray(message)) {
+  const message = decodeServerMessage(text);
+  if (!message) {
     return deadlineExpired
       ? timeoutDecision()
       : { kind: STREAM_NEGOTIATION_DECISION.WAIT };
@@ -76,13 +75,61 @@ export function decisionForServerMessage(text, aacEnabled, deadlineExpired = fal
   if (deadlineExpired) return timeoutDecision();
 
   if (message.type === 'CONFIG_ACK') {
-    if (message.format !== STREAM_AUDIO_FORMAT.AAC_M4A
-        || !Number.isInteger(message.protocol)
-        || message.protocol !== 2) {
+    const requestedFormat = aacEnabled
+      ? STREAM_AUDIO_FORMAT.AAC_M4A
+      : STREAM_AUDIO_FORMAT.LEGACY_FLOAT32;
+    if (message.format !== requestedFormat || message.protocol !== 2) {
       return { kind: STREAM_NEGOTIATION_DECISION.WAIT };
     }
-    return { kind: STREAM_NEGOTIATION_DECISION.SELECT, mode: STREAM_AUDIO_MODE.AAC_M4A };
+    return {
+      kind: STREAM_NEGOTIATION_DECISION.SELECT,
+      mode: aacEnabled ? STREAM_AUDIO_MODE.AAC_M4A : STREAM_AUDIO_MODE.FLOAT32_PCM,
+    };
   }
 
   return { kind: STREAM_NEGOTIATION_DECISION.WAIT };
+}
+
+function hasSelectedCleanupPreferences(cleanupPreferences) {
+  let hasSelectedValue = false;
+  forEachCleanupWireField(cleanupPreferences, () => {
+    hasSelectedValue = true;
+  });
+  return hasSelectedValue;
+}
+
+function forEachCleanupWireField(cleanupPreferences, body) {
+  if (cleanupPreferences.styling !== 'serverDefault') {
+    body('cleanup_styling', cleanupPreferences.styling);
+  }
+  if (cleanupPreferences.structure !== 'serverDefault') {
+    body('cleanup_structure', cleanupPreferences.structure);
+  }
+  if (cleanupPreferences.context !== 'serverDefault') {
+    body('cleanup_context', cleanupPreferences.context);
+  }
+}
+
+function decodeServerMessage(text) {
+  let message;
+  try {
+    message = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (message === null || typeof message !== 'object' || Array.isArray(message)
+      || typeof message.type !== 'string'
+      || !isValidOptionalString(message.format)
+      || !isValidOptionalInteger(message.protocol)) {
+    return null;
+  }
+  return message;
+}
+
+function isValidOptionalString(value) {
+  return value === undefined || value === null || typeof value === 'string';
+}
+
+function isValidOptionalInteger(value) {
+  return value === undefined || value === null || Number.isInteger(value);
 }

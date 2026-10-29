@@ -625,6 +625,9 @@ class KeyboardViewController: UIInputViewController {
             panel.onLanguageChange = { [weak self] language in
                 self?.handleLanguageSelection(language)
             }
+            panel.onLLMCleanupPreferencesChange = { preferences in
+                SharedConfig.setLLMCleanupPreferences(preferences)
+            }
         }
     }
 
@@ -698,7 +701,10 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func presentKeyboardSettingsPanel() {
-        keyboardView.showSettingsPanel(activeLanguage: settingsCache.language)
+        keyboardView.showSettingsPanel(
+            activeLanguage: settingsCache.language,
+            cleanupPreferences: SharedConfig.llmCleanupPreferences()
+        )
     }
 
     // MARK: - Dictation via Container App

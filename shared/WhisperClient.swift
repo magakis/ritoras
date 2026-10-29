@@ -105,6 +105,7 @@ protocol WhisperBackgroundSubmitter: Sendable {
         serverURL: String,
         jobId: UUID,
         language: String?,
+        cleanupPreferences: LLMCleanupPreferences,
         onDurableAcceptance: (@MainActor @Sendable (UUID, String, String) -> Void)?
     ) async throws -> AsyncSubmitResponse
 }
@@ -399,6 +400,8 @@ enum WhisperClient {
     ///   - serverURL:     The target server base URL.
     ///   - correlationId: Optional UUID to correlate this request across processes.
     ///   - language:      Optional ISO-639-1 language code sent as a form field.
+    ///   - cleanupPreferences: Per-request LLM cleanup preferences; server-default
+    ///     axes are omitted.
     ///   - recordingDurationSeconds: Recorded audio duration used to scale the request timeout.
     /// - Returns: The transcribed text string.
     /// - Throws: `WhisperError` if the single server attempt fails.
@@ -407,6 +410,7 @@ enum WhisperClient {
         serverURL: String,
         correlationId: UUID? = nil,
         language: String? = nil,
+        cleanupPreferences: LLMCleanupPreferences,
         recordingDurationSeconds: TimeInterval = 0,
         timeout: TimeInterval = SharedConfig.Defaults.timeoutSeconds
     ) async throws -> String {
@@ -414,7 +418,12 @@ enum WhisperClient {
         let bodyFileURL: URL
         do {
             let bodyBuildT0 = Date()
-            bodyFileURL = try await buildBodyFileOffMain(audioURL: audioURL, boundary: boundary, language: language)
+            bodyFileURL = try await buildBodyFileOffMain(
+                audioURL: audioURL,
+                boundary: boundary,
+                language: language,
+                cleanupPreferences: cleanupPreferences
+            )
             let bodyBytes = (try? FileManager.default.attributesOfItem(atPath: bodyFileURL.path)[.size] as? Int64).map(Int.init) ?? 0
             FileLogger.shared.debug(.transcription, "multipart body build", payload: [
                 "elapsed_ms": Date().timeIntervalSince(bodyBuildT0) * 1000,
@@ -458,6 +467,7 @@ enum WhisperClient {
         onEvent: (@MainActor (TranscriptionEvent) -> Void)? = nil,
         backgroundSubmitter: (any WhisperBackgroundSubmitter)? = nil,
         language: String? = nil,
+        cleanupPreferences: LLMCleanupPreferences,
         onDurableAcceptance: (@MainActor @Sendable (UUID, String, String) -> Void)? = nil,
         recordingDurationSeconds: TimeInterval = 0
     ) async throws -> String {
@@ -477,6 +487,7 @@ enum WhisperClient {
                 correlationId: correlationId, preferredServer: serverURL,
                 onServerSelected: onServerSelected, onEvent: onEvent,
                 backgroundSubmitter: backgroundSubmitter, language: language,
+                cleanupPreferences: cleanupPreferences,
                 onDurableAcceptance: onDurableAcceptance,
                 recordingDurationSeconds: recordingDurationSeconds)
         } catch WhisperError.asyncUnsupported {
@@ -490,6 +501,7 @@ enum WhisperClient {
                 serverURL: serverURL,
                 correlationId: correlationId,
                 language: language,
+                cleanupPreferences: cleanupPreferences,
                 recordingDurationSeconds: recordingDurationSeconds,
                 timeout: config.timeoutSeconds)
         }
@@ -1336,6 +1348,7 @@ enum WhisperClient {
     ///   - preferredServer: Optional pre-selected server URL to use without probing.
     ///   - onServerSelected: Optional main-actor callback when the actual server is resolved.
     ///   - language:        Optional ISO-639-1 language code sent as a form field.
+    ///   - cleanupPreferences: LLM cleanup choices to include in multipart requests.
     ///   - recordingDurationSeconds: Recorded audio duration used to scale timeouts.
     /// - Returns: The transcribed text string.
     /// - Throws: `WhisperError.asyncUnsupported` if the server lacks /transcriptions;
@@ -1350,6 +1363,7 @@ enum WhisperClient {
         onEvent: (@MainActor (TranscriptionEvent) -> Void)? = nil,
         backgroundSubmitter: (any WhisperBackgroundSubmitter)? = nil,
         language: String? = nil,
+        cleanupPreferences: LLMCleanupPreferences,
         onDurableAcceptance: (@MainActor @Sendable (UUID, String, String) -> Void)? = nil,
         recordingDurationSeconds: TimeInterval = 0
     ) async throws -> String {
@@ -1393,7 +1407,8 @@ enum WhisperClient {
                 let preparedBodyFileURL = try await buildBodyFileOffMain(
                     audioURL: audioURL,
                     boundary: boundary,
-                    language: language
+                    language: language,
+                    cleanupPreferences: cleanupPreferences
                 )
                 bodyFileURL = preparedBodyFileURL
                 let bodyBytes = (try? FileManager.default.attributesOfItem(atPath: preparedBodyFileURL.path)[.size] as? Int64).map(Int.init) ?? 0
@@ -1432,6 +1447,7 @@ enum WhisperClient {
                 serverURL: serverURL,
                 jobId: jobId,
                 language: language,
+                cleanupPreferences: cleanupPreferences,
                 onDurableAcceptance: onDurableAcceptance)
         } else {
             guard let bodyFileURL else { throw WhisperError.noResponse }
@@ -1686,7 +1702,12 @@ enum WhisperClient {
     }
 
     /// Builds the multipart form body as a temp file off the caller thread on a .userInitiated queue.
-    private static func buildBodyFileOffMain(audioURL: URL, boundary: String, language: String?) async throws -> URL {
+    private static func buildBodyFileOffMain(
+        audioURL: URL,
+        boundary: String,
+        language: String?,
+        cleanupPreferences: LLMCleanupPreferences
+    ) async throws -> URL {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let tempURL = FileManager.default.temporaryDirectory
@@ -1694,7 +1715,15 @@ enum WhisperClient {
                 do {
                     let ext = audioURL.pathExtension.lowercased()
                     let (filename, mimeType) = ext == "wav" ? ("audio.wav", "audio/wav") : ("audio.m4a", "audio/mp4")
-                    try writeBodyToFile(audioURL: audioURL, boundary: boundary, mimeType: mimeType, filename: filename, language: language, to: tempURL)
+                    try writeBodyToFile(
+                        audioURL: audioURL,
+                        boundary: boundary,
+                        mimeType: mimeType,
+                        filename: filename,
+                        language: language,
+                        cleanupPreferences: cleanupPreferences,
+                        to: tempURL
+                    )
                     continuation.resume(returning: tempURL)
                 } catch {
                     try? FileManager.default.removeItem(at: tempURL)
@@ -1707,7 +1736,12 @@ enum WhisperClient {
     /// Writes the canonical multipart transcription body to a caller-owned file.
     /// Audio streams in 64 KB chunks; the returned boundary belongs in the
     /// request's Content-Type header.
-    static func writeMultipartBody(audioFile: URL, destination: URL, language: String?) throws -> String {
+    static func writeMultipartBody(
+        audioFile: URL,
+        destination: URL,
+        language: String?,
+        cleanupPreferences: LLMCleanupPreferences
+    ) throws -> String {
         let boundary = "Boundary-\(UUID().uuidString)"
         let ext = audioFile.pathExtension.lowercased()
         let (filename, mimeType) = ext == "wav" ? ("audio.wav", "audio/wav") : ("audio.m4a", "audio/mp4")
@@ -1717,13 +1751,22 @@ enum WhisperClient {
             mimeType: mimeType,
             filename: filename,
             language: language,
+            cleanupPreferences: cleanupPreferences,
             to: destination
         )
         return boundary
     }
 
     /// Writes a multipart body while streaming audio in 64 KB chunks.
-    private static func writeBodyToFile(audioURL: URL, boundary: String, mimeType: String, filename: String, language: String?, to tempURL: URL) throws {
+    private static func writeBodyToFile(
+        audioURL: URL,
+        boundary: String,
+        mimeType: String,
+        filename: String,
+        language: String?,
+        cleanupPreferences: LLMCleanupPreferences,
+        to tempURL: URL
+    ) throws {
         guard let outputStream = OutputStream(url: tempURL, append: false) else {
             throw NSError(domain: "WhisperClient", code: 0, userInfo: [NSLocalizedDescriptionKey: "Failed to create output stream"])
         }
@@ -1744,6 +1787,13 @@ enum WhisperClient {
                     written += result
                 }
             }
+        }
+
+        func writeTextFormField(named name: String, value: String) throws {
+            try writeString("\r\n--\(boundary)\r\n")
+            try writeString("Content-Disposition: form-data; name=\"\(name)\"\r\n")
+            try writeString("\r\n")
+            try writeString(value)
         }
 
         // Header
@@ -1781,10 +1831,15 @@ enum WhisperClient {
 
         // Optional language form field (ISO-639-1) — appended only when provided.
         if let language {
-            try writeString("\r\n--\(boundary)\r\n")
-            try writeString("Content-Disposition: form-data; name=\"language\"\r\n")
-            try writeString("\r\n")
-            try writeString(language)
+            try writeTextFormField(named: "language", value: language)
+        }
+
+        var cleanupFields: [(String, String)] = []
+        cleanupPreferences.forEachWireField { name, value in
+            cleanupFields.append((name, value))
+        }
+        for (name, value) in cleanupFields {
+            try writeTextFormField(named: name, value: value)
         }
 
         // Closing boundary

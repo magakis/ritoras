@@ -1261,9 +1261,12 @@ class KeyboardView: UIView {
         setMicState(state)
     }
 
-    func showSettingsPanel(activeLanguage: KeyboardLanguage) {
+    func showSettingsPanel(
+        activeLanguage: KeyboardLanguage,
+        cleanupPreferences: LLMCleanupPreferences
+    ) {
         let panel = settingsPanel
-        panel.show(activeLanguage: activeLanguage)
+        panel.show(activeLanguage: activeLanguage, cleanupPreferences: cleanupPreferences)
         bringSubviewToFront(panel)
     }
 

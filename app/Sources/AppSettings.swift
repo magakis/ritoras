@@ -10,6 +10,9 @@ class AppSettings: ObservableObject {
     @Published var autoCapitalizationEnabled: Bool = true
     @Published var autocorrectOnSpaceEnabled: Bool = true
     @Published var dictationMode: SharedConfig.DictationMode = .batch
+    @Published var llmCleanupStyling: LLMCleanupStyling = SharedConfig.Defaults.llmCleanupStylingDefault
+    @Published var llmCleanupStructure: LLMCleanupStructure = SharedConfig.Defaults.llmCleanupStructureDefault
+    @Published var llmCleanupContext: LLMCleanupContext = SharedConfig.Defaults.llmCleanupContextDefault
     @Published var verboseLogging: Bool = SharedConfig.Defaults.verboseLoggingDefault
     @Published var hapticsEnabled: Bool = SharedConfig.Defaults.hapticsEnabledDefault
     @Published var keyboardLanguage: KeyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
@@ -28,6 +31,7 @@ class AppSettings: ObservableObject {
 
     private var appGroupDefaults: UserDefaults?
     private var cancellables = Set<AnyCancellable>()
+    private var refreshingLLMCleanupPreferences = false
     private var chunkSplitterSilenceOverridePresent = false
     private var updatingDerivedChunkSplitterValue = false
 
@@ -42,6 +46,9 @@ class AppSettings: ObservableObject {
         autoCapitalizationEnabled = SharedConfig.autoCapitalizationEnabled()
         autocorrectOnSpaceEnabled = SharedConfig.autocorrectOnSpaceEnabled()
         dictationMode = SharedConfig.dictationMode()
+        llmCleanupStyling = SharedConfig.llmCleanupStyling()
+        llmCleanupStructure = SharedConfig.llmCleanupStructure()
+        llmCleanupContext = SharedConfig.llmCleanupContext()
         verboseLogging = SharedConfig.verboseLoggingEnabled()
         hapticsEnabled = SharedConfig.hapticsEnabled()
         keyboardLanguage = SharedConfig.keyboardLanguage()
@@ -87,6 +94,18 @@ class AppSettings: ObservableObject {
             FileLogger.shared.info(.settings, "saving dictationMode",
                                    payload: ["value": newValue.rawValue])
             self?.saveDictationMode(newValue)
+        }.store(in: &cancellables)
+        $llmCleanupStyling.dropFirst().sink { [weak self] newValue in
+            guard let self, !self.refreshingLLMCleanupPreferences else { return }
+            self.saveLLMCleanupStyling(newValue)
+        }.store(in: &cancellables)
+        $llmCleanupStructure.dropFirst().sink { [weak self] newValue in
+            guard let self, !self.refreshingLLMCleanupPreferences else { return }
+            self.saveLLMCleanupStructure(newValue)
+        }.store(in: &cancellables)
+        $llmCleanupContext.dropFirst().sink { [weak self] newValue in
+            guard let self, !self.refreshingLLMCleanupPreferences else { return }
+            self.saveLLMCleanupContext(newValue)
         }.store(in: &cancellables)
         $verboseLogging.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving verboseLogging",
@@ -162,6 +181,14 @@ class AppSettings: ObservableObject {
         saveToAppGroup()
     }
 
+    func refreshLLMCleanupPreferences() {
+        refreshingLLMCleanupPreferences = true
+        defer { refreshingLLMCleanupPreferences = false }
+        llmCleanupStyling = SharedConfig.llmCleanupStyling()
+        llmCleanupStructure = SharedConfig.llmCleanupStructure()
+        llmCleanupContext = SharedConfig.llmCleanupContext()
+    }
+
     private func saveToAppGroup() {
         if let data = try? JSONEncoder().encode(servers) {
             appGroupDefaults?.set(data, forKey: "servers")
@@ -171,6 +198,9 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(autoCapitalizationEnabled, forKey: SharedConfig.Defaults.autoCapitalizationEnabledKey)
         appGroupDefaults?.set(autocorrectOnSpaceEnabled, forKey: SharedConfig.Defaults.autocorrectOnSpaceEnabledKey)
         appGroupDefaults?.set(dictationMode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
+        appGroupDefaults?.set(llmCleanupStyling.rawValue, forKey: SharedConfig.Defaults.llmCleanupStylingKey)
+        appGroupDefaults?.set(llmCleanupStructure.rawValue, forKey: SharedConfig.Defaults.llmCleanupStructureKey)
+        appGroupDefaults?.set(llmCleanupContext.rawValue, forKey: SharedConfig.Defaults.llmCleanupContextKey)
         appGroupDefaults?.set(verboseLogging, forKey: SharedConfig.Defaults.verboseLoggingKey)
         appGroupDefaults?.set(hapticsEnabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
         appGroupDefaults?.set(keyboardLanguage.rawValue, forKey: SharedConfig.Defaults.keyboardLanguageKey)
@@ -220,6 +250,21 @@ class AppSettings: ObservableObject {
 
     private func saveDictationMode(_ mode: SharedConfig.DictationMode) {
         appGroupDefaults?.set(mode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
+        postSettingsChanged()
+    }
+
+    private func saveLLMCleanupStyling(_ styling: LLMCleanupStyling) {
+        appGroupDefaults?.set(styling.rawValue, forKey: SharedConfig.Defaults.llmCleanupStylingKey)
+        postSettingsChanged()
+    }
+
+    private func saveLLMCleanupStructure(_ structure: LLMCleanupStructure) {
+        appGroupDefaults?.set(structure.rawValue, forKey: SharedConfig.Defaults.llmCleanupStructureKey)
+        postSettingsChanged()
+    }
+
+    private func saveLLMCleanupContext(_ context: LLMCleanupContext) {
+        appGroupDefaults?.set(context.rawValue, forKey: SharedConfig.Defaults.llmCleanupContextKey)
         postSettingsChanged()
     }
 
@@ -335,6 +380,9 @@ class AppSettings: ObservableObject {
         autoCapitalizationEnabled = SharedConfig.Defaults.autoCapitalizationEnabledDefault
         autocorrectOnSpaceEnabled = SharedConfig.Defaults.autocorrectOnSpaceEnabledDefault
         dictationMode = .batch
+        llmCleanupStyling = SharedConfig.Defaults.llmCleanupStylingDefault
+        llmCleanupStructure = SharedConfig.Defaults.llmCleanupStructureDefault
+        llmCleanupContext = SharedConfig.Defaults.llmCleanupContextDefault
         verboseLogging = SharedConfig.Defaults.verboseLoggingDefault
         hapticsEnabled = SharedConfig.Defaults.hapticsEnabledDefault
         keyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault

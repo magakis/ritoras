@@ -198,6 +198,15 @@ struct SharedConfig {
         static let dictationModeKey = "dictationMode"
         static let dictationModeDefault: DictationMode = .batch
 
+        // MARK: - LLM Cleanup
+
+        static let llmCleanupStylingKey = "llmCleanupStyling"
+        static let llmCleanupStylingDefault: LLMCleanupStyling = .serverDefault
+        static let llmCleanupStructureKey = "llmCleanupStructure"
+        static let llmCleanupStructureDefault: LLMCleanupStructure = .serverDefault
+        static let llmCleanupContextKey = "llmCleanupContext"
+        static let llmCleanupContextDefault: LLMCleanupContext = .serverDefault
+
         // MARK: - Audio Measurement
 
         static let audioMeasurementModeEnabledKey = "audioMeasurementModeEnabled"
@@ -680,6 +689,77 @@ struct SharedConfig {
             return Defaults.dictationModeDefault
         }
         return DictationMode(rawValue: raw) ?? Defaults.dictationModeDefault
+    }
+
+    /// Reads all LLM cleanup preferences from the App Group, falling back to
+    /// server defaults when the suite or any stored raw value is unavailable.
+    static func llmCleanupPreferences() -> LLMCleanupPreferences {
+        let defaults = UserDefaults(suiteName: Defaults.appGroupId)
+        return LLMCleanupPreferences(
+            styling: cleanupPreference(
+                from: defaults,
+                forKey: Defaults.llmCleanupStylingKey,
+                defaultValue: Defaults.llmCleanupStylingDefault
+            ),
+            structure: cleanupPreference(
+                from: defaults,
+                forKey: Defaults.llmCleanupStructureKey,
+                defaultValue: Defaults.llmCleanupStructureDefault
+            ),
+            context: cleanupPreference(
+                from: defaults,
+                forKey: Defaults.llmCleanupContextKey,
+                defaultValue: Defaults.llmCleanupContextDefault
+            )
+        )
+    }
+
+    /// Reads the LLM cleanup styling preference from the App Group.
+    static func llmCleanupStyling() -> LLMCleanupStyling {
+        cleanupPreference(
+            from: UserDefaults(suiteName: Defaults.appGroupId),
+            forKey: Defaults.llmCleanupStylingKey,
+            defaultValue: Defaults.llmCleanupStylingDefault
+        )
+    }
+
+    /// Reads the LLM cleanup structure preference from the App Group.
+    static func llmCleanupStructure() -> LLMCleanupStructure {
+        cleanupPreference(
+            from: UserDefaults(suiteName: Defaults.appGroupId),
+            forKey: Defaults.llmCleanupStructureKey,
+            defaultValue: Defaults.llmCleanupStructureDefault
+        )
+    }
+
+    /// Reads the LLM cleanup context preference from the App Group.
+    static func llmCleanupContext() -> LLMCleanupContext {
+        cleanupPreference(
+            from: UserDefaults(suiteName: Defaults.appGroupId),
+            forKey: Defaults.llmCleanupContextKey,
+            defaultValue: Defaults.llmCleanupContextDefault
+        )
+    }
+
+    /// Stores all LLM cleanup preferences and notifies the keyboard extension.
+    static func setLLMCleanupPreferences(_ preferences: LLMCleanupPreferences) {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return }
+        defaults.set(preferences.styling.rawValue, forKey: Defaults.llmCleanupStylingKey)
+        defaults.set(preferences.structure.rawValue, forKey: Defaults.llmCleanupStructureKey)
+        defaults.set(preferences.context.rawValue, forKey: Defaults.llmCleanupContextKey)
+        DarwinNotifier.post(Defaults.darwinSettingsChangedNotificationName)
+    }
+
+    private static func cleanupPreference<Value: RawRepresentable>(
+        from defaults: UserDefaults?,
+        forKey key: String,
+        defaultValue: Value
+    ) -> Value where Value.RawValue == String {
+        guard let defaults,
+              let raw = defaults.string(forKey: key) else {
+            return defaultValue
+        }
+        return Value(rawValue: raw) ?? defaultValue
     }
 
     /// Reads the auto-capitalization enabled flag from the App Group.

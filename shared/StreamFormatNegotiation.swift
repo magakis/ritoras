@@ -23,19 +23,40 @@ enum StreamFormatNegotiation {
     static let reservedPCM16Format = "pcm16"
     static let supportedSourceSampleRates = [16_000, 48_000]
 
-    static func configMessage(sampleRate: Int) -> String? {
-        guard supportedSourceSampleRates.contains(sampleRate) else { return nil }
-        return "{\"type\":\"CONFIG\",\"format\":\"aac-m4a\","
-            + "\"sampleRate\":\(sampleRate),\"channels\":1,"
-            + "\"bitrate\":64000,\"protocol\":2}"
+    static func configMessage(
+        sampleRate: Int,
+        aacEnabled: Bool,
+        cleanupPreferences: LLMCleanupPreferences
+    ) -> String? {
+        if aacEnabled, !supportedSourceSampleRates.contains(sampleRate) {
+            return nil
+        }
+
+        var message = "{\"type\":\"CONFIG\",\"format\":\""
+        message += (aacEnabled ? aacFormat : legacyFormat)
+        message += "\""
+        if aacEnabled {
+            message += ",\"sampleRate\":\(sampleRate),\"channels\":1,"
+                + "\"bitrate\":64000"
+        }
+        message += ",\"protocol\":2"
+        cleanupPreferences.forEachWireField { field, value in
+            message += ",\"\(field)\":\"\(value)\""
+        }
+        return message + "}"
     }
 
-    static func initialMode(aacEnabled: Bool) -> AudioMode? {
-        aacEnabled ? nil : .float32PCM
+    static func initialMode(configSent: Bool) -> AudioMode? {
+        configSent ? nil : .float32PCM
     }
 
-    static func shouldSendConfig(aacEnabled: Bool, sessionLegacyPinned: Bool) -> Bool {
-        aacEnabled && !sessionLegacyPinned
+    static func shouldSendConfig(
+        aacEnabled: Bool,
+        sessionLegacyPinned: Bool,
+        cleanupPreferences: LLMCleanupPreferences
+    ) -> Bool {
+        guard !sessionLegacyPinned else { return false }
+        return aacEnabled || hasSelectedCleanupPreferences(cleanupPreferences)
     }
 
     static func timeoutDecision() -> Decision {
@@ -47,7 +68,6 @@ enum StreamFormatNegotiation {
         aacEnabled: Bool,
         deadlineExpired: Bool = false
     ) -> Decision {
-        guard aacEnabled else { return .select(.float32PCM) }
         guard let data = text.data(using: .utf8),
               let message = try? JSONDecoder().decode(ServerMessage.self, from: data) else {
             return deadlineExpired ? .closeConnectionAndPinLegacy : .wait
@@ -60,14 +80,25 @@ enum StreamFormatNegotiation {
 
         switch message.type {
         case "CONFIG_ACK":
-            guard message.format == aacFormat,
+            let requestedFormat = aacEnabled ? aacFormat : legacyFormat
+            guard message.format == requestedFormat,
                   message.protocolVersion == 2 else {
                 return .wait
             }
-            return .select(.aacM4A)
+            return .select(aacEnabled ? .aacM4A : .float32PCM)
         default:
             return .wait
         }
+    }
+
+    private static func hasSelectedCleanupPreferences(
+        _ preferences: LLMCleanupPreferences
+    ) -> Bool {
+        var hasSelectedValue = false
+        preferences.forEachWireField { _, _ in
+            hasSelectedValue = true
+        }
+        return hasSelectedValue
     }
 
     private struct ServerMessage: Decodable {

@@ -196,6 +196,7 @@ final class BackgroundTranscriptionUploader: NSObject, URLSessionDataDelegate, U
         server: URL,
         audioURL: URL,
         language: String? = nil,
+        cleanupPreferences: LLMCleanupPreferences,
         onDurableUpdate: (@MainActor @Sendable (UUID, BackgroundUploadTerminal) -> Void)? = nil
     ) throws {
         guard let directory = FileManager.default.urls(
@@ -212,7 +213,8 @@ final class BackgroundTranscriptionUploader: NSObject, URLSessionDataDelegate, U
             boundary = try WhisperClient.writeMultipartBody(
                 audioFile: audioURL,
                 destination: bodyURL,
-                language: language
+                language: language,
+                cleanupPreferences: cleanupPreferences
             )
             try FileManager.default.setAttributes(
                 [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
@@ -639,6 +641,7 @@ extension BackgroundTranscriptionUploader: WhisperBackgroundSubmitter {
         serverURL: String,
         jobId: UUID,
         language: String?,
+        cleanupPreferences: LLMCleanupPreferences,
         onDurableAcceptance: (@MainActor @Sendable (UUID, String, String) -> Void)?
     ) async throws -> AsyncSubmitResponse {
         guard let server = URL(string: serverURL) else {
@@ -649,6 +652,7 @@ extension BackgroundTranscriptionUploader: WhisperBackgroundSubmitter {
             server: server,
             audioURL: audioURL,
             language: language,
+            cleanupPreferences: cleanupPreferences,
             onDurableUpdate: { id, terminal in
                 guard case .accepted(let serverJobID, let endpoint) = terminal else { return }
                 onDurableAcceptance?(id, serverJobID, endpoint)

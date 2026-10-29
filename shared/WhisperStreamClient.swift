@@ -97,6 +97,7 @@ actor WhisperStreamClient {
     private let dictationID: String
     private let aacEnabled: Bool
     private let aacSourceSampleRate: Int
+    private let cleanupPreferences: LLMCleanupPreferences
     /// Survives reconnects for this client/session after an ambiguous timeout or CONFIG error.
     private var sessionLegacyPinned = false
 
@@ -135,10 +136,17 @@ actor WhisperStreamClient {
     /// - Parameter baseURL: Base URL of the Whisper server, e.g.
     ///   `"http://192.168.1.100:5000"`.
     /// - Returns: `nil` if the base URL cannot be parsed into a valid WebSocket URL.
-    init?(baseURL: String, dictationID: UUID, aacEnabled: Bool, aacSourceSampleRate: Int) {
+    init?(
+        baseURL: String,
+        dictationID: UUID,
+        aacEnabled: Bool,
+        aacSourceSampleRate: Int,
+        cleanupPreferences: LLMCleanupPreferences
+    ) {
         self.dictationID = dictationID.uuidString
         self.aacEnabled = aacEnabled
         self.aacSourceSampleRate = aacSourceSampleRate
+        self.cleanupPreferences = cleanupPreferences
         var urlString = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
 
         // Rewrite scheme: http → ws, https → wss
@@ -250,13 +258,16 @@ actor WhisperStreamClient {
     ) async throws {
         let handshakeDeadline = Date().addingTimeInterval(
             SharedConfig.Defaults.streamWsConnectTimeout)
-        let shouldNegotiateAAC = StreamFormatNegotiation.shouldSendConfig(
+        let shouldSendConfig = StreamFormatNegotiation.shouldSendConfig(
             aacEnabled: aacEnabled,
-            sessionLegacyPinned: sessionLegacyPinned)
+            sessionLegacyPinned: sessionLegacyPinned,
+            cleanupPreferences: cleanupPreferences)
         let configMessage: String?
-        if shouldNegotiateAAC {
+        if shouldSendConfig {
             guard let message = StreamFormatNegotiation.configMessage(
-                sampleRate: aacSourceSampleRate) else {
+                sampleRate: aacSourceSampleRate,
+                aacEnabled: aacEnabled,
+                cleanupPreferences: cleanupPreferences) else {
                 throw StreamFormatNegotiationError.unsupportedSourceSampleRate(aacSourceSampleRate)
             }
             configMessage = message
@@ -323,7 +334,7 @@ actor WhisperStreamClient {
             throw WhisperStreamTransportError.superseded
         }
 
-        negotiatedAudioMode = StreamFormatNegotiation.initialMode(aacEnabled: shouldNegotiateAAC)
+        negotiatedAudioMode = StreamFormatNegotiation.initialMode(configSent: configMessage != nil)
         negotiationDeadline = negotiatedAudioMode == nil ? handshakeDeadline : nil
         if configMessage != nil {
             FileLogger.shared.debug(.network, "Stream: CONFIG sent", payload: [

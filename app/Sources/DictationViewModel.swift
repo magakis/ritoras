@@ -1081,6 +1081,7 @@ final class DictationViewModel: ObservableObject {
             chunkSendQueue.setRecordingActive(true)
 
             let config = SharedConfig.load()
+            let cleanupPreferences = SharedConfig.llmCleanupPreferences()
 
             let recorder = StreamingAudioRecorder()
             streamRecorder = recorder
@@ -1163,7 +1164,8 @@ final class DictationViewModel: ObservableObject {
                         recorder: recorder,
                         servers: config.servers,
                         aacEnabled: streamAacEnabled,
-                        aacSourceSampleRate: streamAacSourceSampleRate)
+                        aacSourceSampleRate: streamAacSourceSampleRate,
+                        cleanupPreferences: cleanupPreferences)
                 }
                 UIApplication.shared.isIdleTimerDisabled = true
                 return
@@ -1206,7 +1208,8 @@ final class DictationViewModel: ObservableObject {
         recorder: StreamingAudioRecorder,
         servers: [String],
         aacEnabled: Bool,
-        aacSourceSampleRate: Int
+        aacSourceSampleRate: Int,
+        cleanupPreferences: LLMCleanupPreferences
     ) async {
         let selection = await serverSelectionTask?.value
         let probeResult = selection?.server
@@ -1272,7 +1275,8 @@ final class DictationViewModel: ObservableObject {
                     baseURL: server,
                     dictationID: sessionID,
                     aacEnabled: aacEnabled,
-                    aacSourceSampleRate: aacSourceSampleRate) else {
+                    aacSourceSampleRate: aacSourceSampleRate,
+                    cleanupPreferences: cleanupPreferences) else {
                     let elapsed = Date().timeIntervalSince(attemptStart) * 1000
                     FileLogger.shared.debug(.network, "Stream: invalid server URL",
                                             payload: ["jobId": sessionID.uuidString,
@@ -1524,6 +1528,7 @@ final class DictationViewModel: ObservableObject {
                         correlationId: activeID, initialServer: chosenServer,
                         backgroundSubmitter: BackgroundTranscriptionUploader.shared,
                         language: SharedConfig.keyboardLanguage().dictationLanguageField,
+                        cleanupPreferences: SharedConfig.llmCleanupPreferences(),
                         recordingDurationSeconds: recordedDurationSeconds)
                     FileLogger.shared.debug(.network, "async transcription succeeded",
                                             payload: ["textLength": text.count])
@@ -2186,6 +2191,7 @@ final class DictationViewModel: ObservableObject {
         initialServer: String?,
         backgroundSubmitter: (any WhisperBackgroundSubmitter)? = nil,
         language: String?,
+        cleanupPreferences: LLMCleanupPreferences,
         recordingDurationSeconds: TimeInterval
     ) async throws -> String {
         var activeBackgroundSubmitter = backgroundSubmitter
@@ -2239,6 +2245,7 @@ final class DictationViewModel: ObservableObject {
                     },
                     backgroundSubmitter: activeBackgroundSubmitter,
                     language: language,
+                    cleanupPreferences: cleanupPreferences,
                     onDurableAcceptance: { [weak self] id, serverJobId, statusEndpoint in
                         guard let self,
                               !self.backgroundSubmissionWaitIDs.contains(id) else { return }
@@ -2487,6 +2494,7 @@ final class DictationViewModel: ObservableObject {
                 correlationId: jobId, initialServer: record.server,
                 backgroundSubmitter: BackgroundTranscriptionUploader.shared,
                 language: SharedConfig.keyboardLanguage().dictationLanguageField,
+                cleanupPreferences: SharedConfig.llmCleanupPreferences(),
                 recordingDurationSeconds: record.recordedDurationSeconds)
 
             // Add to persistent text history.

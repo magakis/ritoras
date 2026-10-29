@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var settings: AppSettings
+    @Environment(\.scenePhase) private var scenePhase
     @State private var isEditingServers = false
     @State private var isEditingAPIKey = false
     @State private var apiKeyDraft: String = ""
@@ -38,6 +39,7 @@ struct SettingsView: View {
             serverSection
             apiKeySection
             dictationSection
+            cleanupSection
             audioSection
             keyboardSection
             dictionarySection
@@ -46,6 +48,14 @@ struct SettingsView: View {
             infoSection
         }
         .navigationTitle("Ritoras Settings")
+        .onAppear {
+            settings.refreshLLMCleanupPreferences()
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active {
+                settings.refreshLLMCleanupPreferences()
+            }
+        }
     }
 
     // MARK: - Server Section
@@ -197,6 +207,32 @@ struct SettingsView: View {
                     + "Stream transcribes live as you pause — faster feedback, "
                     + "needs a stable connection. Streaming settings only affect Stream mode."
             )
+        }
+    }
+
+    // MARK: - LLM Cleanup Section
+
+    private var cleanupSection: some View {
+        Section {
+            Picker("Styling", selection: $settings.llmCleanupStyling) {
+                ForEach(LLMCleanupStyling.allCases, id: \.self) { styling in
+                    Text(styling.displayName).tag(styling)
+                }
+            }
+            Picker("Structure", selection: $settings.llmCleanupStructure) {
+                ForEach(LLMCleanupStructure.allCases, id: \.self) { structure in
+                    Text(structure.displayName).tag(structure)
+                }
+            }
+            Picker("Context", selection: $settings.llmCleanupContext) {
+                ForEach(LLMCleanupContext.allCases, id: \.self) { context in
+                    Text(context.displayName).tag(context)
+                }
+            }
+        } header: {
+            Text("LLM Cleanup")
+        } footer: {
+            Text("Server default leaves each cleanup choice to the server.")
         }
     }
 

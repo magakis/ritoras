@@ -39,7 +39,7 @@ URL (`ws` for `http`, or `wss` for `https`).
 ### Request
 
 Ritoras sends a `multipart/form-data` request to `POST /transcribe` with the
-audio part and, when available, an optional language form field:
+audio part and, when available, optional language and LLM-cleanup form fields:
 
 ```text
 --{boundary}\r\n
@@ -57,9 +57,16 @@ Content-Type: audio/mp4\r\n
 | Filename | `audio.m4a` |
 | Content-Type | `audio/mp4` |
 | Optional form field | `language` |
+| Optional form field | `cleanup_styling` (string; `casual`, `semi-casual`, `semi-formal`, `formal`) |
+| Optional form field | `cleanup_structure` (string; `prose`, `lists`) |
+| Optional form field | `cleanup_context` (string; `general`, `email`) |
 
 The field name is **`audio`**, not `file`. The optional `language` field is a
 client-provided value; how the deployment interprets it is deployment-specific.
+Each LLM-cleanup field is optional; omitting it lets the server apply its
+profile default. An invalid cleanup value receives HTTP 422 with a JSON body of
+`{"detail":"<field> must be one of: <choices>"}`, where `<choices>` is the
+allowed-value list for that field above.
 
 ### Authentication
 
@@ -104,14 +111,24 @@ The Ritoras client can submit an asynchronous batch transcription to
 server-v2 source; availability and behavior on any particular deployment are
 not guaranteed by this client contract.
 
-The request is `multipart/form-data` with the required `audio` file part and an
-optional `Idempotency-Key` HTTP header. The server hashes the raw uploaded audio
-bytes with SHA-256. While the key remains indexed, repeating the same key with
-the same audio returns HTTP 202 and the existing `job_id` and
-`status_endpoint`; reusing the key with different audio returns HTTP 422. A
-newly accepted job uses the idempotency key as its `job_id`, or a generated UUID
-when no key is supplied. The optional `language` field is currently ignored by
-this server implementation; this is a source-confirmed property of that
+The request is `multipart/form-data` with the required `audio` file part, the
+optional LLM-cleanup form fields described above, and an optional
+`Idempotency-Key` HTTP header. The cleanup fields are strings with these allowed
+values: `cleanup_styling` (`casual`, `semi-casual`, `semi-formal`, `formal`),
+`cleanup_structure` (`prose`, `lists`), and `cleanup_context` (`general`,
+`email`). Omit a field to let the server apply its profile default. An invalid
+cleanup value receives HTTP 422 with a JSON body of
+`{"detail":"<field> must be one of: <choices>"}`, using that field's allowed
+values for `<choices>`.
+
+The server hashes the raw uploaded audio bytes with SHA-256, and normalized
+cleanup preferences are part of the request content identity. While the key
+remains indexed, repeating the same key with the same audio and cleanup
+preferences returns HTTP 202 and the existing `job_id` and `status_endpoint`;
+reusing the key with different audio or cleanup preferences returns HTTP 422.
+A newly accepted job uses the idempotency key as its `job_id`, or a generated
+UUID when no key is supplied. The optional `language` field is currently ignored
+by this server implementation; this is a source-confirmed property of that
 implementation, not a promise about other compatible servers.
 
 The 202 response has this shape:
@@ -273,20 +290,27 @@ is qualifying activity while recording; after `END`, only a `PONG` qualifies.
 
 ### Protocol v2 (additive)
 
-Protocol v2 adds per-connection audio-format negotiation on the same `/stream`
-endpoint. It adds JSON text control frames and preserves the four-byte chunk ID
-prefix. `CONFIG` follows the existing JSON text-frame precedent used by
-`TELEMETRY` in v1; it does not add another endpoint or transport. The existing
-`END`, `PING`, `partial`, `final`, and ordinary error behavior remains
-unchanged after negotiation.
+Protocol v2 adds per-connection audio-format negotiation and optional
+LLM-cleanup preference delivery on the same `/stream` endpoint. It adds JSON
+text control frames and preserves the four-byte chunk ID prefix. `CONFIG`
+follows the existing JSON text-frame precedent used by `TELEMETRY` in v1; it
+does not add another endpoint or transport. The existing `END`, `PING`,
+`partial`, `final`, and ordinary error behavior remains unchanged after
+negotiation.
 
 #### Negotiation and CONFIG
 
-With the AAC setting enabled (on by default), the client completes the existing
-`PING`/`PONG` probe, sends one `CONFIG` before any binary frame, and waits for
-`CONFIG_ACK`. The ACK wait is bounded inside the existing **32-second**
-`streamWsConnectTimeout` connection-setup budget; it does not add another
-32-second timeout.
+For an unpinned session with AAC enabled (on by default), the client completes
+the existing `PING`/`PONG` probe, sends one `CONFIG` before any binary frame, and
+waits for `CONFIG_ACK`. When AAC is disabled but at least one cleanup preference
+is non-default, it sends `CONFIG` requesting `f32le` and waits for the same ACK.
+With AAC disabled and all cleanup preferences at the server default, it sends
+no `CONFIG` and retains the Protocol v1 Float32 behavior. Legacy-pinned sessions
+also omit `CONFIG`, including when cleanup choices are non-default. The ACK wait
+is bounded inside the existing **32-second** `streamWsConnectTimeout`
+connection-setup budget; it does not add another 32-second timeout. When
+required, the client sends only one `CONFIG` text frame per WebSocket
+connection.
 
 The client sends this JSON text frame (with `sampleRate` set to the active
 source rate):
@@ -305,6 +329,23 @@ source rate):
 | `channels` | `1` | Advisory channel count. |
 | `bitrate` | `64000` | Advisory bitrate in bits per second. |
 | `protocol` | `2` | Protocol version marker; it does not select the audio decode path. |
+| `cleanup_styling` | Optional: `casual`, `semi-casual`, `semi-formal`, or `formal` | Explicit cleanup style; omitted for the server default. |
+| `cleanup_structure` | Optional: `prose` or `lists` | Explicit output structure; omitted for the server default. |
+| `cleanup_context` | Optional: `general` or `email` | Explicit cleanup context; omitted for the server default. |
+
+The cleanup fields are sent in this same first `CONFIG` frame, only for axes
+whose values are non-default. For example, a custom AAC request may include:
+
+```json
+{"type":"CONFIG","format":"aac-m4a","sampleRate":16000,"channels":1,"bitrate":64000,"protocol":2,"cleanup_styling":"formal","cleanup_context":"email"}
+```
+
+No empty values or separate cleanup frames are sent. If AAC is disabled, a
+cleanup-only request uses `f32le` and omits the AAC-specific fields:
+
+```json
+{"type":"CONFIG","format":"f32le","protocol":2,"cleanup_structure":"lists"}
+```
 
 `type` and `protocol` identify the message and version. Of the audio-format
 fields, `format` alone selects the decode path. `sampleRate`, `channels`, and
@@ -341,23 +382,36 @@ For the Ritoras AAC request, the ACK is:
 {"type":"CONFIG_ACK","format":"aac-m4a","protocol":2}
 ```
 
-The ACK's `format` is the format accepted for that connection. A matching v2
-ACK for the Ritoras AAC request is `format: "aac-m4a"` and `protocol: 2`.
-The client treats only a parseable `CONFIG_ACK` with protocol `2` and the
-requested format as success; other text frames do not authorize AAC. A received
-`error` frame selects the fallback below, while an unrecognized or non-matching
-ACK leaves the bounded wait running until it succeeds or times out.
+For a request with cleanup fields, the `CONFIG_ACK` echoes the accepted,
+normalized cleanup values, for example:
+
+```json
+{"type":"CONFIG_ACK","format":"aac-m4a","protocol":2,"cleanup_styling":"formal","cleanup_context":"email"}
+```
+
+The ACK's `format` is the format accepted for that connection. The client treats
+only a parseable `CONFIG_ACK` with protocol `2` and the requested format as
+success: `aac-m4a` when AAC is enabled, or `f32le` for a cleanup-only request
+when AAC is disabled. Other text frames do not authorize the requested format;
+an unrecognized or non-matching ACK leaves the bounded wait running until it
+succeeds or times out. The client does not require the echoed cleanup values to
+authorize the format.
 
 #### Server negotiation policy
 
 - The first `CONFIG` received before any binary frame wins, including an
-  unsupported-format request. Later `CONFIG` frames do not renegotiate that
-  connection.
+  unsupported-format request. Only this first `CONFIG` is accepted; later
+  `CONFIG` frames do not renegotiate that connection. The client sends its
+  `CONFIG` after the initial `PING`/`PONG` probe and before the first binary
+  audio frame.
 - Only a JSON object with `type: "CONFIG"` and `protocol: 2` is a v2 request.
   A server that does not recognize the type or protocol version ignores it as
   an unknown text frame; the client then reaches its bounded ACK timeout.
 - A `CONFIG` received after any binary frame is ignored with a server warning
   and no ACK; the connection keeps the format already selected for it.
+- An invalid cleanup preference value produces an `error` frame and cancels
+  the WebSocket session without a `CONFIG_ACK`. The client sends values from
+  the shared cleanup-preference model's supported options and omits defaults.
 - An accepted `CONFIG` overrides the `?format=` query for that connection only.
   It does not change the query or any other connection's format.
 - An unknown or unimplemented format, including reserved `pcm16`, produces a
@@ -374,10 +428,19 @@ ACK leaves the bounded wait running until it succeeds or times out.
 | Outcome | Connection | Client and wire behavior |
 |---------|------------|--------------------------|
 | Matching `CONFIG_ACK` | Open | Pin to `aac-m4a`; use one complete m4a payload per audio message. |
+| Matching `f32le` `CONFIG_ACK` for cleanup-only request | Open | Use Float32 PCM and retain the accepted cleanup preferences for this connection. |
 | ACK timeout | Client closes | Pin session to `f32le`; bounded reconnect without `CONFIG`, then send v1 Float32. Later reconnects also omit `CONFIG`. |
-| CONFIG `error` frame | Still open | Use `f32le` in place and pin session legacy. Server stays `pcm`; later reconnects omit `CONFIG`. |
+| Unsupported-format `error` frame | Still open | Use `f32le` in place and pin session legacy. Server stays `pcm`; later reconnects omit `CONFIG`. |
 | WebSocket close | Closed | Connection failure, not in-place fallback; an unpinned session re-runs negotiation on the replacement socket. |
-| AAC setting off | Open | Never send `CONFIG`; use the unchanged Protocol v1 Float32 format. |
+| Invalid cleanup preference value | Server cancels session | No `CONFIG_ACK`; the client pins the session to legacy Float32, and a replacement connection omits `CONFIG`. |
+| AAC setting off; cleanup preferences at server defaults | Open | Never send `CONFIG`; use the unchanged Protocol v1 Float32 format. |
+| AAC setting off; at least one cleanup preference non-default | Open after matching ACK | Send `CONFIG` with `format: "f32le"` and only the selected cleanup fields; use Float32 PCM. |
+
+Protocol v1 cannot carry cleanup preferences. If a v1 server ignores a v2
+`CONFIG`, the client's bounded ACK timeout closes and pins that session to
+legacy Float32; subsequent legacy-pinned connections send no `CONFIG`, so the
+stream cleanup choices are not applied by that server. AAC-disabled sessions
+with only default cleanup choices continue to omit `CONFIG` entirely.
 
 A server-side close during negotiation is handled by client lifecycle, not by
 an on-wire fallback. The existing bounded reconnect repeats `PING`/`PONG` and
@@ -389,13 +452,14 @@ so the replacement socket and any later reconnect omit `CONFIG`. If reconnect
 fails, streaming enters the existing terminal-failure path and preserves
 `.stream.wav` for saved-audio retry (see §8).
 
-The AAC toggle and source rate are captured once at session start; changes take
-effect on the next session. A connection uses one audio format only: PCM and
-AAC frames never mix, and there is no mid-connection renegotiation. On reconnect,
-AAC negotiation runs again unless a timeout or error frame has pinned the
-session to legacy Float32; a legacy-pinned session omits `CONFIG` on every
-replacement connection. The send queue keeps PCM samples as its source of truth
-and prepares each retry for the format selected on that connection.
+The AAC toggle, source rate, and cleanup preferences are captured once at
+session start; changes take effect on the next session. A connection uses one
+audio format only: PCM and AAC frames never mix, and there is no mid-connection
+renegotiation. On reconnect, AAC negotiation runs again unless a timeout or
+error frame has pinned the session to legacy Float32; a legacy-pinned session
+omits `CONFIG` on every replacement connection. The send queue keeps PCM samples
+as its source of truth and prepares each retry for the format selected on that
+connection.
 
 #### Protocol v2 binary frame
 

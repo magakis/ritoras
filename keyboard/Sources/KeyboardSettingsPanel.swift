@@ -3,10 +3,14 @@ import UIKit
 final class KeyboardSettingsPanel: UIView {
     var onDismiss: (() -> Void)?
     var onLanguageChange: ((KeyboardLanguage) -> Void)?
+    var onLLMCleanupPreferencesChange: ((LLMCleanupPreferences) -> Void)?
 
     private let backdrop = UIView()
     private let card = UIView()
     private let scrollView = UIScrollView()
+    private let stylingControl = UIButton(type: .system)
+    private let structureControl = UIButton(type: .system)
+    private let contextControl = UIButton(type: .system)
     private let languageControl = UISegmentedControl(items: [
         KeyboardLanguage.english.shortLabel,
         KeyboardLanguage.greek.shortLabel,
@@ -74,6 +78,19 @@ final class KeyboardSettingsPanel: UIView {
         contentStack.addArrangedSubview(languageLabel)
         contentStack.addArrangedSubview(languageControl)
 
+        let cleanupLabel = UILabel()
+        cleanupLabel.text = "LLM Cleanup"
+        cleanupLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        cleanupLabel.textColor = .secondaryLabel
+        contentStack.addArrangedSubview(cleanupLabel)
+
+        configureMenuControl(stylingControl, accessibilityLabel: "Cleanup styling")
+        configureMenuControl(structureControl, accessibilityLabel: "Cleanup structure")
+        configureMenuControl(contextControl, accessibilityLabel: "Cleanup context")
+        contentStack.addArrangedSubview(makeCleanupRow(title: "Styling", control: stylingControl))
+        contentStack.addArrangedSubview(makeCleanupRow(title: "Structure", control: structureControl))
+        contentStack.addArrangedSubview(makeCleanupRow(title: "Context", control: contextControl))
+
         let panelStack = UIStackView(arrangedSubviews: [header, scrollView])
         panelStack.axis = .vertical
         panelStack.alignment = .fill
@@ -118,8 +135,12 @@ final class KeyboardSettingsPanel: UIView {
         ])
     }
 
-    func show(activeLanguage: KeyboardLanguage) {
+    func show(
+        activeLanguage: KeyboardLanguage,
+        cleanupPreferences: LLMCleanupPreferences
+    ) {
         update(activeLanguage: activeLanguage)
+        update(cleanupPreferences: cleanupPreferences)
         guard isHidden else { return }
         isHidden = false
         alpha = 0
@@ -133,6 +154,104 @@ final class KeyboardSettingsPanel: UIView {
         case .english: languageControl.selectedSegmentIndex = 0
         case .greek: languageControl.selectedSegmentIndex = 1
         }
+    }
+
+    private func configureMenuControl(_ control: UIButton, accessibilityLabel: String) {
+        var configuration = UIButton.Configuration.plain()
+        configuration.image = UIImage(systemName: "chevron.down")
+        configuration.imagePlacement = .trailing
+        configuration.imagePadding = 4
+        configuration.contentInsets = .zero
+        control.configuration = configuration
+        control.contentHorizontalAlignment = .right
+        control.showsMenuAsPrimaryAction = true
+        control.tintColor = EmojiPanelView.categoryHighlightColor
+        control.accessibilityLabel = accessibilityLabel
+        control.setContentCompressionResistancePriority(.required, for: .horizontal)
+    }
+
+    private func makeCleanupRow(title: String, control: UIButton) -> UIStackView {
+        let label = UILabel()
+        label.text = title
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .secondaryLabel
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let row = UIStackView(arrangedSubviews: [label, control])
+        row.axis = .horizontal
+        row.alignment = .center
+        row.distribution = .fill
+        row.spacing = 8
+        return row
+    }
+
+    private func update(cleanupPreferences: LLMCleanupPreferences) {
+        configureMenu(
+            for: stylingControl,
+            options: LLMCleanupStyling.allCases,
+            selection: cleanupPreferences.styling,
+            displayName: { $0.displayName }
+        ) { [weak self] _ in
+            self?.cleanupPreferenceSelectionChanged()
+        }
+        configureMenu(
+            for: structureControl,
+            options: LLMCleanupStructure.allCases,
+            selection: cleanupPreferences.structure,
+            displayName: { $0.displayName }
+        ) { [weak self] _ in
+            self?.cleanupPreferenceSelectionChanged()
+        }
+        configureMenu(
+            for: contextControl,
+            options: LLMCleanupContext.allCases,
+            selection: cleanupPreferences.context,
+            displayName: { $0.displayName }
+        ) { [weak self] _ in
+            self?.cleanupPreferenceSelectionChanged()
+        }
+    }
+
+    private func configureMenu<Value: Equatable>(
+        for control: UIButton,
+        options: [Value],
+        selection: Value,
+        displayName: @escaping (Value) -> String,
+        onSelection: @escaping (Value) -> Void
+    ) {
+        let selectedIndex = options.firstIndex(of: selection) ?? 0
+        control.tag = selectedIndex
+
+        var configuration = control.configuration ?? .plain()
+        configuration.title = displayName(selection)
+        control.configuration = configuration
+        control.menu = UIMenu(
+            title: "",
+            options: .singleSelection,
+            children: options.enumerated().map { index, option in
+                UIAction(
+                    title: displayName(option),
+                    state: index == selectedIndex ? .on : .off
+                ) { [weak control] _ in
+                    guard let control else { return }
+                    control.tag = index
+                    var configuration = control.configuration ?? .plain()
+                    configuration.title = displayName(option)
+                    control.configuration = configuration
+                    onSelection(option)
+                }
+            }
+        )
+    }
+
+    private func cleanupPreferenceSelectionChanged() {
+        let preferences = LLMCleanupPreferences(
+            styling: LLMCleanupStyling.allCases[stylingControl.tag],
+            structure: LLMCleanupStructure.allCases[structureControl.tag],
+            context: LLMCleanupContext.allCases[contextControl.tag]
+        )
+        update(cleanupPreferences: preferences)
+        onLLMCleanupPreferencesChange?(preferences)
     }
 
     func dismiss() {
