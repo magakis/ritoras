@@ -3,9 +3,16 @@ import SwiftUI
 struct SilenceProgressIndicator: View {
     let state: ChunkSplitterFrameState
     let chunkDispatchCount: Int
+    @State private var displayedEndpointState: String
+
+    init(state: ChunkSplitterFrameState, chunkDispatchCount: Int) {
+        self.state = state
+        self.chunkDispatchCount = chunkDispatchCount
+        _displayedEndpointState = State(initialValue: state.endpointState)
+    }
 
     private var silenceProgress: Double {
-        guard state.endpointState == "endPending",
+        guard state.endpointState != "idle",
               state.silenceTargetMs > 0,
               state.silenceTargetMs > state.endEvidenceMs else {
             return 0
@@ -17,7 +24,7 @@ struct SilenceProgressIndicator: View {
     }
 
     private var stateLabel: String {
-        switch state.endpointState {
+        switch displayedEndpointState {
         case "idle":
             return "Listening"
         case "onsetPending":
@@ -32,17 +39,17 @@ struct SilenceProgressIndicator: View {
     }
 
     private var stateTextColor: Color {
-        if state.endpointState == "idle" {
+        if displayedEndpointState == "idle" {
             return .secondary
         }
-        if state.endpointState == "endPending" {
+        if displayedEndpointState == "endPending" {
             return .orange
         }
         return .primary
     }
 
     private var stateDotColor: Color {
-        switch state.endpointState {
+        switch displayedEndpointState {
         case "speechActive":
             return .green
         case "endPending":
@@ -53,7 +60,18 @@ struct SilenceProgressIndicator: View {
     }
 
     private var fillColor: Color {
-        state.endpointState == "endPending" ? .orange : .secondary.opacity(0.3)
+        switch state.endpointState {
+        case "idle":
+            return .clear
+        case "endPending":
+            return .orange
+        default:
+            return .orange.opacity(0.35)
+        }
+    }
+
+    private var labelTaskID: String {
+        "\(state.endpointState)|\(state.lastEmissionReason ?? "")"
     }
 
     private var evidenceColor: Color {
@@ -100,6 +118,22 @@ struct SilenceProgressIndicator: View {
             .animation(.easeOut(duration: 0.2), value: state.lastEmissionReason)
 
             levelReadout
+        }
+        .task(id: labelTaskID) { @MainActor in
+            let nextEndpointState = state.endpointState
+            guard nextEndpointState != "idle", state.lastEmissionReason == nil else {
+                displayedEndpointState = nextEndpointState
+                return
+            }
+
+            do {
+                try await Task.sleep(for: .milliseconds(400))
+            } catch {
+                return
+            }
+
+            guard !Task.isCancelled else { return }
+            displayedEndpointState = nextEndpointState
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)

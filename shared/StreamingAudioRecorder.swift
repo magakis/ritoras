@@ -194,6 +194,7 @@ struct ChunkSplitterFrameState: Sendable {
     let silenceThresholdDb: Double
     let floorDb: Double?
     let accumulatedSilenceMs: Double
+    let contiguousTrailingSilenceMs: Double
     let silenceTargetMs: Double
     let endEvidenceMs: Double
     let utteranceDurationMs: Double
@@ -469,6 +470,7 @@ private final class VADContext: @unchecked Sendable {
             silenceThresholdDb: gateSnapshot.silenceThresholdDb,
             floorDb: gateSnapshot.floorDb,
             accumulatedSilenceMs: Double(endpoint.accumulatedSilenceSamples) / 16.0,
+            contiguousTrailingSilenceMs: Double(contiguousTrailingSilenceSamples) / 16.0,
             silenceTargetMs: Double(silenceThresholdSamples) / 16.0,
             endEvidenceMs: Double(endpoint.configuration.endEvidenceSamples) / 16.0,
             utteranceDurationMs: Double(endpoint.utteranceDurationSamples) / 16.0,
