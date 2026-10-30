@@ -225,6 +225,14 @@ final class ChunkSplitterTelemetryFileWriter: @unchecked Sendable, VADTelemetryS
         if record.isLoudRegime {
             object["lr"] = true
         }
+        if let referenceDb = record.utteranceLevelReferenceDb {
+            object["ur"] = referenceDb
+        }
+        object["uq"] = record.utteranceLevelQualification
+        object["ar"] = record.ambiguousRunSamples
+        object["ac"] = record.ambiguousFrameCreditSamples
+        object["wc"] = record.weightedSilenceCreditSamples
+        object["ts"] = record.physicalTrailingSilenceSamples
         return serialize(object)
     }
 

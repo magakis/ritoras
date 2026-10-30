@@ -43,6 +43,14 @@ export const SHIPPING_SESSION_CONFIG = Object.freeze({
   endpointSilenceMs: 700,
   endpointResumeMs: 120,
   endpointAmbiguousRescueMs: 320,
+  utteranceRelativeResetEnabled: true,
+  utteranceResetMarginDb: 12,
+  utteranceEstablishMs: 500,
+  utteranceLevelDescentDbPerSec: 1,
+  utteranceLevelDescentCapDb: 8,
+  utteranceLevelRaiseSustainMs: 300,
+  ambiguousDecayGraceMs: 800,
+  ambiguousDecayRate: 0.75,
   silenceMs: 700,
   minSpeechMs: 300,
   minChunkMs: 300,
@@ -106,6 +114,15 @@ function asFiniteNumber(value, key) {
   const number = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(number)) throw new Error(`${key} must be a finite number`);
   return number;
+}
+
+function boundedNumber(value, fallback, minimum, maximum) {
+  const number = Number.isFinite(value) ? value : fallback;
+  return Math.min(maximum, Math.max(minimum, number));
+}
+
+function boundedInteger(value, fallback, minimum, maximum) {
+  return Math.trunc(boundedNumber(value, fallback, minimum, maximum));
 }
 
 function parseScalar(value) {
@@ -376,12 +393,45 @@ export function normalizeConfig(rawConfig = {}) {
   });
   const gate = new VADThresholdGate(gateConfig);
   const endpointSilenceMs = asFiniteNumber(raw.endpointSilenceMs, 'endpointSilenceMs');
+  const utteranceRelativeResetEnabled = Boolean(
+    raw.utteranceRelativeResetEnabled && raw.endpointMachineEnabled,
+  );
+  const utteranceResetMarginDb = boundedNumber(raw.utteranceResetMarginDb, 12, 6, 24);
+  const utteranceEstablishMs = boundedInteger(raw.utteranceEstablishMs, 500, 250, 2_000);
+  const utteranceLevelDescentDbPerSec = boundedNumber(
+    raw.utteranceLevelDescentDbPerSec,
+    1,
+    0,
+    3,
+  );
+  const utteranceLevelDescentCapDb = boundedNumber(
+    raw.utteranceLevelDescentCapDb,
+    8,
+    0,
+    24,
+  );
+  const boundedUtteranceLevelRaiseSustainMs = boundedInteger(
+    raw.utteranceLevelRaiseSustainMs,
+    300,
+    100,
+    1_000,
+  );
+  // Match Config.swift: startup seed support cannot exceed the establishment window.
+  const utteranceLevelRaiseSustainMs = Math.min(
+    boundedUtteranceLevelRaiseSustainMs,
+    utteranceEstablishMs,
+  );
+  const ambiguousDecayGraceMs = boundedInteger(raw.ambiguousDecayGraceMs, 800, 100, 2_000);
+  const ambiguousDecayRate = boundedNumber(raw.ambiguousDecayRate, 0.75, 0, 1);
   const endpoint = new StreamingEndpoint(makeStreamingEndpointConfig({
     onsetMs: asFiniteNumber(raw.endpointOnsetMs, 'endpointOnsetMs'),
     endEvidenceMs: asFiniteNumber(raw.endpointEndEvidenceMs, 'endpointEndEvidenceMs'),
     endpointSilenceMs,
     resumeMs: asFiniteNumber(raw.endpointResumeMs, 'endpointResumeMs'),
     ambiguousRescueMs: asFiniteNumber(raw.endpointAmbiguousRescueMs, 'endpointAmbiguousRescueMs'),
+    ambiguousDecayEnabled: utteranceRelativeResetEnabled,
+    ambiguousDecayGraceMs,
+    ambiguousDecayRate,
   }));
   const minimum = key => Math.max(0, Math.floor(asFiniteNumber(raw[key], key) * 16));
   const maxNoiseSamples = Math.max(0, Math.floor(
@@ -413,6 +463,14 @@ export function normalizeConfig(rawConfig = {}) {
     endpointSilenceMs: endpoint.configuration.endpointSilenceSamples / 16,
     endpointResumeMs: endpoint.configuration.resumeSamples / 16,
     endpointAmbiguousRescueMs: endpoint.configuration.ambiguousRescueSamples / 16,
+    utteranceRelativeResetEnabled,
+    utteranceResetMarginDb,
+    utteranceEstablishMs,
+    utteranceLevelDescentDbPerSec,
+    utteranceLevelDescentCapDb,
+    utteranceLevelRaiseSustainMs,
+    ambiguousDecayGraceMs: endpoint.configuration.ambiguousDecayGraceMs,
+    ambiguousDecayRate: endpoint.configuration.ambiguousDecayRate,
     silenceMs: endpoint.configuration.endpointSilenceSamples / 16,
     minSpeechMs: minimum('minSpeechMs') / 16,
     minChunkMs: minimum('minChunkMs') / 16,
@@ -440,6 +498,14 @@ export function normalizeConfig(rawConfig = {}) {
     slowOnsetDeltaDb: normalized.slowOnsetDeltaDb,
     slowOnsetEvidenceMs: normalized.slowOnsetEvidenceMs,
     slowOnsetWindowSeconds: normalized.slowOnsetWindowSeconds,
+    utteranceRelativeResetEnabled: normalized.utteranceRelativeResetEnabled,
+    utteranceResetMarginDb: normalized.utteranceResetMarginDb,
+    utteranceEstablishMs: normalized.utteranceEstablishMs,
+    utteranceLevelDescentDbPerSec: normalized.utteranceLevelDescentDbPerSec,
+    utteranceLevelDescentCapDb: normalized.utteranceLevelDescentCapDb,
+    utteranceLevelRaiseSustainMs: normalized.utteranceLevelRaiseSustainMs,
+    ambiguousDecayGraceMs: normalized.ambiguousDecayGraceMs,
+    ambiguousDecayRate: normalized.ambiguousDecayRate,
   } };
 }
 
@@ -449,6 +515,7 @@ function harnessOptions(normalized) {
     endpointConfig: normalized.endpoint.configuration,
     endpointSilenceMs: normalized.config.endpointSilenceMs,
     endpointMachineEnabled: normalized.config.endpointMachineEnabled,
+    utteranceRelativeResetEnabled: normalized.config.utteranceRelativeResetEnabled,
     minSpeechSamples: normalized.minSpeechSamples,
     minChunkSamples: normalized.minChunkSamples,
     maxNoiseSamples: normalized.maxNoiseSamples,

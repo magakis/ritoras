@@ -156,6 +156,12 @@ final class StreamingChunkSplitterTelemetry: @unchecked Sendable, VADTelemetrySi
                 if let spread = frame.dynamicsSpreadDb { item["dy"] = spread }
                 if let spread = frame.shortSpreadDb { item["sdy"] = spread }
                 if let ratio = frame.highBandRatioDb { item["hbr"] = ratio }
+                if let referenceDb = frame.utteranceLevelReferenceDb { item["ur"] = referenceDb }
+                item["uq"] = frame.utteranceLevelQualification
+                item["ar"] = frame.ambiguousRunSamples
+                item["ac"] = frame.ambiguousFrameCreditSamples
+                item["wc"] = frame.weightedSilenceCreditSamples
+                item["ts"] = frame.physicalTrailingSilenceSamples
                 return item
             }
         ]
@@ -182,6 +188,12 @@ final class StreamingChunkSplitterTelemetry: @unchecked Sendable, VADTelemetrySi
                 if let spread = frame.dynamicsSpreadDb { item["dy"] = spread }
                 if let spread = frame.shortSpreadDb { item["sdy"] = spread }
                 if let ratio = frame.highBandRatioDb { item["hbr"] = ratio }
+                if let referenceDb = frame.utteranceLevelReferenceDb { item["ur"] = referenceDb }
+                item["uq"] = frame.utteranceLevelQualification
+                item["ar"] = frame.ambiguousRunSamples
+                item["ac"] = frame.ambiguousFrameCreditSamples
+                item["wc"] = frame.weightedSilenceCreditSamples
+                item["ts"] = frame.physicalTrailingSilenceSamples
                 return item
             }
             let trimHistory = historicalSnapshot.count - historyCount

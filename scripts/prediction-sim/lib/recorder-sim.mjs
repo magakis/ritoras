@@ -44,6 +44,15 @@ function makeEndpoint(endpointSilenceMs = DEFAULT_ENDPOINT_SILENCE_MS, partial =
   return new StreamingEndpoint({ endpointSilenceMs, ...partial });
 }
 
+function clampFinite(value, fallback, minimum, maximum) {
+  const finiteValue = Number.isFinite(value) ? value : fallback;
+  return Math.min(maximum, Math.max(minimum, finiteValue));
+}
+
+function clampInteger(value, fallback, minimum, maximum) {
+  return Math.trunc(clampFinite(value, fallback, minimum, maximum));
+}
+
 export function classifyEndPendingEvidence({
   endpointState,
   evidence,
@@ -137,6 +146,14 @@ function makeSessionConfig(harness) {
     endpointSilenceMs: endpoint.endpointSilenceSamples / 16,
     endpointResumeMs: endpoint.resumeSamples / 16,
     endpointAmbiguousRescueMs: endpoint.ambiguousRescueSamples / 16,
+    utteranceRelativeResetEnabled: harness.utteranceRelativeResetEnabled,
+    utteranceResetMarginDb: harness.utteranceResetMarginDb,
+    utteranceEstablishMs: harness.utteranceEstablishSamples / 16,
+    utteranceLevelDescentDbPerSec: harness.utteranceLevelDescentDbPerSec,
+    utteranceLevelDescentCapDb: harness.utteranceLevelDescentCapDb,
+    utteranceLevelRaiseSustainMs: harness.utteranceLevelRaiseSustainSamples / 16,
+    ambiguousDecayGraceMs: endpoint.ambiguousDecayGraceMs,
+    ambiguousDecayRate: endpoint.ambiguousDecayRate,
     endpointPreRollMs: endpoint.preRollSamples / 16,
     sessionHeadBufferMs: harness.headBufferSamples / 16,
     silenceMs: harness.silenceThresholdSamples / 16,
@@ -197,6 +214,7 @@ export function makeRecorderHarness({
   headBufferSamples = DEFAULT_HEAD_BUFFER_SAMPLES,
   maxNoiseSamples = DEFAULT_MAX_NOISE_SAMPLES,
   endpointMachineEnabled = true,
+  utteranceRelativeResetEnabled = true,
   recorderConfig = {},
   gateConfig = {},
   onFrame,
@@ -204,12 +222,51 @@ export function makeRecorderHarness({
   onSlowOnsetDiagnostic,
 } = {}) {
   const recorderFrameDuration = frameMs / 1000;
-  const endpoint = makeEndpoint(endpointSilenceMs, endpointConfig);
+  const featureEnabled = Boolean(utteranceRelativeResetEnabled && endpointMachineEnabled);
+  const utteranceEstablishSamples = clampInteger(
+    recorderConfig.utteranceEstablishMs,
+    500,
+    250,
+    2_000,
+  ) * 16;
+  // Keep direct harness callers consistent with the replay config's effective dwell.
+  const utteranceLevelRaiseSustainSamples = Math.min(
+    clampInteger(recorderConfig.utteranceLevelRaiseSustainMs, 300, 100, 1_000) * 16,
+    utteranceEstablishSamples,
+  );
+  const endpoint = makeEndpoint(endpointSilenceMs, {
+    ...endpointConfig,
+    ambiguousDecayEnabled: featureEnabled,
+  });
   const gate = makeGate(gateConfig);
   const harness = {
     gate,
     endpoint,
     endpointMachineEnabled,
+    utteranceRelativeResetEnabled: featureEnabled,
+    utteranceResetMarginDb: clampFinite(recorderConfig.utteranceResetMarginDb, 12, 6, 24),
+    utteranceEstablishSamples,
+    utteranceLevelDescentDbPerSec: clampFinite(
+      recorderConfig.utteranceLevelDescentDbPerSec,
+      1,
+      0,
+      3,
+    ),
+    utteranceLevelDescentCapDb: clampFinite(
+      recorderConfig.utteranceLevelDescentCapDb,
+      8,
+      0,
+      24,
+    ),
+    utteranceLevelRaiseSustainSamples,
+    utteranceLevelReferenceDb: null,
+    utteranceLevelMaximumDb: null,
+    utteranceEstablishEvidenceSamples: 0,
+    utteranceEstablishmentWindowSamples: 0,
+    utteranceEstablishmentLevels: [],
+    utteranceReferenceEstablished: false,
+    utteranceLevelRaiseEvidenceSamples: 0,
+    utteranceLevelRaiseCandidateMaxDb: null,
     silenceThresholdSamples: endpoint.configuration.endpointSilenceSamples,
     minChunkSamples,
     minSpeechSamples,
@@ -314,6 +371,7 @@ export function makeRecorderHarness({
 
     resetAfterRouteChange() {
       this.gate.resetFloorAfterRouteChange();
+      this.resetUtteranceLevelReference();
       this.primingComplete = this.gate.snapshot.floorDb === null;
       this.contiguousTrailingSilenceSamples = 0;
       this.contiguousTrailingSilenceMinimumDb = null;
@@ -324,7 +382,164 @@ export function makeRecorderHarness({
       this.quietLatchRisingEdgeSeen = false;
     },
 
-    recordFrame(output, previousState, decision, decisionSilenceSamples, frameDb, frameDuration) {
+    resetUtteranceLevelReference() {
+      this.utteranceLevelReferenceDb = null;
+      this.utteranceLevelMaximumDb = null;
+      this.utteranceEstablishEvidenceSamples = 0;
+      this.utteranceEstablishmentWindowSamples = 0;
+      this.utteranceEstablishmentLevels.length = 0;
+      this.utteranceReferenceEstablished = false;
+      this.utteranceLevelRaiseEvidenceSamples = 0;
+      this.utteranceLevelRaiseCandidateMaxDb = null;
+    },
+
+    qualifyEndpointEvidence(
+      evidence,
+      classifiedEvidence,
+      frameDb,
+      frameSamples,
+      frameDuration,
+      previousState,
+    ) {
+      if (!this.utteranceRelativeResetEnabled) return { evidence, state: 'disabled' };
+
+      // Keep gate-classified duration separate from endpoint remaps.
+      let qualifiedEvidence = evidence;
+      let qualificationState = this.utteranceReferenceEstablished ? 'established' : 'establishing';
+      if ((evidence === 'strong' || evidence === 'continuing')
+        && this.utteranceReferenceEstablished
+        && this.utteranceLevelReferenceDb - frameDb > this.utteranceResetMarginDb) {
+        qualifiedEvidence = 'ambiguous';
+        qualificationState = 'stripped';
+      }
+
+      if (classifiedEvidence !== 'strong' && classifiedEvidence !== 'continuing') {
+        this.utteranceLevelRaiseEvidenceSamples = 0;
+        this.utteranceLevelRaiseCandidateMaxDb = null;
+      }
+      this.updateUtteranceLevelReference(
+        classifiedEvidence,
+        evidence,
+        frameDb,
+        frameSamples,
+        frameDuration,
+        previousState,
+      );
+      if (qualificationState !== 'stripped') {
+        qualificationState = this.utteranceReferenceEstablished ? 'established' : 'establishing';
+      }
+      return { evidence: qualifiedEvidence, state: qualificationState };
+    },
+
+    updateUtteranceLevelReference(
+      classifiedEvidence,
+      endpointEvidence,
+      frameDb,
+      frameSamples,
+      frameDuration,
+      previousState,
+    ) {
+      if (classifiedEvidence !== 'strong' && classifiedEvidence !== 'continuing') return;
+
+      if (!this.utteranceReferenceEstablished) {
+        if (previousState === 'idle' && endpointEvidence !== 'strong') return;
+        const windowSamplesToAdd = this.utteranceEstablishEvidenceSamples
+          < this.utteranceEstablishSamples
+          ? Math.min(
+            frameSamples,
+            this.utteranceEstablishSamples - this.utteranceEstablishEvidenceSamples,
+          )
+          : frameSamples;
+        this.utteranceEstablishEvidenceSamples += frameSamples;
+        if (windowSamplesToAdd > 0) {
+          this.utteranceEstablishmentLevels.push({
+            frameDb,
+            samples: windowSamplesToAdd,
+          });
+          this.utteranceEstablishmentWindowSamples += windowSamplesToAdd;
+          this.trimUtteranceEstablishmentWindow();
+        }
+        if (this.utteranceEstablishEvidenceSamples < this.utteranceEstablishSamples) return;
+        const sustainedLevelDb = this.sustainedEstablishmentLevelDb();
+        if (sustainedLevelDb === null) return;
+        this.utteranceLevelMaximumDb = sustainedLevelDb;
+        this.utteranceLevelReferenceDb = sustainedLevelDb;
+        this.utteranceReferenceEstablished = true;
+        this.utteranceEstablishmentWindowSamples = 0;
+        this.utteranceEstablishmentLevels.length = 0;
+        this.utteranceLevelRaiseEvidenceSamples = 0;
+        this.utteranceLevelRaiseCandidateMaxDb = null;
+        return;
+      }
+
+      const previousReferenceDb = this.utteranceLevelReferenceDb;
+      // Only establishment and sustained raises can move the descent floor.
+      const minimumReferenceDb = this.utteranceLevelMaximumDb - this.utteranceLevelDescentCapDb;
+      const descendedReferenceDb = Math.max(
+        minimumReferenceDb,
+        previousReferenceDb - this.utteranceLevelDescentDbPerSec * frameDuration,
+      );
+      this.utteranceLevelReferenceDb = descendedReferenceDb;
+      if (frameDb <= previousReferenceDb) {
+        this.utteranceLevelRaiseEvidenceSamples = 0;
+        this.utteranceLevelRaiseCandidateMaxDb = null;
+        return;
+      }
+
+      this.utteranceLevelRaiseEvidenceSamples += frameSamples;
+      this.utteranceLevelRaiseCandidateMaxDb = Math.max(
+        this.utteranceLevelRaiseCandidateMaxDb ?? frameDb,
+        frameDb,
+      );
+      if (this.utteranceLevelRaiseEvidenceSamples < this.utteranceLevelRaiseSustainSamples) return;
+
+      const raisedReferenceDb = this.utteranceLevelRaiseCandidateMaxDb;
+      this.utteranceLevelMaximumDb = Math.max(this.utteranceLevelMaximumDb, raisedReferenceDb);
+      this.utteranceLevelReferenceDb = Math.max(descendedReferenceDb, raisedReferenceDb);
+      this.utteranceLevelRaiseEvidenceSamples = 0;
+      this.utteranceLevelRaiseCandidateMaxDb = null;
+    },
+
+    trimUtteranceEstablishmentWindow() {
+      while (this.utteranceEstablishmentWindowSamples > this.utteranceEstablishSamples
+        && this.utteranceEstablishmentLevels.length > 0) {
+        const firstSample = this.utteranceEstablishmentLevels[0];
+        const excessSamples = this.utteranceEstablishmentWindowSamples
+          - this.utteranceEstablishSamples;
+        if (firstSample.samples <= excessSamples) {
+          this.utteranceEstablishmentWindowSamples -= firstSample.samples;
+          this.utteranceEstablishmentLevels.shift();
+        } else {
+          firstSample.samples -= excessSamples;
+          this.utteranceEstablishmentWindowSamples -= excessSamples;
+        }
+      }
+    },
+
+    sustainedEstablishmentLevelDb() {
+      let classifiedSamples = 0;
+      // A startup crest with less than the raise dwell cannot define the seed.
+      const strongestLevels = [...this.utteranceEstablishmentLevels]
+        .sort((left, right) => right.frameDb - left.frameDb);
+      for (const sample of strongestLevels) {
+        classifiedSamples += sample.samples;
+        if (classifiedSamples >= this.utteranceLevelRaiseSustainSamples) {
+          return sample.frameDb;
+        }
+      }
+      return null;
+    },
+
+    recordFrame(
+      output,
+      previousState,
+      decision,
+      decisionSilenceSamples,
+      frameDb,
+      frameDuration,
+      qualificationState,
+      physicalTrailingSilenceSamples,
+    ) {
       const record = {
         t: 'f',
         q: this.frameSequence,
@@ -344,8 +559,17 @@ export function makeRecorderHarness({
         us: this.endpoint.utteranceDurationSamples,
         ls: this.sustainedContinuingMs,
         ll: this.sustainedContinuingOnsetLatched,
+        uq: qualificationState,
+        ar: this.endpoint.lastDecisionAmbiguousRunSamples
+          ?? this.endpoint.ambiguousRunSamples,
+        ac: this.endpoint.lastDecisionAmbiguousFrameCreditSamples
+          ?? this.endpoint.lastFrameAmbiguousCreditSamples,
+        wc: this.endpoint.lastDecisionAmbiguousCreditSamples
+          ?? this.endpoint.accumulatedAmbiguousCreditSamples,
+        ts: physicalTrailingSilenceSamples,
       };
       copyOptional(record, 'fl', output.floorDb);
+      copyOptional(record, 'ur', this.utteranceLevelReferenceDb);
       record.fc = output.floorConverged;
       copyOptional(record, 'dy', output.dynamicsSpreadDb);
       record.sh = output.speechShaped;
@@ -824,6 +1048,19 @@ export function makeRecorderHarness({
           || this.endpoint.configuration.ambiguousRescueToEndpointSilenceRatio !== undefined,
         frameDuration,
       });
+      let qualificationState = this.utteranceRelativeResetEnabled ? 'establishing' : 'disabled';
+      if (this.endpointMachineEnabled) {
+        const qualification = this.qualifyEndpointEvidence(
+          endpointEvidence,
+          output.evidence,
+          frameDb,
+          frameSamples,
+          frameDuration,
+          previousState,
+        );
+        endpointEvidence = qualification.evidence;
+        qualificationState = qualification.state;
+      }
       if (output.isSpeech) this.speechSamples += frameSamples;
       if (this.endpointMachineEnabled) {
         const isTrailingSilence = endpointEvidence === 'silence';
@@ -868,6 +1105,7 @@ export function makeRecorderHarness({
       let decision = { type: 'none' };
       let discarded = false;
       let decisionSilenceSamples = this.silenceSamples;
+      let decisionAmbiguousCreditSamples = 0;
       if (this.endpointMachineEnabled) {
         const silenceBeforeDecision = this.endpoint.accumulatedSilenceSamples;
         if (slowOnsetTriggered) {
@@ -891,10 +1129,13 @@ export function makeRecorderHarness({
           this.flatFrameStreakStartTime = null;
           this.flatTerminatorActive = false;
         }
-        decisionSilenceSamples = decision.type === 'finalizeUtterance'
-          && endpointEvidence === 'silence'
-          ? silenceBeforeDecision + frameSamples
-          : this.endpoint.accumulatedSilenceSamples;
+        if (decision.type === 'finalizeUtterance') {
+          decisionSilenceSamples = this.endpoint.lastDecisionSilenceSamples
+            ?? silenceBeforeDecision + (endpointEvidence === 'silence' ? frameSamples : 0);
+          decisionAmbiguousCreditSamples = this.endpoint.lastDecisionAmbiguousCreditSamples ?? 0;
+        } else {
+          decisionSilenceSamples = this.endpoint.accumulatedSilenceSamples;
+        }
         if (frameWasInRetainedGap) {
           this.appendRetainedGap(
             frameSamples,
@@ -1014,10 +1255,16 @@ export function makeRecorderHarness({
         output,
         previousState,
         this.endpointMachineEnabled ? decision : { type: 'none' },
-        decisionSilenceSamples,
+        Math.round(decisionSilenceSamples),
         frameDb,
         frameDuration,
+        qualificationState,
+        this.contiguousTrailingSilenceSamples,
       );
+      if (decision.type === 'finalizeUtterance'
+        || (previousState === 'onsetPending' && this.endpoint.state === 'idle')) {
+        this.resetUtteranceLevelReference();
+      }
       if (decision.type === 'startUtterance') {
         this.finishIdleGapRun();
       } else if (this.endpointMachineEnabled
@@ -1147,6 +1394,8 @@ export function makeRecorderHarness({
             sourceStartSample: emissionStartSamples,
             sourceEndSample: sourceEndSamples,
             es: previousState,
+            weightedSilenceCreditMs: decisionAmbiguousCreditSamples / 16,
+            physicalTrailingSilenceMs: this.contiguousTrailingSilenceSamples / 16,
           });
           this.clearRetainedGap();
           if (trimmedTailSamples > 0) {
@@ -1423,6 +1672,8 @@ export function makeRecorderHarness({
       this.quietLatchRisingEdgeSeen = false;
       this.moveRetainedGapToAccumulator();
       this.finishIdleGapRun();
+      const stopWeightedSilenceCreditMs = this.endpoint.accumulatedAmbiguousCreditSamples / 16;
+      const stopPhysicalTrailingSilenceMs = this.contiguousTrailingSilenceSamples / 16;
       const sampleCount = this.accumulatorSamples;
       const speechMs = this.speechSamples / 16;
       const decisionTimeEndpointState = this.endpoint.state;
@@ -1436,6 +1687,7 @@ export function makeRecorderHarness({
         ? (this.primingComplete ? 'empty' : 'priming_window')
         : sampleCount < STOP_FLUSH_MINIMUM_SAMPLES ? 'tail_floor' : 'flush';
       if (this.endpointMachineEnabled) this.endpoint.forceFinalize('stop');
+      this.resetUtteranceLevelReference();
       this.emitEvent({
         t: 'ev',
         k: 'stop_flush',
@@ -1500,6 +1752,8 @@ export function makeRecorderHarness({
         sourceStartSample,
         sourceEndSample,
         es: decisionTimeEndpointState,
+        weightedSilenceCreditMs: stopWeightedSilenceCreditMs,
+        physicalTrailingSilenceMs: stopPhysicalTrailingSilenceMs,
       });
       this.headLive = false;
       this.headSamples = 0;
@@ -1523,6 +1777,7 @@ export function makeRecorderHarness({
 
     end({ flush = false } = {}) {
       if (flush) this.flush();
+      this.resetUtteranceLevelReference();
       this.emitEvent({ t: 'ev', k: 'session_end' });
     },
   };

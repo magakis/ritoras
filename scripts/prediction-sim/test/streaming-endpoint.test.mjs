@@ -16,8 +16,8 @@ function feed(endpoint, evidence, durationMs) {
   return endpoint.process(evidence, samples(durationMs));
 }
 
-function startEndpoint() {
-  const endpoint = new StreamingEndpoint();
+function startEndpoint(config = {}) {
+  const endpoint = new StreamingEndpoint(config);
   for (let i = 0; i < 7; i++) feed(endpoint, E.strong, 10);
   assert.strictEqual(endpoint.state, 'speechActive');
   return endpoint;
@@ -75,6 +75,19 @@ describe('StreamingEndpoint', () => {
         rescue: 160,
       },
     );
+  });
+
+  it('clamps ambiguous decay and keeps its grace at least as long as rescue', () => {
+    const configuration = makeStreamingEndpointConfig({
+      ambiguousDecayEnabled: true,
+      ambiguousRescueMs: 500,
+      ambiguousDecayGraceMs: 50,
+      ambiguousDecayRate: 1.5,
+    });
+
+    assert.equal(configuration.ambiguousDecayEnabled, true);
+    assert.equal(configuration.ambiguousDecayGraceSamples, 500 * 16);
+    assert.equal(configuration.ambiguousDecayRate, 1);
   });
 
   it('permits an inert resume threshold above endpoint silence', () => {
@@ -171,23 +184,41 @@ describe('StreamingEndpoint', () => {
   });
 
   it('brief ambiguous blips do not rescue end-pending', () => {
-    const endpoint = startEndpoint();
+    const endpoint = startEndpoint({ ambiguousDecayEnabled: true });
     feed(endpoint, E.silence, 100);
     feed(endpoint, E.ambiguous, 319);
     assert.strictEqual(endpoint.accumulatedSilenceSamples, samples(100));
+    assert.strictEqual(endpoint.ambiguousRunSamples, samples(319));
     feed(endpoint, E.silence, 599);
     assert.strictEqual(endpoint.state, 'endPending');
+    assert.strictEqual(endpoint.ambiguousRunSamples, samples(319));
     assert.strictEqual(feed(endpoint, E.silence, 1).type, 'finalizeUtterance');
   });
 
   it('ambiguous speech rescues end-pending after 320ms', () => {
-    const endpoint = startEndpoint();
+    const endpoint = startEndpoint({ ambiguousDecayEnabled: true });
     feed(endpoint, E.silence, 100);
     feed(endpoint, E.ambiguous, 319);
     assert.strictEqual(endpoint.state, 'endPending');
     assert.strictEqual(feed(endpoint, E.ambiguous, 1).type, 'continueUtterance');
     assert.strictEqual(endpoint.state, 'speechActive');
-    assert.strictEqual(endpoint.accumulatedSilenceSamples, 0);
+    assert.strictEqual(endpoint.accumulatedSilenceSamples, samples(100));
+    assert.strictEqual(endpoint.ambiguousRunSamples, samples(320));
+  });
+
+  it('keeps legacy active-ambiguity clearing and rescue clearing when the master is off', () => {
+    const active = startEndpoint();
+    feed(active, E.silence, 50);
+    feed(active, E.ambiguous, 10);
+    assert.equal(active.accumulatedSilenceSamples, 0);
+
+    const rescued = startEndpoint();
+    feed(rescued, E.silence, 100);
+    feed(rescued, E.ambiguous, 319);
+    feed(rescued, E.ambiguous, 1);
+    assert.equal(rescued.state, 'speechActive');
+    assert.equal(rescued.accumulatedSilenceSamples, 0);
+    assert.equal(rescued.ambiguousRunSamples, 0);
   });
 
   it('stabilizes gradually rising background noise before endpoint classification', () => {

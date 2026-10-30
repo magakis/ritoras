@@ -17,6 +17,13 @@ struct VADAdaptiveThresholds {
     let continuingDeltaDb: Double
     let silenceDeltaDb: Double
     let ceilingMarginDb: Double
+    let utteranceResetMarginDb: Double
+    let utteranceEstablishMs: Int
+    let utteranceLevelDescentDbPerSec: Double
+    let utteranceLevelDescentCapDb: Double
+    let utteranceLevelRaiseSustainMs: Int
+    let ambiguousDecayGraceMs: Int
+    let ambiguousDecayRate: Double
 }
 
 enum ChunkSplitterProfileResolver {
@@ -26,6 +33,13 @@ enum ChunkSplitterProfileResolver {
     static let defaultContinuingDeltaDb = 4.0
     static let defaultSilenceDeltaDb = 3.0
     static let defaultCeilingMarginDb = 8.0
+    static let defaultUtteranceResetMarginDb = 12.0
+    static let defaultUtteranceEstablishMs = 500
+    static let defaultUtteranceLevelDescentDbPerSec = 1.0
+    static let defaultUtteranceLevelDescentCapDb = 8.0
+    static let defaultUtteranceLevelRaiseSustainMs = 300
+    static let defaultAmbiguousDecayGraceMs = 800
+    static let defaultAmbiguousDecayRate = 0.75
     static let minimumAdaptiveDeltaDb = 3.0
     static let maximumAdaptiveDeltaDb = 24.0
     static let oldSilenceDefaultMs = 2_000
@@ -37,6 +51,13 @@ enum ChunkSplitterProfileResolver {
         rawAdaptiveDeltaDb: Double?,
         rawSilenceDeltaDb: Double? = nil,
         rawCeilingMarginDb: Double? = nil,
+        rawUtteranceResetMarginDb: Double? = nil,
+        rawUtteranceEstablishMs: Int? = nil,
+        rawUtteranceLevelDescentDbPerSec: Double? = nil,
+        rawUtteranceLevelDescentCapDb: Double? = nil,
+        rawUtteranceLevelRaiseSustainMs: Int? = nil,
+        rawAmbiguousDecayGraceMs: Int? = nil,
+        rawAmbiguousDecayRate: Double? = nil,
         rawOverrideExplicit: Bool = false
     ) -> VADAdaptiveThresholds {
         let profileValues = (strong: 7.0, continuing: 4.0)
@@ -70,12 +91,77 @@ enum ChunkSplitterProfileResolver {
             ? rawCeilingMargin
             : defaultCeilingMarginDb
         let ceilingMarginDb = min(max(finiteCeilingMargin, 0.0), 24.0)
+        let utteranceResetMargin = rawUtteranceResetMarginDb
+            ?? defaultUtteranceResetMarginDb
+        let finiteUtteranceResetMargin = utteranceResetMargin.isFinite
+            ? utteranceResetMargin
+            : defaultUtteranceResetMarginDb
+        let utteranceResetMarginDb = min(
+            max(finiteUtteranceResetMargin, 6.0),
+            24.0
+        )
+        let utteranceLevelDescentRate = rawUtteranceLevelDescentDbPerSec
+            ?? defaultUtteranceLevelDescentDbPerSec
+        let utteranceLevelDescentDbPerSec = min(
+            max(
+                utteranceLevelDescentRate.isFinite
+                    ? utteranceLevelDescentRate
+                    : defaultUtteranceLevelDescentDbPerSec,
+                0.0
+            ),
+            3.0
+        )
+        let utteranceLevelDescentCap = rawUtteranceLevelDescentCapDb
+            ?? defaultUtteranceLevelDescentCapDb
+        let utteranceLevelDescentCapDb = min(
+            max(
+                utteranceLevelDescentCap.isFinite
+                    ? utteranceLevelDescentCap
+                    : defaultUtteranceLevelDescentCapDb,
+                0.0
+            ),
+            24.0
+        )
+        let utteranceEstablishMs = min(
+            max(rawUtteranceEstablishMs ?? defaultUtteranceEstablishMs, 250),
+            2_000
+        )
+        let boundedUtteranceLevelRaiseSustainMs = min(
+            max(rawUtteranceLevelRaiseSustainMs ?? defaultUtteranceLevelRaiseSustainMs, 100),
+            1_000
+        )
+        // The seed support requirement must fit inside the establishment window.
+        let utteranceLevelRaiseSustainMs = min(
+            boundedUtteranceLevelRaiseSustainMs,
+            utteranceEstablishMs
+        )
+        let ambiguousDecayGraceMs = min(
+            max(rawAmbiguousDecayGraceMs ?? defaultAmbiguousDecayGraceMs, 100),
+            2_000
+        )
+        let ambiguousDecayRateValue = rawAmbiguousDecayRate ?? defaultAmbiguousDecayRate
+        let ambiguousDecayRate = min(
+            max(
+                ambiguousDecayRateValue.isFinite
+                    ? ambiguousDecayRateValue
+                    : defaultAmbiguousDecayRate,
+                0.0
+            ),
+            1.0
+        )
 
         return VADAdaptiveThresholds(
             strongDeltaDb: strongDeltaDb,
             continuingDeltaDb: continuingDeltaDb,
             silenceDeltaDb: silenceDeltaDb,
-            ceilingMarginDb: ceilingMarginDb
+            ceilingMarginDb: ceilingMarginDb,
+            utteranceResetMarginDb: utteranceResetMarginDb,
+            utteranceEstablishMs: utteranceEstablishMs,
+            utteranceLevelDescentDbPerSec: utteranceLevelDescentDbPerSec,
+            utteranceLevelDescentCapDb: utteranceLevelDescentCapDb,
+            utteranceLevelRaiseSustainMs: utteranceLevelRaiseSustainMs,
+            ambiguousDecayGraceMs: ambiguousDecayGraceMs,
+            ambiguousDecayRate: ambiguousDecayRate
         )
     }
 
@@ -84,6 +170,13 @@ enum ChunkSplitterProfileResolver {
         rawAdaptiveDeltaDb: Double?,
         rawSilenceDeltaDb: Double? = nil,
         rawCeilingMarginDb: Double? = nil,
+        rawUtteranceResetMarginDb: Double? = nil,
+        rawUtteranceEstablishMs: Int? = nil,
+        rawUtteranceLevelDescentDbPerSec: Double? = nil,
+        rawUtteranceLevelDescentCapDb: Double? = nil,
+        rawUtteranceLevelRaiseSustainMs: Int? = nil,
+        rawAmbiguousDecayGraceMs: Int? = nil,
+        rawAmbiguousDecayRate: Double? = nil,
         rawOverrideExplicit: Bool = false
     ) -> VADAdaptiveThresholds {
         sensitivity(
@@ -92,6 +185,13 @@ enum ChunkSplitterProfileResolver {
             rawAdaptiveDeltaDb: rawAdaptiveDeltaDb,
             rawSilenceDeltaDb: rawSilenceDeltaDb,
             rawCeilingMarginDb: rawCeilingMarginDb,
+            rawUtteranceResetMarginDb: rawUtteranceResetMarginDb,
+            rawUtteranceEstablishMs: rawUtteranceEstablishMs,
+            rawUtteranceLevelDescentDbPerSec: rawUtteranceLevelDescentDbPerSec,
+            rawUtteranceLevelDescentCapDb: rawUtteranceLevelDescentCapDb,
+            rawUtteranceLevelRaiseSustainMs: rawUtteranceLevelRaiseSustainMs,
+            rawAmbiguousDecayGraceMs: rawAmbiguousDecayGraceMs,
+            rawAmbiguousDecayRate: rawAmbiguousDecayRate,
             rawOverrideExplicit: rawOverrideExplicit
         )
     }
@@ -250,6 +350,22 @@ struct SharedConfig {
         static let streamVadAdaptiveSilenceDeltaDbDefault: Double = 3.0
         static let streamVadCeilingMarginDbKey = "streamVadCeilingMarginDb"
         static let streamVadCeilingMarginDbDefault: Double = 8.0
+        static let streamVadUtteranceRelativeResetEnabledKey = "streamVadUtteranceRelativeResetEnabled"
+        static let streamVadUtteranceRelativeResetEnabledDefault = true
+        static let streamVadUtteranceResetMarginDbKey = "streamVadUtteranceResetMarginDb"
+        static let streamVadUtteranceResetMarginDbDefault: Double = 12.0
+        static let streamVadUtteranceEstablishMsKey = "streamVadUtteranceEstablishMs"
+        static let streamVadUtteranceEstablishMsDefault = 500
+        static let streamVadUtteranceLevelDescentDbPerSecKey = "streamVadUtteranceLevelDescentDbPerSec"
+        static let streamVadUtteranceLevelDescentDbPerSecDefault: Double = 1.0
+        static let streamVadUtteranceLevelDescentCapDbKey = "streamVadUtteranceLevelDescentCapDb"
+        static let streamVadUtteranceLevelDescentCapDbDefault: Double = 8.0
+        static let streamVadUtteranceLevelRaiseSustainMsKey = "streamVadUtteranceLevelRaiseSustainMs"
+        static let streamVadUtteranceLevelRaiseSustainMsDefault = 300
+        static let streamVadAmbiguousDecayGraceMsKey = "streamVadAmbiguousDecayGraceMs"
+        static let streamVadAmbiguousDecayGraceMsDefault = 800
+        static let streamVadAmbiguousDecayRateKey = "streamVadAmbiguousDecayRate"
+        static let streamVadAmbiguousDecayRateDefault: Double = 0.75
         static let streamVadAbsoluteSpeechFloorDbKey = "streamVadAbsoluteSpeechFloorDb"
         static let streamVadAbsoluteSpeechFloorDbDefault: Double = -50.0
         static let streamVadStaleFloorSecondsKey = "streamVadStaleFloorSeconds"
@@ -879,6 +995,15 @@ struct SharedConfig {
         streamVadAdaptiveThresholds().ceilingMarginDb
     }
 
+    static func streamVadUtteranceRelativeResetEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.streamVadUtteranceRelativeResetEnabledDefault
+        }
+        return (defaults.object(
+            forKey: Defaults.streamVadUtteranceRelativeResetEnabledKey
+        ) as? Bool) ?? Defaults.streamVadUtteranceRelativeResetEnabledDefault
+    }
+
     /// Reads the adaptive stale-floor window (seconds) from the App Group.
     /// VADGate divides the clamped value by the rise-speed multiplier for the effective stale window.
     static func streamVadStaleFloorSeconds() -> Double {
@@ -1162,7 +1287,17 @@ struct SharedConfig {
                 profile: .automatic,
                 rawAdaptiveDeltaDb: nil,
                 rawSilenceDeltaDb: Defaults.streamVadAdaptiveSilenceDeltaDbDefault,
-                rawCeilingMarginDb: Defaults.streamVadCeilingMarginDbDefault
+                rawCeilingMarginDb: Defaults.streamVadCeilingMarginDbDefault,
+                rawUtteranceResetMarginDb: Defaults.streamVadUtteranceResetMarginDbDefault,
+                rawUtteranceEstablishMs: Defaults.streamVadUtteranceEstablishMsDefault,
+                rawUtteranceLevelDescentDbPerSec:
+                    Defaults.streamVadUtteranceLevelDescentDbPerSecDefault,
+                rawUtteranceLevelDescentCapDb:
+                    Defaults.streamVadUtteranceLevelDescentCapDbDefault,
+                rawUtteranceLevelRaiseSustainMs:
+                    Defaults.streamVadUtteranceLevelRaiseSustainMsDefault,
+                rawAmbiguousDecayGraceMs: Defaults.streamVadAmbiguousDecayGraceMsDefault,
+                rawAmbiguousDecayRate: Defaults.streamVadAmbiguousDecayRateDefault
             )
         }
         let rawAdaptiveDeltaDb = (defaults.object(
@@ -1177,11 +1312,41 @@ struct SharedConfig {
         let rawCeilingMarginDb = (defaults.object(
             forKey: Defaults.streamVadCeilingMarginDbKey
         ) as? NSNumber)?.doubleValue ?? Defaults.streamVadCeilingMarginDbDefault
+        let rawUtteranceResetMarginDb = (defaults.object(
+            forKey: Defaults.streamVadUtteranceResetMarginDbKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadUtteranceResetMarginDbDefault
+        let rawUtteranceEstablishMs = (defaults.object(
+            forKey: Defaults.streamVadUtteranceEstablishMsKey
+        ) as? NSNumber)?.intValue ?? Defaults.streamVadUtteranceEstablishMsDefault
+        let rawUtteranceLevelDescentDbPerSec = (defaults.object(
+            forKey: Defaults.streamVadUtteranceLevelDescentDbPerSecKey
+        ) as? NSNumber)?.doubleValue
+            ?? Defaults.streamVadUtteranceLevelDescentDbPerSecDefault
+        let rawUtteranceLevelDescentCapDb = (defaults.object(
+            forKey: Defaults.streamVadUtteranceLevelDescentCapDbKey
+        ) as? NSNumber)?.doubleValue
+            ?? Defaults.streamVadUtteranceLevelDescentCapDbDefault
+        let rawUtteranceLevelRaiseSustainMs = (defaults.object(
+            forKey: Defaults.streamVadUtteranceLevelRaiseSustainMsKey
+        ) as? NSNumber)?.intValue ?? Defaults.streamVadUtteranceLevelRaiseSustainMsDefault
+        let rawAmbiguousDecayGraceMs = (defaults.object(
+            forKey: Defaults.streamVadAmbiguousDecayGraceMsKey
+        ) as? NSNumber)?.intValue ?? Defaults.streamVadAmbiguousDecayGraceMsDefault
+        let rawAmbiguousDecayRate = (defaults.object(
+            forKey: Defaults.streamVadAmbiguousDecayRateKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.streamVadAmbiguousDecayRateDefault
         return ChunkSplitterProfileResolver.sensitivity(
             profile: .automatic,
             rawAdaptiveDeltaDb: rawAdaptiveDeltaDb,
             rawSilenceDeltaDb: rawSilenceDeltaDb,
             rawCeilingMarginDb: rawCeilingMarginDb,
+            rawUtteranceResetMarginDb: rawUtteranceResetMarginDb,
+            rawUtteranceEstablishMs: rawUtteranceEstablishMs,
+            rawUtteranceLevelDescentDbPerSec: rawUtteranceLevelDescentDbPerSec,
+            rawUtteranceLevelDescentCapDb: rawUtteranceLevelDescentCapDb,
+            rawUtteranceLevelRaiseSustainMs: rawUtteranceLevelRaiseSustainMs,
+            rawAmbiguousDecayGraceMs: rawAmbiguousDecayGraceMs,
+            rawAmbiguousDecayRate: rawAmbiguousDecayRate,
             rawOverrideExplicit: rawOverrideExplicit
         )
     }

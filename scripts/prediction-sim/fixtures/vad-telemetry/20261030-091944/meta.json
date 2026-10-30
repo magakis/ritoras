@@ -1,0 +1,41 @@
+{
+  "timestamp": "2026-10-30T09:20:09.356191",
+  "source": "stream",
+  "engine": "parakeet-v2",
+  "transcription": "It feels that now the chunking is very sensitive to noise. For example, there is a TV pretty far from where I am, but it is still catching up its signals and it is not ending the recording or the chunk. For example, check this latest recording, what I am recording right now. I took a very long pause and still the utterance and the chunk slicer did not slice the chunk. Please have a look at it and let me know what it is. And let me know what is going on. ",
+  "model_size": "small.en",
+  "device": "cpu",
+  "compute_type": "int8",
+  "sample_rate": 16000,
+  "params": {
+    "engine": "parakeet-v2",
+    "model": "nemo-parakeet-tdt-0.6b-v2",
+    "quantization": "int8",
+    "vad_enabled": false,
+    "itn_enabled": true,
+    "llm_cleanup": true
+  },
+  "recording_token": "34d84989-e4e2-4844-b743-417c7eef39db",
+  "session": {
+    "chunks_received": 1,
+    "chunks_processed": 1,
+    "audio_duration_s": 67.452,
+    "first_chunk_at": "2026-10-30T09:19:44.076338",
+    "chunk_boundaries_samples": [
+      {
+        "chunk_index": 0,
+        "start_sample": 0,
+        "end_sample": 1079232
+      }
+    ],
+    "incomplete": false
+  },
+  "chunk_timing": {
+    "count": 1,
+    "total_transcription_s": 16.662136793136597,
+    "mean_transcription_s": 16.662136793136597,
+    "max_transcription_s": 16.662136793136597,
+    "first_chunk_received_at": 1793348384.076069,
+    "last_chunk_received_at": 1793348384.076069
+  }
+}

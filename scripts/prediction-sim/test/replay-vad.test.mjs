@@ -101,6 +101,71 @@ describe('VAD replay', () => {
     )));
   });
 
+  it('clamps reset and decay knobs through the replay configuration path', () => {
+    const normalized = normalizeConfig({
+      ...SHIPPING_SESSION_CONFIG,
+      utteranceRelativeResetEnabled: true,
+      utteranceResetMarginDb: 30,
+      utteranceEstablishMs: 10,
+      utteranceLevelDescentDbPerSec: 4,
+      utteranceLevelDescentCapDb: 30,
+      utteranceLevelRaiseSustainMs: 2_000,
+      endpointAmbiguousRescueMs: 500,
+      ambiguousDecayGraceMs: 50,
+      ambiguousDecayRate: 1.5,
+    });
+
+    assert.equal(normalized.config.utteranceRelativeResetEnabled, true);
+    assert.equal(normalized.config.utteranceResetMarginDb, 24);
+    assert.equal(normalized.config.utteranceEstablishMs, 250);
+    assert.equal(normalized.config.utteranceLevelDescentDbPerSec, 3);
+    assert.equal(normalized.config.utteranceLevelDescentCapDb, 24);
+    assert.equal(normalized.config.utteranceLevelRaiseSustainMs, 250);
+    assert.equal(normalized.config.ambiguousDecayGraceMs, 500);
+    assert.equal(normalized.config.ambiguousDecayRate, 1);
+    assert.equal(normalized.endpoint.configuration.ambiguousDecayEnabled, true);
+  });
+
+  it('keeps establishment and seed-support dwell compatible for both clamp boundaries', () => {
+    for (const { establishMs, raiseSustainMs } of [
+      { establishMs: 250, raiseSustainMs: 300 },
+      { establishMs: 500, raiseSustainMs: 1_000 },
+    ]) {
+      const normalized = normalizeConfig({
+        ...SHIPPING_SESSION_CONFIG,
+        utteranceRelativeResetEnabled: true,
+        utteranceEstablishMs: establishMs,
+        utteranceLevelRaiseSustainMs: raiseSustainMs,
+      });
+      const expectedSustainMs = Math.min(establishMs, raiseSustainMs);
+      assert.equal(normalized.config.utteranceLevelRaiseSustainMs, expectedSustainMs);
+
+      const harness = makeRecorderHarness({
+        frameMs: 10,
+        endpointSilenceMs: 2_000,
+        endpointConfig: normalized.endpoint.configuration,
+        endpointMachineEnabled: normalized.config.endpointMachineEnabled,
+        utteranceRelativeResetEnabled: normalized.config.utteranceRelativeResetEnabled,
+        minChunkSamples: 0,
+        minSpeechSamples: 0,
+        recorderConfig: normalized.recorderConfig,
+        gateConfig: { mode: 'static', staticRms: 0.01 },
+      });
+      for (let index = 0; index < 100; index += 1) harness.drive(-25);
+
+      assert.equal(harness.utteranceReferenceEstablished, true);
+      assert.ok(harness.utteranceEstablishEvidenceSamples / 16 <= 1_000);
+      assert.equal(harness.utteranceEstablishSamples / 16, establishMs);
+      assert.equal(harness.utteranceLevelRaiseSustainSamples / 16, expectedSustainMs);
+      assert.equal(harness.sessionConfig.utteranceEstablishMs, establishMs);
+      assert.equal(harness.sessionConfig.utteranceLevelRaiseSustainMs, expectedSustainMs);
+      const strippedSpeech = harness.drive(-43);
+      assert.equal(harness.endpoint.state, 'speechActive');
+      assert.equal(strippedSpeech.frameRecord.uq, 'stripped');
+      assert.equal(strippedSpeech.endpointEvidence, 'ambiguous');
+    }
+  });
+
   it('reports KD-3 for PCM16 WAV replay and tags near-threshold mismatches', () => {
     const samples = Array.from({ length: 160 }, (_, index) => (
       index % 2 === 0 ? 0.0255 : -0.0255
@@ -227,8 +292,17 @@ describe('VAD replay', () => {
     assert.strictEqual(options.sessionPath, null);
     assert.strictEqual(options.labelsFile, 'speech.txt');
     assert.strictEqual(SHIPPING_SESSION_CONFIG.mode, 'adaptive');
+    assert.strictEqual(makeRecorderHarness().utteranceRelativeResetEnabled, true);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.endpointSilenceMs, 700);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.silenceMs, 700);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.utteranceRelativeResetEnabled, true);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.utteranceResetMarginDb, 12);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.utteranceEstablishMs, 500);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.utteranceLevelDescentDbPerSec, 1);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.utteranceLevelDescentCapDb, 8);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.utteranceLevelRaiseSustainMs, 300);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.ambiguousDecayGraceMs, 800);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.ambiguousDecayRate, 0.75);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.maxNoiseSec, 6);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.minSpeechMs, 300);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.minChunkMs, 300);

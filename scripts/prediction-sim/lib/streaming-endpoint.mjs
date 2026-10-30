@@ -7,6 +7,8 @@ export const STREAM_ENDPOINT_ONSET_SAMPLES = 1120;
 export const STREAM_ENDPOINT_END_EVIDENCE_SAMPLES = 1600;
 export const STREAM_ENDPOINT_RESUME_SAMPLES = 1920;
 export const STREAM_ENDPOINT_AMBIGUOUS_RESCUE_SAMPLES = 5120;
+export const STREAM_ENDPOINT_AMBIGUOUS_DECAY_GRACE_MS = 800;
+export const STREAM_ENDPOINT_AMBIGUOUS_DECAY_RATE = 0.75;
 const STREAM_ENDPOINT_MIN_SAMPLES = 160;
 
 export const StreamingEndpointEvidence = Object.freeze({
@@ -35,12 +37,16 @@ export function makeStreamingEndpointConfig(partial = {}) {
     endpointSilenceSamples: STREAM_ENDPOINT_SILENCE_MS * 16,
     resumeSamples: STREAM_ENDPOINT_RESUME_SAMPLES,
     ambiguousRescueSamples: STREAM_ENDPOINT_AMBIGUOUS_RESCUE_SAMPLES,
+    ambiguousDecayEnabled: false,
+    ambiguousDecayGraceMs: STREAM_ENDPOINT_AMBIGUOUS_DECAY_GRACE_MS,
+    ambiguousDecayRate: STREAM_ENDPOINT_AMBIGUOUS_DECAY_RATE,
     ...(partial ?? {}),
   };
   const millisecondFields = [
     ['onsetMs', 'onsetSamples'],
     ['endEvidenceMs', 'endEvidenceSamples'],
     ['endpointSilenceMs', 'endpointSilenceSamples'],
+    ['ambiguousDecayGraceMs', 'ambiguousDecayGraceSamples'],
   ];
   for (const [millisecondsKey, samplesKey] of millisecondFields) {
     if (partial?.[millisecondsKey] !== undefined) {
@@ -88,6 +94,21 @@ export function makeStreamingEndpointConfig(partial = {}) {
     STREAM_ENDPOINT_MIN_SAMPLES,
     config.ambiguousRescueSamples,
   );
+  const rawAmbiguousDecayGraceSamples = config.ambiguousDecayGraceSamples
+    ?? config.ambiguousDecayGraceMs * 16;
+  const finiteAmbiguousDecayGraceSamples = Number.isFinite(rawAmbiguousDecayGraceSamples)
+    ? rawAmbiguousDecayGraceSamples
+    : STREAM_ENDPOINT_AMBIGUOUS_DECAY_GRACE_MS * 16;
+  config.ambiguousDecayGraceSamples = Math.max(
+    100 * 16,
+    Math.min(2_000 * 16, finiteAmbiguousDecayGraceSamples),
+    config.ambiguousRescueSamples,
+  );
+  config.ambiguousDecayGraceMs = config.ambiguousDecayGraceSamples / 16;
+  config.ambiguousDecayEnabled = Boolean(config.ambiguousDecayEnabled);
+  config.ambiguousDecayRate = Number.isFinite(config.ambiguousDecayRate)
+    ? Math.min(1, Math.max(0, config.ambiguousDecayRate))
+    : STREAM_ENDPOINT_AMBIGUOUS_DECAY_RATE;
   return config;
 }
 
@@ -98,12 +119,26 @@ export class StreamingEndpoint {
     this.utteranceDurationSamples = 0;
     this.accumulatedSilenceSamples = 0;
     this.resumeEvidenceSamples = 0;
-    this.ambiguousEvidenceSamples = 0;
+    this.ambiguousRunSamples = 0;
+    this.accumulatedAmbiguousCreditSamples = 0;
+    this.lastFrameAmbiguousCreditSamples = 0;
+    this.lastDecisionSilenceSamples = null;
+    this.lastDecisionAmbiguousCreditSamples = null;
+    this.lastDecisionAmbiguousRunSamples = null;
+    this.lastDecisionAmbiguousFrameCreditSamples = null;
     this.onsetEvidenceSamples = 0;
   }
 
   process(evidence, durationSamples) {
     const samples = Math.max(0, durationSamples);
+    this.lastFrameAmbiguousCreditSamples = 0;
+    this.lastDecisionSilenceSamples = null;
+    this.lastDecisionAmbiguousCreditSamples = null;
+    this.lastDecisionAmbiguousRunSamples = null;
+    this.lastDecisionAmbiguousFrameCreditSamples = null;
+    if (this.configuration.ambiguousDecayEnabled) {
+      return this.processWithAmbiguousDecay(evidence, samples);
+    }
     switch (this.state) {
       case StreamingEndpointState.idle:
         return this.processIdle(evidence, samples);
@@ -133,7 +168,13 @@ export class StreamingEndpoint {
     this.utteranceDurationSamples = 0;
     this.accumulatedSilenceSamples = 0;
     this.resumeEvidenceSamples = 0;
-    this.ambiguousEvidenceSamples = 0;
+    this.ambiguousRunSamples = 0;
+    this.accumulatedAmbiguousCreditSamples = 0;
+    this.lastFrameAmbiguousCreditSamples = 0;
+    this.lastDecisionSilenceSamples = null;
+    this.lastDecisionAmbiguousCreditSamples = null;
+    this.lastDecisionAmbiguousRunSamples = null;
+    this.lastDecisionAmbiguousFrameCreditSamples = null;
     this.onsetEvidenceSamples = 0;
   }
 
@@ -162,7 +203,8 @@ export class StreamingEndpoint {
     this.utteranceDurationSamples = this.onsetEvidenceSamples;
     this.accumulatedSilenceSamples = 0;
     this.resumeEvidenceSamples = 0;
-    this.ambiguousEvidenceSamples = 0;
+    this.ambiguousRunSamples = 0;
+    this.accumulatedAmbiguousCreditSamples = 0;
     return { type: 'startUtterance' };
   }
 
@@ -194,29 +236,28 @@ export class StreamingEndpoint {
     this.utteranceDurationSamples += durationSamples;
     switch (evidence) {
       case StreamingEndpointEvidence.ambiguous:
-        this.ambiguousEvidenceSamples += durationSamples;
-        if (this.ambiguousEvidenceSamples < this.configuration.ambiguousRescueSamples) {
+        this.ambiguousRunSamples += durationSamples;
+        if (this.ambiguousRunSamples < this.configuration.ambiguousRescueSamples) {
           return this.continue();
         }
         this.state = StreamingEndpointState.speechActive;
         this.accumulatedSilenceSamples = 0;
         this.resumeEvidenceSamples = 0;
-        this.ambiguousEvidenceSamples = 0;
+        this.ambiguousRunSamples = 0;
         return this.continue();
       case StreamingEndpointEvidence.silence:
-        this.ambiguousEvidenceSamples = 0;
+        this.ambiguousRunSamples = 0;
         this.accumulatedSilenceSamples += durationSamples;
         this.resumeEvidenceSamples = 0;
         if (this.accumulatedSilenceSamples < this.configuration.endpointSilenceSamples) {
           return this.continue();
         }
-        this.reset();
-        return this.finalize(StreamingEndpointFinalizeKind.endpoint);
+        return this.finalizeForEndpoint();
       case StreamingEndpointEvidence.strong:
       case StreamingEndpointEvidence.continuing:
         // Resume evidence pauses the silence timer but cannot cancel the
         // pending end until the resume threshold is reached.
-        this.ambiguousEvidenceSamples = 0;
+        this.ambiguousRunSamples = 0;
         this.resumeEvidenceSamples += durationSamples;
         if (this.resumeEvidenceSamples < this.configuration.resumeSamples) {
           return this.continue();
@@ -228,6 +269,103 @@ export class StreamingEndpoint {
       default:
         return this.continue();
     }
+  }
+
+  processWithAmbiguousDecay(evidence, durationSamples) {
+    switch (this.state) {
+      case StreamingEndpointState.idle:
+        return this.processIdle(evidence, durationSamples);
+      case StreamingEndpointState.onsetPending:
+        return this.processOnset(evidence, durationSamples);
+      case StreamingEndpointState.speechActive:
+      case StreamingEndpointState.endPending:
+        this.utteranceDurationSamples += durationSamples;
+        break;
+      default:
+        return this.none();
+    }
+
+    switch (evidence) {
+      case StreamingEndpointEvidence.strong:
+      case StreamingEndpointEvidence.continuing:
+        this.ambiguousRunSamples = 0;
+        if (this.state === StreamingEndpointState.speechActive) {
+          this.accumulatedSilenceSamples = 0;
+          this.accumulatedAmbiguousCreditSamples = 0;
+          this.resumeEvidenceSamples = 0;
+          return this.continue();
+        }
+
+        this.resumeEvidenceSamples += durationSamples;
+        if (this.resumeEvidenceSamples < this.configuration.resumeSamples) {
+          return this.continue();
+        }
+        this.state = StreamingEndpointState.speechActive;
+        this.accumulatedSilenceSamples = 0;
+        this.accumulatedAmbiguousCreditSamples = 0;
+        this.resumeEvidenceSamples = 0;
+        return this.continue();
+
+      case StreamingEndpointEvidence.ambiguous: {
+        const runBeforeFrame = this.ambiguousRunSamples;
+        this.ambiguousRunSamples += durationSamples;
+        // Compute this frame's beyond-grace slice once, before any state hop.
+        const beyondGraceSamples = Math.max(
+          0,
+          this.ambiguousRunSamples - Math.max(
+            runBeforeFrame,
+            this.configuration.ambiguousDecayGraceSamples,
+          ),
+        );
+        const creditSamples = beyondGraceSamples * this.configuration.ambiguousDecayRate;
+        this.lastFrameAmbiguousCreditSamples = creditSamples;
+        this.accumulatedSilenceSamples += creditSamples;
+        this.accumulatedAmbiguousCreditSamples += creditSamples;
+
+        if (this.accumulatedSilenceSamples >= this.configuration.endpointSilenceSamples) {
+          return this.finalizeForEndpoint();
+        }
+        if (this.state === StreamingEndpointState.speechActive
+          && this.accumulatedSilenceSamples >= this.configuration.endEvidenceSamples) {
+          this.state = StreamingEndpointState.endPending;
+        }
+        if (this.state === StreamingEndpointState.endPending
+          && this.ambiguousRunSamples >= this.configuration.ambiguousRescueSamples) {
+          // Rescue returns to active without discarding either endpoint counter.
+          this.state = StreamingEndpointState.speechActive;
+          this.resumeEvidenceSamples = 0;
+        }
+        return this.continue();
+      }
+
+      case StreamingEndpointEvidence.silence:
+        this.accumulatedSilenceSamples += durationSamples;
+        if (this.state === StreamingEndpointState.endPending) this.resumeEvidenceSamples = 0;
+        if (this.accumulatedSilenceSamples >= this.configuration.endpointSilenceSamples) {
+          return this.finalizeForEndpoint();
+        }
+        if (this.state === StreamingEndpointState.speechActive
+          && this.accumulatedSilenceSamples >= this.configuration.endEvidenceSamples) {
+          this.state = StreamingEndpointState.endPending;
+        }
+        return this.continue();
+
+      default:
+        return this.continue();
+    }
+  }
+
+  finalizeForEndpoint() {
+    const decisionSilenceSamples = this.accumulatedSilenceSamples;
+    const decisionAmbiguousCreditSamples = this.accumulatedAmbiguousCreditSamples;
+    const decisionAmbiguousRunSamples = this.ambiguousRunSamples;
+    const decisionAmbiguousFrameCreditSamples = this.lastFrameAmbiguousCreditSamples;
+    this.reset();
+    this.lastDecisionSilenceSamples = decisionSilenceSamples;
+    this.lastDecisionAmbiguousCreditSamples = decisionAmbiguousCreditSamples;
+    this.lastDecisionAmbiguousRunSamples = decisionAmbiguousRunSamples;
+    this.lastDecisionAmbiguousFrameCreditSamples = decisionAmbiguousFrameCreditSamples;
+    return this.finalize(StreamingEndpointFinalizeKind.endpoint);
   }
 
   none() {

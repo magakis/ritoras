@@ -80,6 +80,12 @@ struct VADTelemetryFrame: @unchecked Sendable {
     let decisionSilenceSamples: Int
     let utteranceDurationSamples: Int
     let isLoudRegime: Bool
+    let utteranceLevelReferenceDb: Double?
+    let utteranceLevelQualification: String
+    let ambiguousRunSamples: Double
+    let ambiguousFrameCreditSamples: Double
+    let weightedSilenceCreditSamples: Double
+    let physicalTrailingSilenceSamples: Int
 }
 
 enum VADTelemetryEventKind: String, Sendable {
@@ -213,6 +219,11 @@ struct ChunkSplitterFrameState: Sendable {
 private final class VADContext: @unchecked Sendable {
     private static let maximumStrongGustFrameDurationSeconds = 0.02
 
+    private struct EstablishmentLevelSample {
+        let frameDb: Double
+        var samples: Int
+    }
+
     // MARK: Configuration (constants)
     let gate: VADThresholdGate
     let silenceThresholdSamples: Int
@@ -222,6 +233,12 @@ private final class VADContext: @unchecked Sendable {
     let minimumVoiceEvidenceToRetainSamples = 100 * 16
     let endpointMachineEnabled: Bool
     let endpoint: StreamingEndpoint
+    let utteranceRelativeResetEnabled: Bool
+    let utteranceResetMarginDb: Double
+    let utteranceEstablishSamples: Int
+    let utteranceLevelDescentDbPerSec: Double
+    let utteranceLevelDescentCapDb: Double
+    let utteranceLevelRaiseSustainSamples: Int
     let loudFlatSpreadDb: Double
     let loudFlatTerminateSeconds: Double
     let loudFlatTerminateEnabled: Bool
@@ -262,6 +279,15 @@ private final class VADContext: @unchecked Sendable {
     private var sawReanchorDuringUtterance = false
     private var bufferHighWaterSamples = 0
     private var utteranceQuietestStrongDb: Double?
+    // Independent max-side reference; VADGate retains its separate running-min ceiling.
+    private var utteranceLevelReferenceDb: Double?
+    private var utteranceLevelMaximumDb: Double?
+    private var utteranceEstablishEvidenceSamples = 0
+    private var utteranceEstablishmentWindowSamples = 0
+    private var utteranceEstablishmentLevels: [EstablishmentLevelSample] = []
+    private var utteranceReferenceEstablished = false
+    private var utteranceLevelRaiseEvidenceSamples = 0
+    private var utteranceLevelRaiseCandidateMaxDb: Double?
     private var loudFlatStreakMs = 0.0
     private var loudFlatStreakStartSeconds: Double?
     private var loudFlatTerminatorActive = false
@@ -284,6 +310,8 @@ private final class VADContext: @unchecked Sendable {
         minChunkSamples: Int,
         maxNoiseSamples: Int,
         endpointMachineEnabled: Bool,
+        utteranceRelativeResetEnabled: Bool,
+        adaptiveThresholds: VADAdaptiveThresholds,
         loudFlatSpreadDb: Double,
         loudFlatTerminateSeconds: Double,
         loudFlatTerminateEnabled: Bool,
@@ -299,12 +327,22 @@ private final class VADContext: @unchecked Sendable {
         self.maxNoiseSamples = maxNoiseSamples
         self.accumulatorSpillSamples = SharedConfig.streamVadAccumulatorSpillSamples()
         self.endpointMachineEnabled = endpointMachineEnabled
+        self.utteranceRelativeResetEnabled = endpointMachineEnabled
+            && utteranceRelativeResetEnabled
+        self.utteranceResetMarginDb = adaptiveThresholds.utteranceResetMarginDb
+        self.utteranceEstablishSamples = adaptiveThresholds.utteranceEstablishMs * 16
+        self.utteranceLevelDescentDbPerSec = adaptiveThresholds.utteranceLevelDescentDbPerSec
+        self.utteranceLevelDescentCapDb = adaptiveThresholds.utteranceLevelDescentCapDb
+        self.utteranceLevelRaiseSustainSamples = adaptiveThresholds.utteranceLevelRaiseSustainMs * 16
         self.endpoint = StreamingEndpoint(configuration: StreamingEndpointConfiguration(
             onsetSamples: Int(Double(SharedConfig.streamVadOnsetMs()) * 16.0),
             endEvidenceSamples: Int(Double(SharedConfig.streamVadEndEvidenceMs()) * 16.0),
             endpointSilenceSamples: silenceThresholdSamples,
             resumeSamples: Int(Double(SharedConfig.streamVadResumeMs()) * 16.0),
-            ambiguousRescueSamples: Int(Double(SharedConfig.streamVadAmbiguousRescueMs()) * 16.0)
+            ambiguousRescueSamples: Int(Double(SharedConfig.streamVadAmbiguousRescueMs()) * 16.0),
+            ambiguousDecayEnabled: endpointMachineEnabled && utteranceRelativeResetEnabled,
+            ambiguousDecayGraceSamples: adaptiveThresholds.ambiguousDecayGraceMs * 16,
+            ambiguousDecayRate: adaptiveThresholds.ambiguousDecayRate
         ))
         self.loudFlatSpreadDb = max(0, loudFlatSpreadDb)
         self.loudFlatTerminateSeconds = max(0, loudFlatTerminateSeconds)
@@ -333,6 +371,7 @@ private final class VADContext: @unchecked Sendable {
         chunkStartSessionSamples = nil
         chunkEndSessionSamples = nil
         previousFrameDbForClassification = nil
+        resetUtteranceLevelReference()
         resetIdleGapRun()
         guard let sink else { return }
 
@@ -343,6 +382,14 @@ private final class VADContext: @unchecked Sendable {
         config["endpointSilenceMs"] = Double(endpoint.configuration.endpointSilenceSamples) / 16.0
         config["endpointResumeMs"] = Double(endpoint.configuration.resumeSamples) / 16.0
         config["endpointAmbiguousRescueMs"] = Double(endpoint.configuration.ambiguousRescueSamples) / 16.0
+        config["utteranceRelativeResetEnabled"] = utteranceRelativeResetEnabled
+        config["utteranceResetMarginDb"] = utteranceResetMarginDb
+        config["utteranceEstablishMs"] = Double(utteranceEstablishSamples) / 16.0
+        config["utteranceLevelDescentDbPerSec"] = utteranceLevelDescentDbPerSec
+        config["utteranceLevelDescentCapDb"] = utteranceLevelDescentCapDb
+        config["utteranceLevelRaiseSustainMs"] = Double(utteranceLevelRaiseSustainSamples) / 16.0
+        config["ambiguousDecayGraceMs"] = Double(endpoint.configuration.ambiguousDecayGraceSamples) / 16.0
+        config["ambiguousDecayRate"] = endpoint.configuration.ambiguousDecayRate
         config["idleGapMinSeconds"] = SharedConfig.Defaults.streamVadIdleGapMinimumSecondsDefault
         config["idleGapPeakAboveFloorDb"] = SharedConfig.Defaults.streamVadIdleGapPeakAboveFloorDbDefault
         config["idleGapEvidenceAboveFloorDb"] = SharedConfig.Defaults.streamVadIdleGapEvidenceAboveFloorDbDefault
@@ -399,6 +446,7 @@ private final class VADContext: @unchecked Sendable {
         primingComplete = gate.snapshot.floorDb == nil
         utteranceQuietestStrongDb = nil
         sawReanchorDuringUtterance = false
+        resetUtteranceLevelReference()
         loudFlatStreakMs = 0
         loudFlatStreakStartSeconds = nil
         loudFlatTerminatorActive = false
@@ -462,7 +510,9 @@ private final class VADContext: @unchecked Sendable {
         frameDuration: Double,
         previousEndpointState: StreamingEndpointState,
         decision: StreamingEndpointDecision,
-        decisionSilenceSamples: Int
+        decisionSilenceSamples: Int,
+        qualificationState: String,
+        physicalTrailingSilenceSamples: Int
     ) {
         guard let sink = telemetrySink else { return }
         let record = VADTelemetryFrame(
@@ -487,10 +537,172 @@ private final class VADContext: @unchecked Sendable {
             endpointDecision: telemetryDecisionLabel(decision),
             decisionSilenceSamples: decisionSilenceSamples,
             utteranceDurationSamples: endpoint.utteranceDurationSamples,
-            isLoudRegime: output.isLoudRegime
+            isLoudRegime: output.isLoudRegime,
+            utteranceLevelReferenceDb: utteranceLevelReferenceDb,
+            utteranceLevelQualification: qualificationState,
+            ambiguousRunSamples: endpoint.lastDecisionAmbiguousRunSamples
+                ?? endpoint.ambiguousRunSamples,
+            ambiguousFrameCreditSamples: endpoint.lastDecisionAmbiguousFrameCreditSamples
+                ?? endpoint.lastFrameAmbiguousCreditSamples,
+            weightedSilenceCreditSamples: endpoint.lastDecisionAmbiguousCreditSamples
+                ?? endpoint.accumulatedAmbiguousCreditSamples,
+            physicalTrailingSilenceSamples: physicalTrailingSilenceSamples
         )
         telemetrySequence &+= 1
         sink.frame(record)
+    }
+
+    private func qualifyEndpointEvidence(
+        _ evidence: StreamingEndpointEvidence,
+        classifiedEvidence: StreamingEndpointEvidence,
+        frameDb: Double,
+        frameLength: Int,
+        frameDuration: Double,
+        previousState: StreamingEndpointState
+    ) -> (evidence: StreamingEndpointEvidence, state: String) {
+        guard utteranceRelativeResetEnabled else {
+            return (evidence, "disabled")
+        }
+
+        var qualifiedEvidence = evidence
+        var qualificationState = utteranceReferenceEstablished ? "established" : "establishing"
+        if isResetQualifyingEvidence(evidence),
+           utteranceReferenceEstablished,
+           let referenceDb = utteranceLevelReferenceDb,
+           referenceDb - frameDb > utteranceResetMarginDb {
+            qualifiedEvidence = .ambiguous
+            qualificationState = "stripped"
+        }
+
+        if !isResetQualifyingEvidence(classifiedEvidence) {
+            utteranceLevelRaiseEvidenceSamples = 0
+            utteranceLevelRaiseCandidateMaxDb = nil
+        }
+        updateUtteranceLevelReference(
+            classifiedEvidence: classifiedEvidence,
+            endpointEvidence: evidence,
+            frameDb: frameDb,
+            frameLength: frameLength,
+            frameDuration: frameDuration,
+            previousState: previousState
+        )
+        if qualificationState != "stripped" {
+            qualificationState = utteranceReferenceEstablished ? "established" : "establishing"
+        }
+        return (qualifiedEvidence, qualificationState)
+    }
+
+    private func updateUtteranceLevelReference(
+        classifiedEvidence: StreamingEndpointEvidence,
+        endpointEvidence: StreamingEndpointEvidence,
+        frameDb: Double,
+        frameLength: Int,
+        frameDuration: Double,
+        previousState: StreamingEndpointState
+    ) {
+        guard isResetQualifyingEvidence(classifiedEvidence) else { return }
+
+        if !utteranceReferenceEstablished {
+            guard previousState != .idle || endpointEvidence == .strong else { return }
+            let windowSamplesToAdd = utteranceEstablishEvidenceSamples < utteranceEstablishSamples
+                ? min(frameLength, utteranceEstablishSamples - utteranceEstablishEvidenceSamples)
+                : frameLength
+            utteranceEstablishEvidenceSamples += frameLength
+            if windowSamplesToAdd > 0 {
+                utteranceEstablishmentLevels.append(EstablishmentLevelSample(
+                    frameDb: frameDb,
+                    samples: windowSamplesToAdd
+                ))
+                utteranceEstablishmentWindowSamples += windowSamplesToAdd
+                trimUtteranceEstablishmentWindow()
+            }
+            guard utteranceEstablishEvidenceSamples >= utteranceEstablishSamples,
+                  let sustainedLevelDb = sustainedEstablishmentLevelDb() else {
+                return
+            }
+            utteranceLevelMaximumDb = sustainedLevelDb
+            utteranceLevelReferenceDb = sustainedLevelDb
+            utteranceReferenceEstablished = true
+            utteranceEstablishmentWindowSamples = 0
+            utteranceEstablishmentLevels.removeAll(keepingCapacity: true)
+            utteranceLevelRaiseEvidenceSamples = 0
+            utteranceLevelRaiseCandidateMaxDb = nil
+            return
+        }
+
+        guard let referenceDb = utteranceLevelReferenceDb else { return }
+        // Only establishment and sustained raises can move the descent floor.
+        let minimumReferenceDb = (utteranceLevelMaximumDb ?? referenceDb)
+            - utteranceLevelDescentCapDb
+        let descendedReferenceDb = max(
+            minimumReferenceDb,
+            referenceDb - utteranceLevelDescentDbPerSec * frameDuration
+        )
+        utteranceLevelReferenceDb = descendedReferenceDb
+
+        guard frameDb > referenceDb else {
+            utteranceLevelRaiseEvidenceSamples = 0
+            utteranceLevelRaiseCandidateMaxDb = nil
+            return
+        }
+
+        utteranceLevelRaiseEvidenceSamples += frameLength
+        utteranceLevelRaiseCandidateMaxDb = max(
+            utteranceLevelRaiseCandidateMaxDb ?? frameDb,
+            frameDb
+        )
+        guard utteranceLevelRaiseEvidenceSamples >= utteranceLevelRaiseSustainSamples,
+              let raisedReferenceDb = utteranceLevelRaiseCandidateMaxDb else {
+            return
+        }
+
+        utteranceLevelMaximumDb = max(utteranceLevelMaximumDb ?? raisedReferenceDb, raisedReferenceDb)
+        utteranceLevelReferenceDb = max(descendedReferenceDb, raisedReferenceDb)
+        utteranceLevelRaiseEvidenceSamples = 0
+        utteranceLevelRaiseCandidateMaxDb = nil
+    }
+
+    private func trimUtteranceEstablishmentWindow() {
+        while utteranceEstablishmentWindowSamples > utteranceEstablishSamples,
+              let firstSample = utteranceEstablishmentLevels.first {
+            let excessSamples = utteranceEstablishmentWindowSamples - utteranceEstablishSamples
+            if firstSample.samples <= excessSamples {
+                utteranceEstablishmentWindowSamples -= firstSample.samples
+                utteranceEstablishmentLevels.removeFirst()
+            } else {
+                var trimmedSample = firstSample
+                trimmedSample.samples -= excessSamples
+                utteranceEstablishmentLevels[0] = trimmedSample
+                utteranceEstablishmentWindowSamples -= excessSamples
+            }
+        }
+    }
+
+    private func sustainedEstablishmentLevelDb() -> Double? {
+        var classifiedSamples = 0
+        // A startup crest with less than the raise dwell cannot define the seed.
+        for sample in utteranceEstablishmentLevels.sorted(by: { $0.frameDb > $1.frameDb }) {
+            classifiedSamples += sample.samples
+            if classifiedSamples >= utteranceLevelRaiseSustainSamples {
+                return sample.frameDb
+            }
+        }
+        return nil
+    }
+
+    private func isResetQualifyingEvidence(_ evidence: StreamingEndpointEvidence) -> Bool {
+        evidence == .strong || evidence == .continuing
+    }
+
+    private func resetUtteranceLevelReference() {
+        utteranceLevelReferenceDb = nil
+        utteranceLevelMaximumDb = nil
+        utteranceEstablishEvidenceSamples = 0
+        utteranceEstablishmentWindowSamples = 0
+        utteranceEstablishmentLevels.removeAll(keepingCapacity: true)
+        utteranceReferenceEstablished = false
+        utteranceLevelRaiseEvidenceSamples = 0
+        utteranceLevelRaiseCandidateMaxDb = nil
     }
 
     private func trackIdleGapFrame(
@@ -654,7 +866,11 @@ private final class VADContext: @unchecked Sendable {
 
         var decision: StreamingEndpointDecision = .none
         var endpointEvidence = StreamingEndpointEvidence(rawValue: output.evidence.rawValue) ?? .silence
+        // Preserve gate-classified duration separately from endpoint remaps.
+        let classifiedEvidence = endpointEvidence
+        var qualificationState = utteranceRelativeResetEnabled ? "establishing" : "disabled"
         var decisionSilenceSamples = endpoint.accumulatedSilenceSamples
+        var decisionAmbiguousCreditSamples = 0.0
         if endpointMachineEnabled {
             let previousState = previousEndpointState
             let flatTerminatorStateEligible = previousState == .speechActive
@@ -723,6 +939,17 @@ private final class VADContext: @unchecked Sendable {
                 endpointEvidence = .silence
             }
 
+            let qualification = qualifyEndpointEvidence(
+                endpointEvidence,
+                classifiedEvidence: classifiedEvidence,
+                frameDb: frameDb,
+                frameLength: frameLength,
+                frameDuration: frameDuration,
+                previousState: previousState
+            )
+            endpointEvidence = qualification.evidence
+            qualificationState = qualification.state
+
             if endpointEvidence == .silence {
                 contiguousTrailingSilenceSamples += frameLength
                 contiguousTrailingSilenceMinimumDb = min(
@@ -748,8 +975,10 @@ private final class VADContext: @unchecked Sendable {
                 loudFlatStreakStartSeconds = nil
                 loudFlatTerminatorActive = false
             }
-            if case .finalizeUtterance = decision, endpointEvidence == .silence {
-                decisionSilenceSamples = silenceBeforeDecision + frameLength
+            if case .finalizeUtterance = decision {
+                decisionSilenceSamples = endpoint.lastDecisionSilenceSamples
+                    ?? (silenceBeforeDecision + Double(frameLength))
+                decisionAmbiguousCreditSamples = endpoint.lastDecisionAmbiguousCreditSamples ?? 0
             } else {
                 decisionSilenceSamples = endpoint.accumulatedSilenceSamples
             }
@@ -795,7 +1024,7 @@ private final class VADContext: @unchecked Sendable {
                 }
                 silenceSamples += frameLength
             }
-            decisionSilenceSamples = silenceSamples
+            decisionSilenceSamples = Double(silenceSamples)
             if silenceSamples >= silenceThresholdSamples {
                 decision = .finalizeUtterance(kind: .endpoint)
                 silenceSamples = 0
@@ -809,8 +1038,15 @@ private final class VADContext: @unchecked Sendable {
             frameDuration: frameDuration,
             previousEndpointState: previousEndpointState,
             decision: decision,
-            decisionSilenceSamples: decisionSilenceSamples
+            decisionSilenceSamples: Int(decisionSilenceSamples.rounded()),
+            qualificationState: qualificationState,
+            physicalTrailingSilenceSamples: contiguousTrailingSilenceSamples
         )
+        if case .finalizeUtterance = decision {
+            resetUtteranceLevelReference()
+        } else if previousEndpointState == .onsetPending && endpoint.state == .idle {
+            resetUtteranceLevelReference()
+        }
         if endpointMachineEnabled {
             if case .startUtterance = decision {
                 moveRetainedGapToAccumulator()
@@ -854,7 +1090,7 @@ private final class VADContext: @unchecked Sendable {
                                        payload: ["sampleCount": accumulatorSampleCount,
                                                  "speechSamples": speechSamples])
             } else {
-                let silenceMs = Double(decisionSilenceSamples) / 16.0
+                let silenceMs = decisionSilenceSamples / 16.0
                 let totalMs = Double(accumulatorSampleCount) / 16.0
                 let speechMs = Double(speechSamples) / 16.0
                 FileLogger.shared.info(.audio, "Chunk splitter: \(kind.rawValue) → emit",
@@ -867,7 +1103,9 @@ private final class VADContext: @unchecked Sendable {
                     silenceMs: silenceMs,
                     speechMs: speechMs,
                     endpointState: previousEndpointState.rawValue,
-                    trimToPostRoll: true
+                    trimToPostRoll: true,
+                    weightedSilenceCreditMs: decisionAmbiguousCreditSamples / 16.0,
+                    physicalTrailingSilenceMs: Double(contiguousTrailingSilenceSamples) / 16.0
                 )
             }
         }
@@ -1140,7 +1378,9 @@ private final class VADContext: @unchecked Sendable {
         silenceMs: Double,
         speechMs: Double,
         endpointState: String,
-        trimToPostRoll: Bool = false
+        trimToPostRoll: Bool = false,
+        weightedSilenceCreditMs: Double = 0,
+        physicalTrailingSilenceMs: Double? = nil
     ) -> VADEmission {
         var snapshot = assembledAccumulator()
         let id = chunkId
@@ -1165,6 +1405,8 @@ private final class VADContext: @unchecked Sendable {
         }
         let emittedTotalMs = Double(sampleCount) / 16.0
         let startMs = Double(startSamples) / 16.0
+        let emittedPhysicalTrailingSilenceMs = physicalTrailingSilenceMs
+            ?? Double(contiguousTrailingSilenceSamples) / 16.0
         // Preserve legacy count-based endMs; sourceEndSamples is gap-aware.
         let endMs = startMs + Double(sampleCount) / 16.0
         chunkId &+= 1
@@ -1183,6 +1425,7 @@ private final class VADContext: @unchecked Sendable {
         silenceSamples = 0
         speechSamples = 0
         endpoint.reset()
+        resetUtteranceLevelReference()
         sawReanchorDuringUtterance = false
         bufferHighWaterSamples = retainedGapBuffer.count
         utteranceQuietestStrongDb = nil
@@ -1200,7 +1443,11 @@ private final class VADContext: @unchecked Sendable {
             endMs: endMs,
             sourceStartSample: startSamples,
             sourceEndSample: sourceEndSamples,
-            endpointState: endpointState
+            endpointState: endpointState,
+            metadata: [
+                "weightedSilenceCreditMs": weightedSilenceCreditMs,
+                "physicalTrailingSilenceMs": emittedPhysicalTrailingSilenceMs
+            ]
         ))
         if retainedGapBuffer.count > maxNoiseSamples, !retainedGapHasSpeechEvidence {
             shedRetainedGap()
@@ -1218,7 +1465,10 @@ private final class VADContext: @unchecked Sendable {
         let decisionTimeEndpointState = endpoint.state.rawValue
         moveRetainedGapToAccumulator()
         finishIdleGapRun()
+        let stopWeightedSilenceCreditMs = endpoint.accumulatedAmbiguousCreditSamples / 16.0
+        let stopPhysicalTrailingSilenceMs = Double(contiguousTrailingSilenceSamples) / 16.0
         _ = endpoint.forceFinalize(kind: .stop)
+        resetUtteranceLevelReference()
         let sampleCount = accumulatorSampleCount
         let trailingSpeechMs = Double(speechSamples) / 16.0
         let startSamples = chunkStartSessionSamples ?? (sessionElapsedSamples - sampleCount)
@@ -1278,7 +1528,9 @@ private final class VADContext: @unchecked Sendable {
         return emit(reason: "flush",
                     silenceMs: Double(contiguousTrailingSilenceSamples) / 16.0,
                     speechMs: Double(speechSamples) / 16.0,
-                    endpointState: decisionTimeEndpointState)
+                    endpointState: decisionTimeEndpointState,
+                    weightedSilenceCreditMs: stopWeightedSilenceCreditMs,
+                    physicalTrailingSilenceMs: stopPhysicalTrailingSilenceMs)
     }
 }
 
@@ -1453,6 +1705,8 @@ actor StreamingAudioRecorder {
         let minSpeechSamples = Int(Double(SharedConfig.streamVadMinSpeechMs()) * 16.0)
         let minChunkSamples = Int(Double(SharedConfig.streamVadMinChunkMs()) * 16.0)
         let maxNoiseSamples = Int(SharedConfig.streamVadMaxNoiseSec() * 16000.0)
+        let adaptiveThresholds = SharedConfig.streamVadAdaptiveThresholds()
+        let endpointMachineEnabled = SharedConfig.streamEndpointMachineEnabled()
         let vadGateConfig = VADGateConfig(
             mode: SharedConfig.streamVadMode(),
             staticRms: SharedConfig.streamVadSpeechRms(),
@@ -1486,7 +1740,9 @@ actor StreamingAudioRecorder {
             minSpeechSamples: minSpeechSamples,
             minChunkSamples: minChunkSamples,
             maxNoiseSamples: maxNoiseSamples,
-            endpointMachineEnabled: SharedConfig.streamEndpointMachineEnabled(),
+            endpointMachineEnabled: endpointMachineEnabled,
+            utteranceRelativeResetEnabled: SharedConfig.streamVadUtteranceRelativeResetEnabled(),
+            adaptiveThresholds: adaptiveThresholds,
             loudFlatSpreadDb: SharedConfig.streamVadLoudFlatSpreadDb(),
             loudFlatTerminateSeconds: SharedConfig.streamVadLoudFlatTerminateSeconds(),
             loudFlatTerminateEnabled: SharedConfig.streamVadLoudFlatTerminateEnabled(),

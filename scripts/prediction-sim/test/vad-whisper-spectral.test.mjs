@@ -365,9 +365,31 @@ describe('VAD telemetry replay and fixtures', () => {
 
     assert.ok(coreFrames.some(frame => frame.sp));
     assert.deepEqual(shedCore, []);
-    assert.ok(replay.events.some(event => event.k === 'emit'
-      && event.sourceStartSample <= coreStartSample
-      && event.sourceEndSample >= coreEndSample));
+    const emittedRanges = replay.events
+      .filter(event => event.k === 'emit'
+        && Number.isInteger(event.sourceStartSample)
+        && Number.isInteger(event.sourceEndSample))
+      .map(event => ({ start: event.sourceStartSample, end: event.sourceEndSample }))
+      .sort((left, right) => left.start - right.start);
+    const coreEmissions = replay.events.filter(event => event.k === 'emit'
+      && Number.isInteger(event.sourceStartSample)
+      && Number.isInteger(event.sourceEndSample)
+      && event.sourceStartSample < coreEndSample
+      && event.sourceEndSample > coreStartSample);
+    assert.ok(coreEmissions.length > 0);
+    for (const event of coreEmissions) {
+      assert.equal(event.sourceEndSample - event.sourceStartSample, event.n);
+    }
+    let coveredThroughSample = coreStartSample;
+    for (const range of emittedRanges) {
+      if (range.start > coveredThroughSample) continue;
+      coveredThroughSample = Math.max(coveredThroughSample, range.end);
+      if (coveredThroughSample >= coreEndSample) break;
+    }
+    assert.ok(
+      coveredThroughSample >= coreEndSample,
+      'speech-evident gap samples must be covered by the union of emitted spans',
+    );
   });
 
   const idleGapFixture = phaseOneFixtures.find(

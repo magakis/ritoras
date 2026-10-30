@@ -1067,6 +1067,7 @@ describe('adaptive VAD convergence', () => {
     const harness = makeRecorderHarness({
       frameMs: 10,
       endpointSilenceMs: 10,
+      utteranceRelativeResetEnabled: false,
       endpointConfig: {
         onsetMs: 70,
         endEvidenceMs: 10,
