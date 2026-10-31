@@ -1,5 +1,45 @@
 > This document must be reviewed by counsel before any commercial distribution. The CC BY-SA 4.0 ShareAlike clause may require the project to be released under a compatible license.
 
+## Silero VAD v6 CoreML model
+
+**Original model:** https://github.com/snakers4/silero-vad
+
+**CoreML conversion:** https://huggingface.co/FluidInference/silero-vad-coreml
+
+**Model distribution:** https://github.com/paean-ai/silero-vad-swift
+
+**Pinned model distribution revision:** `9f03b552e8131b37498495cbc6f0a6e2a47e58c8`
+
+**Description:** Silero VAD v6.0.0 converted for CoreML. The bundled model processes 576 Float32 samples at 16 kHz and carries 128-element hidden and cell states between steps.
+
+**What was used:** The precompiled model at `app/Resources/silero_vad.mlmodelc`.
+
+**License:** MIT (Silero model, Fluid Inference CoreML conversion, and Pæan distribution).
+
+### MIT License
+
+Copyright (c) 2020-present Silero Team
+Copyright (c) Fluid Inference
+Copyright (c) 2026 Pæan™
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
 ## wordfreq
 
 **Source:** https://github.com/rspeer/wordfreq

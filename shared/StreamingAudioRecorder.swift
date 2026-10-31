@@ -66,26 +66,28 @@ struct VADTelemetryFrame: @unchecked Sendable {
     let evidence: String
     let isSpeech: Bool
     let floorDb: Double?
-    let floorConverged: Bool
-    let strongThresholdDb: Double
-    let continuationThresholdDb: Double
-    let silenceThresholdDb: Double
+    let floorConverged: Bool?
+    let strongThresholdDb: Double?
+    let continuationThresholdDb: Double?
+    let silenceThresholdDb: Double?
     let dynamicsSpreadDb: Double?
     let shortSpreadDb: Double?
-    let speechShaped: Bool
+    let speechShaped: Bool?
     let highBandRatioDb: Double?
     let endpointPreviousState: String
     let endpointState: String
     let endpointDecision: String
     let decisionSilenceSamples: Int
     let utteranceDurationSamples: Int
-    let isLoudRegime: Bool
+    let isLoudRegime: Bool?
     let utteranceLevelReferenceDb: Double?
-    let utteranceLevelQualification: String
+    let utteranceLevelQualification: String?
     let ambiguousRunSamples: Double
     let ambiguousFrameCreditSamples: Double
     let weightedSilenceCreditSamples: Double
     let physicalTrailingSilenceSamples: Int
+    let sileroRawProbability: Double?
+    let sileroSmoothedProbability: Double?
 }
 
 enum VADTelemetryEventKind: String, Sendable {
@@ -104,6 +106,7 @@ enum VADTelemetryEventKind: String, Sendable {
     case spill
     case primingComplete = "priming_complete"
     case split
+    case vadSourceFallback = "vad_source_fallback"
 
     var defaultReason: String {
         switch self {
@@ -122,6 +125,7 @@ enum VADTelemetryEventKind: String, Sendable {
         case .spill: return "created"
         case .primingComplete: return "priming-complete"
         case .split: return "split-gap"
+        case .vadSourceFallback: return "model_error_fallback"
         }
     }
 }
@@ -186,9 +190,12 @@ struct VADTelemetryEvent: @unchecked Sendable {
 }
 
 struct ChunkSplitterFrameState: Sendable {
+    let vadSource: String
     let endpointState: String
     let evidence: String
     let frameDb: Double
+    let sileroRawProbability: Double?
+    let sileroSmoothedProbability: Double?
     let thresholdDb: Double
     let continuationThresholdDb: Double
     let silenceThresholdDb: Double
@@ -244,6 +251,8 @@ private final class VADContext: @unchecked Sendable {
     let loudFlatTerminateSeconds: Double
     let loudFlatTerminateEnabled: Bool
     let accumulatorSpillSamples: Int
+    let requestedVADSource: VADSource
+    let sileroConfiguration: SileroEvidenceConfiguration
     let postRollSamples = 400 * 16
     let analysisHpf: VADHighPassFilter?
     let whisperAnalysisHpf: VADHighPassFilter
@@ -295,6 +304,9 @@ private final class VADContext: @unchecked Sendable {
     private var telemetrySequence: UInt64 = 0
     private var telemetrySink: VADTelemetrySink?
     private var primingComplete = false
+    private var sileroClassifier: SileroVADClassifier?
+    private var didSileroFallback = false
+    private let sileroEvidenceProcessor: SileroEvidenceProcessor
     private var idleGapRunSamples = 0
     private var idleGapStartSessionSamples: Int?
     private var idleGapEndSessionSamples: Int?
@@ -317,7 +329,9 @@ private final class VADContext: @unchecked Sendable {
         loudFlatTerminateSeconds: Double,
         loudFlatTerminateEnabled: Bool,
         analysisHpfEnabled: Bool,
-        analysisHpfCutoffHz: Double
+        analysisHpfCutoffHz: Double,
+        vadSource: VADSource,
+        sileroConfiguration: SileroEvidenceConfiguration
     ) {
         let gate = VADThresholdGate(config: gateConfig)
         self.gate = gate
@@ -326,6 +340,9 @@ private final class VADContext: @unchecked Sendable {
         self.minSpeechSamples = minSpeechSamples
         self.minChunkSamples = minChunkSamples
         self.maxNoiseSamples = maxNoiseSamples
+        self.requestedVADSource = vadSource
+        self.sileroConfiguration = sileroConfiguration
+        self.sileroEvidenceProcessor = SileroEvidenceProcessor(configuration: sileroConfiguration)
         self.accumulatorSpillSamples = SharedConfig.streamVadAccumulatorSpillSamples()
         self.endpointMachineEnabled = endpointMachineEnabled
         self.utteranceRelativeResetEnabled = endpointMachineEnabled
@@ -358,6 +375,7 @@ private final class VADContext: @unchecked Sendable {
 
     deinit {
         try? accumulatorSpillHandle?.close()
+        sileroClassifier?.unload()
         if let accumulatorSpillURL {
             try? FileManager.default.removeItem(at: accumulatorSpillURL)
         }
@@ -414,6 +432,7 @@ private final class VADContext: @unchecked Sendable {
             SharedConfig.Defaults.streamVadWhisperModulationSpreadDbDefault
         config["whisperContextMs"] = SharedConfig.Defaults.streamVadWhisperContextMsDefault
         config["gapSpeechPeakAboveFloorDb"] = SharedConfig.Defaults.streamVadGapSpeechPeakAboveFloorDbDefault
+        config.merge(sileroTelemetryConfiguration) { _, new in new }
         if let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
             config["appShortVersion"] = appVersion
         }
@@ -435,6 +454,7 @@ private final class VADContext: @unchecked Sendable {
         analysisHpf?.reset()
         whisperAnalysisHpf.reset()
         previousFrameDbForClassification = nil
+        resetSileroState()
     }
 
     func resetAfterRouteChange() {
@@ -443,6 +463,7 @@ private final class VADContext: @unchecked Sendable {
         analysisHpf?.reset()
         whisperAnalysisHpf.reset()
         previousFrameDbForClassification = nil
+        resetSileroState()
         gate.resetFloorAfterRouteChange()
         primingComplete = gate.snapshot.floorDb == nil
         utteranceQuietestStrongDb = nil
@@ -461,10 +482,16 @@ private final class VADContext: @unchecked Sendable {
         defer { os_unfair_lock_unlock(&unfairLock) }
 
         let gateSnapshot = gate.snapshot
+        let sileroDecision = isSileroEffective ? sileroEvidenceProcessor.latestDecision : nil
         return ChunkSplitterFrameState(
+            vadSource: effectiveVADSourceName,
             endpointState: endpoint.state.rawValue,
-            evidence: gateSnapshot.evidence.rawValue,
+            evidence: isSileroEffective
+                ? (sileroDecision?.evidence.rawValue ?? VADEvidence.silence.rawValue)
+                : gateSnapshot.evidence.rawValue,
             frameDb: lastFrameDb,
+            sileroRawProbability: sileroDecision?.rawProbability,
+            sileroSmoothedProbability: sileroDecision?.smoothedProbability,
             thresholdDb: gateSnapshot.thresholdDb,
             continuationThresholdDb: gateSnapshot.continuationThresholdDb,
             silenceThresholdDb: gateSnapshot.silenceThresholdDb,
@@ -492,6 +519,75 @@ private final class VADContext: @unchecked Sendable {
         return summary
     }
 
+    private var isSileroEffective: Bool {
+        requestedVADSource == .silero && !didSileroFallback && sileroClassifier != nil
+    }
+
+    private var effectiveVADSourceName: String {
+        guard requestedVADSource == .silero else { return VADSource.dsp.rawValue }
+        return didSileroFallback ? "silero_fallback_dsp" : VADSource.silero.rawValue
+    }
+
+    private var sileroTelemetryConfiguration: [String: Any] {
+        [
+            "vadSource": effectiveVADSourceName,
+            "sileroStartThreshold": sileroConfiguration.startThreshold,
+            "sileroStopThreshold": sileroConfiguration.stopThreshold,
+            "sileroSmoothingSteps": sileroConfiguration.smoothingSteps
+        ]
+    }
+
+    func prepareForSession() {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+
+        sileroClassifier?.unload()
+        sileroClassifier = nil
+        didSileroFallback = false
+        sileroEvidenceProcessor.reset()
+        guard requestedVADSource == .silero else { return }
+
+        let classifier = SileroVADClassifier()
+        do {
+            try classifier.load()
+            sileroClassifier = classifier
+        } catch {
+            fallBackToDSP(error: error)
+        }
+    }
+
+    func releaseSileroClassifier() {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+        sileroClassifier?.unload()
+        sileroClassifier = nil
+        sileroEvidenceProcessor.reset()
+    }
+
+    private func fallBackToDSP(error: Error) {
+        sileroClassifier?.unload()
+        sileroClassifier = nil
+        didSileroFallback = true
+        sileroEvidenceProcessor.reset()
+        FileLogger.shared.error(.audio, "Silero VAD failed — falling back to DSP",
+                                payload: ["error": error.localizedDescription])
+        telemetrySink?.event(VADTelemetryEvent(
+            kind: .vadSourceFallback,
+            reason: "silero_model_error",
+            config: sileroTelemetryConfiguration
+        ))
+    }
+
+    private func resetSileroState() {
+        sileroEvidenceProcessor.reset()
+        guard isSileroEffective, let sileroClassifier else { return }
+        do {
+            try sileroClassifier.reset()
+        } catch {
+            fallBackToDSP(error: error)
+        }
+    }
+
     private func telemetryDecisionLabel(_ decision: StreamingEndpointDecision) -> String {
         switch decision {
         case .none:
@@ -513,8 +609,10 @@ private final class VADContext: @unchecked Sendable {
         previousEndpointState: StreamingEndpointState,
         decision: StreamingEndpointDecision,
         decisionSilenceSamples: Int,
-        qualificationState: String,
-        physicalTrailingSilenceSamples: Int
+        qualificationState: String?,
+        physicalTrailingSilenceSamples: Int,
+        sileroDecision: SileroEvidenceDecision?,
+        usesSileroEvidence: Bool
     ) {
         guard let sink = telemetrySink else { return }
         let record = VADTelemetryFrame(
@@ -526,20 +624,20 @@ private final class VADContext: @unchecked Sendable {
             evidence: output.evidence.rawValue,
             isSpeech: output.isSpeech,
             floorDb: output.floorDb,
-            floorConverged: output.floorConverged,
-            strongThresholdDb: output.thresholdDb,
-            continuationThresholdDb: output.continuationThresholdDb,
-            silenceThresholdDb: output.silenceThresholdDb,
+            floorConverged: usesSileroEvidence ? nil : output.floorConverged,
+            strongThresholdDb: usesSileroEvidence ? nil : output.thresholdDb,
+            continuationThresholdDb: usesSileroEvidence ? nil : output.continuationThresholdDb,
+            silenceThresholdDb: usesSileroEvidence ? nil : output.silenceThresholdDb,
             dynamicsSpreadDb: output.dynamicsSpreadDb,
             shortSpreadDb: output.shortSpreadDb,
-            speechShaped: output.speechShaped,
+            speechShaped: usesSileroEvidence ? nil : output.speechShaped,
             highBandRatioDb: output.highBandRatioDb,
             endpointPreviousState: previousEndpointState.rawValue,
             endpointState: endpoint.state.rawValue,
             endpointDecision: telemetryDecisionLabel(decision),
             decisionSilenceSamples: decisionSilenceSamples,
             utteranceDurationSamples: endpoint.utteranceDurationSamples,
-            isLoudRegime: output.isLoudRegime,
+            isLoudRegime: usesSileroEvidence ? nil : output.isLoudRegime,
             utteranceLevelReferenceDb: utteranceLevelReferenceDb,
             utteranceLevelQualification: qualificationState,
             ambiguousRunSamples: endpoint.lastDecisionAmbiguousRunSamples
@@ -548,7 +646,9 @@ private final class VADContext: @unchecked Sendable {
                 ?? endpoint.lastFrameAmbiguousCreditSamples,
             weightedSilenceCreditSamples: endpoint.lastDecisionAmbiguousCreditSamples
                 ?? endpoint.accumulatedAmbiguousCreditSamples,
-            physicalTrailingSilenceSamples: physicalTrailingSilenceSamples
+            physicalTrailingSilenceSamples: physicalTrailingSilenceSamples,
+            sileroRawProbability: sileroDecision?.rawProbability,
+            sileroSmoothedProbability: sileroDecision?.smoothedProbability
         )
         telemetrySequence &+= 1
         sink.frame(record)
@@ -696,6 +796,27 @@ private final class VADContext: @unchecked Sendable {
         evidence == .strong || evidence == .continuing
     }
 
+    private func sileroGateOutput(evidence: VADEvidence) -> VADGateOutput {
+        VADGateOutput(
+            isSpeech: evidence == .strong || evidence == .continuing,
+            evidence: evidence,
+            speechShaped: false,
+            thresholdDb: 0,
+            continuationThresholdDb: 0,
+            silenceThresholdDb: 0,
+            floorDb: nil,
+            floorConverged: false,
+            dynamicsSpreadDb: nil,
+            shortSpreadDb: nil,
+            highBandRatioDb: nil,
+            isLoudRegime: false,
+            didReanchor: false,
+            didCompletePriming: false,
+            primingDurationSeconds: 0,
+            primingEndedAtCap: false
+        )
+    }
+
     private func resetUtteranceLevelReference() {
         utteranceLevelReferenceDb = nil
         utteranceLevelMaximumDb = nil
@@ -817,27 +938,52 @@ private final class VADContext: @unchecked Sendable {
         let previousEndpointState = endpoint.state
         let withinUtteranceContext = previousEndpointState == .speechActive
             || previousEndpointState == .endPending
-        let output = gate.process(
-            frameDb: frameDb,
-            frameDuration: frameDuration,
-            highBandRatioDb: highBandRatioDb,
-            withinUtteranceContext: withinUtteranceContext
-        )
-        if output.didCompletePriming {
-            telemetrySink?.event(VADTelemetryEvent(
-                kind: .primingComplete,
-                reason: output.primingEndedAtCap ? "duration_cap" : "quiet_floor_seed",
-                totalMs: output.primingDurationSeconds * 1_000.0
-            ))
+        var sileroDecision: SileroEvidenceDecision?
+        var usesSileroEvidence = false
+        let output: VADGateOutput
+        if isSileroEffective, let sileroClassifier {
+            do {
+                try sileroClassifier.append(samples: frame)
+                for probability in sileroClassifier.takeNewProbabilities() {
+                    sileroDecision = sileroEvidenceProcessor.consume(probability)
+                }
+                sileroDecision = sileroEvidenceProcessor.latestDecision
+                usesSileroEvidence = true
+                output = sileroGateOutput(evidence: sileroDecision?.evidence ?? .silence)
+            } catch {
+                fallBackToDSP(error: error)
+                output = gate.process(
+                    frameDb: frameDb,
+                    frameDuration: frameDuration,
+                    highBandRatioDb: highBandRatioDb,
+                    withinUtteranceContext: withinUtteranceContext
+                )
+            }
+        } else {
+            output = gate.process(
+                frameDb: frameDb,
+                frameDuration: frameDuration,
+                highBandRatioDb: highBandRatioDb,
+                withinUtteranceContext: withinUtteranceContext
+            )
         }
-        primingComplete = primingComplete || output.didCompletePriming
+        if !usesSileroEvidence {
+            if output.didCompletePriming {
+                telemetrySink?.event(VADTelemetryEvent(
+                    kind: .primingComplete,
+                    reason: output.primingEndedAtCap ? "duration_cap" : "quiet_floor_seed",
+                    totalMs: output.primingDurationSeconds * 1_000.0
+                ))
+            }
+            primingComplete = primingComplete || output.didCompletePriming
 
-        let reanchorEvent = output.didReanchor
-        _ = gate.takePendingReanchorEvent()
-        if reanchorEvent {
-            telemetrySink?.event(VADTelemetryEvent(kind: .reanchor, reason: "floor_moved"))
-            if previousEndpointState == .speechActive || previousEndpointState == .endPending {
-                sawReanchorDuringUtterance = true
+            let reanchorEvent = output.didReanchor
+            _ = gate.takePendingReanchorEvent()
+            if reanchorEvent {
+                telemetrySink?.event(VADTelemetryEvent(kind: .reanchor, reason: "floor_moved"))
+                if previousEndpointState == .speechActive || previousEndpointState == .endPending {
+                    sawReanchorDuringUtterance = true
+                }
             }
         }
 
@@ -847,7 +993,9 @@ private final class VADContext: @unchecked Sendable {
             appendRetainedGapFrame(
                 frame,
                 startSamples: frameStartSamples,
-                evidence: output.isSpeech || output.speechShaped ? .continuing : output.evidence,
+                evidence: usesSileroEvidence
+                    ? output.evidence
+                    : (output.isSpeech || output.speechShaped ? .continuing : output.evidence),
                 frameDb: frameDb,
                 floorDb: output.floorDb
             )
@@ -870,87 +1018,91 @@ private final class VADContext: @unchecked Sendable {
         var endpointEvidence = StreamingEndpointEvidence(rawValue: output.evidence.rawValue) ?? .silence
         // Preserve gate-classified duration separately from endpoint remaps.
         let classifiedEvidence = endpointEvidence
-        var qualificationState = utteranceRelativeResetEnabled ? "establishing" : "disabled"
+        var qualificationState: String? = usesSileroEvidence
+            ? nil
+            : (utteranceRelativeResetEnabled ? "establishing" : "disabled")
         var decisionSilenceSamples = endpoint.accumulatedSilenceSamples
         var decisionAmbiguousCreditSamples = 0.0
         if endpointMachineEnabled {
             let previousState = previousEndpointState
-            let flatTerminatorStateEligible = previousState == .speechActive
-                || (loudFlatTerminatorActive && previousState == .endPending)
-            let isLoudFlatFrame = loudFlatTerminateEnabled
-                && output.isLoudRegime
-                && flatTerminatorStateEligible
-                && output.dynamicsSpreadDb.map { $0 < loudFlatSpreadDb } == true
-                && output.shortSpreadDb.map { $0 < loudFlatSpreadDb } == true
-            if isLoudFlatFrame {
-                if !loudFlatTerminatorActive {
-                    loudFlatStreakStartSeconds = loudFlatStreakStartSeconds
-                        ?? Double(frameStartSamples) / 16_000.0
-                    loudFlatStreakMs += frameDuration * 1_000.0
-                    if loudFlatStreakMs >= loudFlatTerminateSeconds * 1_000.0 {
-                        loudFlatTerminatorActive = true
-                        if endpointEvidence != .silence {
-                            telemetrySink?.event(VADTelemetryEvent(
-                                kind: .flatTerminate,
-                                samples: Int(loudFlatStreakMs * 16.0),
-                                reason: "flat_spread",
-                                startMs: (loudFlatStreakStartSeconds ?? 0) * 1_000.0,
-                                endMs: Double(sessionElapsedSamples) / 16.0,
-                                endpointState: previousState.rawValue
-                            ))
+            if !usesSileroEvidence {
+                let flatTerminatorStateEligible = previousState == .speechActive
+                    || (loudFlatTerminatorActive && previousState == .endPending)
+                let isLoudFlatFrame = loudFlatTerminateEnabled
+                    && output.isLoudRegime
+                    && flatTerminatorStateEligible
+                    && output.dynamicsSpreadDb.map { $0 < loudFlatSpreadDb } == true
+                    && output.shortSpreadDb.map { $0 < loudFlatSpreadDb } == true
+                if isLoudFlatFrame {
+                    if !loudFlatTerminatorActive {
+                        loudFlatStreakStartSeconds = loudFlatStreakStartSeconds
+                            ?? Double(frameStartSamples) / 16_000.0
+                        loudFlatStreakMs += frameDuration * 1_000.0
+                        if loudFlatStreakMs >= loudFlatTerminateSeconds * 1_000.0 {
+                            loudFlatTerminatorActive = true
+                            if endpointEvidence != .silence {
+                                telemetrySink?.event(VADTelemetryEvent(
+                                    kind: .flatTerminate,
+                                    samples: Int(loudFlatStreakMs * 16.0),
+                                    reason: "flat_spread",
+                                    startMs: (loudFlatStreakStartSeconds ?? 0) * 1_000.0,
+                                    endMs: Double(sessionElapsedSamples) / 16.0,
+                                    endpointState: previousState.rawValue
+                                ))
+                            }
                         }
                     }
-                }
-                if loudFlatTerminatorActive {
-                    if previousState != .endPending || output.evidence != .strong {
-                        endpointEvidence = .silence
+                    if loudFlatTerminatorActive {
+                        if previousState != .endPending || output.evidence != .strong {
+                            endpointEvidence = .silence
+                        }
                     }
+                } else {
+                    loudFlatStreakMs = 0
+                    loudFlatStreakStartSeconds = nil
+                    loudFlatTerminatorActive = false
                 }
-            } else {
-                loudFlatStreakMs = 0
-                loudFlatStreakStartSeconds = nil
-                loudFlatTerminatorActive = false
-            }
 
-            // Keep gate/floor evidence level-based; shape only controls the endpoint silence clock.
-            if output.speechShaped, endpointEvidence == .silence {
-                endpointEvidence = .continuing
-            }
+                // Keep gate/floor evidence level-based; shape only controls the endpoint silence clock.
+                if output.speechShaped, endpointEvidence == .silence {
+                    endpointEvidence = .continuing
+                }
 
-            // Bound wind suppression to one short strong edge after a non-strong frame.
-            let isTransientStrongGust = previousState == .endPending
-                && output.evidence == .strong
-                && previousGateEvidence != .strong
-                && !output.speechShaped
-                && adjacentStepDb.map {
-                    $0 >= VADThresholdGate.adaptiveEndPendingWindDispersionDb
-                } == true
-                && output.dynamicsSpreadDb.map {
-                    $0 >= VADThresholdGate.adaptiveEndPendingWindDispersionDb
-                } == true
-                && output.shortSpreadDb.map { $0 >= gate.effectiveFlatSpreadDb } == true
-                && frameDuration <= Self.maximumStrongGustFrameDurationSeconds
-            if isTransientStrongGust {
-                // Only the first short, abrupt strong edge is suppressed; a sustained run passes.
-                endpointEvidence = .silence
-            } else if previousState == .endPending,
-               output.shortSpreadDb != nil,
-               output.dynamicsSpreadDb != nil,
-               !output.speechShaped,
-               (endpointEvidence == .continuing || endpointEvidence == .ambiguous) {
-                endpointEvidence = .silence
-            }
+                // Bound wind suppression to one short strong edge after a non-strong frame.
+                let isTransientStrongGust = previousState == .endPending
+                    && output.evidence == .strong
+                    && previousGateEvidence != .strong
+                    && !output.speechShaped
+                    && adjacentStepDb.map {
+                        $0 >= VADThresholdGate.adaptiveEndPendingWindDispersionDb
+                    } == true
+                    && output.dynamicsSpreadDb.map {
+                        $0 >= VADThresholdGate.adaptiveEndPendingWindDispersionDb
+                    } == true
+                    && output.shortSpreadDb.map { $0 >= gate.effectiveFlatSpreadDb } == true
+                    && frameDuration <= Self.maximumStrongGustFrameDurationSeconds
+                if isTransientStrongGust {
+                    // Only the first short, abrupt strong edge is suppressed; a sustained run passes.
+                    endpointEvidence = .silence
+                } else if previousState == .endPending,
+                   output.shortSpreadDb != nil,
+                   output.dynamicsSpreadDb != nil,
+                   !output.speechShaped,
+                   (endpointEvidence == .continuing || endpointEvidence == .ambiguous) {
+                    endpointEvidence = .silence
+                }
 
-            let qualification = qualifyEndpointEvidence(
-                endpointEvidence,
-                classifiedEvidence: classifiedEvidence,
-                frameDb: frameDb,
-                frameLength: frameLength,
-                frameDuration: frameDuration,
-                previousState: previousState
-            )
-            endpointEvidence = qualification.evidence
-            qualificationState = qualification.state
+                let qualification = qualifyEndpointEvidence(
+                    endpointEvidence,
+                    classifiedEvidence: classifiedEvidence,
+                    frameDb: frameDb,
+                    frameLength: frameLength,
+                    frameDuration: frameDuration,
+                    previousState: previousState
+                )
+                endpointEvidence = qualification.evidence
+                qualificationState = qualification.state
+            }
 
             if endpointEvidence == .silence {
                 contiguousTrailingSilenceSamples += frameLength
@@ -987,12 +1139,14 @@ private final class VADContext: @unchecked Sendable {
             if previousState != endpoint.state {
                 FileLogger.shared.debug(.audio, "Chunk splitter: \(previousState.rawValue) → \(endpoint.state.rawValue)")
             }
-            gate.updateFloorTracking(
-                frameDb: frameDb,
-                duration: frameDuration,
-                machineIsIdle: previousState == .idle && endpoint.state == .idle,
-                machineIsEnding: previousState == .endPending || endpoint.state == .endPending
-            )
+            if !usesSileroEvidence {
+                gate.updateFloorTracking(
+                    frameDb: frameDb,
+                    duration: frameDuration,
+                    machineIsIdle: previousState == .idle && endpoint.state == .idle,
+                    machineIsEnding: previousState == .endPending || endpoint.state == .endPending
+                )
+            }
 
             if case .startUtterance = decision {
                 utteranceQuietestStrongDb = nil
@@ -1002,11 +1156,13 @@ private final class VADContext: @unchecked Sendable {
                 utteranceQuietestStrongDb = min(utteranceQuietestStrongDb ?? frameDb, frameDb)
             }
         } else {
-            gate.updateFloorTracking(
-                frameDb: frameDb,
-                duration: frameDuration,
-                machineIsIdle: accumulatorSampleCount == frameLength
-            )
+            if !usesSileroEvidence {
+                gate.updateFloorTracking(
+                    frameDb: frameDb,
+                    duration: frameDuration,
+                    machineIsIdle: accumulatorSampleCount == frameLength
+                )
+            }
             if output.isSpeech {
                 silenceSamples = 0
                 contiguousTrailingSilenceSamples = 0
@@ -1042,7 +1198,9 @@ private final class VADContext: @unchecked Sendable {
             decision: decision,
             decisionSilenceSamples: Int(decisionSilenceSamples.rounded()),
             qualificationState: qualificationState,
-            physicalTrailingSilenceSamples: contiguousTrailingSilenceSamples
+            physicalTrailingSilenceSamples: contiguousTrailingSilenceSamples,
+            sileroDecision: sileroDecision,
+            usesSileroEvidence: usesSileroEvidence
         )
         if case .finalizeUtterance = decision {
             resetUtteranceLevelReference()
@@ -1057,7 +1215,9 @@ private final class VADContext: @unchecked Sendable {
                     kind: .startUtterance,
                     samples: accumulatorSampleCount
                 ))
-            } else if previousEndpointState == .idle, endpoint.state == .idle {
+            } else if !usesSileroEvidence,
+                      previousEndpointState == .idle,
+                      endpoint.state == .idle {
                 trackIdleGapFrame(
                     frameDb: frameDb,
                     frameStartSamples: frameStartSamples,
@@ -1068,10 +1228,12 @@ private final class VADContext: @unchecked Sendable {
         }
 
         if case .finalizeUtterance(let kind) = decision {
-            gate.noteUtteranceEnded(
-                quietestStrongDb: utteranceQuietestStrongDb,
-                trailingSilenceDb: contiguousTrailingSilenceMinimumDb
-            )
+            if !usesSileroEvidence {
+                gate.noteUtteranceEnded(
+                    quietestStrongDb: utteranceQuietestStrongDb,
+                    trailingSilenceDb: contiguousTrailingSilenceMinimumDb
+                )
+            }
             if sawReanchorDuringUtterance {
                 FileLogger.shared.debug(.audio, "Chunk splitter kept utterance after mid-utterance re-anchor",
                                         payload: ["quietestStrongDb": utteranceQuietestStrongDb ?? NSNull(),
@@ -1146,18 +1308,20 @@ private final class VADContext: @unchecked Sendable {
         diagnosticElapsed += frameDuration
         if diagnosticElapsed >= 1.0 {
             diagnosticElapsed = 0
-            let snapshot = gate.snapshot
-        FileLogger.shared.debug(.audio, "Chunk splitter summary", payload: [
-                "state": endpoint.state.rawValue,
-                "floorDb": snapshot.floorDb ?? snapshot.thresholdDb,
-                "onsetDb": snapshot.thresholdDb,
-                "continueDb": snapshot.continuationThresholdDb,
-                "silenceDb": snapshot.silenceThresholdDb,
-                "noSilenceS": gate.secondsSinceSilenceEvidence,
-                "silenceMs": Double(endpoint.accumulatedSilenceSamples) / 16.0,
-                "resumeMs": Double(endpoint.resumeEvidenceSamples) / 16.0,
-                "bufferHighWaterSamples": bufferHighWaterSamples
-            ])
+            if !usesSileroEvidence {
+                let snapshot = gate.snapshot
+                FileLogger.shared.debug(.audio, "Chunk splitter summary", payload: [
+                    "state": endpoint.state.rawValue,
+                    "floorDb": snapshot.floorDb ?? snapshot.thresholdDb,
+                    "onsetDb": snapshot.thresholdDb,
+                    "continueDb": snapshot.continuationThresholdDb,
+                    "silenceDb": snapshot.silenceThresholdDb,
+                    "noSilenceS": gate.secondsSinceSilenceEvidence,
+                    "silenceMs": Double(endpoint.accumulatedSilenceSamples) / 16.0,
+                    "resumeMs": Double(endpoint.resumeEvidenceSamples) / 16.0,
+                    "bufferHighWaterSamples": bufferHighWaterSamples
+                ])
+            }
         }
         return nil
     }
@@ -1521,7 +1685,7 @@ private final class VADContext: @unchecked Sendable {
         }
         FileLogger.shared.info(.audio, "Chunk splitter: stop → emit",
                                payload: ["count": accumulatorSampleCount])
-        if speechSamples > 0 {
+        if speechSamples > 0, !isSileroEffective {
             gate.noteUtteranceEnded(
                 quietestStrongDb: utteranceQuietestStrongDb,
                 trailingSilenceDb: contiguousTrailingSilenceMinimumDb
@@ -1707,6 +1871,8 @@ actor StreamingAudioRecorder {
         let minSpeechSamples = Int(Double(SharedConfig.streamVadMinSpeechMs()) * 16.0)
         let minChunkSamples = Int(Double(SharedConfig.streamVadMinChunkMs()) * 16.0)
         let maxNoiseSamples = Int(SharedConfig.streamVadMaxNoiseSec() * 16000.0)
+        let vadSource = SharedConfig.vadSource()
+        let sileroConfiguration = SharedConfig.sileroEvidenceConfiguration()
         let adaptiveThresholds = SharedConfig.streamVadAdaptiveThresholds()
         let endpointMachineEnabled = SharedConfig.streamEndpointMachineEnabled()
         let vadGateConfig = VADGateConfig(
@@ -1749,7 +1915,9 @@ actor StreamingAudioRecorder {
             loudFlatTerminateSeconds: SharedConfig.streamVadLoudFlatTerminateSeconds(),
             loudFlatTerminateEnabled: SharedConfig.streamVadLoudFlatTerminateEnabled(),
             analysisHpfEnabled: SharedConfig.streamVadAnalysisHpfEnabled(),
-            analysisHpfCutoffHz: SharedConfig.Defaults.streamVadHpfCutoffHzDefault
+            analysisHpfCutoffHz: SharedConfig.Defaults.streamVadHpfCutoffHzDefault,
+            vadSource: vadSource,
+            sileroConfiguration: sileroConfiguration
         )
     }
 
@@ -1793,10 +1961,13 @@ actor StreamingAudioRecorder {
             throw AudioRecorder.AudioRecorderError.invalidSessionConfiguration(error)
         }
 
+        let vad = self.vad
+        let vadQueue = self.vadQueue
         var startCompleted = false
         defer {
             if !startCompleted {
                 teardownEngine()
+                vadQueue.sync { vad.releaseSileroClassifier() }
                 self.onChunk = nil
                 self.onChunkSplitterState = nil
                 isRecording = false
@@ -1807,6 +1978,7 @@ actor StreamingAudioRecorder {
         self.onChunk = onChunk
         self.onChunkSplitterState = onChunkSplitterState
         self.telemetryFlushable = telemetry as? VADTelemetryFlushable
+        vad.prepareForSession()
         vad.setTelemetrySink(telemetry)
 
         // 3. Build the 16 kHz mono target format (converter output)
@@ -1851,8 +2023,6 @@ actor StreamingAudioRecorder {
         // Capture references for the closure (no actor self capture).
         let handler = onChunk
         let stateHandler = onChunkSplitterState
-        let vad = self.vad
-        let vadQueue = self.vadQueue
         let telemetryFlushable = self.telemetryFlushable
         let converterHolder = self.converterHolder
         let diskWriter = self.diskWriter
@@ -2194,6 +2364,7 @@ actor StreamingAudioRecorder {
                     let emissionSummary = vad.takePendingEmissionSummary()
                     stateHandler(vad.frameState(emissionSummary: emissionSummary))
                 }
+                vad.releaseSileroClassifier()
                 diskWriter.close()
                 let ratio = accounting.outputFramesTotal > 0
                     ? Double(accounting.inputFramesTotal) / Double(accounting.outputFramesTotal)

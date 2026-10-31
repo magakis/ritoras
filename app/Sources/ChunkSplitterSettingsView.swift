@@ -115,7 +115,11 @@ struct ChunkSplitterSettingsView: View {
                 meterRow
             }
         } footer: {
-            Text("Use the live meter to check microphone levels and tune the chunk splitter's voice sensitivity. Green means an utterance is in progress; brief noise bumps stay red.")
+            if settings.chunkSplitterVADSource == .silero {
+                Text("The meter shows DSP level classification for reference; Silero CoreML decisions use speech probability instead.")
+            } else {
+                Text("Use the live meter to check microphone levels and tune the chunk splitter's voice sensitivity. Green means an utterance is in progress; brief noise bumps stay red.")
+            }
         }
     }
 
@@ -254,12 +258,18 @@ struct ChunkSplitterSettingsView: View {
 
     private var normalSection: some View {
         Section {
-            absoluteSpeechFloorRow
+            if settings.chunkSplitterVADSource == .dsp {
+                absoluteSpeechFloorRow
+            }
             silenceDurationRow
         } header: {
             Text("Basics")
         } footer: {
-            Text("Sensitivity adjusts voice detection for your environment. Silence duration controls how long the chunk splitter waits in silence before closing the utterance. 700 ms is the default; 450 ms is the minimum.")
+            if settings.chunkSplitterVADSource == .silero {
+                Text("Silence duration controls how long the endpoint waits before closing an utterance. 700 ms is the default; 450 ms is the minimum.")
+            } else {
+                Text("Sensitivity adjusts voice detection for your environment. Silence duration controls how long the chunk splitter waits in silence before closing the utterance. 700 ms is the default; 450 ms is the minimum.")
+            }
         }
     }
 
@@ -307,20 +317,30 @@ struct ChunkSplitterSettingsView: View {
 
     private var modeSection: some View {
         Section {
-            Picker("Detection", selection: $settings.chunkSplitterMode) {
-                ForEach(VADMode.allCases, id: \.self) { mode in
-                    switch mode {
-                    case .staticMode:
-                        Text("Static").tag(mode)
-                    case .adaptive:
-                        Text("Adaptive").tag(mode)
-                    }
+            Picker("Evidence source", selection: $settings.chunkSplitterVADSource) {
+                ForEach(VADSource.allCases, id: \.self) { source in
+                    Text(source.displayName).tag(source)
                 }
             }
-            .pickerStyle(.segmented)
 
-            if settings.chunkSplitterMode == .staticMode {
-                speechRmsRow
+            if settings.chunkSplitterVADSource == .dsp {
+                Picker("Detection", selection: $settings.chunkSplitterMode) {
+                    ForEach(VADMode.allCases, id: \.self) { mode in
+                        switch mode {
+                        case .staticMode:
+                            Text("Static").tag(mode)
+                        case .adaptive:
+                            Text("Adaptive").tag(mode)
+                        }
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                if settings.chunkSplitterMode == .staticMode {
+                    speechRmsRow
+                }
+            } else {
+                sileroSettingsRows
             }
         } header: {
             Text("Mode")
@@ -329,12 +349,58 @@ struct ChunkSplitterSettingsView: View {
         }
     }
 
+    @ViewBuilder
     private var modeHelpText: some View {
-        switch settings.chunkSplitterMode {
-        case .staticMode:
-            Text("One fixed level bar. Retune it when your environment changes.")
-        case .adaptive:
-            Text("Seeds the noise floor from the quietest tenth of the first second, then tracks it continuously. Δ is how far above the floor speech must be — lower it for whispering (try 6–8). Best hands-off choice across environments.")
+        if settings.chunkSplitterVADSource == .silero {
+            Text(
+                "Silero CoreML analyzes 576-sample windows at 16 kHz. "
+                    + "Probability thresholds classify strong speech, continuation, or silence; "
+                    + "the DSP level gate is bypassed. Changes take effect next session."
+            )
+        } else {
+            switch settings.chunkSplitterMode {
+            case .staticMode:
+                Text("One fixed level bar. Retune it when your environment changes.")
+            case .adaptive:
+                Text("Seeds the noise floor from the quietest tenth of the first second, then tracks it continuously. Δ is how far above the floor speech must be — lower it for whispering (try 6–8). Best hands-off choice across environments.")
+            }
+        }
+    }
+
+    private var sileroSettingsRows: some View {
+        Group {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Start threshold")
+                    Spacer()
+                    Text(String(format: "%.2f", settings.sileroStartThreshold))
+                        .foregroundColor(.secondary)
+                }
+                Slider(value: $settings.sileroStartThreshold, in: 0.10...0.90, step: 0.01)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Stop threshold")
+                    Spacer()
+                    Text(String(format: "%.2f", min(settings.sileroStopThreshold, settings.sileroStartThreshold)))
+                        .foregroundColor(.secondary)
+                }
+                Slider(
+                    value: Binding(
+                        get: { min(settings.sileroStopThreshold, settings.sileroStartThreshold) },
+                        set: { settings.sileroStopThreshold = $0 }
+                    ),
+                    in: 0.10...settings.sileroStartThreshold,
+                    step: 0.01
+                )
+            }
+
+            Stepper(
+                "Smoothing: \(settings.sileroSmoothingSteps) model steps",
+                value: $settings.sileroSmoothingSteps,
+                in: 1...15
+            )
         }
     }
 
@@ -544,8 +610,13 @@ struct ChunkSplitterSettingsView: View {
 
     private func globalChunkSplitterSettings() -> [(String, String)] {
         // This list intentionally mirrors the sessionStart config keys.
-        [
+        let sileroConfiguration = SharedConfig.sileroEvidenceConfiguration()
+        return [
             ("telemetryEnabled", SharedConfig.chunkSplitterTelemetryEnabled() ? "ON" : "OFF"),
+            ("vadSource", SharedConfig.vadSource().rawValue),
+            ("sileroStartThreshold", "\(sileroConfiguration.startThreshold)"),
+            ("sileroStopThreshold", "\(sileroConfiguration.stopThreshold)"),
+            ("sileroSmoothingSteps", "\(sileroConfiguration.smoothingSteps)"),
             ("mode", SharedConfig.streamVadMode().rawValue),
             ("pause", SharedConfig.chunkSplitterPauseProfile().rawValue),
             ("staticRms", "\(SharedConfig.streamVadSpeechRms())"),

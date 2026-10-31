@@ -50,7 +50,9 @@ final class StreamingChunkSplitterTelemetry: @unchecked Sendable, VADTelemetrySi
         else if record.evidence == "silence" { silenceFrames += 1; silenceMs += record.frameDuration * 1000 }
         else { ambiguousFrames += 1; ambiguousMs += record.frameDuration * 1000 }
         finalFloorDb = record.floorDb ?? finalFloorDb
-        floorConverged = record.floorConverged
+        if let value = record.floorConverged {
+            floorConverged = value
+        }
         decisions[record.endpointDecision, default: 0] += 1
     }
 
@@ -146,22 +148,28 @@ final class StreamingChunkSplitterTelemetry: @unchecked Sendable, VADTelemetrySi
                     "sourceStartSample": frame.sourceStartSample,
                     "sourceEndSample": frame.sourceEndSample,
                     "dt": frame.frameDuration, "db": frame.frameDb,
-                    "e": frame.evidence, "sp": frame.isSpeech, "fc": frame.floorConverged,
-                    "th": frame.strongThresholdDb, "ct": frame.continuationThresholdDb,
-                     "st": frame.silenceThresholdDb, "ps": frame.endpointPreviousState,
+                    "e": frame.evidence, "sp": frame.isSpeech,
+                    "ps": frame.endpointPreviousState,
                      "es": frame.endpointState, "d": frame.endpointDecision,
-                     "ss": frame.decisionSilenceSamples, "us": frame.utteranceDurationSamples,
-                     "lr": frame.isLoudRegime, "sh": frame.speechShaped]
+                     "ss": frame.decisionSilenceSamples, "us": frame.utteranceDurationSamples]
+                if let floorConverged = frame.floorConverged { item["fc"] = floorConverged }
+                if let threshold = frame.strongThresholdDb { item["th"] = threshold }
+                if let threshold = frame.continuationThresholdDb { item["ct"] = threshold }
+                if let threshold = frame.silenceThresholdDb { item["st"] = threshold }
+                if let isLoudRegime = frame.isLoudRegime { item["lr"] = isLoudRegime }
+                if let speechShaped = frame.speechShaped { item["sh"] = speechShaped }
                 if let floorDb = frame.floorDb { item["fl"] = floorDb }
                 if let spread = frame.dynamicsSpreadDb { item["dy"] = spread }
                 if let spread = frame.shortSpreadDb { item["sdy"] = spread }
                 if let ratio = frame.highBandRatioDb { item["hbr"] = ratio }
                 if let referenceDb = frame.utteranceLevelReferenceDb { item["ur"] = referenceDb }
-                item["uq"] = frame.utteranceLevelQualification
+                if let qualification = frame.utteranceLevelQualification { item["uq"] = qualification }
                 item["ar"] = frame.ambiguousRunSamples
                 item["ac"] = frame.ambiguousFrameCreditSamples
                 item["wc"] = frame.weightedSilenceCreditSamples
                 item["ts"] = frame.physicalTrailingSilenceSamples
+                if let probability = frame.sileroRawProbability { item["pr"] = probability }
+                if let probability = frame.sileroSmoothedProbability { item["pm"] = probability }
                 return item
             }
         ]
@@ -178,22 +186,28 @@ final class StreamingChunkSplitterTelemetry: @unchecked Sendable, VADTelemetrySi
                     "sourceStartSample": frame.sourceStartSample,
                     "sourceEndSample": frame.sourceEndSample,
                     "dt": frame.frameDuration, "db": frame.frameDb,
-                    "e": frame.evidence, "sp": frame.isSpeech, "fc": frame.floorConverged,
-                    "th": frame.strongThresholdDb, "ct": frame.continuationThresholdDb,
-                     "st": frame.silenceThresholdDb, "ps": frame.endpointPreviousState,
+                    "e": frame.evidence, "sp": frame.isSpeech,
+                    "ps": frame.endpointPreviousState,
                      "es": frame.endpointState, "d": frame.endpointDecision,
-                     "ss": frame.decisionSilenceSamples, "us": frame.utteranceDurationSamples,
-                     "lr": frame.isLoudRegime, "sh": frame.speechShaped]
+                     "ss": frame.decisionSilenceSamples, "us": frame.utteranceDurationSamples]
+                if let floorConverged = frame.floorConverged { item["fc"] = floorConverged }
+                if let threshold = frame.strongThresholdDb { item["th"] = threshold }
+                if let threshold = frame.continuationThresholdDb { item["ct"] = threshold }
+                if let threshold = frame.silenceThresholdDb { item["st"] = threshold }
+                if let isLoudRegime = frame.isLoudRegime { item["lr"] = isLoudRegime }
+                if let speechShaped = frame.speechShaped { item["sh"] = speechShaped }
                 if let floorDb = frame.floorDb { item["fl"] = floorDb }
                 if let spread = frame.dynamicsSpreadDb { item["dy"] = spread }
                 if let spread = frame.shortSpreadDb { item["sdy"] = spread }
                 if let ratio = frame.highBandRatioDb { item["hbr"] = ratio }
                 if let referenceDb = frame.utteranceLevelReferenceDb { item["ur"] = referenceDb }
-                item["uq"] = frame.utteranceLevelQualification
+                if let qualification = frame.utteranceLevelQualification { item["uq"] = qualification }
                 item["ar"] = frame.ambiguousRunSamples
                 item["ac"] = frame.ambiguousFrameCreditSamples
                 item["wc"] = frame.weightedSilenceCreditSamples
                 item["ts"] = frame.physicalTrailingSilenceSamples
+                if let probability = frame.sileroRawProbability { item["pr"] = probability }
+                if let probability = frame.sileroSmoothedProbability { item["pm"] = probability }
                 return item
             }
             let trimHistory = historicalSnapshot.count - historyCount

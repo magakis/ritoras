@@ -176,22 +176,44 @@ struct SilenceProgressIndicator: View {
         }
     }
 
+    @ViewBuilder
     private var levelReadout: some View {
-        HStack(spacing: 8) {
-            Text(String(format: "now %.1f dB", state.frameDb))
-                .foregroundColor(evidenceColor)
+        if state.vadSource == VADSource.silero.rawValue {
+            HStack(spacing: 8) {
+                Text("Silero \(probabilityText(state.sileroSmoothedProbability))")
+                    .foregroundColor(evidenceColor)
 
-            Spacer(minLength: 0)
+                Spacer(minLength: 0)
 
-            Text(String(format: "onset %.1f", state.thresholdDb))
-            Text(String(format: "continue %.1f", state.continuationThresholdDb))
-            Text(String(format: "silence %.1f", state.silenceThresholdDb))
+                Text("raw \(probabilityText(state.sileroRawProbability))")
+            }
+            .font(.caption2)
+            .foregroundColor(.secondary)
+            .monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+        } else {
+            HStack(spacing: 8) {
+                Text(String(format: "now %.1f dB", state.frameDb))
+                    .foregroundColor(evidenceColor)
+
+                Spacer(minLength: 0)
+
+                Text(String(format: "onset %.1f", state.thresholdDb))
+                Text(String(format: "continue %.1f", state.continuationThresholdDb))
+                Text(String(format: "silence %.1f", state.silenceThresholdDb))
+            }
+            .font(.caption2)
+            .foregroundColor(.secondary)
+            .monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
         }
-        .font(.caption2)
-        .foregroundColor(.secondary)
-        .monospacedDigit()
-        .lineLimit(1)
-        .minimumScaleFactor(0.7)
+    }
+
+    private func probabilityText(_ probability: Double?) -> String {
+        guard let probability else { return "—" }
+        return String(format: "%.2f", probability)
     }
 
     private var accessibilityLabel: String {

@@ -18,6 +18,11 @@ targets:
     platform: iOS
     sources:
       - path: app
+        excludes:
+          - Resources/**
+      - path: app/Resources/silero_vad.mlmodelc
+        type: folder
+        buildPhase: resources
       - path: shared
     dependencies:
       - sdk: libsqlite3.tbd

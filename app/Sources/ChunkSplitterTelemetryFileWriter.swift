@@ -199,17 +199,27 @@ final class ChunkSplitterTelemetryFileWriter: @unchecked Sendable, VADTelemetryS
             "db": record.frameDb,
             "e": record.evidence,
             "sp": record.isSpeech,
-            "sh": record.speechShaped,
-            "th": record.strongThresholdDb,
-            "ct": record.continuationThresholdDb,
-            "st": record.silenceThresholdDb,
             "ps": record.endpointPreviousState,
             "es": record.endpointState,
             "d": record.endpointDecision,
             "ss": record.decisionSilenceSamples,
-            "us": record.utteranceDurationSamples,
-            "fc": record.floorConverged
+            "us": record.utteranceDurationSamples
         ]
+        if let floorConverged = record.floorConverged {
+            object["fc"] = floorConverged
+        }
+        if let speechShaped = record.speechShaped {
+            object["sh"] = speechShaped
+        }
+        if let threshold = record.strongThresholdDb {
+            object["th"] = threshold
+        }
+        if let threshold = record.continuationThresholdDb {
+            object["ct"] = threshold
+        }
+        if let threshold = record.silenceThresholdDb {
+            object["st"] = threshold
+        }
         if let floorDb = record.floorDb {
             object["fl"] = floorDb
         }
@@ -222,17 +232,25 @@ final class ChunkSplitterTelemetryFileWriter: @unchecked Sendable, VADTelemetryS
         if let highBandRatioDb = record.highBandRatioDb {
             object["hbr"] = highBandRatioDb
         }
-        if record.isLoudRegime {
+        if record.isLoudRegime == true {
             object["lr"] = true
         }
         if let referenceDb = record.utteranceLevelReferenceDb {
             object["ur"] = referenceDb
         }
-        object["uq"] = record.utteranceLevelQualification
+        if let qualification = record.utteranceLevelQualification {
+            object["uq"] = qualification
+        }
         object["ar"] = record.ambiguousRunSamples
         object["ac"] = record.ambiguousFrameCreditSamples
         object["wc"] = record.weightedSilenceCreditSamples
         object["ts"] = record.physicalTrailingSilenceSamples
+        if let probability = record.sileroRawProbability {
+            object["pr"] = probability
+        }
+        if let probability = record.sileroSmoothedProbability {
+            object["pm"] = probability
+        }
         return serialize(object)
     }
 

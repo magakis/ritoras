@@ -489,6 +489,10 @@ export function normalizeConfig(rawConfig = {}) {
     ),
   };
   return { config: normalized, endpoint, gateConfig, minSpeechSamples: minimum('minSpeechMs'), minChunkSamples: minimum('minChunkMs'), maxNoiseSamples, recorderConfig: {
+    vadSource: raw.vadSource,
+    sileroStartThreshold: raw.sileroStartThreshold,
+    sileroStopThreshold: raw.sileroStopThreshold,
+    sileroSmoothingSteps: raw.sileroSmoothingSteps,
     loudFlatTerminateEnabled: normalized.loudFlatTerminateEnabled,
     loudFlatSpreadDb: normalized.loudFlatSpreadDb,
     loudFlatTerminateSeconds: normalized.loudFlatTerminateSeconds,
@@ -1117,6 +1121,21 @@ export function replaySession(session, configInput = session.config, {
       ? rawConfigFromTelemetry(configInput)
       : configInput,
   );
+  const sessionSource = session.config?.vadSource ?? session.config?.effectiveVADSource;
+  const configuredSource = normalized.config.vadSource
+    ?? normalized.config.effectiveVADSource;
+  const hasSileroProbabilities = session.frames.some(
+    frame => Number.isFinite(frame.pr) || Number.isFinite(frame.pm),
+  ) || (session.recordedFrames ?? []).some(
+    frame => Number.isFinite(frame.pr) || Number.isFinite(frame.pm),
+  );
+  if (sessionSource === 'silero' || configuredSource === 'silero' || hasSileroProbabilities) {
+    return {
+      status: 'unsupported_skipped',
+      reason: 'Silero-sourced sessions cannot be replayed by the DSP-only VAD replay engine.',
+      config: normalized.config,
+    };
+  }
   const inputFrames = session.frames;
   const recordedFrames = session.recordedFrames ?? inputFrames;
   const sourceFrames = fromWav
@@ -1239,6 +1258,12 @@ function configLabel(config, keys) {
 }
 
 function printDefaultReport(result) {
+  if (result.status === 'unsupported_skipped') {
+    console.log('=== VAD replay ===');
+    console.log(`Status: ${result.status}`);
+    console.log(`Reason: ${result.reason}`);
+    return;
+  }
   const { metrics, floorStats: floors, thresholdsAtEnd: thresholds } = result;
   console.log('=== VAD replay ===');
   console.log(`Session duration: ${formatNumber(metrics.sessionDurationSeconds)} s`);
@@ -1289,16 +1314,43 @@ function printDefaultReport(result) {
 }
 
 function printSweepTable(results) {
-  const headings = ['config', 'utterances', 'open(s)', 'false(s)', 'missed(s)', 'chunks', 'onset(ms)'];
-  const rows = results.map(result => [
-    result.label,
-    String(result.replay.metrics.utteranceCount),
-    formatNumber(result.replay.metrics.totalOpenSeconds),
-    formatNumber(result.replay.metrics.falseOpenSeconds),
-    formatNumber(result.replay.metrics.missedSpeechSeconds),
-    String(result.replay.metrics.chunkCount),
-    formatMilliseconds(result.replay.metrics.meanOnsetLatencySeconds),
-  ]);
+  const headings = [
+    'config',
+    'status',
+    'utterances',
+    'open(s)',
+    'false(s)',
+    'missed(s)',
+    'chunks',
+    'onset(ms)',
+    'reason',
+  ];
+  const rows = results.map(result => {
+    if (result.replay.status === 'unsupported_skipped') {
+      return [
+        result.label,
+        result.replay.status,
+        'n/a',
+        'n/a',
+        'n/a',
+        'n/a',
+        'n/a',
+        'n/a',
+        result.replay.reason,
+      ];
+    }
+    return [
+      result.label,
+      'replayed',
+      String(result.replay.metrics.utteranceCount),
+      formatNumber(result.replay.metrics.totalOpenSeconds),
+      formatNumber(result.replay.metrics.falseOpenSeconds),
+      formatNumber(result.replay.metrics.missedSpeechSeconds),
+      String(result.replay.metrics.chunkCount),
+      formatMilliseconds(result.replay.metrics.meanOnsetLatencySeconds),
+      '',
+    ];
+  });
   const widths = headings.map((heading, index) => Math.max(heading.length, ...rows.map(row => row[index].length)));
   const render = row => row.map((value, index) => index === 0 ? value.padEnd(widths[index]) : value.padStart(widths[index])).join(' | ');
   console.log(render(headings));
@@ -1377,6 +1429,7 @@ function replayFixtures(options, baseConfig) {
   ]);
   const runs = [];
   let failures = 0;
+  let skipped = 0;
   for (const fixture of fixtures) {
     try {
       const wav = decodeFixtureWav(fixture.wavPath);
@@ -1410,11 +1463,19 @@ function replayFixtures(options, baseConfig) {
           replay,
         };
         runs.push(run);
-        console.log(
-          `${fixture.caseId} ${fixture.metadata.kind}/${fixture.metadata.mechanism}: `
-          + `${replay.metrics.utteranceCount} utterances, ${replay.metrics.chunkCount} emits, `
-          + `${replay.frames.length} frames`,
-        );
+        if (replay.status === 'unsupported_skipped') {
+          skipped += 1;
+          console.log(
+            `${fixture.caseId} ${fixture.metadata.kind}/${fixture.metadata.mechanism}: `
+            + `skipped (${replay.reason})`,
+          );
+        } else {
+          console.log(
+            `${fixture.caseId} ${fixture.metadata.kind}/${fixture.metadata.mechanism}: `
+            + `${replay.metrics.utteranceCount} utterances, ${replay.metrics.chunkCount} emits, `
+            + `${replay.frames.length} frames`,
+          );
+        }
       }
     } catch (error) {
       failures += 1;
@@ -1422,7 +1483,10 @@ function replayFixtures(options, baseConfig) {
       if (options.stopOnFirstFail) break;
     }
   }
-  console.log(`Fixtures replayed: ${runs.length}; failed cases: ${failures}; seed: ${options.seed}`);
+  console.log(
+    `Fixtures replayed: ${runs.length - skipped}; skipped: ${skipped}; `
+    + `failed cases: ${failures}; seed: ${options.seed}`,
+  );
   if (options.jsonPath) {
     fs.writeFileSync(path.resolve(options.jsonPath), `${JSON.stringify({ runs }, null, 2)}\n`);
     console.log(`Timeline JSON: ${options.jsonPath}`);
@@ -1489,8 +1553,9 @@ export function main(argv = process.argv.slice(2)) {
         ...options.sweep.map(item => item.key),
       ]),
     });
-    const failed = replay.divergence?.mismatchCount > 0
-      || replay.decisionParity?.mismatchCount > 0;
+    const failed = replay.status !== 'unsupported_skipped'
+      && (replay.divergence?.mismatchCount > 0
+        || replay.decisionParity?.mismatchCount > 0);
     if (options.stopOnFirstFail && failed) break;
   }
 

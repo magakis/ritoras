@@ -12,6 +12,7 @@ import {
   IDLE_GAP_TELEMETRY_MIN_SECONDS,
   IDLE_GAP_TELEMETRY_PEAK_ABOVE_FLOOR_DB,
 } from './vad-idle-gap.mjs';
+import { SileroEvidenceProcessor, normalizeSileroEvidenceConfig } from './silero-evidence.mjs';
 
 // This chunk splitter segments a continuous
 // audio stream into chunks for streaming ASR while retaining all audio except
@@ -42,6 +43,28 @@ function makeGate(partial = {}) {
 
 function makeEndpoint(endpointSilenceMs = DEFAULT_ENDPOINT_SILENCE_MS, partial = {}) {
   return new StreamingEndpoint({ endpointSilenceMs, ...partial });
+}
+
+function makeSileroOutput(decision) {
+  const evidence = decision?.evidence ?? 'silence';
+  return {
+    isSpeech: evidence === 'strong' || evidence === 'continuing',
+    evidence,
+    speechShaped: false,
+    thresholdDb: null,
+    continuationThresholdDb: null,
+    silenceThresholdDb: null,
+    floorDb: null,
+    floorConverged: false,
+    dynamicsSpreadDb: null,
+    shortSpreadDb: null,
+    highBandRatioDb: null,
+    isLoudRegime: false,
+    didReanchor: false,
+    didCompletePriming: false,
+    primingDurationSeconds: 0,
+    primingEndedAtCap: false,
+  };
 }
 
 function clampFinite(value, fallback, minimum, maximum) {
@@ -121,6 +144,10 @@ function makeSessionConfig(harness) {
   const gate = harness.gate;
   const endpoint = harness.endpoint.configuration;
   const config = {
+    vadSource: harness.effectiveVADSource,
+    sileroStartThreshold: harness.sileroConfiguration.startThreshold,
+    sileroStopThreshold: harness.sileroConfiguration.stopThreshold,
+    sileroSmoothingSteps: harness.sileroConfiguration.smoothingSteps,
     mode: gate.config.mode,
     strongDeltaDb: gate.effectiveAdaptiveDeltaDb,
     absoluteSpeechFloorDb: gate.effectiveAbsoluteSpeechFloorDb,
@@ -222,6 +249,12 @@ export function makeRecorderHarness({
   onSlowOnsetDiagnostic,
 } = {}) {
   const recorderFrameDuration = frameMs / 1000;
+  const requestedVADSource = recorderConfig.vadSource === 'silero' ? 'silero' : 'dsp';
+  const effectiveVADSource = requestedVADSource === 'silero'
+    && recorderConfig.effectiveVADSource === 'silero_fallback_dsp'
+    ? 'silero_fallback_dsp'
+    : requestedVADSource;
+  const sileroConfiguration = normalizeSileroEvidenceConfig(recorderConfig);
   const featureEnabled = Boolean(utteranceRelativeResetEnabled && endpointMachineEnabled);
   const utteranceEstablishSamples = clampInteger(
     recorderConfig.utteranceEstablishMs,
@@ -240,6 +273,11 @@ export function makeRecorderHarness({
   });
   const gate = makeGate(gateConfig);
   const harness = {
+    requestedVADSource,
+    effectiveVADSource,
+    sileroConfiguration,
+    sileroEvidenceProcessor: new SileroEvidenceProcessor(recorderConfig),
+    latestSileroDecision: null,
     gate,
     endpoint,
     endpointMachineEnabled,
@@ -362,7 +400,7 @@ export function makeRecorderHarness({
     quietLatchStartFloorDb: null,
     quietLatchCoverageMs: 0,
     sawReanchorDuringUtterance: false,
-    primingComplete: gate.snapshot.floorDb === null,
+    primingComplete: effectiveVADSource === 'silero' || gate.snapshot.floorDb === null,
     sessionConfig: null,
 
     emitEvent(event) {
@@ -371,8 +409,11 @@ export function makeRecorderHarness({
 
     resetAfterRouteChange() {
       this.gate.resetFloorAfterRouteChange();
+      this.sileroEvidenceProcessor.reset();
+      this.latestSileroDecision = null;
       this.resetUtteranceLevelReference();
-      this.primingComplete = this.gate.snapshot.floorDb === null;
+      this.primingComplete = this.effectiveVADSource === 'silero'
+        || this.gate.snapshot.floorDb === null;
       this.contiguousTrailingSilenceSamples = 0;
       this.contiguousTrailingSilenceMinimumDb = null;
       this.contiguousTrailingSilencePeakAboveFloorDb = null;
@@ -540,42 +581,71 @@ export function makeRecorderHarness({
       qualificationState,
       physicalTrailingSilenceSamples,
     ) {
-      const record = {
-        t: 'f',
-        q: this.frameSequence,
-        sourceStartSample: this.sessionElapsedSamples - Math.round(frameDuration * 16000),
-        sourceEndSample: this.sessionElapsedSamples,
-        dt: frameDuration,
-        db: frameDb,
-        e: output.evidence,
-        sp: output.isSpeech,
-        th: output.thresholdDb,
-        ct: output.continuationThresholdDb,
-        st: output.silenceThresholdDb,
-        ps: previousState,
-        es: this.endpoint.state,
-        d: decisionLabel(decision),
-        ss: decisionSilenceSamples,
-        us: this.endpoint.utteranceDurationSamples,
-        ls: this.sustainedContinuingMs,
-        ll: this.sustainedContinuingOnsetLatched,
-        uq: qualificationState,
-        ar: this.endpoint.lastDecisionAmbiguousRunSamples
-          ?? this.endpoint.ambiguousRunSamples,
-        ac: this.endpoint.lastDecisionAmbiguousFrameCreditSamples
-          ?? this.endpoint.lastFrameAmbiguousCreditSamples,
-        wc: this.endpoint.lastDecisionAmbiguousCreditSamples
-          ?? this.endpoint.accumulatedAmbiguousCreditSamples,
-        ts: physicalTrailingSilenceSamples,
-      };
-      copyOptional(record, 'fl', output.floorDb);
-      copyOptional(record, 'ur', this.utteranceLevelReferenceDb);
-      record.fc = output.floorConverged;
-      copyOptional(record, 'dy', output.dynamicsSpreadDb);
-      record.sh = output.speechShaped;
-      copyOptional(record, 'sdy', output.shortSpreadDb);
-      copyOptional(record, 'hbr', output.highBandRatioDb);
-      if (output.isLoudRegime) record.lr = true;
+      const sourceStartSample = this.sessionElapsedSamples - Math.round(frameDuration * 16000);
+      const record = this.effectiveVADSource === 'silero'
+        ? {
+          t: 'f',
+          q: this.frameSequence,
+          sourceStartSample,
+          sourceEndSample: this.sessionElapsedSamples,
+          dt: frameDuration,
+          db: frameDb,
+          e: output.evidence,
+          sp: output.isSpeech,
+          ps: previousState,
+          es: this.endpoint.state,
+          d: decisionLabel(decision),
+          ss: decisionSilenceSamples,
+          us: this.endpoint.utteranceDurationSamples,
+          ar: this.endpoint.lastDecisionAmbiguousRunSamples
+            ?? this.endpoint.ambiguousRunSamples,
+          ac: this.endpoint.lastDecisionAmbiguousFrameCreditSamples
+            ?? this.endpoint.lastFrameAmbiguousCreditSamples,
+          wc: this.endpoint.lastDecisionAmbiguousCreditSamples
+            ?? this.endpoint.accumulatedAmbiguousCreditSamples,
+          ts: physicalTrailingSilenceSamples,
+        }
+        : {
+          t: 'f',
+          q: this.frameSequence,
+          sourceStartSample,
+          sourceEndSample: this.sessionElapsedSamples,
+          dt: frameDuration,
+          db: frameDb,
+          e: output.evidence,
+          sp: output.isSpeech,
+          th: output.thresholdDb,
+          ct: output.continuationThresholdDb,
+          st: output.silenceThresholdDb,
+          ps: previousState,
+          es: this.endpoint.state,
+          d: decisionLabel(decision),
+          ss: decisionSilenceSamples,
+          us: this.endpoint.utteranceDurationSamples,
+          ls: this.sustainedContinuingMs,
+          ll: this.sustainedContinuingOnsetLatched,
+          uq: qualificationState,
+          ar: this.endpoint.lastDecisionAmbiguousRunSamples
+            ?? this.endpoint.ambiguousRunSamples,
+          ac: this.endpoint.lastDecisionAmbiguousFrameCreditSamples
+            ?? this.endpoint.lastFrameAmbiguousCreditSamples,
+          wc: this.endpoint.lastDecisionAmbiguousCreditSamples
+            ?? this.endpoint.accumulatedAmbiguousCreditSamples,
+          ts: physicalTrailingSilenceSamples,
+        };
+      if (this.effectiveVADSource === 'silero') {
+        copyOptional(record, 'pr', this.latestSileroDecision?.rawProbability);
+        copyOptional(record, 'pm', this.latestSileroDecision?.smoothedProbability);
+      } else {
+        copyOptional(record, 'fl', output.floorDb);
+        copyOptional(record, 'ur', this.utteranceLevelReferenceDb);
+        record.fc = output.floorConverged;
+        copyOptional(record, 'dy', output.dynamicsSpreadDb);
+        record.sh = output.speechShaped;
+        copyOptional(record, 'sdy', output.shortSpreadDb);
+        copyOptional(record, 'hbr', output.highBandRatioDb);
+        if (output.isLoudRegime) record.lr = true;
+      }
       this.frameSequence += 1;
       if (typeof onFrame === 'function') onFrame(record);
       return record;
@@ -719,12 +789,25 @@ export function makeRecorderHarness({
       }
     },
 
-    drive(frameDb, frameDuration = recorderFrameDuration, { highBandRatioDb = null } = {}) {
+    drive(frameDb, frameDuration = recorderFrameDuration, {
+      highBandRatioDb = null,
+      sileroProbability = null,
+      sileroProbabilities = [],
+    } = {}) {
       const frameSamples = Math.round(frameDuration * 16000);
       const frameStartSamples = this.sessionElapsedSamples;
       const previousState = this.endpoint.state;
       const previousFrameDb = this.previousProcessedFrameDb;
       const previousGateEvidence = this.gate.snapshot.evidence;
+      if (this.effectiveVADSource === 'silero') {
+        const probabilities = Array.isArray(sileroProbabilities)
+          ? [...sileroProbabilities]
+          : [];
+        if (sileroProbability !== null && sileroProbability !== undefined) {
+          probabilities.push(sileroProbability);
+        }
+        this.latestSileroDecision = this.sileroEvidenceProcessor.consumeMany(probabilities);
+      }
       const adjacentStepDb = previousFrameDb === null
         ? null
         : Math.abs(frameDb - previousFrameDb);
@@ -734,10 +817,12 @@ export function makeRecorderHarness({
       this.sessionElapsedSamples += frameSamples;
       this.slowOnsetTriggerTime = null;
       const primingWasComplete = this.primingComplete;
-      const output = this.gate.process(frameDb, frameDuration, {
-        highBandRatioDb,
-        withinUtteranceContext: previousState === 'speechActive' || previousState === 'endPending',
-      });
+      const output = this.effectiveVADSource === 'silero'
+        ? makeSileroOutput(this.latestSileroDecision)
+        : this.gate.process(frameDb, frameDuration, {
+          highBandRatioDb,
+          withinUtteranceContext: previousState === 'speechActive' || previousState === 'endPending',
+        });
       const completedPrimingNow = output.didCompletePriming;
       this.primingComplete ||= completedPrimingNow;
       if (completedPrimingNow) {
@@ -775,7 +860,9 @@ export function makeRecorderHarness({
           }
         }
       }
-      const reanchorEvent = this.gate.takePendingReanchorEvent();
+      const reanchorEvent = this.effectiveVADSource === 'silero'
+        ? false
+        : this.gate.takePendingReanchorEvent();
       const endpointWasIdle = previousState === 'idle';
       const frameWasInRetainedGap = this.endpointMachineEnabled
         && (previousState === 'idle' || previousState === 'onsetPending');
@@ -980,11 +1067,8 @@ export function makeRecorderHarness({
         && latchedContinuingOnset
         ? 'strong'
         : output.evidence;
-      const slowOnsetTriggered = this.updateSlowOnsetEvidence(
-        frameDb,
-        output.floorDb,
-        frameDuration,
-      );
+      const slowOnsetTriggered = this.effectiveVADSource !== 'silero'
+        && this.updateSlowOnsetEvidence(frameDb, output.floorDb, frameDuration);
       const slowEvidenceAfterMs = this.slowOnsetHistory.reduce(
         (total, frame) => total + frame.end - frame.start,
         0,
@@ -1031,25 +1115,29 @@ export function makeRecorderHarness({
       if (output.speechShaped && endpointEvidence === 'silence') {
         endpointEvidence = 'continuing';
       }
-      endpointEvidence = classifyEndPendingEvidence({
-        endpointState: previousState,
-        evidence: endpointEvidence,
-        previousEvidence: previousGateEvidence,
-        speechShaped: output.speechShaped,
-        shortSpreadDb: output.shortSpreadDb,
-        dynamicsSpreadDb: output.dynamicsSpreadDb,
-        adjacentStepDb,
-        flatSpreadDb: this.gate.effectiveFlatSpreadDb,
-        accumulatedSilenceSamples: this.endpoint.accumulatedSilenceSamples,
-        endpointSilenceSamples: this.endpoint.configuration.endpointSilenceSamples,
-        ambiguousRescueSamples: this.endpoint.configuration.ambiguousRescueSamples,
-        rescueAwareWindowsEnabled:
-          this.endpoint.configuration.resumeToEndpointSilenceRatio !== undefined
-          || this.endpoint.configuration.ambiguousRescueToEndpointSilenceRatio !== undefined,
-        frameDuration,
-      });
-      let qualificationState = this.utteranceRelativeResetEnabled ? 'establishing' : 'disabled';
-      if (this.endpointMachineEnabled) {
+      if (this.effectiveVADSource !== 'silero') {
+        endpointEvidence = classifyEndPendingEvidence({
+          endpointState: previousState,
+          evidence: endpointEvidence,
+          previousEvidence: previousGateEvidence,
+          speechShaped: output.speechShaped,
+          shortSpreadDb: output.shortSpreadDb,
+          dynamicsSpreadDb: output.dynamicsSpreadDb,
+          adjacentStepDb,
+          flatSpreadDb: this.gate.effectiveFlatSpreadDb,
+          accumulatedSilenceSamples: this.endpoint.accumulatedSilenceSamples,
+          endpointSilenceSamples: this.endpoint.configuration.endpointSilenceSamples,
+          ambiguousRescueSamples: this.endpoint.configuration.ambiguousRescueSamples,
+          rescueAwareWindowsEnabled:
+            this.endpoint.configuration.resumeToEndpointSilenceRatio !== undefined
+            || this.endpoint.configuration.ambiguousRescueToEndpointSilenceRatio !== undefined,
+          frameDuration,
+        });
+      }
+      let qualificationState = this.effectiveVADSource === 'silero'
+        ? null
+        : this.utteranceRelativeResetEnabled ? 'establishing' : 'disabled';
+      if (this.endpointMachineEnabled && this.effectiveVADSource !== 'silero') {
         const qualification = this.qualifyEndpointEvidence(
           endpointEvidence,
           output.evidence,
@@ -1140,23 +1228,27 @@ export function makeRecorderHarness({
           this.appendRetainedGap(
             frameSamples,
             frameStartSamples,
-            output.isSpeech || output.speechShaped ? 'continuing' : output.evidence,
+            this.effectiveVADSource === 'silero'
+              ? output.evidence
+              : output.isSpeech || output.speechShaped ? 'continuing' : output.evidence,
             frameDb,
             output.floorDb,
           );
           this.manageRetainedGapOverflow();
         }
         // Prevent the adaptive floor from chasing evidence held for a slow onset.
-        this.gate.updateFloorTracking(
-          frameDb,
-          frameDuration,
-          previousState === 'idle'
-            && this.endpoint.state === 'idle'
-            && this.slowOnsetHistory.length === 0,
-          previousState === 'endPending' || this.endpoint.state === 'endPending',
-          this.quietRiseCapAppliesToAmbiguous,
-          this.quietRiseCapWitnessDb,
-        );
+        if (this.effectiveVADSource !== 'silero') {
+          this.gate.updateFloorTracking(
+            frameDb,
+            frameDuration,
+            previousState === 'idle'
+              && this.endpoint.state === 'idle'
+              && this.slowOnsetHistory.length === 0,
+            previousState === 'endPending' || this.endpoint.state === 'endPending',
+            this.quietRiseCapAppliesToAmbiguous,
+            this.quietRiseCapWitnessDb,
+          );
+        }
 
         const synthesizedStartNow = completedPrimingNow
           && this.accumulatorSamples === 0
@@ -1204,14 +1296,16 @@ export function makeRecorderHarness({
           );
         }
       } else {
-        this.gate.updateFloorTracking(
-          frameDb,
-          frameDuration,
-          this.accumulatorSamples === 0,
-          false,
-          this.quietRiseCapAppliesToAmbiguous,
-          this.quietRiseCapWitnessDb,
-        );
+        if (this.effectiveVADSource !== 'silero') {
+          this.gate.updateFloorTracking(
+            frameDb,
+            frameDuration,
+            this.accumulatorSamples === 0,
+            false,
+            this.quietRiseCapAppliesToAmbiguous,
+            this.quietRiseCapWitnessDb,
+          );
+        }
         if (this.accumulatorSamples === 0) {
           this.chunkStartSessionSamples = this.sessionElapsedSamples - frameSamples;
         }
@@ -1267,7 +1361,8 @@ export function makeRecorderHarness({
       }
       if (decision.type === 'startUtterance') {
         this.finishIdleGapRun();
-      } else if (this.endpointMachineEnabled
+      } else if (this.effectiveVADSource !== 'silero'
+        && this.endpointMachineEnabled
         && previousState === 'idle'
         && this.endpoint.state === 'idle') {
         this.trackIdleGapFrame(frameDb, frameSamples, output);
@@ -1306,7 +1401,8 @@ export function makeRecorderHarness({
                     ? 'window_evicted_evidence'
                     : slowOnsetQualifies ? 'evidence_accumulating' : 'below_threshold',
       };
-      if (typeof onSlowOnsetDiagnostic === 'function') {
+      if (this.effectiveVADSource !== 'silero'
+        && typeof onSlowOnsetDiagnostic === 'function') {
         onSlowOnsetDiagnostic({
           frame: frameRecord,
           time: this.sessionElapsedSamples / 16000,
@@ -1335,10 +1431,12 @@ export function makeRecorderHarness({
         if (!this.primingComplete && this.accumulatorSamples === 0) {
           this.emitEvent({ t: 'ev', k: 'discard', r: 'priming_window' });
           this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
-          this.gate.noteUtteranceEnded(
-            this.utteranceQuietestStrongDb,
-            this.contiguousTrailingSilenceMinimumDb,
-          );
+          if (this.effectiveVADSource !== 'silero') {
+            this.gate.noteUtteranceEnded(
+              this.utteranceQuietestStrongDb,
+              this.contiguousTrailingSilenceMinimumDb,
+            );
+          }
           this.utteranceQuietestStrongDb = null;
           this.speechSamples = 0;
           return { output, decision, frameRecord: null, discarded: true };
@@ -1377,10 +1475,12 @@ export function makeRecorderHarness({
           this.chunkCount += 1;
           this.emittedSampleCount += totalSamples;
           this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
-          this.gate.noteUtteranceEnded(
-            this.utteranceQuietestStrongDb,
-            this.contiguousTrailingSilenceMinimumDb,
-          );
+          if (this.effectiveVADSource !== 'silero') {
+            this.gate.noteUtteranceEnded(
+              this.utteranceQuietestStrongDb,
+              this.contiguousTrailingSilenceMinimumDb,
+            );
+          }
           this.emitEvent({
             t: 'ev',
             k: 'emit',
@@ -1734,10 +1834,12 @@ export function makeRecorderHarness({
       this.emittedTotalMs = sampleCount / 16;
       if (this.speechSamples > 0) {
         this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
-        this.gate.noteUtteranceEnded(
-          this.utteranceQuietestStrongDb,
-          this.contiguousTrailingSilenceMinimumDb,
-        );
+        if (this.effectiveVADSource !== 'silero') {
+          this.gate.noteUtteranceEnded(
+            this.utteranceQuietestStrongDb,
+            this.contiguousTrailingSilenceMinimumDb,
+          );
+        }
       }
       this.emitEvent({
         t: 'ev',

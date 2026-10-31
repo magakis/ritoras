@@ -1,5 +1,17 @@
 import Foundation
 
+enum VADSource: String, CaseIterable {
+    case dsp
+    case silero
+
+    var displayName: String {
+        switch self {
+        case .dsp: return "DSP"
+        case .silero: return "Silero CoreML"
+        }
+    }
+}
+
 enum VADSensitivityProfile: String, CaseIterable {
     case automatic
     case quietVoice
@@ -341,6 +353,14 @@ struct SharedConfig {
         /// RMS threshold for voice detection. Higher = less sensitive.
         static let streamVadSpeechRmsKey = "streamVadSpeechRms"
         static let streamVadSpeechRmsDefault: Float = 0.025
+        static let vadSourceKey = "vadSource"
+        static let vadSourceDefault = "dsp"
+        static let sileroStartThresholdKey = "sileroStartThreshold"
+        static let sileroStartThresholdDefault = SileroEvidenceConfiguration.defaultStartThreshold
+        static let sileroStopThresholdKey = "sileroStopThreshold"
+        static let sileroStopThresholdDefault = SileroEvidenceConfiguration.defaultStopThreshold
+        static let sileroSmoothingStepsKey = "sileroSmoothingSteps"
+        static let sileroSmoothingStepsDefault = SileroEvidenceConfiguration.defaultSmoothingSteps
         static let streamVadModeKey = "streamVadMode"
         static let streamVadModeDefault = "adaptive"
         static let streamVadAdaptiveDeltaDbKey = "streamVadAdaptiveDeltaDb"
@@ -983,6 +1003,36 @@ struct SharedConfig {
             return fallbackMode
         }
         return VADMode(rawValue: raw) ?? fallbackMode
+    }
+
+    /// Reads the streaming evidence source from the shared App Group.
+    static func vadSource() -> VADSource {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId),
+              let raw = defaults.string(forKey: Defaults.vadSourceKey) else {
+            return VADSource(rawValue: Defaults.vadSourceDefault) ?? .dsp
+        }
+        return VADSource(rawValue: raw) ?? .dsp
+    }
+
+    /// Resolves bounded Silero thresholds and smoothing steps from the App Group.
+    static func sileroEvidenceConfiguration() -> SileroEvidenceConfiguration {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return SileroEvidenceConfiguration()
+        }
+        let startThreshold = (defaults.object(
+            forKey: Defaults.sileroStartThresholdKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.sileroStartThresholdDefault
+        let stopThreshold = (defaults.object(
+            forKey: Defaults.sileroStopThresholdKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.sileroStopThresholdDefault
+        let smoothingSteps = (defaults.object(
+            forKey: Defaults.sileroSmoothingStepsKey
+        ) as? NSNumber)?.intValue ?? Defaults.sileroSmoothingStepsDefault
+        return SileroEvidenceConfiguration(
+            startThreshold: startThreshold,
+            stopThreshold: stopThreshold,
+            smoothingSteps: smoothingSteps
+        )
     }
 
     /// Reads the adaptive silence delta (dB) from the App Group.

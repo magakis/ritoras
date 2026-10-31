@@ -20,6 +20,10 @@ class AppSettings: ObservableObject {
     @Published var audioCaptureAttenuationEnabled: Bool = SharedConfig.Defaults.audioCaptureAttenuationEnabledDefault
 
     @Published var chunkSplitterMode: VADMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
+    @Published var chunkSplitterVADSource: VADSource = .dsp
+    @Published var sileroStartThreshold = SileroEvidenceConfiguration.defaultStartThreshold
+    @Published var sileroStopThreshold = SileroEvidenceConfiguration.defaultStopThreshold
+    @Published var sileroSmoothingSteps = SileroEvidenceConfiguration.defaultSmoothingSteps
     @Published var chunkSplitterPauseProfile: ChunkSplitterPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
     @Published var chunkSplitterSilenceMs: Int = SharedConfig.Defaults.streamVadSilenceMsDefault
     @Published var chunkSplitterSpeechRms: Float = SharedConfig.Defaults.streamVadSpeechRmsDefault
@@ -55,6 +59,11 @@ class AppSettings: ObservableObject {
         audioMeasurementModeEnabled = SharedConfig.audioMeasurementModeEnabled()
         audioCaptureAttenuationEnabled = SharedConfig.audioCaptureAttenuationEnabled()
         chunkSplitterMode = SharedConfig.streamVadMode()
+        chunkSplitterVADSource = SharedConfig.vadSource()
+        let sileroConfiguration = SharedConfig.sileroEvidenceConfiguration()
+        sileroStartThreshold = sileroConfiguration.startThreshold
+        sileroStopThreshold = sileroConfiguration.stopThreshold
+        sileroSmoothingSteps = sileroConfiguration.smoothingSteps
         chunkSplitterPauseProfile = SharedConfig.chunkSplitterPauseProfile()
         chunkSplitterSilenceMs = SharedConfig.chunkSplitterSilenceMs()
         chunkSplitterSilenceOverridePresent = SharedConfig.chunkSplitterSilenceMsOverridePresent()
@@ -133,6 +142,20 @@ class AppSettings: ObservableObject {
                                    payload: ["value": newValue.rawValue])
             self?.saveChunkSplitterMode(newValue)
         }.store(in: &cancellables)
+        $chunkSplitterVADSource.dropFirst().sink { [weak self] newValue in
+            FileLogger.shared.info(.settings, "saving streaming VAD source",
+                                   payload: ["value": newValue.rawValue])
+            self?.saveChunkSplitterVADSource(newValue)
+        }.store(in: &cancellables)
+        $sileroStartThreshold.dropFirst().sink { [weak self] _ in
+            self?.saveSileroEvidenceConfiguration()
+        }.store(in: &cancellables)
+        $sileroStopThreshold.dropFirst().sink { [weak self] _ in
+            self?.saveSileroEvidenceConfiguration()
+        }.store(in: &cancellables)
+        $sileroSmoothingSteps.dropFirst().sink { [weak self] _ in
+            self?.saveSileroEvidenceConfiguration()
+        }.store(in: &cancellables)
         $chunkSplitterPauseProfile.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving chunk splitter pause profile",
                                    payload: ["value": newValue.rawValue])
@@ -207,6 +230,15 @@ class AppSettings: ObservableObject {
         saveAudioMeasurementModeEnabled(audioMeasurementModeEnabled)
         saveAudioCaptureAttenuationEnabled(audioCaptureAttenuationEnabled)
         appGroupDefaults?.set(chunkSplitterMode.rawValue, forKey: SharedConfig.Defaults.streamVadModeKey)
+        appGroupDefaults?.set(chunkSplitterVADSource.rawValue, forKey: SharedConfig.Defaults.vadSourceKey)
+        let sileroConfiguration = SileroEvidenceConfiguration(
+            startThreshold: sileroStartThreshold,
+            stopThreshold: sileroStopThreshold,
+            smoothingSteps: sileroSmoothingSteps
+        )
+        appGroupDefaults?.set(sileroConfiguration.startThreshold, forKey: SharedConfig.Defaults.sileroStartThresholdKey)
+        appGroupDefaults?.set(sileroConfiguration.stopThreshold, forKey: SharedConfig.Defaults.sileroStopThresholdKey)
+        appGroupDefaults?.set(sileroConfiguration.smoothingSteps, forKey: SharedConfig.Defaults.sileroSmoothingStepsKey)
         appGroupDefaults?.set(chunkSplitterPauseProfile.rawValue, forKey: SharedConfig.Defaults.streamVadPauseProfileKey)
         if chunkSplitterSilenceOverridePresent {
             appGroupDefaults?.set(chunkSplitterSilenceMs, forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
@@ -295,6 +327,32 @@ class AppSettings: ObservableObject {
 
     private func saveChunkSplitterMode(_ mode: VADMode) {
         appGroupDefaults?.set(mode.rawValue, forKey: SharedConfig.Defaults.streamVadModeKey)
+        postSettingsChanged()
+    }
+
+    private func saveChunkSplitterVADSource(_ source: VADSource) {
+        appGroupDefaults?.set(source.rawValue, forKey: SharedConfig.Defaults.vadSourceKey)
+        postSettingsChanged()
+    }
+
+    private func saveSileroEvidenceConfiguration() {
+        let configuration = SileroEvidenceConfiguration(
+            startThreshold: sileroStartThreshold,
+            stopThreshold: sileroStopThreshold,
+            smoothingSteps: sileroSmoothingSteps
+        )
+        appGroupDefaults?.set(
+            configuration.startThreshold,
+            forKey: SharedConfig.Defaults.sileroStartThresholdKey
+        )
+        appGroupDefaults?.set(
+            configuration.stopThreshold,
+            forKey: SharedConfig.Defaults.sileroStopThresholdKey
+        )
+        appGroupDefaults?.set(
+            configuration.smoothingSteps,
+            forKey: SharedConfig.Defaults.sileroSmoothingStepsKey
+        )
         postSettingsChanged()
     }
 
@@ -389,6 +447,10 @@ class AppSettings: ObservableObject {
         audioMeasurementModeEnabled = SharedConfig.Defaults.audioMeasurementModeEnabledDefault
         audioCaptureAttenuationEnabled = SharedConfig.Defaults.audioCaptureAttenuationEnabledDefault
         chunkSplitterMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
+        chunkSplitterVADSource = VADSource(rawValue: SharedConfig.Defaults.vadSourceDefault) ?? .dsp
+        sileroStartThreshold = SharedConfig.Defaults.sileroStartThresholdDefault
+        sileroStopThreshold = SharedConfig.Defaults.sileroStopThresholdDefault
+        sileroSmoothingSteps = SharedConfig.Defaults.sileroSmoothingStepsDefault
         chunkSplitterPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
         chunkSplitterSilenceOverridePresent = false
         updatingDerivedChunkSplitterValue = true
@@ -397,6 +459,8 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsKey)
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
         chunkSplitterSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
+        saveChunkSplitterVADSource(chunkSplitterVADSource)
+        saveSileroEvidenceConfiguration()
         streamAacEnabled = SharedConfig.Defaults.streamAacEnabledDefault
         streamAacSourceSampleRate = SharedConfig.Defaults.streamAacSourceSampleRateDefault
     }
@@ -407,12 +471,18 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadSilenceMsOverrideKey)
         chunkSplitterPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
         chunkSplitterMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
+        chunkSplitterVADSource = VADSource(rawValue: SharedConfig.Defaults.vadSourceDefault) ?? .dsp
+        sileroStartThreshold = SharedConfig.Defaults.sileroStartThresholdDefault
+        sileroStopThreshold = SharedConfig.Defaults.sileroStopThresholdDefault
+        sileroSmoothingSteps = SharedConfig.Defaults.sileroSmoothingStepsDefault
         chunkSplitterSpeechRms = SharedConfig.Defaults.streamVadSpeechRmsDefault
         appGroupDefaults?.removeObject(forKey: SharedConfig.Defaults.streamVadAbsoluteSpeechFloorDbKey)
         chunkSplitterTelemetryEnabled = SharedConfig.Defaults.streamVadTelemetryEnabledDefault
         streamAacEnabled = SharedConfig.Defaults.streamAacEnabledDefault
         streamAacSourceSampleRate = SharedConfig.Defaults.streamAacSourceSampleRateDefault
         fullRecordingUploadEnabled = SharedConfig.Defaults.fullRecordingUploadEnabledDefault
+        saveChunkSplitterVADSource(chunkSplitterVADSource)
+        saveSileroEvidenceConfiguration()
         updatingDerivedChunkSplitterValue = true
         chunkSplitterSilenceMs = SharedConfig.Defaults.streamVadSilenceMsDefault
         updatingDerivedChunkSplitterValue = false
