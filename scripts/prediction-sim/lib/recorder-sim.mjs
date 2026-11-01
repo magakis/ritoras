@@ -440,6 +440,7 @@ export function makeRecorderHarness({
         energyOnsetSustainMs: this.energyEvidenceConfiguration.onsetSustainMs,
         energyContinuationElevationDb: this.energyEvidenceConfiguration.continuationElevationDb,
         energyCooldownMs: this.energyEvidenceConfiguration.cooldownMs,
+        energyMaxContinuationSec: this.energyEvidenceConfiguration.maxUncorroboratedContinuationSec,
       }, {
         requiresEndpointOnsetAcceptance: true,
       });
@@ -888,6 +889,7 @@ export function makeRecorderHarness({
       this.slowOnsetTriggerTime = null;
       const primingWasComplete = this.primingComplete;
       let energyOpinion = null;
+      let sileroCorroborated = false;
       let output;
       if (this.effectiveVADSource === 'silero') {
         const sileroEvidence = this.latestSileroDecision?.evidence ?? 'silence';
@@ -901,10 +903,13 @@ export function makeRecorderHarness({
           });
           let combinedEvidence = sileroEvidence;
           if (floorOutput.floorDb !== null && floorOutput.floorDb !== undefined) {
+            sileroCorroborated = this.latestSileroDecision !== null
+              && this.latestSileroDecision.smoothedProbability >= this.sileroConfiguration.stopThreshold;
             energyOpinion = this.energyEvidenceProcessor.process(
               frameDb,
               floorOutput.floorDb,
               frameDuration * 1000,
+              sileroCorroborated,
             );
             combinedEvidence = combineSileroAndEnergyEvidence(
               sileroEvidence,
@@ -1298,6 +1303,9 @@ export function makeRecorderHarness({
       let decisionAmbiguousCreditSamples = 0;
       if (this.endpointMachineEnabled) {
         const silenceBeforeDecision = this.endpoint.accumulatedSilenceSamples;
+        let forcedEnergyEndpointFinalize = false;
+        let forcedEnergyDecisionSilenceSamples = 0;
+        let forcedEnergyDecisionAmbiguousCreditSamples = 0;
         const energyCanOriginateOnset = this.energyRecallActive
           && energyOpinion?.suppliesStrong
           && (previousState === 'idle' || previousState === 'onsetPending')
@@ -1330,6 +1338,14 @@ export function makeRecorderHarness({
         } else {
           decision = this.endpoint.process(endpointEvidence, frameSamples);
         }
+        if (this.energyRecallActive
+          && this.energyEvidenceProcessor.takeForceFinalizeRequest()
+          && (this.endpoint.state === 'speechActive' || this.endpoint.state === 'endPending')) {
+          forcedEnergyDecisionSilenceSamples = this.endpoint.accumulatedSilenceSamples;
+          forcedEnergyDecisionAmbiguousCreditSamples = this.endpoint.accumulatedAmbiguousCreditSamples;
+          decision = this.endpoint.forceFinalize('endpoint');
+          forcedEnergyEndpointFinalize = decision.type === 'finalizeUtterance';
+        }
         if (this.energyRecallActive) {
           if (decision.type === 'startUtterance') {
             this.energyOriginatedUtteranceIsActive = this.energyOriginatedOnsetPending;
@@ -1347,9 +1363,14 @@ export function makeRecorderHarness({
           this.flatTerminatorActive = false;
         }
         if (decision.type === 'finalizeUtterance') {
-          decisionSilenceSamples = this.endpoint.lastDecisionSilenceSamples
-            ?? silenceBeforeDecision + (endpointEvidence === 'silence' ? frameSamples : 0);
-          decisionAmbiguousCreditSamples = this.endpoint.lastDecisionAmbiguousCreditSamples ?? 0;
+          if (forcedEnergyEndpointFinalize) {
+            decisionSilenceSamples = forcedEnergyDecisionSilenceSamples;
+            decisionAmbiguousCreditSamples = forcedEnergyDecisionAmbiguousCreditSamples;
+          } else {
+            decisionSilenceSamples = this.endpoint.lastDecisionSilenceSamples
+              ?? silenceBeforeDecision + (endpointEvidence === 'silence' ? frameSamples : 0);
+            decisionAmbiguousCreditSamples = this.endpoint.lastDecisionAmbiguousCreditSamples ?? 0;
+          }
         } else {
           decisionSilenceSamples = this.endpoint.accumulatedSilenceSamples;
         }

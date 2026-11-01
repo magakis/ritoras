@@ -65,15 +65,28 @@ function makeSileroRecorder({
   harness.gate.coldStartConverged = true;
   harness.gate.adaptivePrimed = true;
   harness.primingComplete = true;
-  return { harness, events, frames };
+  const forceFinalizeRequests = [];
+  const processor = harness.energyEvidenceProcessor;
+  const takeForceFinalizeRequest = processor.takeForceFinalizeRequest.bind(processor);
+  processor.takeForceFinalizeRequest = () => {
+    const requested = takeForceFinalizeRequest();
+    if (requested) forceFinalizeRequests.push(harness.sessionElapsedSamples);
+    return requested;
+  };
+  return { harness, events, frames, forceFinalizeRequests };
 }
 
 function driveTrace(harness, trace) {
-  return expandTrace(trace).map(frame => harness.drive(
-    frame.frameDb,
-    frame.frameDurationMs / 1_000,
-    { sileroProbability: frame.sileroProbability },
-  ));
+  return expandTrace(trace).map(frame => {
+    if (Number.isFinite(trace.pinnedFloorDb)) {
+      harness.gate.floorDb = trace.pinnedFloorDb;
+    }
+    return harness.drive(
+      frame.frameDb,
+      frame.frameDurationMs / 1_000,
+      { sileroProbability: frame.sileroProbability },
+    );
+  });
 }
 
 function emissionSignature(events) {
@@ -290,6 +303,90 @@ describe('Silero energy recall recorder integration', () => {
     assert.ok(emissionsCoverRange(events, 0, 40_000));
   });
 
+  it('force-splits noise-held energy at 12 seconds and flushes the complete remaining span', () => {
+    const { harness, events, forceFinalizeRequests } = makeSileroRecorder();
+    driveTrace(harness, fixture.traces.energyOnlyNoiseContinuationCap);
+
+    const capEmission = events.find(event => event.k === 'emit' && event.r === 'endpoint');
+    assert.ok(capEmission);
+    assert.deepEqual(forceFinalizeRequests, [13 * 16_000]);
+    assert.equal(capEmission.sourceEndSample, 13 * 16_000);
+    assert.ok(capEmission.sourceEndSample < harness.sessionElapsedSamples);
+    assert.equal(events.filter(event => event.k === 'start_utterance').length, 1);
+    assert.equal(events.some(event => event.r === 'noise_guard'), false);
+
+    const sessionEndSample = harness.sessionElapsedSamples;
+    harness.flush();
+
+    assert.ok(events.some(event => event.k === 'emit' && event.r === 'flush'));
+    assert.ok(emissionsCoverRange(events, 0, sessionEndSample));
+    assert.equal(harness.emittedSampleCount, sessionEndSample);
+  });
+
+  it('does not force-split a long energy-originated utterance with recurring Silero corroboration', () => {
+    const { harness, events } = makeSileroRecorder({ endpointSilenceMs: 2_500 });
+    driveTrace(harness, fixture.traces.sileroCorroboratedLongEnergySpeech);
+
+    const endpointEmissions = events.filter(event => event.k === 'emit' && event.r === 'endpoint');
+    assert.equal(events.filter(event => event.k === 'start_utterance').length, 1);
+    assert.equal(endpointEmissions.length, 1);
+    assert.ok(endpointEmissions[0].sourceEndSample > 30 * 16_000);
+  });
+
+  it('does not re-open on post-split ambient noise but accepts a later real onset after cooldown', () => {
+    const { harness, events } = makeSileroRecorder();
+    const trace = fixture.traces.energyCapAmbientThenRealOnset;
+
+    driveTrace(harness, { frames: trace.frames.slice(0, 2) });
+    assert.equal(events.filter(event => event.k === 'start_utterance').length, 1);
+    assert.equal(events.filter(event => event.k === 'emit' && event.r === 'endpoint').length, 1);
+
+    const realOnsetResults = driveTrace(harness, { frames: [trace.frames[2]] });
+    assert.ok(realOnsetResults.some(result => result.energyOpinion?.suppliesStrong));
+    assert.equal(events.filter(event => event.k === 'start_utterance').length, 2);
+
+    driveTrace(harness, { frames: [trace.frames[3]] });
+    assert.equal(events.filter(event => event.k === 'emit' && event.r === 'endpoint').length, 2);
+    const sessionEndSample = harness.sessionElapsedSamples;
+    harness.flush();
+    assert.ok(emissionsCoverRange(events, 0, sessionEndSample));
+  });
+
+  it('resets the continuation cap at 11.9 seconds when Silero reaches the stop threshold', () => {
+    const { harness, events, frames, forceFinalizeRequests } = makeSileroRecorder();
+    const trace = fixture.traces.energyCapSileroCorroborationReset;
+
+    driveTrace(harness, { ...trace, frames: trace.frames.slice(0, 2) });
+    driveTrace(harness, {
+      ...trace,
+      frames: [{ ...trace.frames[2], repeat: 4 }],
+    });
+    assert.ok(frames.at(-1).pm < 0.30);
+    assert.equal(harness.sessionElapsedSamples, 206_400);
+    assert.equal(
+      harness.energyEvidenceProcessor.uncorroboratedContinuationMilliseconds,
+      11_900,
+    );
+    assert.deepEqual(forceFinalizeRequests, []);
+
+    driveTrace(harness, {
+      ...trace,
+      frames: [{ ...trace.frames[2], repeat: 1 }],
+    });
+    assert.equal(frames.at(-1).pm, 0.30);
+    assert.equal(harness.sessionElapsedSamples, 208_000);
+    assert.equal(harness.energyEvidenceProcessor.uncorroboratedContinuationMilliseconds, 0);
+    assert.deepEqual(forceFinalizeRequests, []);
+    assert.equal(events.some(event => event.k === 'emit'), false);
+
+    driveTrace(harness, { ...trace, frames: [trace.frames[3]] });
+    assert.deepEqual(forceFinalizeRequests, [25 * 16_000]);
+    const endpointEmission = events.find(event => event.k === 'emit' && event.r === 'endpoint');
+    assert.ok(endpointEmission);
+    assert.equal(endpointEmission.sourceEndSample, 25 * 16_000);
+    assert.equal(events.filter(event => event.k === 'emit' && event.r === 'endpoint').length, 1);
+  });
+
   it('keeps all vad-cases fixture frames and DSP-fallback events byte-identical to DSP', {
     skip: loadVadFixtures().length === 0 ? 'vad-cases fixtures are absent in this checkout' : false,
   }, () => {
@@ -401,5 +498,15 @@ describe('Silero energy recall recorder integration', () => {
     }]);
     assert.equal(harness.accumulatorSamples, 0);
     assert.equal(harness.retainedGapSamples, 16_000);
+  });
+
+  it('does not apply the energy continuation cap when the kill switch is off', () => {
+    const { harness, events } = makeSileroRecorder({ energyRecallEnabled: false });
+    const results = driveTrace(harness, fixture.traces.energyOnlyNoiseContinuationCap);
+
+    assert.equal(results.some(result => result.energyOpinion !== null), false);
+    assert.equal(results.some(result => result.decision.type === 'startUtterance'), false);
+    assert.equal(events.some(event => event.k === 'emit'), false);
+    assert.equal(harness.endpoint.state, 'idle');
   });
 });

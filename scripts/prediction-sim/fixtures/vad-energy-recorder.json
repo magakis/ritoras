@@ -23,6 +23,42 @@
         { "frameDb": -60, "sileroProbability": 0, "frameDurationMs": 100, "repeat": 20 }
       ]
     },
+    "energyOnlyNoiseContinuationCap": {
+      "description": "A +35 dB energy onset followed by 15 seconds of uncorroborated +15 dB ambient energy and quiet.",
+      "pinnedFloorDb": -70,
+      "frames": [
+        { "frameDb": -35, "sileroProbability": 0, "frameDurationMs": 100, "repeat": 12 },
+        { "frameDb": -55, "sileroProbability": 0, "frameDurationMs": 100, "repeat": 150 },
+        { "frameDb": -70, "sileroProbability": 0, "frameDurationMs": 100, "repeat": 15 }
+      ]
+    },
+    "energyCapAmbientThenRealOnset": {
+      "description": "An energy-only onset, 15 seconds of +15 dB ambient noise, then a sustained event clearing +30 dB over the tracked floor and quiet.",
+      "frames": [
+        { "frameDb": -35, "sileroProbability": 0, "frameDurationMs": 100, "repeat": 12 },
+        { "frameDb": -55, "sileroProbability": 0, "frameDurationMs": 100, "repeat": 150 },
+        { "frameDb": -10, "sileroProbability": 0, "frameDurationMs": 100, "repeat": 12 },
+        { "frameDb": -70, "sileroProbability": 0, "frameDurationMs": 100, "repeat": 15 }
+      ]
+    },
+    "energyCapSileroCorroborationReset": {
+      "description": "Silero pm reaches the 0.30 stop threshold at 11.9 seconds, then disappears for a fresh 12-second energy-only run.",
+      "pinnedFloorDb": -70,
+      "frames": [
+        { "frameDb": -35, "sileroProbability": 0, "frameDurationMs": 100, "repeat": 12 },
+        { "frameDb": -55, "sileroProbability": 0, "frameDurationMs": 100, "repeat": 113 },
+        { "frameDb": -55, "sileroProbability": 0.3, "frameDurationMs": 100, "repeat": 5 },
+        { "frameDb": -55, "sileroProbability": 0, "frameDurationMs": 100, "repeat": 120 }
+      ]
+    },
+    "sileroCorroboratedLongEnergySpeech": {
+      "description": "A 1.2 second energy onset followed by 28.8 seconds of Silero-corroborated speech, then four seconds of quiet.",
+      "frames": [
+        { "frameDb": -35, "sileroProbability": 0, "frameDurationMs": 100, "repeat": 12 },
+        { "frameDb": -45, "sileroProbability": 0.5, "frameDurationMs": 100, "repeat": 288 },
+        { "frameDb": -70, "sileroProbability": 0, "frameDurationMs": 100, "repeat": 40 }
+      ]
+    },
     "shortBreathsAndJunk": {
       "description": "Four separated 200 ms breaths at +25 dB over a -70 dB floor, each followed by 300 ms below the onset margin.",
       "frames": [

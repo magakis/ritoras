@@ -1016,10 +1016,14 @@ private final class VADContext: @unchecked Sendable {
                     )
                     var combinedEvidence = sileroEvidence
                     if let floorDb = floorOutput.floorDb {
+                        let sileroCorroborated = sileroDecision.map {
+                            $0.smoothedProbability >= sileroConfiguration.stopThreshold
+                        } ?? false
                         let opinion = energyEvidenceProcessor.process(
                             frameDb: frameDb,
                             floorDb: floorDb,
-                            frameDurationMs: frameDuration * 1_000.0
+                            frameDurationMs: frameDuration * 1_000.0,
+                            sileroCorroborated: sileroCorroborated
                         )
                         energyOpinion = opinion
                         combinedEvidence = combinedSileroAndEnergyEvidence(
@@ -1112,6 +1116,9 @@ private final class VADContext: @unchecked Sendable {
         var decisionAmbiguousCreditSamples = 0.0
         if endpointMachineEnabled {
             let previousState = previousEndpointState
+            var forcedEnergyEndpointFinalize = false
+            var forcedEnergyDecisionSilenceSamples = 0.0
+            var forcedEnergyDecisionAmbiguousCreditSamples = 0.0
             if !usesSileroEvidence {
                 let flatTerminatorStateEligible = previousState == .speechActive
                     || (loudFlatTerminatorActive && previousState == .endPending)
@@ -1227,6 +1234,17 @@ private final class VADContext: @unchecked Sendable {
             }
             let silenceBeforeDecision = endpoint.accumulatedSilenceSamples
             decision = endpoint.process(evidence: endpointEvidence, durationSamples: frameLength)
+            if energyRecallActive,
+               energyEvidenceProcessor.takeForceFinalizeRequest(),
+               (endpoint.state == .speechActive || endpoint.state == .endPending) {
+                forcedEnergyDecisionSilenceSamples = endpoint.accumulatedSilenceSamples
+                forcedEnergyDecisionAmbiguousCreditSamples = endpoint.accumulatedAmbiguousCreditSamples
+                decision = endpoint.forceFinalize(kind: .endpoint)
+                if case .finalizeUtterance = decision {
+                    forcedEnergyEndpointFinalize = true
+                    FileLogger.shared.debug(.audio, "Chunk splitter: energy-only continuation cap forced endpoint")
+                }
+            }
             if energyRecallActive {
                 if case .startUtterance = decision {
                     energyOriginatedUtteranceIsActive = energyOriginatedOnsetPending
@@ -1244,9 +1262,14 @@ private final class VADContext: @unchecked Sendable {
                 loudFlatTerminatorActive = false
             }
             if case .finalizeUtterance = decision {
-                decisionSilenceSamples = endpoint.lastDecisionSilenceSamples
-                    ?? (silenceBeforeDecision + Double(frameLength))
-                decisionAmbiguousCreditSamples = endpoint.lastDecisionAmbiguousCreditSamples ?? 0
+                if forcedEnergyEndpointFinalize {
+                    decisionSilenceSamples = forcedEnergyDecisionSilenceSamples
+                    decisionAmbiguousCreditSamples = forcedEnergyDecisionAmbiguousCreditSamples
+                } else {
+                    decisionSilenceSamples = endpoint.lastDecisionSilenceSamples
+                        ?? (silenceBeforeDecision + Double(frameLength))
+                    decisionAmbiguousCreditSamples = endpoint.lastDecisionAmbiguousCreditSamples ?? 0
+                }
             } else {
                 decisionSilenceSamples = endpoint.accumulatedSilenceSamples
             }

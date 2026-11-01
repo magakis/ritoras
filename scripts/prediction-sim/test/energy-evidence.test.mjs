@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import {
   DEFAULT_ENERGY_CONTINUATION_ELEVATION_DB,
   DEFAULT_ENERGY_COOLDOWN_MS,
+  DEFAULT_ENERGY_MAX_CONTINUATION_SEC,
   DEFAULT_ENERGY_ONSET_ELEVATION_DB,
   DEFAULT_ENERGY_ONSET_SUSTAIN_MS,
   DEFAULT_ENERGY_RECALL_ENABLED,
@@ -45,12 +46,14 @@ describe('energy evidence second opinion', () => {
     assert.equal(DEFAULT_ENERGY_ONSET_SUSTAIN_MS, 1_000);
     assert.equal(DEFAULT_ENERGY_CONTINUATION_ELEVATION_DB, 10);
     assert.equal(DEFAULT_ENERGY_COOLDOWN_MS, 2_000);
+    assert.equal(DEFAULT_ENERGY_MAX_CONTINUATION_SEC, 12);
     assert.deepEqual(normalizeEnergyEvidenceConfig(), {
       enabled: true,
       onsetElevationDb: 30,
       onsetSustainMs: 1_000,
       continuationElevationDb: 10,
       cooldownMs: 2_000,
+      maxUncorroboratedContinuationSec: 12,
     });
     assert.deepEqual(normalizeEnergyEvidenceConfig({
       energyRecallEnabled: false,
@@ -58,13 +61,17 @@ describe('energy evidence second opinion', () => {
       energyOnsetSustainMs: 1,
       energyContinuationElevationDb: -1,
       energyCooldownMs: 20_000,
+      energyMaxContinuationSec: 100,
     }), {
       enabled: false,
       onsetElevationDb: 60,
       onsetSustainMs: 100,
       continuationElevationDb: 0,
       cooldownMs: 10_000,
+      maxUncorroboratedContinuationSec: 60,
     });
+    assert.equal(normalizeEnergyEvidenceConfig({ energyMaxContinuationSec: 0 })
+      .maxUncorroboratedContinuationSec, 5);
   });
 
   it('loads synthetic-only traces with no recorded telemetry or audio', () => {

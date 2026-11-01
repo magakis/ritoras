@@ -371,6 +371,8 @@ struct SharedConfig {
         static let energyContinuationElevationDbDefault: Double = 10.0
         static let energyCooldownMsKey = "energyCooldownMs"
         static let energyCooldownMsDefault: Int = 2_000
+        static let energyMaxContinuationSecKey = "energyMaxContinuationSec"
+        static let energyMaxContinuationSecDefault: Double = 12.0
         static let streamVadModeKey = "streamVadMode"
         static let streamVadModeDefault = "adaptive"
         static let streamVadAdaptiveDeltaDbKey = "streamVadAdaptiveDeltaDb"
@@ -1067,12 +1069,16 @@ struct SharedConfig {
         let cooldownMs = (defaults.object(
             forKey: Defaults.energyCooldownMsKey
         ) as? NSNumber)?.intValue ?? Defaults.energyCooldownMsDefault
+        let maxContinuationSec = (defaults.object(
+            forKey: Defaults.energyMaxContinuationSecKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.energyMaxContinuationSecDefault
         return EnergyEvidenceConfiguration(
             enabled: enabled,
             onsetElevationDb: onsetElevationDb,
             onsetSustainMs: onsetSustainMs,
             continuationElevationDb: continuationElevationDb,
-            cooldownMs: cooldownMs
+            cooldownMs: cooldownMs,
+            maxUncorroboratedContinuationSec: maxContinuationSec
         )
     }
 
