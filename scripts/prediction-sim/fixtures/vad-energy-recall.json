@@ -1,0 +1,76 @@
+{
+  "syntheticOnly": true,
+  "description": "Synthetic dB/floor runs use aggregate level ranges only; no recorded audio or telemetry is included.",
+  "traces": {
+    "whisperClass": {
+      "description": "Three seconds of sustained speech energy 35 dB above a -60 dB floor.",
+      "frames": [
+        { "frameDb": -25, "floorDb": -60, "frameDurationMs": 100, "repeat": 30 }
+      ]
+    },
+    "softWhisperFluctuating": {
+      "description": "Whisper elevations +20 to +35 dB, including one consecutive second at or above +30 dB.",
+      "frames": [
+        { "frameDb": -40, "floorDb": -60, "frameDurationMs": 100, "repeat": 2 },
+        { "frameDb": -33, "floorDb": -60, "frameDurationMs": 100, "repeat": 2 },
+        { "frameDb": -29, "floorDb": -60, "frameDurationMs": 100, "repeat": 2 },
+        { "frameDb": -26, "floorDb": -60, "frameDurationMs": 100, "repeat": 2 },
+        { "frameDb": -31, "floorDb": -60, "frameDurationMs": 100, "repeat": 1 },
+        { "frameDb": -29, "floorDb": -60, "frameDurationMs": 100, "repeat": 10 },
+        { "frameDb": -25, "floorDb": -60, "frameDurationMs": 100, "repeat": 5 }
+      ]
+    },
+    "breathAndJunkTransients": {
+      "description": "Separated 100-500 ms bursts from +25 to +50 dB with below-onset gaps.",
+      "frames": [
+        { "frameDb": -35, "floorDb": -60, "frameDurationMs": 100, "repeat": 1 },
+        { "frameDb": -54, "floorDb": -60, "frameDurationMs": 100, "repeat": 6 },
+        { "frameDb": -10, "floorDb": -60, "frameDurationMs": 100, "repeat": 5 },
+        { "frameDb": -54, "floorDb": -60, "frameDurationMs": 100, "repeat": 5 },
+        { "frameDb": -20, "floorDb": -60, "frameDurationMs": 100, "repeat": 3 },
+        { "frameDb": -53, "floorDb": -60, "frameDurationMs": 100, "repeat": 30 }
+      ]
+    },
+    "pauseAndSilence": {
+      "description": "Two seconds near floor+5 dB followed by two seconds near floor+10 dB.",
+      "frames": [
+        { "frameDb": -55, "floorDb": -60, "frameDurationMs": 100, "repeat": 20 },
+        { "frameDb": -50, "floorDb": -60, "frameDurationMs": 100, "repeat": 20 }
+      ]
+    },
+    "cooldownBoundary1999And2001": {
+      "description": "Consecutive high frames reach 1999 ms, then cross the emission cooldown at 2001 ms.",
+      "frames": [
+        { "frameDb": -25, "floorDb": -60, "frameDurationMs": 100, "repeat": 19 },
+        { "frameDb": -25, "floorDb": -60, "frameDurationMs": 99, "repeat": 1 },
+        { "frameDb": -25, "floorDb": -60, "frameDurationMs": 2, "repeat": 1 }
+      ]
+    },
+    "onsetSustainBoundary999And1001": {
+      "description": "The consecutive onset run reaches 999 ms, then 1001 ms.",
+      "frames": [
+        { "frameDb": -29, "floorDb": -60, "frameDurationMs": 100, "repeat": 9 },
+        { "frameDb": -29, "floorDb": -60, "frameDurationMs": 99, "repeat": 1 },
+        { "frameDb": -29, "floorDb": -60, "frameDurationMs": 2, "repeat": 1 }
+      ]
+    },
+    "onsetElevationBoundary29And31": {
+      "description": "Twelve frames at +29 dB never onset; ten following frames at +31 dB do.",
+      "frames": [
+        { "frameDb": -31, "floorDb": -60, "frameDurationMs": 100, "repeat": 12 },
+        { "frameDb": -29, "floorDb": -60, "frameDurationMs": 100, "repeat": 10 }
+      ]
+    },
+    "risingAndFallingFloor": {
+      "description": "A rising floor crosses a fixed frame level, then a falling floor restores the margins.",
+      "frames": [
+        { "frameDb": -39, "floorDb": -70, "frameDurationMs": 100, "repeat": 4 },
+        { "frameDb": -39, "floorDb": -35, "frameDurationMs": 100, "repeat": 1 },
+        { "frameDb": -39, "floorDb": -70, "frameDurationMs": 100, "repeat": 10 },
+        { "frameDb": -60, "floorDb": -70, "frameDurationMs": 100, "repeat": 1 },
+        { "frameDb": -60, "floorDb": -59, "frameDurationMs": 100, "repeat": 1 },
+        { "frameDb": -60, "floorDb": -70, "frameDurationMs": 100, "repeat": 1 }
+      ]
+    }
+  }
+}

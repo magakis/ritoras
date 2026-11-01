@@ -361,6 +361,16 @@ struct SharedConfig {
         static let sileroStopThresholdDefault = SileroEvidenceConfiguration.defaultStopThreshold
         static let sileroSmoothingStepsKey = "sileroSmoothingSteps"
         static let sileroSmoothingStepsDefault = SileroEvidenceConfiguration.defaultSmoothingSteps
+        static let energyRecallEnabledKey = "energyRecallEnabled"
+        static let energyRecallEnabledDefault = true
+        static let energyOnsetElevationDbKey = "energyOnsetElevationDb"
+        static let energyOnsetElevationDbDefault: Double = 30.0
+        static let energyOnsetSustainMsKey = "energyOnsetSustainMs"
+        static let energyOnsetSustainMsDefault: Int = 1_000
+        static let energyContinuationElevationDbKey = "energyContinuationElevationDb"
+        static let energyContinuationElevationDbDefault: Double = 10.0
+        static let energyCooldownMsKey = "energyCooldownMs"
+        static let energyCooldownMsDefault: Int = 2_000
         static let streamVadModeKey = "streamVadMode"
         static let streamVadModeDefault = "adaptive"
         static let streamVadAdaptiveDeltaDbKey = "streamVadAdaptiveDeltaDb"
@@ -460,6 +470,8 @@ struct SharedConfig {
         static let streamVadWhisperContextMsDefault: Double = 150.0
         /// A retained gap above floor-level noise is carried, even without 100 ms of evidence.
         static let streamVadGapSpeechPeakAboveFloorDbDefault: Double = 6.0
+        /// Maximum idle energy-bearing audio held before promotion to the spill-capable accumulator.
+        static let energyRetentionCapSecDefault: Double = 60.0
         /// Legacy silence duration key, retained for stored user preferences.
         static let streamVadSilenceMsKey = "streamVadSilenceMs"
         static let streamVadSilenceMsOverrideKey = "streamVadSilenceMsOverride"
@@ -1032,6 +1044,35 @@ struct SharedConfig {
             startThreshold: startThreshold,
             stopThreshold: stopThreshold,
             smoothingSteps: smoothingSteps
+        )
+    }
+
+    /// Resolves the bounded energy-recall switch and thresholds from the App Group.
+    static func energyRecallConfiguration() -> EnergyEvidenceConfiguration {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return EnergyEvidenceConfiguration()
+        }
+        let enabled = (defaults.object(
+            forKey: Defaults.energyRecallEnabledKey
+        ) as? Bool) ?? Defaults.energyRecallEnabledDefault
+        let onsetElevationDb = (defaults.object(
+            forKey: Defaults.energyOnsetElevationDbKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.energyOnsetElevationDbDefault
+        let onsetSustainMs = (defaults.object(
+            forKey: Defaults.energyOnsetSustainMsKey
+        ) as? NSNumber)?.intValue ?? Defaults.energyOnsetSustainMsDefault
+        let continuationElevationDb = (defaults.object(
+            forKey: Defaults.energyContinuationElevationDbKey
+        ) as? NSNumber)?.doubleValue ?? Defaults.energyContinuationElevationDbDefault
+        let cooldownMs = (defaults.object(
+            forKey: Defaults.energyCooldownMsKey
+        ) as? NSNumber)?.intValue ?? Defaults.energyCooldownMsDefault
+        return EnergyEvidenceConfiguration(
+            enabled: enabled,
+            onsetElevationDb: onsetElevationDb,
+            onsetSustainMs: onsetSustainMs,
+            continuationElevationDb: continuationElevationDb,
+            cooldownMs: cooldownMs
         )
     }
 
