@@ -146,7 +146,7 @@ final class EnergyEvidenceProcessor {
     }
 
     private var maxUncorroboratedContinuationMilliseconds: Double {
-        maxUncorroboratedContinuationSec * 1_000.0
+        configuration.maxUncorroboratedContinuationSec * 1_000.0
     }
 
     /// Transitions held strong evidence to continuation and starts the cap timer.
