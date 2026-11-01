@@ -1999,6 +1999,18 @@ private final class ConverterAccounting: @unchecked Sendable {
     var debugLoggedBuffers = 0
 }
 
+// MARK: - Continuous Buffer IDs (access via vadQueue serialization)
+
+/// Per-session IDs for converted buffers. Access is vadQueue-only, so no lock is needed.
+private final class ContinuousBufferIDCounter: @unchecked Sendable {
+    private var nextValue: UInt32 = 0
+
+    func takeNext() -> UInt32 {
+        defer { nextValue += 1 }
+        return nextValue
+    }
+}
+
 // MARK: - Streaming Audio Recorder
 
 /// Captures microphone audio via `AVAudioEngine`, runs a level- and shape-based voice detector
@@ -2015,6 +2027,7 @@ private final class ConverterAccounting: @unchecked Sendable {
 /// state is protected internally by `os_unfair_lock`.
 actor StreamingAudioRecorder {
     typealias ChunkHandler = @Sendable (UInt32, [Float]) -> Void
+    typealias ContinuousBufferHandler = @Sendable (UInt32, [Float]) -> Void
 
     // MARK: - Private Properties
 
@@ -2116,6 +2129,9 @@ actor StreamingAudioRecorder {
     /// - Parameter onChunk: Called on vadQueue for each detected speech
     ///   segment. The first argument is a monotonically increasing chunk ID
     ///   (starting at 0); the second is float32 PCM samples at 16 kHz mono.
+    /// - Parameter onContinuousBuffer: Optional callback called on vadQueue
+    ///   for every converted 16 kHz mono buffer, including silence. Its IDs
+    ///   increase from 0 for each recording session.
     /// - Parameter onChunkSplitterState: Called on vadQueue after each processed audio
     ///   frame with the current detector and endpoint state.
     /// - Parameter telemetry: Optional per-frame chunk splitter telemetry sink. Telemetry
@@ -2124,7 +2140,13 @@ actor StreamingAudioRecorder {
     ///   if mic access is unavailable; `AudioRecorder.AudioRecorderError.invalidSessionConfiguration`
     ///   if session setup fails; `StreamingRecorderError.engineStartFailed` if
     ///   the audio engine cannot start.
-    func start(fileURL: URL? = nil, onChunk: @escaping ChunkHandler, onChunkSplitterState: ((ChunkSplitterFrameState) -> Void)? = nil, telemetry: VADTelemetrySink? = nil) async throws {
+    func start(
+        fileURL: URL? = nil,
+        onChunk: @escaping ChunkHandler,
+        onContinuousBuffer: ContinuousBufferHandler? = nil,
+        onChunkSplitterState: ((ChunkSplitterFrameState) -> Void)? = nil,
+        telemetry: VADTelemetrySink? = nil
+    ) async throws {
         guard !isRecording else {
             throw StreamingRecorderError.alreadyStreaming
         }
@@ -2210,6 +2232,8 @@ actor StreamingAudioRecorder {
 
         // Capture references for the closure (no actor self capture).
         let handler = onChunk
+        let continuousBufferHandler = onContinuousBuffer
+        let continuousBufferIDCounter = onContinuousBuffer.map { _ in ContinuousBufferIDCounter() }
         let stateHandler = onChunkSplitterState
         let telemetryFlushable = self.telemetryFlushable
         let converterHolder = self.converterHolder
@@ -2258,6 +2282,8 @@ actor StreamingAudioRecorder {
                     targetFormat: targetFormat,
                     vad: vad,
                     handler: handler,
+                    continuousBufferHandler: continuousBufferHandler,
+                    continuousBufferIDCounter: continuousBufferIDCounter,
                     stateHandler: stateHandler,
                     telemetryFlushable: telemetryFlushable,
                     diskWriter: diskWriter,
@@ -2332,6 +2358,8 @@ actor StreamingAudioRecorder {
         targetFormat: AVAudioFormat,
         vad: VADContext,
         handler: ChunkHandler,
+        continuousBufferHandler: ContinuousBufferHandler?,
+        continuousBufferIDCounter: ContinuousBufferIDCounter?,
         stateHandler: ((ChunkSplitterFrameState) -> Void)?,
         telemetryFlushable: VADTelemetryFlushable?,
         diskWriter: DiskWriterHolder,
@@ -2462,6 +2490,12 @@ actor StreamingAudioRecorder {
         }
 
         guard !drained.isEmpty else { return }
+
+        // This path deliberately precedes and does not consult VAD state: every
+        // converted buffer, including silence, reaches the continuous consumer.
+        if let continuousBufferHandler, let continuousBufferIDCounter {
+            continuousBufferHandler(continuousBufferIDCounter.takeNext(), drained)
+        }
 
         let expectedOutput = Double(frameLength) * 16000.0 / deliveredSampleRate
         accounting.inputFramesTotal += frameLength

@@ -320,6 +320,8 @@ struct SharedConfig {
 
         static let dictationModeKey = "dictationMode"
         static let dictationModeDefault: DictationMode = .batch
+        static let unifiedStreamServerBaseURLKey = "unifiedStreamServerBaseURL"
+        static let unifiedStreamServerBaseURLDefault = ""
 
         // MARK: - LLM Cleanup
 
@@ -803,6 +805,7 @@ struct SharedConfig {
     enum DictationMode: String, CaseIterable {
         case batch
         case stream
+        case unifiedStream
     }
 
     let servers: [String]
@@ -852,6 +855,15 @@ struct SharedConfig {
             return Defaults.dictationModeDefault
         }
         return DictationMode(rawValue: raw) ?? Defaults.dictationModeDefault
+    }
+
+    /// Reads the optional base URL for the experimental unified stream server.
+    static func unifiedStreamServerBaseURL() -> String {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.unifiedStreamServerBaseURLDefault
+        }
+        return defaults.string(forKey: Defaults.unifiedStreamServerBaseURLKey)
+            ?? Defaults.unifiedStreamServerBaseURLDefault
     }
 
     /// Reads all LLM cleanup preferences from the App Group, falling back to

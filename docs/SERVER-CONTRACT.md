@@ -476,6 +476,99 @@ the prefix. Do not send ADTS, add another length prefix, or split one container
 across messages. The declared source rate may be 16 kHz or 48 kHz; server
 decoding normalizes either to 16 kHz mono Float32.
 
+### Experimental unified streaming protocol (`/stream-unified`)
+
+`/stream-unified` is an experimental WebSocket endpoint for continuous raw
+Float32 PCM streaming. It is a separate protocol from `/stream` and is not a
+drop-in format option for the existing stream client. The Ritoras experimental
+mode derives `ws://` or `wss://` from its configured HTTP(S) base URL and appends
+`/stream-unified`. The upgrade request uses
+`Authorization: Bearer <key>`; an authentication failure closes with code
+`1008` and does not send an error frame.
+
+There is no ready/handshake frame and no format negotiation. The client sends
+only 16 kHz mono Float32 little-endian PCM: it never sends `CONFIG`, never
+negotiates a format, and never sends AAC, regardless of the existing `/stream`
+AAC setting.
+
+#### Client → server
+
+Each binary audio frame has this layout:
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 0 | 4 bytes | `chunk_id`, unsigned 32-bit integer, big-endian |
+| 4 | N × 4 bytes | Float32 PCM samples, little-endian, 16 kHz mono |
+
+Frames must contain at least one sample (8 bytes total), and the payload length
+must satisfy `(frame_length - 4) % 4 == 0`. Chunk IDs must be unique within a
+connection; duplicate IDs are silently dropped. Audio is processed in receive
+order, so clients send frames chronologically with monotonically increasing
+IDs. Audio frames have no per-frame acknowledgement.
+
+The only supported client text controls are JSON objects:
+
+| Frame | Shape | Purpose |
+|-------|-------|---------|
+| Text JSON | `{"type":"PING"}` | Connection probe; an optional `ping_seq` value is echoed verbatim in PONG. |
+| Text JSON | `{"type":"CANCEL"}` | Cancels the session; the server replies `cancelled` and closes normally. |
+| Text JSON | `{"type":"END"}` | Ends audio input and requests the aggregate final result. |
+
+Malformed JSON, a non-object JSON value, or any unsupported text control
+(including `CONFIG`) produces
+`{"type":"error","message":"unsupported control type: ..."}` or the
+corresponding malformed-message error, then closes with code `1003`.
+
+#### Server → client
+
+The server sends JSON text frames with these schemas:
+
+```json
+{"type":"interim","segment_index":1,"transcription":"...","start_s":0.0,"audio_end_s":0.56}
+```
+
+`interim` is the current open segment and is not emitted when its transcript is
+empty.
+
+```json
+{"type":"final_segment","segment_index":0,"transcription":"...","start_s":0.0,"end_s":0.56,"emitted_at_s":1.12,"reason":"endpoint"}
+```
+
+Standalone `final_segment` frames are emitted only when an endpoint finalizes a
+segment; their `reason` is `endpoint`.
+
+```json
+{"type":"final","transcription":"...","segments":[{"segment_index":0,"transcription":"...","start_s":0.0,"end_s":0.56,"emitted_at_s":1.12,"reason":"endpoint"}],"reason":"END"}
+```
+
+`final` is the aggregate result. `transcription` is the space-joined segment
+text. If END finalizes an open segment, that segment is included in `segments`
+with `reason` set to `end`.
+
+```json
+{"type":"PONG"}
+{"type":"PONG","ping_seq":123}
+{"type":"error","message":"..."}
+{"type":"cancelled"}
+```
+
+`PONG` echoes the optional `ping_seq` value without changing its JSON type.
+`error` reports a server exception and closes with code `1011`; `cancelled` is
+the response to CANCEL.
+
+#### Finalization and close behavior
+
+Only `{"type":"END"}` requests the aggregate `final`. A bare WebSocket
+disconnect never produces a final response. CANCEL returns `cancelled`; END and
+CANCEL close normally with code `1000`. Invalid or unsupported client controls
+close with `1003`, authentication failures close with `1008`, and server
+exceptions close with `1011` after an error frame where the connection permits
+it.
+
+The recommended client send cadence is approximately **0.56 seconds**. The
+server endpoint silence threshold is **1.7 seconds**, with approximately
+**1.12 seconds** of algorithmic latency.
+
 ---
 
 ## 6. Result semantics and stop behavior

@@ -51,6 +51,97 @@ final class ChunkSendQueue: @unchecked Sendable {
     }
 }
 
+/// Coalesces continuous PCM buffers on a serial queue and sends completed
+/// frames in order through one bounded async consumer.
+private final class UnifiedStreamAudioPipeline: @unchecked Sendable {
+    private enum PipelineError: LocalizedError {
+        case sendBufferOverflow
+
+        var errorDescription: String? {
+            "Unified streaming audio send buffer filled before it could drain."
+        }
+    }
+
+    private static let maximumBufferedFrames = 8
+
+    private let queue = DispatchQueue(label: "com.ritoras.unified-stream-audio")
+    private let continuation: AsyncStream<[Float]>.Continuation
+    private let senderTask: Task<Void, Error>
+    private var coalescer = UnifiedFrameCoalescer()
+    private var isAcceptingAudio = true
+    private var isFinished = false
+    private var didOverflow = false
+
+    init(client: UnifiedStreamClient) {
+        let (frames, continuation) = AsyncStream<[Float]>.makeStream(
+            bufferingPolicy: .bufferingOldest(Self.maximumBufferedFrames))
+        self.continuation = continuation
+        senderTask = Task {
+            for await frame in frames {
+                try Task.checkCancellation()
+                try await client.sendAudio(samples: frame)
+            }
+        }
+    }
+
+    func append(_ samples: [Float]) {
+        queue.async { [self] in
+            guard isAcceptingAudio, !isFinished else { return }
+            enqueue(coalescer.append(samples))
+        }
+    }
+
+    func finish() async throws {
+        let overflowed = await withCheckedContinuation { continuation in
+            queue.async { [self] in
+                if !isFinished {
+                    let remainder = coalescer.flush()
+                    if isAcceptingAudio, let remainder {
+                        enqueue([remainder])
+                    }
+                    isFinished = true
+                    isAcceptingAudio = false
+                    self.continuation.finish()
+                }
+                continuation.resume(returning: didOverflow)
+            }
+        }
+
+        try await senderTask.value
+        if overflowed {
+            throw PipelineError.sendBufferOverflow
+        }
+    }
+
+    func cancel() {
+        senderTask.cancel()
+        queue.async { [self] in
+            isAcceptingAudio = false
+            isFinished = true
+            continuation.finish()
+        }
+    }
+
+    private func enqueue(_ frames: [[Float]]) {
+        for frame in frames {
+            switch continuation.yield(frame) {
+            case .enqueued(remaining: _):
+                break
+            case .dropped(_), .terminated:
+                didOverflow = true
+                isAcceptingAudio = false
+                continuation.finish()
+                return
+            @unknown default:
+                didOverflow = true
+                isAcceptingAudio = false
+                continuation.finish()
+                return
+            }
+        }
+    }
+}
+
 /// Thread-safe holder of the latest published dictation snapshot. Read by the
 /// localhost server's background `conn_queue` (via the `/state` route), written
 /// by the @MainActor view model. Marked @unchecked Sendable because all access
@@ -177,6 +268,8 @@ final class DictationViewModel: ObservableObject {
 
     private var recorder: AudioRecorder?
     private(set) var activeID: UUID?
+    private var activeDictationMode: SharedConfig.DictationMode?
+    private var unifiedStopRequestedSessionID: UUID?
     private var earlyCancelledSessionID: UUID?
     private var cancellationInProgressID: UUID?
     private var cancellationTasks: [UUID: Task<Void, Never>] = [:]
@@ -197,6 +290,11 @@ final class DictationViewModel: ObservableObject {
 
     private var streamRecorder: StreamingAudioRecorder?
     private var streamClient: WhisperStreamClient?
+    private var unifiedStreamClient: UnifiedStreamClient?
+    private var unifiedStreamAudioPipeline: UnifiedStreamAudioPipeline?
+    private var unifiedStreamEventTask: Task<Void, Never>?
+    private static let unifiedConnectTimeout: TimeInterval = 20
+    private static let unifiedFinalWaitTimeout: TimeInterval = 30
     private var finalRecordingToken: String?
     private var chunkAudioStore: ChunkAudioStore?
     // One fresh-server-session recovery attempt bounds each dictation's reconnect budget.
@@ -885,6 +983,22 @@ final class DictationViewModel: ObservableObject {
             && SharedConfig.pendingDictationCancel()?.id != id
     }
 
+    private func canStartUnifiedStreamSession(_ id: UUID) -> Bool {
+        canContinueSession(id)
+            && activeDictationMode == .unifiedStream
+            && unifiedStopRequestedSessionID != id
+            && phase == .connecting
+    }
+
+    private func canContinueUnifiedSessionAfterAwait(_ id: UUID) async -> Bool {
+        guard activeID == id, activeDictationMode == .unifiedStream else { return false }
+        guard canContinueSession(id) else {
+            await cancel(expectedID: id)
+            return false
+        }
+        return true
+    }
+
     private func canAttemptStreamConnection(
         sessionID: UUID,
         recorder: StreamingAudioRecorder
@@ -923,6 +1037,7 @@ final class DictationViewModel: ObservableObject {
     }
 
     private func performStart(id: UUID) async {
+        let mode = SharedConfig.dictationMode()
         if let priorID = activeID {
             FileLogger.shared.info(.transcription, "start: awaiting prior session teardown")
             await cancel(expectedID: priorID)
@@ -934,6 +1049,8 @@ final class DictationViewModel: ObservableObject {
         streamConnectGraceSessionID = nil
         SharedConfig.clearPendingDictationCancel(exceptSessionID: id)
         activeID = id
+        activeDictationMode = mode
+        unifiedStopRequestedSessionID = nil
         streamReconnectAttemptedSessionID = nil
         finalRecordingToken = nil
         earlyCancelledSessionID = nil
@@ -960,49 +1077,75 @@ final class DictationViewModel: ObservableObject {
             "id": id.uuidString
         ])
 
-        let mode = SharedConfig.dictationMode()
+        let unifiedServerBaseURL = mode == .unifiedStream
+            ? SharedConfig.unifiedStreamServerBaseURL()
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            : ""
+        if mode == .unifiedStream {
+            guard !unifiedServerBaseURL.isEmpty else {
+                FileLogger.shared.info(.transcription,
+                                       "unified stream mode rejected — server URL not configured")
+                phase = .error(
+                    "Set the unified server URL in Settings → Dictation before using this mode.")
+                return
+            }
+        }
         let streamAacEnabled = mode == .stream ? SharedConfig.streamAacEnabled() : false
         let streamAacSourceSampleRate = mode == .stream
             ? SharedConfig.streamAacSourceSampleRate()
             : SharedConfig.Defaults.streamAacSourceSampleRateDefault
 
-        // Selection runs while microphone permission and recording setup proceed.
-        let probeConfig = SharedConfig.load()
-        serverSelectionTask = Task { [weak self] in
-            let selection: ServerSelectionResult
-            if mode == .stream {
-                selection = await WhisperClient.selectStreamServer(servers: probeConfig.servers)
-            } else {
-                let selected = await WhisperClient.selectFirstHealthyServer(servers: probeConfig.servers)
-                selection = ServerSelectionResult(
-                    server: selected,
-                    modelLoaded: nil,
-                    usedPinnedServerPreflight: false
-                )
+        if mode != .unifiedStream {
+            // Selection runs while microphone permission and recording setup proceed.
+            let probeConfig = SharedConfig.load()
+            serverSelectionTask = Task { [weak self] in
+                let selection: ServerSelectionResult
+                if mode == .stream {
+                    selection = await WhisperClient.selectStreamServer(servers: probeConfig.servers)
+                } else {
+                    let selected = await WhisperClient.selectFirstHealthyServer(servers: probeConfig.servers)
+                    selection = ServerSelectionResult(
+                        server: selected,
+                        modelLoaded: nil,
+                        usedPinnedServerPreflight: false
+                    )
+                }
+                await MainActor.run {
+                    guard let self, self.activeID == id else { return }
+                    self.setPinnedServer(selection.server, for: id)
+                }
+                return selection
             }
-            await MainActor.run {
-                guard let self, self.activeID == id else { return }
-                self.setPinnedServer(selection.server, for: id)
+
+            // Fire-and-forget model warm-up: batch mode only connects to the server
+            // AFTER recording stops, so pre-load the engine now — the ~5 s load
+            // overlaps with the user's speech. Stream mode already loads at WS connect.
+            if mode != .stream {
+                let selectionTask = serverSelectionTask
+                Task.detached(priority: .utility) {
+                    guard let selection = await selectionTask?.value,
+                          let selected = selection.server,
+                          !selected.isEmpty else { return }
+                    await WhisperClient.warmup(serverURL: selected)
+                }
             }
-            return selection
         }
 
-        // Fire-and-forget model warm-up: batch mode only connects to the server
-        // AFTER recording stops, so pre-load the engine now — the ~5 s load
-        // overlaps with the user's speech. Stream mode already loads at WS connect.
-        if mode != .stream {
-            let selectionTask = serverSelectionTask
-            Task.detached(priority: .utility) {
-                guard let selection = await selectionTask?.value,
-                      let selected = selection.server,
-                      !selected.isEmpty else { return }
-                await WhisperClient.warmup(serverURL: selected)
-            }
+        let modeName: String
+        switch mode {
+        case .batch:
+            modeName = "batch"
+            activeModeLabel = "BATCH"
+        case .stream:
+            modeName = "stream"
+            activeModeLabel = "STREAM"
+        case .unifiedStream:
+            modeName = "unified_stream"
+            activeModeLabel = "UNIFIED STREAM"
         }
-        activeModeLabel = mode == .stream ? "STREAM" : "BATCH"
         FileLogger.shared.info(.transcription, "dictation start", payload: [
             "id": id.uuidString,
-            "mode": mode == .stream ? "stream" : "batch"
+            "mode": modeName
         ])
 
         // Check microphone permission before attempting to record
@@ -1036,6 +1179,9 @@ final class DictationViewModel: ObservableObject {
         }
 
         switch mode {
+        case .unifiedStream:
+            await beginUnifiedStreamSession(id: id, baseURL: unifiedServerBaseURL)
+
         case .batch:
             let newRecorder = AudioRecorder()
             do {
@@ -1201,6 +1347,153 @@ final class DictationViewModel: ObservableObject {
                 phase = .error(message)
             }
         }
+    }
+
+    private func beginUnifiedStreamSession(id: UUID, baseURL: String) async {
+        guard canStartUnifiedStreamSession(id) else { return }
+        let config = SharedConfig.load()
+        guard let client = UnifiedStreamClient(baseURL: baseURL, apiKey: config.apiKey) else {
+            FileLogger.shared.error(.network, "Unified stream URL is invalid")
+            phase = .error(
+                "Enter a valid HTTP or HTTPS unified server base URL in Settings → Dictation.")
+            return
+        }
+
+        unifiedStreamClient = client
+        startUnifiedStreamEventTask(client: client, sessionID: id)
+        do {
+            try await client.connect(timeout: Self.unifiedConnectTimeout)
+        } catch {
+            if await shouldAbortStartingSession(id) {
+                await client.disconnect()
+                return
+            }
+            guard canStartUnifiedStreamSession(id) else {
+                await client.disconnect()
+                return
+            }
+            unifiedStreamEventTask?.cancel()
+            unifiedStreamEventTask = nil
+            unifiedStreamClient = nil
+            await client.disconnect()
+            guard canContinueSession(id) else { return }
+            let message = "Could not connect to the unified streaming server. "
+                + "Check the URL and confirm the experimental server is running. "
+                + error.localizedDescription
+            FileLogger.shared.error(.network, "Unified stream connection failed", payload: [
+                "jobId": id.uuidString,
+                "error": error.localizedDescription
+            ])
+            phase = .error(message)
+            return
+        }
+
+        if await shouldAbortStartingSession(id) {
+            await client.disconnect()
+            return
+        }
+        guard canStartUnifiedStreamSession(id) else {
+            await client.disconnect()
+            return
+        }
+
+        let recorder = StreamingAudioRecorder()
+        let audioPipeline = UnifiedStreamAudioPipeline(client: client)
+        streamRecorder = recorder
+        unifiedStreamAudioPipeline = audioPipeline
+        do {
+            try await recorder.start(
+                fileURL: RecordingStore.shared.streamWavURL(for: id),
+                onChunk: { _, _ in },
+                onContinuousBuffer: { _, samples in
+                    audioPipeline.append(samples)
+                })
+        } catch {
+            if await shouldAbortStartingSession(id) {
+                await recorder.stop()
+                return
+            }
+            guard canContinueSession(id), activeDictationMode == .unifiedStream else { return }
+            guard unifiedStopRequestedSessionID != id else { return }
+            FileLogger.shared.error(.audio, "Unified stream recorder start failed", payload: [
+                "jobId": id.uuidString,
+                "error": error.localizedDescription
+            ])
+            unifiedStreamEventTask?.cancel()
+            unifiedStreamEventTask = nil
+            unifiedStreamAudioPipeline = nil
+            streamRecorder = nil
+            unifiedStreamClient = nil
+            audioPipeline.cancel()
+            await client.disconnect()
+            guard canContinueSession(id) else { return }
+            phase = .error(
+                "Could not start microphone recording for unified streaming. "
+                    + error.localizedDescription)
+            return
+        }
+
+        if await shouldAbortStartingSession(id) {
+            await recorder.stop()
+            return
+        }
+        guard canStartUnifiedStreamSession(id) else { return }
+        FileLogger.shared.info(.audio, "Unified stream recorder started")
+        recordingStartTime = Date()
+        phase = .recording
+        UIApplication.shared.isIdleTimerDisabled = true
+    }
+
+    private func startUnifiedStreamEventTask(
+        client: UnifiedStreamClient,
+        sessionID: UUID
+    ) {
+        unifiedStreamEventTask?.cancel()
+        unifiedStreamEventTask = Task { [weak self] in
+            let events = await client.events()
+            var didSurfaceFailure = false
+            for await event in events {
+                guard !Task.isCancelled else { return }
+                switch event {
+                case .interim(_), .finalSegment(_), .final(_):
+                    let snapshot = await client.transcriptSnapshot()
+                    guard !Task.isCancelled,
+                          let self,
+                          self.activeID == sessionID,
+                          self.activeDictationMode == .unifiedStream else { return }
+                    self.livePartial = snapshot.displayText
+                    if !snapshot.displayText.isEmpty {
+                        self.transcriptionDeliveredThisSession = true
+                    }
+                case .error(let message):
+                    guard let self else { return }
+                    self.surfaceUnifiedStreamFailure(
+                        sessionID: sessionID,
+                        message: message)
+                    didSurfaceFailure = true
+                case .deadSocket:
+                    guard !didSurfaceFailure, let self else { continue }
+                    self.surfaceUnifiedStreamFailure(
+                        sessionID: sessionID,
+                        message: UnifiedStreamClientError.deadSocket.localizedDescription)
+                    didSurfaceFailure = true
+                case .connectionState(_), .pong, .cancelled, .unknownMessage(_):
+                    break
+                }
+            }
+        }
+    }
+
+    private func surfaceUnifiedStreamFailure(sessionID: UUID, message: String) {
+        guard activeID == sessionID,
+              activeDictationMode == .unifiedStream,
+              phase == .recording || phase == .transcribing else { return }
+        activeModeLabel = "UNIFIED · CONNECTION LOST"
+        fallbackNotice = "Unified stream connection lost. Stop to keep the transcript received so far."
+        FileLogger.shared.warn(.network, "Unified stream transport failed; no reconnect will be attempted", payload: [
+            "jobId": sessionID.uuidString,
+            "error": String(message.prefix(160))
+        ])
     }
 
     private func runStreamConnectLoop(
@@ -1394,6 +1687,7 @@ final class DictationViewModel: ObservableObject {
     }
 
     func stop() async {
+        guard let mode = activeDictationMode else { return }
         chunkSplitterState = nil
         lastChunkSplitterPublishTime = nil
         lastPublishedChunkSplitterState = nil
@@ -1409,7 +1703,12 @@ final class DictationViewModel: ObservableObject {
                 writer.recordFullRecordingUploadOutcome(telemetry)
             }
         }
-        switch SharedConfig.dictationMode() {
+        switch mode {
+        case .unifiedStream:
+            guard let id = activeID else { return }
+            await stopUnifiedStream(id: id)
+            return
+
         case .batch:
             guard let recorder = recorder, let id = activeID else { return }
             self.recorder = nil
@@ -2109,6 +2408,141 @@ final class DictationViewModel: ObservableObject {
             stopSummary["queue_drain_elapsed_ms"] = queueDrainElapsedMs.map { $0 as Any } ?? NSNull()
             FileLogger.shared.info(.network, "Stream: stop summary", payload: stopSummary)
         }
+    }
+
+    private func stopUnifiedStream(id: UUID) async {
+        guard activeID == id,
+              activeDictationMode == .unifiedStream,
+              unifiedStopRequestedSessionID != id,
+              phase == .connecting || phase == .recording else { return }
+        unifiedStopRequestedSessionID = id
+
+        let sessionRecorder = streamRecorder
+        let client = unifiedStreamClient
+        let audioPipeline = unifiedStreamAudioPipeline
+        let recordedDurationMs = recordingStartTime.map {
+            Date().timeIntervalSince($0) * 1000
+        } ?? 0
+        FileLogger.shared.info(.transcription, "unified stream stop requested", payload: [
+            "jobId": id.uuidString,
+            "recordedDurationMs": recordedDurationMs
+        ])
+
+        returnToIdleDeadline = Date().addingTimeInterval(Self.unifiedFinalWaitTimeout + 5)
+        phase = .transcribing
+        if fallbackNotice == nil {
+            fallbackNotice = "Waiting up to \(Int(Self.unifiedFinalWaitTimeout)) seconds "
+                + "for the unified stream final; "
+                + "received text is kept if final delivery fails."
+        }
+        UIApplication.shared.isIdleTimerDisabled = false
+
+        var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "WhisperTranscription") {
+            FileLogger.shared.warn(.lifecycle, "WhisperTranscription lease expired", payload: [
+                "id": String(id.uuidString.prefix(8))
+            ])
+            self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id)
+        }
+        defer {
+            endStopBackgroundTask(
+                &backgroundTaskID,
+                name: "WhisperTranscription",
+                dictationID: id)
+        }
+
+        await sessionRecorder?.stop()
+        guard await canContinueUnifiedSessionAfterAwait(id) else { return }
+
+        var stopFailure: Error?
+        do {
+            try await audioPipeline?.finish()
+        } catch {
+            stopFailure = error
+        }
+        guard await canContinueUnifiedSessionAfterAwait(id) else { return }
+
+        var finalReceived = false
+        if let client {
+            do {
+                try await client.sendEnd()
+            } catch {
+                stopFailure = stopFailure ?? error
+            }
+            guard await canContinueUnifiedSessionAfterAwait(id) else { return }
+
+            do {
+                _ = try await client.awaitFinal(timeout: Self.unifiedFinalWaitTimeout)
+                finalReceived = true
+            } catch {
+                stopFailure = stopFailure ?? error
+            }
+            guard await canContinueUnifiedSessionAfterAwait(id) else { return }
+        } else {
+            stopFailure = stopFailure ?? UnifiedStreamClientError.notConnected
+        }
+
+        let snapshot: UnifiedStreamTranscriptSnapshot
+        if let client {
+            snapshot = await client.transcriptSnapshot()
+            guard await canContinueUnifiedSessionAfterAwait(id) else { return }
+        } else {
+            let receivedText = livePartial
+            snapshot = UnifiedStreamTranscriptSnapshot(
+                displayText: receivedText,
+                terminalAggregate: nil,
+                degradedAggregate: receivedText.isEmpty ? nil : receivedText)
+        }
+        livePartial = snapshot.displayText
+
+        if stopFailure == nil,
+           finalReceived,
+           let finalText = snapshot.terminalAggregate,
+           !finalText.isEmpty {
+            TranscriptionHistory.shared.add(text: finalText)
+            RecordingStore.shared.deleteStreamWav(for: id)
+            fallbackNotice = nil
+            FileLogger.shared.info(.transcription, "Unified stream aggregate final received", payload: [
+                "jobId": id.uuidString,
+                "textLength": finalText.count
+            ])
+            phase = .done(finalText)
+        } else {
+            let degradedText = snapshot.degradedAggregate ?? snapshot.displayText
+            let failureReason = stopFailure?.localizedDescription
+                ?? "The unified streaming server returned no aggregate transcript."
+            let failureMessage = "Unified stream final unavailable: \(failureReason)"
+            _ = preserveStreamFailure(jobId: id, error: failureMessage)
+
+            if !degradedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                TranscriptionHistory.shared.add(text: degradedText)
+                fallbackNotice = "Unified stream could not finalize. Showing received text; "
+                    + "the full recording is retained for manual recovery."
+                FileLogger.shared.warn(.transcription, "Unified stream returned a degraded transcript", payload: [
+                    "jobId": id.uuidString,
+                    "textLength": degradedText.count,
+                    "reason": String(failureReason.prefix(160))
+                ])
+                phase = .done(degradedText)
+            } else {
+                fallbackNotice = nil
+                let message = "Unified streaming could not produce a transcript. "
+                    + "The full recording is available for manual recovery if it was saved."
+                FileLogger.shared.error(.transcription, "Unified stream produced no transcript", payload: [
+                    "jobId": id.uuidString,
+                    "reason": String(failureReason.prefix(160))
+                ])
+                phase = .error(message)
+            }
+        }
+
+        unifiedStreamEventTask?.cancel()
+        unifiedStreamEventTask = nil
+        unifiedStreamAudioPipeline = nil
+        streamRecorder = nil
+        unifiedStreamClient = nil
+        await client?.disconnect()
+        guard activeID == id, activeDictationMode == .unifiedStream else { return }
     }
 
     // MARK: - Recovery (Phase 4)
@@ -3124,6 +3558,16 @@ final class DictationViewModel: ObservableObject {
 
     private func performCancellation(for id: UUID) async {
         guard activeID == id, cancellationInProgressID != id else { return }
+        let sessionMode = activeDictationMode
+        let unifiedClient = unifiedStreamClient
+        let unifiedAudioPipeline = unifiedStreamAudioPipeline
+        let shouldSendUnifiedCancel: Bool
+        switch phase {
+        case .connecting, .recording, .transcribing:
+            shouldSendUnifiedCancel = sessionMode == .unifiedStream
+        case .done, .error, .cancelled:
+            shouldSendUnifiedCancel = false
+        }
         cancellationInProgressID = id
         serverSelectionTask?.cancel()
         serverSelectionTask = nil
@@ -3139,6 +3583,11 @@ final class DictationViewModel: ObservableObject {
         lastChunkSplitterPublishTime = nil
         lastPublishedChunkSplitterState = nil
         let sessionRecorder = streamRecorder
+        if sessionMode == .unifiedStream {
+            unifiedStreamEventTask?.cancel()
+            unifiedStreamEventTask = nil
+            unifiedAudioPipeline?.cancel()
+        }
 
         // Keep the localhost /state listener alive for cancelGraceSeconds so a
         // suspended keyboard can return and fetch the terminal .cancelled
@@ -3181,6 +3630,24 @@ final class DictationViewModel: ObservableObject {
         chunkSplitterState = nil
         lastChunkSplitterPublishTime = nil
         lastPublishedChunkSplitterState = nil
+        if sessionMode == .unifiedStream {
+            if shouldSendUnifiedCancel, let unifiedClient {
+                do {
+                    try await unifiedClient.sendCancel()
+                } catch {
+                    FileLogger.shared.debug(.network, "Unified stream CANCEL was not sent", payload: [
+                        "jobId": id.uuidString,
+                        "error": String(error.localizedDescription.prefix(120))
+                    ])
+                }
+                guard activeID == id, activeDictationMode == sessionMode else { return }
+            }
+            await unifiedClient?.disconnect()
+            guard activeID == id, activeDictationMode == sessionMode else { return }
+            unifiedStreamClient = nil
+            unifiedStreamAudioPipeline = nil
+            unifiedStreamEventTask = nil
+        }
         await streamClient?.disconnect()
         guard activeID == id else { return }
         streamClient = nil
@@ -3221,6 +3688,8 @@ final class DictationViewModel: ObservableObject {
         }
         chunkSplitterTelemetryWriter = nil
         activeID = nil
+        activeDictationMode = nil
+        unifiedStopRequestedSessionID = nil
         // Retain the terminal .cancelled payload in the localhost /state holder
         // for terminalStateRetentionSeconds so a suspended/reappearing keyboard
         // can still fetch it; id-matching on the keyboard side makes a stale

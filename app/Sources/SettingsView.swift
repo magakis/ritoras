@@ -191,12 +191,30 @@ struct SettingsView: View {
             Picker("Mode", selection: $settings.dictationMode) {
                 Text("Batch (full recording)").tag(SharedConfig.DictationMode.batch)
                 Text("Stream (live)").tag(SharedConfig.DictationMode.stream)
+                Text("Unified stream · experimental").tag(SharedConfig.DictationMode.unifiedStream)
             }
             .pickerStyle(.segmented)
 
             if settings.dictationMode == .stream {
                 NavigationLink("Streaming") {
                     ChunkSplitterSettingsView()
+                }
+            } else if settings.dictationMode == .unifiedStream {
+                TextField("Unified server base URL", text: $settings.unifiedStreamServerBaseURL)
+                    .textContentType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled(true)
+                    .keyboardType(.URL)
+
+                if settings.unifiedStreamServerBaseURL
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .isEmpty {
+                    Label(
+                        "Set the unified server URL before using this mode.",
+                        systemImage: "exclamationmark.triangle.fill"
+                    )
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
                 }
             }
         } header: {

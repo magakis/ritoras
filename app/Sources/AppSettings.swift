@@ -10,6 +10,7 @@ class AppSettings: ObservableObject {
     @Published var autoCapitalizationEnabled: Bool = true
     @Published var autocorrectOnSpaceEnabled: Bool = true
     @Published var dictationMode: SharedConfig.DictationMode = .batch
+    @Published var unifiedStreamServerBaseURL: String = SharedConfig.Defaults.unifiedStreamServerBaseURLDefault
     @Published var llmCleanupStyling: LLMCleanupStyling = SharedConfig.Defaults.llmCleanupStylingDefault
     @Published var llmCleanupStructure: LLMCleanupStructure = SharedConfig.Defaults.llmCleanupStructureDefault
     @Published var llmCleanupContext: LLMCleanupContext = SharedConfig.Defaults.llmCleanupContextDefault
@@ -50,6 +51,7 @@ class AppSettings: ObservableObject {
         autoCapitalizationEnabled = SharedConfig.autoCapitalizationEnabled()
         autocorrectOnSpaceEnabled = SharedConfig.autocorrectOnSpaceEnabled()
         dictationMode = SharedConfig.dictationMode()
+        unifiedStreamServerBaseURL = SharedConfig.unifiedStreamServerBaseURL()
         llmCleanupStyling = SharedConfig.llmCleanupStyling()
         llmCleanupStructure = SharedConfig.llmCleanupStructure()
         llmCleanupContext = SharedConfig.llmCleanupContext()
@@ -103,6 +105,9 @@ class AppSettings: ObservableObject {
             FileLogger.shared.info(.settings, "saving dictationMode",
                                    payload: ["value": newValue.rawValue])
             self?.saveDictationMode(newValue)
+        }.store(in: &cancellables)
+        $unifiedStreamServerBaseURL.dropFirst().sink { [weak self] newValue in
+            self?.saveUnifiedStreamServerBaseURL(newValue)
         }.store(in: &cancellables)
         $llmCleanupStyling.dropFirst().sink { [weak self] newValue in
             guard let self, !self.refreshingLLMCleanupPreferences else { return }
@@ -221,6 +226,7 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(autoCapitalizationEnabled, forKey: SharedConfig.Defaults.autoCapitalizationEnabledKey)
         appGroupDefaults?.set(autocorrectOnSpaceEnabled, forKey: SharedConfig.Defaults.autocorrectOnSpaceEnabledKey)
         appGroupDefaults?.set(dictationMode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
+        saveUnifiedStreamServerBaseURL(unifiedStreamServerBaseURL)
         appGroupDefaults?.set(llmCleanupStyling.rawValue, forKey: SharedConfig.Defaults.llmCleanupStylingKey)
         appGroupDefaults?.set(llmCleanupStructure.rawValue, forKey: SharedConfig.Defaults.llmCleanupStructureKey)
         appGroupDefaults?.set(llmCleanupContext.rawValue, forKey: SharedConfig.Defaults.llmCleanupContextKey)
@@ -282,6 +288,11 @@ class AppSettings: ObservableObject {
 
     private func saveDictationMode(_ mode: SharedConfig.DictationMode) {
         appGroupDefaults?.set(mode.rawValue, forKey: SharedConfig.Defaults.dictationModeKey)
+        postSettingsChanged()
+    }
+
+    private func saveUnifiedStreamServerBaseURL(_ url: String) {
+        appGroupDefaults?.set(url, forKey: SharedConfig.Defaults.unifiedStreamServerBaseURLKey)
         postSettingsChanged()
     }
 
@@ -438,6 +449,8 @@ class AppSettings: ObservableObject {
         autoCapitalizationEnabled = SharedConfig.Defaults.autoCapitalizationEnabledDefault
         autocorrectOnSpaceEnabled = SharedConfig.Defaults.autocorrectOnSpaceEnabledDefault
         dictationMode = .batch
+        unifiedStreamServerBaseURL = SharedConfig.Defaults.unifiedStreamServerBaseURLDefault
+        saveUnifiedStreamServerBaseURL(unifiedStreamServerBaseURL)
         llmCleanupStyling = SharedConfig.Defaults.llmCleanupStylingDefault
         llmCleanupStructure = SharedConfig.Defaults.llmCleanupStructureDefault
         llmCleanupContext = SharedConfig.Defaults.llmCleanupContextDefault
