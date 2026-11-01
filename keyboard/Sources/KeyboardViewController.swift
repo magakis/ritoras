@@ -625,6 +625,9 @@ class KeyboardViewController: UIInputViewController {
             panel.onLanguageChange = { [weak self] language in
                 self?.handleLanguageSelection(language)
             }
+            panel.onVADSourceSelected = { source in
+                SharedConfig.setVADSource(source)
+            }
             panel.onLLMCleanupPreferencesChange = { preferences in
                 SharedConfig.setLLMCleanupPreferences(preferences)
             }
@@ -703,6 +706,7 @@ class KeyboardViewController: UIInputViewController {
     private func presentKeyboardSettingsPanel() {
         keyboardView.showSettingsPanel(
             activeLanguage: settingsCache.language,
+            activeVADSource: SharedConfig.vadSource(),
             cleanupPreferences: SharedConfig.llmCleanupPreferences()
         )
     }

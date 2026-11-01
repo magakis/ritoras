@@ -1263,10 +1263,15 @@ class KeyboardView: UIView {
 
     func showSettingsPanel(
         activeLanguage: KeyboardLanguage,
+        activeVADSource: VADSource,
         cleanupPreferences: LLMCleanupPreferences
     ) {
         let panel = settingsPanel
-        panel.show(activeLanguage: activeLanguage, cleanupPreferences: cleanupPreferences)
+        panel.show(
+            activeLanguage: activeLanguage,
+            activeVADSource: activeVADSource,
+            cleanupPreferences: cleanupPreferences
+        )
         bringSubviewToFront(panel)
     }
 

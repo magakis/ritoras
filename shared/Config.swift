@@ -993,6 +993,14 @@ struct SharedConfig {
         DarwinNotifier.post(Defaults.darwinSettingsChangedNotificationName)
     }
 
+    /// Writes the streaming evidence source to the App Group and posts the
+    /// settings-changed Darwin notification.
+    static func setVADSource(_ source: VADSource) {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return }
+        defaults.set(source.rawValue, forKey: Defaults.vadSourceKey)
+        DarwinNotifier.post(Defaults.darwinSettingsChangedNotificationName)
+    }
+
     /// Reads the streaming voice detection RMS threshold from the App Group.
     /// Used by the keyboard extension, which cannot link `AppSettings`.
     /// Returns the default (`0.025`) when the App Group is unavailable or the key is unset.
