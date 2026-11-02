@@ -566,8 +566,13 @@ exceptions close with `1011` after an error frame where the connection permits
 it.
 
 The recommended client send cadence is approximately **0.56 seconds**. The
-server endpoint silence threshold is **1.7 seconds**, with approximately
-**1.12 seconds** of algorithmic latency.
+server endpoint silence threshold is **2.2 seconds**, with approximately
+**2.08 seconds** of algorithmic latency (1.04 s chunk + 1.04 s right-context).
+
+On stop, the Ritoras client streams **1.5 seconds** of synthetic silence
+(24,000 zero-valued samples at 16 kHz) through the audio frame pipeline before
+sending END, giving the server's rolling windows trailing right-context per its
+settle margin.
 
 ---
 

@@ -62,7 +62,9 @@ private final class UnifiedStreamAudioPipeline: @unchecked Sendable {
         }
     }
 
-    private static let maximumBufferedFrames = 8
+    /// Eight queued mic frames, one mic remainder, and the stop tail fit.
+    private static let maximumBufferedFrames = 12
+    private static let maximumMicrophoneBufferedFrames = 8
 
     private let queue = DispatchQueue(label: "com.ritoras.unified-stream-audio")
     private let continuation: AsyncStream<[Float]>.Continuation
@@ -71,6 +73,7 @@ private final class UnifiedStreamAudioPipeline: @unchecked Sendable {
     private var isAcceptingAudio = true
     private var isFinished = false
     private var didOverflow = false
+    private var isAppendingStopTail = false
 
     init(client: UnifiedStreamClient) {
         let (frames, continuation) = AsyncStream<[Float]>.makeStream(
@@ -91,13 +94,28 @@ private final class UnifiedStreamAudioPipeline: @unchecked Sendable {
         }
     }
 
+    func appendStopTail(_ samples: [Float]) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async { [self] in
+                defer { continuation.resume() }
+                guard isAcceptingAudio, !isFinished else { return }
+                if let microphoneRemainder = coalescer.flush() {
+                    enqueue([microphoneRemainder])
+                }
+                guard isAcceptingAudio else { return }
+                isAppendingStopTail = true
+                enqueue(coalescer.append(samples), isStopTail: true)
+            }
+        }
+    }
+
     func finish() async throws {
         let overflowed = await withCheckedContinuation { continuation in
             queue.async { [self] in
                 if !isFinished {
                     let remainder = coalescer.flush()
                     if isAcceptingAudio, let remainder {
-                        enqueue([remainder])
+                        enqueue([remainder], isStopTail: isAppendingStopTail)
                     }
                     isFinished = true
                     isAcceptingAudio = false
@@ -122,23 +140,35 @@ private final class UnifiedStreamAudioPipeline: @unchecked Sendable {
         }
     }
 
-    private func enqueue(_ frames: [[Float]]) {
+    private func enqueue(_ frames: [[Float]], isStopTail: Bool = false) {
         for frame in frames {
             switch continuation.yield(frame) {
-            case .enqueued(remaining: _):
+            case .enqueued(remaining: remaining):
+                // `remaining` is free slots: occupancy = maximumBufferedFrames - remaining.
+                let bufferedFrames = Self.maximumBufferedFrames - remaining
+                if !isStopTail, bufferedFrames > Self.maximumMicrophoneBufferedFrames {
+                    handleOverflow(isStopTail: false)
+                    return
+                }
                 break
             case .dropped(_), .terminated:
-                didOverflow = true
-                isAcceptingAudio = false
-                continuation.finish()
+                handleOverflow(isStopTail: isStopTail)
                 return
             @unknown default:
-                didOverflow = true
-                isAcceptingAudio = false
-                continuation.finish()
+                handleOverflow(isStopTail: isStopTail)
                 return
             }
         }
+    }
+
+    private func handleOverflow(isStopTail: Bool) {
+        guard !isStopTail else {
+            coalescer = UnifiedFrameCoalescer()
+            return
+        }
+        didOverflow = true
+        isAcceptingAudio = false
+        continuation.finish()
     }
 }
 
@@ -295,6 +325,10 @@ final class DictationViewModel: ObservableObject {
     private var unifiedStreamEventTask: Task<Void, Never>?
     private static let unifiedConnectTimeout: TimeInterval = 20
     private static let unifiedFinalWaitTimeout: TimeInterval = 30
+    /// Server profile parakeet-unified.json has right_context_s = 1.04 s;
+    /// parakeet_unified_engine.py settles at max(final_tail_padding_s 1.0,
+    /// refine_margin_s 1.5) = 1.5 s.
+    private static let unifiedStopTailDuration: TimeInterval = 1.5
     private var finalRecordingToken: String?
     private var chunkAudioStore: ChunkAudioStore?
     // One fresh-server-session recovery attempt bounds each dictation's reconnect budget.
@@ -2452,6 +2486,11 @@ final class DictationViewModel: ObservableObject {
         }
 
         await sessionRecorder?.stop()
+        guard await canContinueUnifiedSessionAfterAwait(id) else { return }
+
+        let stopTailSampleCount = Int(16_000 * Self.unifiedStopTailDuration)
+        await audioPipeline?.appendStopTail(
+            [Float](repeating: 0, count: stopTailSampleCount))
         guard await canContinueUnifiedSessionAfterAwait(id) else { return }
 
         var stopFailure: Error?
