@@ -143,7 +143,7 @@ private final class UnifiedStreamAudioPipeline: @unchecked Sendable {
     private func enqueue(_ frames: [[Float]], isStopTail: Bool = false) {
         for frame in frames {
             switch continuation.yield(frame) {
-            case .enqueued(remaining: remaining):
+            case .enqueued(let remaining):
                 // `remaining` is free slots: occupancy = maximumBufferedFrames - remaining.
                 let bufferedFrames = Self.maximumBufferedFrames - remaining
                 if !isStopTail, bufferedFrames > Self.maximumMicrophoneBufferedFrames {
