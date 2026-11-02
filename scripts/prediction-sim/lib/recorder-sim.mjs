@@ -12,7 +12,6 @@ import {
   IDLE_GAP_TELEMETRY_MIN_SECONDS,
   IDLE_GAP_TELEMETRY_PEAK_ABOVE_FLOOR_DB,
 } from './vad-idle-gap.mjs';
-import { EnergyEvidenceProcessor, normalizeEnergyEvidenceConfig } from './energy-evidence.mjs';
 import { SileroEvidenceProcessor, normalizeSileroEvidenceConfig } from './silero-evidence.mjs';
 
 // This chunk splitter segments a continuous
@@ -26,7 +25,6 @@ const DEFAULT_MAX_NOISE_SAMPLES = 6 * 16000;
 const DEFAULT_HEAD_BUFFER_SAMPLES = 2500 * 16;
 const MINIMUM_VOICE_EVIDENCE_SAMPLES = 100 * 16;
 const GAP_SPEECH_PEAK_ABOVE_FLOOR_DB = 6;
-const ENERGY_RETENTION_CAP_DEFAULT_SEC = 60;
 const MAX_STRONG_GUST_FRAME_DURATION_S = 0.02;
 const STOP_FLUSH_MINIMUM_SAMPLES = 250 * 16;
 const POST_FINALIZE_SOFT_LATCH_SUPPRESSION_SAMPLES = 700 * 16;
@@ -47,7 +45,8 @@ function makeEndpoint(endpointSilenceMs = DEFAULT_ENDPOINT_SILENCE_MS, partial =
   return new StreamingEndpoint({ endpointSilenceMs, ...partial });
 }
 
-function makeSileroOutput(decision, evidence = decision?.evidence ?? 'silence', floorDb = null) {
+function makeSileroOutput(decision) {
+  const evidence = decision?.evidence ?? 'silence';
   return {
     isSpeech: evidence === 'strong' || evidence === 'continuing',
     evidence,
@@ -55,7 +54,7 @@ function makeSileroOutput(decision, evidence = decision?.evidence ?? 'silence', 
     thresholdDb: null,
     continuationThresholdDb: null,
     silenceThresholdDb: null,
-    floorDb,
+    floorDb: null,
     floorConverged: false,
     dynamicsSpreadDb: null,
     shortSpreadDb: null,
@@ -66,13 +65,6 @@ function makeSileroOutput(decision, evidence = decision?.evidence ?? 'silence', 
     primingDurationSeconds: 0,
     primingEndedAtCap: false,
   };
-}
-
-function combineSileroAndEnergyEvidence(sileroEvidence, energyOpinion) {
-  if (energyOpinion.suppliesStrong) return 'strong';
-  if (energyOpinion.suppliesContinuing
-    && (sileroEvidence === 'ambiguous' || sileroEvidence === 'silence')) return 'continuing';
-  return sileroEvidence;
 }
 
 function clampFinite(value, fallback, minimum, maximum) {
@@ -263,16 +255,6 @@ export function makeRecorderHarness({
     ? 'silero_fallback_dsp'
     : requestedVADSource;
   const sileroConfiguration = normalizeSileroEvidenceConfig(recorderConfig);
-  const energyEvidenceConfiguration = normalizeEnergyEvidenceConfig(recorderConfig);
-  const energyRecallActive = endpointMachineEnabled
-    && effectiveVADSource === 'silero'
-    && energyEvidenceConfiguration.enabled;
-  const energyRetentionCapSamples = clampInteger(
-    recorderConfig.energyRetentionCapSec,
-    ENERGY_RETENTION_CAP_DEFAULT_SEC,
-    1,
-    60,
-  ) * 16_000;
   const featureEnabled = Boolean(utteranceRelativeResetEnabled && endpointMachineEnabled);
   const utteranceEstablishSamples = clampInteger(
     recorderConfig.utteranceEstablishMs,
@@ -294,16 +276,8 @@ export function makeRecorderHarness({
     requestedVADSource,
     effectiveVADSource,
     sileroConfiguration,
-    energyEvidenceConfiguration,
-    energyRecallActive,
-    energyRetentionCapSamples,
     sileroEvidenceProcessor: new SileroEvidenceProcessor(recorderConfig),
-    energyEvidenceProcessor: new EnergyEvidenceProcessor(recorderConfig, {
-      requiresEndpointOnsetAcceptance: true,
-    }),
     latestSileroDecision: null,
-    energyOriginatedOnsetPending: false,
-    energyOriginatedUtteranceIsActive: false,
     gate,
     endpoint,
     endpointMachineEnabled,
@@ -433,34 +407,9 @@ export function makeRecorderHarness({
       if (typeof onEvent === 'function') onEvent(event);
     },
 
-    resetEnergyEvidenceState() {
-      this.energyEvidenceProcessor = new EnergyEvidenceProcessor({
-        energyRecallEnabled: this.energyEvidenceConfiguration.enabled,
-        energyOnsetElevationDb: this.energyEvidenceConfiguration.onsetElevationDb,
-        energyOnsetSustainMs: this.energyEvidenceConfiguration.onsetSustainMs,
-        energyContinuationElevationDb: this.energyEvidenceConfiguration.continuationElevationDb,
-        energyCooldownMs: this.energyEvidenceConfiguration.cooldownMs,
-        energyMaxContinuationSec: this.energyEvidenceConfiguration.maxUncorroboratedContinuationSec,
-      }, {
-        requiresEndpointOnsetAcceptance: true,
-      });
-      this.energyOriginatedOnsetPending = false;
-      this.energyOriginatedUtteranceIsActive = false;
-    },
-
-    endEnergyEvidenceUtterance(emitted) {
-      if (emitted && this.energyOriginatedUtteranceIsActive) {
-        this.energyEvidenceProcessor.noteEnergyOriginatedEmission();
-      }
-      this.energyEvidenceProcessor.noteUtteranceEnded();
-      this.energyOriginatedOnsetPending = false;
-      this.energyOriginatedUtteranceIsActive = false;
-    },
-
     resetAfterRouteChange() {
       this.gate.resetFloorAfterRouteChange();
       this.sileroEvidenceProcessor.reset();
-      this.resetEnergyEvidenceState();
       this.latestSileroDecision = null;
       this.resetUtteranceLevelReference();
       this.primingComplete = this.effectiveVADSource === 'silero'
@@ -759,12 +708,6 @@ export function makeRecorderHarness({
         this.chunkStartSessionSamples = this.retainedGapStartSessionSamples;
       }
       this.accumulatorHasSpeechEvidence ||= this.retainedGapEvidenceSamples > 0;
-      if (this.energyRecallActive && this.retainedGapPeakAboveFloorDb !== null) {
-        this.accumulatorPeakAboveFloorDb = Math.max(
-          this.accumulatorPeakAboveFloorDb ?? this.retainedGapPeakAboveFloorDb,
-          this.retainedGapPeakAboveFloorDb,
-        );
-      }
       this.chunkEndSessionSamples = this.retainedGapStartSessionSamples + this.retainedGapSamples;
       this.accumulatorSamples += this.retainedGapSamples;
       this.clearRetainedGap();
@@ -783,11 +726,6 @@ export function makeRecorderHarness({
       if (this.retainedGapPeakAboveFloorDb !== null
         && this.retainedGapPeakAboveFloorDb >= GAP_SPEECH_PEAK_ABOVE_FLOOR_DB) return true;
       return this.accumulatorHasSpeechEvidence;
-    },
-
-    retainedGapHasEnergyEvidence() {
-      return this.retainedGapPeakAboveFloorDb !== null
-        && this.retainedGapPeakAboveFloorDb >= GAP_SPEECH_PEAK_ABOVE_FLOOR_DB;
     },
 
     accumulatorHasPlausibleSpeech() {
@@ -840,17 +778,8 @@ export function makeRecorderHarness({
     },
 
     manageRetainedGapOverflow() {
-      if (this.retainedGapSamples === 0
+      if (this.retainedGapSamples <= this.maxNoiseSamples
         || (this.endpoint.state !== 'idle' && this.endpoint.state !== 'onsetPending')) {
-        return;
-      }
-      const exceedsNoiseLimit = this.retainedGapSamples > this.maxNoiseSamples;
-      const exceedsEnergyRetentionCap = this.energyRecallActive
-        && this.retainedGapSamples > this.energyRetentionCapSamples;
-      if (!exceedsNoiseLimit && !exceedsEnergyRetentionCap) return;
-
-      if (this.energyRecallActive && this.retainedGapHasEnergyEvidence()) {
-        if (exceedsEnergyRetentionCap) this.moveRetainedGapToAccumulator();
         return;
       }
       if (!this.retainedGapHasSpeechEvidence()) {
@@ -888,48 +817,12 @@ export function makeRecorderHarness({
       this.sessionElapsedSamples += frameSamples;
       this.slowOnsetTriggerTime = null;
       const primingWasComplete = this.primingComplete;
-      let energyOpinion = null;
-      let sileroCorroborated = false;
-      let output;
-      if (this.effectiveVADSource === 'silero') {
-        const sileroEvidence = this.latestSileroDecision?.evidence ?? 'silence';
-        if (this.energyRecallActive) {
-          // The gate runs only to maintain its adaptive floor; its evidence is
-          // deliberately excluded from the endpoint while Silero is effective.
-          const floorOutput = this.gate.process(frameDb, frameDuration, {
-            highBandRatioDb,
-            withinUtteranceContext: previousState === 'speechActive'
-              || previousState === 'endPending',
-          });
-          let combinedEvidence = sileroEvidence;
-          if (floorOutput.floorDb !== null && floorOutput.floorDb !== undefined) {
-            sileroCorroborated = this.latestSileroDecision !== null
-              && this.latestSileroDecision.smoothedProbability >= this.sileroConfiguration.stopThreshold;
-            energyOpinion = this.energyEvidenceProcessor.process(
-              frameDb,
-              floorOutput.floorDb,
-              frameDuration * 1000,
-              sileroCorroborated,
-            );
-            combinedEvidence = combineSileroAndEnergyEvidence(
-              sileroEvidence,
-              energyOpinion,
-            );
-          }
-          output = makeSileroOutput(
-            this.latestSileroDecision,
-            combinedEvidence,
-            floorOutput.floorDb,
-          );
-        } else {
-          output = makeSileroOutput(this.latestSileroDecision);
-        }
-      } else {
-        output = this.gate.process(frameDb, frameDuration, {
+      const output = this.effectiveVADSource === 'silero'
+        ? makeSileroOutput(this.latestSileroDecision)
+        : this.gate.process(frameDb, frameDuration, {
           highBandRatioDb,
           withinUtteranceContext: previousState === 'speechActive' || previousState === 'endPending',
         });
-      }
       const completedPrimingNow = output.didCompletePriming;
       this.primingComplete ||= completedPrimingNow;
       if (completedPrimingNow) {
@@ -1303,25 +1196,6 @@ export function makeRecorderHarness({
       let decisionAmbiguousCreditSamples = 0;
       if (this.endpointMachineEnabled) {
         const silenceBeforeDecision = this.endpoint.accumulatedSilenceSamples;
-        let forcedEnergyEndpointFinalize = false;
-        let forcedEnergyDecisionSilenceSamples = 0;
-        let forcedEnergyDecisionAmbiguousCreditSamples = 0;
-        const energyCanOriginateOnset = this.energyRecallActive
-          && energyOpinion?.suppliesStrong
-          && (previousState === 'idle' || previousState === 'onsetPending')
-          && this.latestSileroDecision?.evidence !== 'strong';
-        if (this.energyRecallActive && this.latestSileroDecision?.evidence === 'strong') {
-          this.energyOriginatedOnsetPending = false;
-        }
-        if (this.energyRecallActive
-          && energyOpinion?.suppliesStrong
-          && !energyCanOriginateOnset) {
-          // Do not let a Silero-started utterance inherit energy continuation eligibility.
-          this.energyEvidenceProcessor.noteUtteranceEnded();
-        }
-        if (energyCanOriginateOnset) {
-          this.energyOriginatedOnsetPending = true;
-        }
         if (slowOnsetTriggered) {
           const remainingOnsetSamples = Math.max(
             0,
@@ -1338,39 +1212,15 @@ export function makeRecorderHarness({
         } else {
           decision = this.endpoint.process(endpointEvidence, frameSamples);
         }
-        if (this.energyRecallActive
-          && this.energyEvidenceProcessor.takeForceFinalizeRequest()
-          && (this.endpoint.state === 'speechActive' || this.endpoint.state === 'endPending')) {
-          forcedEnergyDecisionSilenceSamples = this.endpoint.accumulatedSilenceSamples;
-          forcedEnergyDecisionAmbiguousCreditSamples = this.endpoint.accumulatedAmbiguousCreditSamples;
-          decision = this.endpoint.forceFinalize('endpoint');
-          forcedEnergyEndpointFinalize = decision.type === 'finalizeUtterance';
-        }
-        if (this.energyRecallActive) {
-          if (decision.type === 'startUtterance') {
-            this.energyOriginatedUtteranceIsActive = this.energyOriginatedOnsetPending;
-            this.energyOriginatedOnsetPending = false;
-            if (this.energyOriginatedUtteranceIsActive) {
-              this.energyEvidenceProcessor.noteEnergyOriginatedOnsetAccepted();
-            }
-          } else if (previousState === 'onsetPending' && this.endpoint.state === 'idle') {
-            this.endEnergyEvidenceUtterance(false);
-          }
-        }
         if (this.flatTerminatorActive && this.endpoint.state === 'idle') {
           this.flatFrameStreakMs = 0;
           this.flatFrameStreakStartTime = null;
           this.flatTerminatorActive = false;
         }
         if (decision.type === 'finalizeUtterance') {
-          if (forcedEnergyEndpointFinalize) {
-            decisionSilenceSamples = forcedEnergyDecisionSilenceSamples;
-            decisionAmbiguousCreditSamples = forcedEnergyDecisionAmbiguousCreditSamples;
-          } else {
-            decisionSilenceSamples = this.endpoint.lastDecisionSilenceSamples
-              ?? silenceBeforeDecision + (endpointEvidence === 'silence' ? frameSamples : 0);
-            decisionAmbiguousCreditSamples = this.endpoint.lastDecisionAmbiguousCreditSamples ?? 0;
-          }
+          decisionSilenceSamples = this.endpoint.lastDecisionSilenceSamples
+            ?? silenceBeforeDecision + (endpointEvidence === 'silence' ? frameSamples : 0);
+          decisionAmbiguousCreditSamples = this.endpoint.lastDecisionAmbiguousCreditSamples ?? 0;
         } else {
           decisionSilenceSamples = this.endpoint.accumulatedSilenceSamples;
         }
@@ -1387,7 +1237,7 @@ export function makeRecorderHarness({
           this.manageRetainedGapOverflow();
         }
         // Prevent the adaptive floor from chasing evidence held for a slow onset.
-        if (this.effectiveVADSource !== 'silero' || this.energyRecallActive) {
+        if (this.effectiveVADSource !== 'silero') {
           this.gate.updateFloorTracking(
             frameDb,
             frameDuration,
@@ -1581,7 +1431,7 @@ export function makeRecorderHarness({
         if (!this.primingComplete && this.accumulatorSamples === 0) {
           this.emitEvent({ t: 'ev', k: 'discard', r: 'priming_window' });
           this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
-          if (this.effectiveVADSource !== 'silero' || this.energyRecallActive) {
+          if (this.effectiveVADSource !== 'silero') {
             this.gate.noteUtteranceEnded(
               this.utteranceQuietestStrongDb,
               this.contiguousTrailingSilenceMinimumDb,
@@ -1603,7 +1453,6 @@ export function makeRecorderHarness({
         const speechMs = this.speechSamples / 16;
         if (this.accumulatorSamples < this.minChunkSamples
           || this.speechSamples < this.minSpeechSamples) {
-          if (this.energyRecallActive) this.endEnergyEvidenceUtterance(false);
           // Swift keeps a below-minimum endpoint accumulator for later continuation or stop flush.
           this.emitEvent({
             t: 'ev',
@@ -1626,13 +1475,12 @@ export function makeRecorderHarness({
           this.chunkCount += 1;
           this.emittedSampleCount += totalSamples;
           this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
-          if (this.effectiveVADSource !== 'silero' || this.energyRecallActive) {
+          if (this.effectiveVADSource !== 'silero') {
             this.gate.noteUtteranceEnded(
               this.utteranceQuietestStrongDb,
               this.contiguousTrailingSilenceMinimumDb,
             );
           }
-          this.endEnergyEvidenceUtterance(true);
           this.emitEvent({
             t: 'ev',
             k: 'emit',
@@ -1650,16 +1498,7 @@ export function makeRecorderHarness({
             physicalTrailingSilenceMs: this.contiguousTrailingSilenceSamples / 16,
           });
           this.clearRetainedGap();
-          if (trimmedTailSamples > 0) {
-            // Keep the post-roll-trimmed silence contiguous with the next chunk.
-            this.retainedGapSamples = trimmedTailSamples;
-            this.retainedGapStartSessionSamples = sourceEndSamples;
-            this.retainedGapPeakAboveFloorDb = this.contiguousTrailingSilencePeakAboveFloorDb;
-          }
-          this.headLive = false;
-          this.headSamples = 0;
-          this.postHeadPreRollSamples = 0;
-          this.utteranceQuietestStrongDb = null;
+          // Clear the emitted chunk before overflow can promote its trimmed tail.
           this.accumulatorSamples = 0;
           this.accumulatorPeakAboveFloorDb = null;
           this.accumulatorHasSpeechEvidence = false;
@@ -1667,20 +1506,24 @@ export function makeRecorderHarness({
           this.chunkEndSessionSamples = null;
           this.speechSamples = 0;
           this.silenceSamples = 0;
+          if (trimmedTailSamples > 0) {
+            // Keep the post-roll-trimmed silence contiguous with the next chunk.
+            this.retainedGapSamples = trimmedTailSamples;
+            this.retainedGapStartSessionSamples = sourceEndSamples;
+            this.retainedGapPeakAboveFloorDb = this.contiguousTrailingSilencePeakAboveFloorDb;
+            this.manageRetainedGapOverflow();
+          }
+          this.headLive = false;
+          this.headSamples = 0;
+          this.postHeadPreRollSamples = 0;
+          this.utteranceQuietestStrongDb = null;
           this.sawReanchorDuringUtterance = false;
           this.sustainedContinuingMs = 0;
           this.streakStartFloorDb = null;
-          this.streakPeakDb = null;
-          this.streakSawDynamics = false;
+           this.streakPeakDb = null;
+           this.streakSawDynamics = false;
           this.sustainedContinuingOnsetLatched = false;
           this.resetQuietLatchWindow();
-          // Promotion must run after clearing the emitted accumulator or its tail is erased.
-          if (this.energyRecallActive) {
-            this.manageRetainedGapOverflow();
-          } else if (this.retainedGapSamples > this.maxNoiseSamples
-            && !this.retainedGapHasSpeechEvidence()) {
-            this.shedRetainedGap();
-          }
         }
       }
 
@@ -1707,7 +1550,6 @@ export function makeRecorderHarness({
 
       return {
         output,
-        energyOpinion,
         decision,
         endpointEvidence,
         reanchorEvent,
@@ -1934,9 +1776,6 @@ export function makeRecorderHarness({
       const stopWeightedSilenceCreditMs = this.endpoint.accumulatedAmbiguousCreditSamples / 16;
       const stopPhysicalTrailingSilenceMs = this.contiguousTrailingSilenceSamples / 16;
       const sampleCount = this.accumulatorSamples;
-      const energyBearingTail = this.energyRecallActive
-        && this.accumulatorPeakAboveFloorDb !== null
-        && this.accumulatorPeakAboveFloorDb >= GAP_SPEECH_PEAK_ABOVE_FLOOR_DB;
       const speechMs = this.speechSamples / 16;
       const decisionTimeEndpointState = this.endpoint.state;
       const startMs = (this.chunkStartSessionSamples
@@ -1947,9 +1786,7 @@ export function makeRecorderHarness({
       const sourceEndSample = this.chunkEndSessionSamples ?? this.sessionElapsedSamples;
       const reason = sampleCount === 0
         ? (this.primingComplete ? 'empty' : 'priming_window')
-        : sampleCount < STOP_FLUSH_MINIMUM_SAMPLES && !energyBearingTail
-          ? 'tail_floor'
-          : 'flush';
+        : sampleCount < STOP_FLUSH_MINIMUM_SAMPLES ? 'tail_floor' : 'flush';
       if (this.endpointMachineEnabled) this.endpoint.forceFinalize('stop');
       this.resetUtteranceLevelReference();
       this.emitEvent({
@@ -1965,18 +1802,11 @@ export function makeRecorderHarness({
         ...(sampleCount > 0 ? { sourceStartSample, sourceEndSample } : {}),
         es: decisionTimeEndpointState,
       });
-      if (!this.primingComplete && sampleCount === 0) {
-        this.endEnergyEvidenceUtterance(false);
-        return { type: 'none' };
-      }
-      if (sampleCount === 0) {
-        this.endEnergyEvidenceUtterance(false);
-        return { type: 'none' };
-      }
+      if (!this.primingComplete && sampleCount === 0) return { type: 'none' };
+      if (sampleCount === 0) return { type: 'none' };
       // Sub-250 ms cannot contain an intelligible word, so the tail floor
       // prevents hallucinated tokens.
-      if (sampleCount < STOP_FLUSH_MINIMUM_SAMPLES && !energyBearingTail) {
-        this.endEnergyEvidenceUtterance(false);
+      if (sampleCount < STOP_FLUSH_MINIMUM_SAMPLES) {
         this.tailFloorSampleCount += sampleCount;
         this.emitEvent({
           t: 'ev',
@@ -2005,14 +1835,13 @@ export function makeRecorderHarness({
       this.emittedTotalMs = sampleCount / 16;
       if (this.speechSamples > 0) {
         this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
-        if (this.effectiveVADSource !== 'silero' || this.energyRecallActive) {
+        if (this.effectiveVADSource !== 'silero') {
           this.gate.noteUtteranceEnded(
             this.utteranceQuietestStrongDb,
             this.contiguousTrailingSilenceMinimumDb,
           );
         }
       }
-      this.endEnergyEvidenceUtterance(true);
       this.emitEvent({
         t: 'ev',
         k: 'emit',

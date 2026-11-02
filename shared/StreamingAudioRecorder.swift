@@ -238,7 +238,6 @@ private final class VADContext: @unchecked Sendable {
     let minSpeechSamples: Int
     let minChunkSamples: Int
     let maxNoiseSamples: Int
-    let energyRetentionCapSamples: Int
     let minimumVoiceEvidenceToRetainSamples = 100 * 16
     let endpointMachineEnabled: Bool
     let endpoint: StreamingEndpoint
@@ -254,7 +253,6 @@ private final class VADContext: @unchecked Sendable {
     let accumulatorSpillSamples: Int
     let requestedVADSource: VADSource
     let sileroConfiguration: SileroEvidenceConfiguration
-    let energyEvidenceConfiguration: EnergyEvidenceConfiguration
     let postRollSamples = 400 * 16
     let analysisHpf: VADHighPassFilter?
     let whisperAnalysisHpf: VADHighPassFilter
@@ -264,8 +262,8 @@ private final class VADContext: @unchecked Sendable {
 
     // MARK: Mutable state
     var accumulator: [Float] = []
-    // Junk stays near maxNoiseSamples; enabled Silero recall retains energy-bearing
-    // gaps to the 60 s cap before promoting them to the spill-capable accumulator.
+    // This gap buffer stays near maxNoiseSamples (~6 s / 384 KB float32);
+    // evidence-qualified audio moves to the spill-capable accumulator.
     private var retainedGapBuffer: [Float] = []
     private var retainedGapStartSessionSamples: Int?
     private var retainedGapEvidenceSamples = 0
@@ -309,9 +307,6 @@ private final class VADContext: @unchecked Sendable {
     private var sileroClassifier: SileroVADClassifier?
     private var didSileroFallback = false
     private let sileroEvidenceProcessor: SileroEvidenceProcessor
-    private var energyEvidenceProcessor: EnergyEvidenceProcessor
-    private var energyOriginatedOnsetPending = false
-    private var energyOriginatedUtteranceIsActive = false
     private var idleGapRunSamples = 0
     private var idleGapStartSessionSamples: Int?
     private var idleGapEndSessionSamples: Int?
@@ -345,20 +340,9 @@ private final class VADContext: @unchecked Sendable {
         self.minSpeechSamples = minSpeechSamples
         self.minChunkSamples = minChunkSamples
         self.maxNoiseSamples = maxNoiseSamples
-        let retentionCapSeconds = min(
-            max(SharedConfig.Defaults.energyRetentionCapSecDefault, 1.0),
-            60.0
-        )
-        self.energyRetentionCapSamples = Int(retentionCapSeconds * 16_000.0)
         self.requestedVADSource = vadSource
         self.sileroConfiguration = sileroConfiguration
         self.sileroEvidenceProcessor = SileroEvidenceProcessor(configuration: sileroConfiguration)
-        let energyEvidenceConfiguration = SharedConfig.energyRecallConfiguration()
-        self.energyEvidenceConfiguration = energyEvidenceConfiguration
-        self.energyEvidenceProcessor = EnergyEvidenceProcessor(
-            configuration: energyEvidenceConfiguration,
-            requiresEndpointOnsetAcceptance: true
-        )
         self.accumulatorSpillSamples = SharedConfig.streamVadAccumulatorSpillSamples()
         self.endpointMachineEnabled = endpointMachineEnabled
         self.utteranceRelativeResetEnabled = endpointMachineEnabled
@@ -539,10 +523,6 @@ private final class VADContext: @unchecked Sendable {
         requestedVADSource == .silero && !didSileroFallback && sileroClassifier != nil
     }
 
-    private var energyRecallIsActive: Bool {
-        endpointMachineEnabled && energyEvidenceConfiguration.enabled && isSileroEffective
-    }
-
     private var effectiveVADSourceName: String {
         guard requestedVADSource == .silero else { return VADSource.dsp.rawValue }
         return didSileroFallback ? "silero_fallback_dsp" : VADSource.silero.rawValue
@@ -565,7 +545,6 @@ private final class VADContext: @unchecked Sendable {
         sileroClassifier = nil
         didSileroFallback = false
         sileroEvidenceProcessor.reset()
-        resetEnergyEvidenceState()
         guard requestedVADSource == .silero else { return }
 
         let classifier = SileroVADClassifier()
@@ -583,7 +562,6 @@ private final class VADContext: @unchecked Sendable {
         sileroClassifier?.unload()
         sileroClassifier = nil
         sileroEvidenceProcessor.reset()
-        resetEnergyEvidenceState()
     }
 
     private func fallBackToDSP(error: Error) {
@@ -591,7 +569,6 @@ private final class VADContext: @unchecked Sendable {
         sileroClassifier = nil
         didSileroFallback = true
         sileroEvidenceProcessor.reset()
-        resetEnergyEvidenceState()
         FileLogger.shared.error(.audio, "Silero VAD failed — falling back to DSP",
                                 payload: ["error": error.localizedDescription])
         telemetrySink?.event(VADTelemetryEvent(
@@ -603,7 +580,6 @@ private final class VADContext: @unchecked Sendable {
 
     private func resetSileroState() {
         sileroEvidenceProcessor.reset()
-        resetEnergyEvidenceState()
         guard isSileroEffective, let sileroClassifier else { return }
         do {
             try sileroClassifier.reset()
@@ -820,7 +796,7 @@ private final class VADContext: @unchecked Sendable {
         evidence == .strong || evidence == .continuing
     }
 
-    private func sileroGateOutput(evidence: VADEvidence, floorDb: Double? = nil) -> VADGateOutput {
+    private func sileroGateOutput(evidence: VADEvidence) -> VADGateOutput {
         VADGateOutput(
             isSpeech: evidence == .strong || evidence == .continuing,
             evidence: evidence,
@@ -828,7 +804,7 @@ private final class VADContext: @unchecked Sendable {
             thresholdDb: 0,
             continuationThresholdDb: 0,
             silenceThresholdDb: 0,
-            floorDb: floorDb,
+            floorDb: nil,
             floorConverged: false,
             dynamicsSpreadDb: nil,
             shortSpreadDb: nil,
@@ -839,36 +815,6 @@ private final class VADContext: @unchecked Sendable {
             primingDurationSeconds: 0,
             primingEndedAtCap: false
         )
-    }
-
-    private func combinedSileroAndEnergyEvidence(
-        sileroEvidence: VADEvidence,
-        energyOpinion: EnergyEvidenceOpinion
-    ) -> VADEvidence {
-        if energyOpinion.suppliesStrong { return .strong }
-        if energyOpinion.suppliesContinuing,
-           (sileroEvidence == .ambiguous || sileroEvidence == .silence) {
-            return .continuing
-        }
-        return sileroEvidence
-    }
-
-    private func resetEnergyEvidenceState() {
-        energyEvidenceProcessor = EnergyEvidenceProcessor(
-            configuration: energyEvidenceConfiguration,
-            requiresEndpointOnsetAcceptance: true
-        )
-        energyOriginatedOnsetPending = false
-        energyOriginatedUtteranceIsActive = false
-    }
-
-    private func endEnergyEvidenceUtterance(emitted: Bool) {
-        if emitted && energyOriginatedUtteranceIsActive {
-            energyEvidenceProcessor.noteEnergyOriginatedEmission()
-        }
-        energyEvidenceProcessor.noteUtteranceEnded()
-        energyOriginatedOnsetPending = false
-        energyOriginatedUtteranceIsActive = false
     }
 
     private func resetUtteranceLevelReference() {
@@ -994,7 +940,6 @@ private final class VADContext: @unchecked Sendable {
             || previousEndpointState == .endPending
         var sileroDecision: SileroEvidenceDecision?
         var usesSileroEvidence = false
-        var energyOpinion: EnergyEvidenceOpinion?
         let output: VADGateOutput
         if isSileroEffective, let sileroClassifier {
             do {
@@ -1004,40 +949,7 @@ private final class VADContext: @unchecked Sendable {
                 }
                 sileroDecision = sileroEvidenceProcessor.latestDecision
                 usesSileroEvidence = true
-                let sileroEvidence = sileroDecision?.evidence ?? .silence
-                if endpointMachineEnabled && energyEvidenceConfiguration.enabled {
-                    // Keep the DSP gate's adaptive floor current, but never send its
-                    // classification to the endpoint while Silero is effective.
-                    let floorOutput = gate.process(
-                        frameDb: frameDb,
-                        frameDuration: frameDuration,
-                        highBandRatioDb: highBandRatioDb,
-                        withinUtteranceContext: withinUtteranceContext
-                    )
-                    var combinedEvidence = sileroEvidence
-                    if let floorDb = floorOutput.floorDb {
-                        let sileroCorroborated = sileroDecision.map {
-                            $0.smoothedProbability >= sileroConfiguration.stopThreshold
-                        } ?? false
-                        let opinion = energyEvidenceProcessor.process(
-                            frameDb: frameDb,
-                            floorDb: floorDb,
-                            frameDurationMs: frameDuration * 1_000.0,
-                            sileroCorroborated: sileroCorroborated
-                        )
-                        energyOpinion = opinion
-                        combinedEvidence = combinedSileroAndEnergyEvidence(
-                            sileroEvidence: sileroEvidence,
-                            energyOpinion: opinion
-                        )
-                    }
-                    output = sileroGateOutput(
-                        evidence: combinedEvidence,
-                        floorDb: floorOutput.floorDb
-                    )
-                } else {
-                    output = sileroGateOutput(evidence: sileroEvidence)
-                }
+                output = sileroGateOutput(evidence: sileroDecision?.evidence ?? .silence)
             } catch {
                 fallBackToDSP(error: error)
                 output = gate.process(
@@ -1055,9 +967,6 @@ private final class VADContext: @unchecked Sendable {
                 withinUtteranceContext: withinUtteranceContext
             )
         }
-        let energyRecallActive = usesSileroEvidence
-            && endpointMachineEnabled
-            && energyEvidenceConfiguration.enabled
         if !usesSileroEvidence {
             if output.didCompletePriming {
                 telemetrySink?.event(VADTelemetryEvent(
@@ -1116,9 +1025,6 @@ private final class VADContext: @unchecked Sendable {
         var decisionAmbiguousCreditSamples = 0.0
         if endpointMachineEnabled {
             let previousState = previousEndpointState
-            var forcedEnergyEndpointFinalize = false
-            var forcedEnergyDecisionSilenceSamples = 0.0
-            var forcedEnergyDecisionAmbiguousCreditSamples = 0.0
             if !usesSileroEvidence {
                 let flatTerminatorStateEligible = previousState == .speechActive
                     || (loudFlatTerminatorActive && previousState == .endPending)
@@ -1216,67 +1122,24 @@ private final class VADContext: @unchecked Sendable {
                 contiguousTrailingSilencePeakAboveFloorDb = nil
             }
 
-            let energyCanOriginateOnset = energyRecallActive
-                && energyOpinion?.suppliesStrong == true
-                && (previousState == .idle || previousState == .onsetPending)
-                && sileroDecision?.evidence != .strong
-            if energyRecallActive, sileroDecision?.evidence == .strong {
-                energyOriginatedOnsetPending = false
-            }
-            if energyRecallActive,
-               energyOpinion?.suppliesStrong == true,
-               !energyCanOriginateOnset {
-                // A Silero-started utterance must not inherit energy continuation eligibility.
-                energyEvidenceProcessor.noteUtteranceEnded()
-            }
-            if energyCanOriginateOnset {
-                energyOriginatedOnsetPending = true
-            }
             let silenceBeforeDecision = endpoint.accumulatedSilenceSamples
             decision = endpoint.process(evidence: endpointEvidence, durationSamples: frameLength)
-            if energyRecallActive,
-               energyEvidenceProcessor.takeForceFinalizeRequest(),
-               (endpoint.state == .speechActive || endpoint.state == .endPending) {
-                forcedEnergyDecisionSilenceSamples = endpoint.accumulatedSilenceSamples
-                forcedEnergyDecisionAmbiguousCreditSamples = endpoint.accumulatedAmbiguousCreditSamples
-                decision = endpoint.forceFinalize(kind: .endpoint)
-                if case .finalizeUtterance = decision {
-                    forcedEnergyEndpointFinalize = true
-                    FileLogger.shared.debug(.audio, "Chunk splitter: energy-only continuation cap forced endpoint")
-                }
-            }
-            if energyRecallActive {
-                if case .startUtterance = decision {
-                    energyOriginatedUtteranceIsActive = energyOriginatedOnsetPending
-                    energyOriginatedOnsetPending = false
-                    if energyOriginatedUtteranceIsActive {
-                        energyEvidenceProcessor.noteEnergyOriginatedOnsetAccepted()
-                    }
-                } else if previousState == .onsetPending && endpoint.state == .idle {
-                    endEnergyEvidenceUtterance(emitted: false)
-                }
-            }
             if loudFlatTerminatorActive && endpoint.state == .idle {
                 loudFlatStreakMs = 0
                 loudFlatStreakStartSeconds = nil
                 loudFlatTerminatorActive = false
             }
             if case .finalizeUtterance = decision {
-                if forcedEnergyEndpointFinalize {
-                    decisionSilenceSamples = forcedEnergyDecisionSilenceSamples
-                    decisionAmbiguousCreditSamples = forcedEnergyDecisionAmbiguousCreditSamples
-                } else {
-                    decisionSilenceSamples = endpoint.lastDecisionSilenceSamples
-                        ?? (silenceBeforeDecision + Double(frameLength))
-                    decisionAmbiguousCreditSamples = endpoint.lastDecisionAmbiguousCreditSamples ?? 0
-                }
+                decisionSilenceSamples = endpoint.lastDecisionSilenceSamples
+                    ?? (silenceBeforeDecision + Double(frameLength))
+                decisionAmbiguousCreditSamples = endpoint.lastDecisionAmbiguousCreditSamples ?? 0
             } else {
                 decisionSilenceSamples = endpoint.accumulatedSilenceSamples
             }
             if previousState != endpoint.state {
                 FileLogger.shared.debug(.audio, "Chunk splitter: \(previousState.rawValue) → \(endpoint.state.rawValue)")
             }
-            if !usesSileroEvidence || energyRecallActive {
+            if !usesSileroEvidence {
                 gate.updateFloorTracking(
                     frameDb: frameDb,
                     duration: frameDuration,
@@ -1293,7 +1156,7 @@ private final class VADContext: @unchecked Sendable {
                 utteranceQuietestStrongDb = min(utteranceQuietestStrongDb ?? frameDb, frameDb)
             }
         } else {
-            if !usesSileroEvidence || energyRecallActive {
+            if !usesSileroEvidence {
                 gate.updateFloorTracking(
                     frameDb: frameDb,
                     duration: frameDuration,
@@ -1365,7 +1228,7 @@ private final class VADContext: @unchecked Sendable {
         }
 
         if case .finalizeUtterance(let kind) = decision {
-            if !usesSileroEvidence || energyRecallActive {
+            if !usesSileroEvidence {
                 gate.noteUtteranceEnded(
                     quietestStrongDb: utteranceQuietestStrongDb,
                     trailingSilenceDb: contiguousTrailingSilenceMinimumDb
@@ -1379,9 +1242,6 @@ private final class VADContext: @unchecked Sendable {
             utteranceQuietestStrongDb = nil
             sawReanchorDuringUtterance = false
             if accumulatorSampleCount < minChunkSamples || speechSamples < minSpeechSamples {
-                if energyRecallActive {
-                    endEnergyEvidenceUtterance(emitted: false)
-                }
                 telemetrySink?.event(VADTelemetryEvent(
                     kind: .outcome,
                     samples: accumulatorSampleCount,
@@ -1416,8 +1276,12 @@ private final class VADContext: @unchecked Sendable {
 
         if endpointMachineEnabled,
            (endpoint.state == .idle || endpoint.state == .onsetPending),
-           !retainedGapBuffer.isEmpty {
-            manageRetainedGapOverflow()
+           retainedGapBuffer.count > maxNoiseSamples {
+            if !retainedGapHasSpeechEvidence {
+                shedRetainedGap()
+            } else {
+                moveRetainedGapToAccumulator()
+            }
         } else if !endpointMachineEnabled,
                   endpoint.state == .idle,
                   accumulatorSampleCount > maxNoiseSamples,
@@ -1502,12 +1366,6 @@ private final class VADContext: @unchecked Sendable {
         return accumulatorHasSpeechEvidence
     }
 
-    private var retainedGapHasEnergyEvidence: Bool {
-        retainedGapPeakAboveFloorDb.map {
-            $0 >= SharedConfig.Defaults.streamVadGapSpeechPeakAboveFloorDbDefault
-        } ?? false
-    }
-
     private var accumulatorHasPlausibleSpeech: Bool {
         if accumulatorHasSpeechEvidence { return true }
         return accumulatorPeakAboveFloorDb.map {
@@ -1538,12 +1396,6 @@ private final class VADContext: @unchecked Sendable {
             chunkStartSessionSamples = retainedGapStartSessionSamples
         }
         accumulatorHasSpeechEvidence = accumulatorHasSpeechEvidence || retainedGapEvidenceSamples > 0
-        if energyRecallIsActive, let retainedGapPeakAboveFloorDb {
-            accumulatorPeakAboveFloorDb = max(
-                accumulatorPeakAboveFloorDb ?? retainedGapPeakAboveFloorDb,
-                retainedGapPeakAboveFloorDb
-            )
-        }
         if let retainedGapStartSessionSamples {
             chunkEndSessionSamples = retainedGapStartSessionSamples + retainedGapBuffer.count
         }
@@ -1553,29 +1405,6 @@ private final class VADContext: @unchecked Sendable {
         retainedGapEvidenceSamples = 0
         retainedGapPeakAboveFloorDb = nil
         bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
-    }
-
-    private func manageRetainedGapOverflow() {
-        guard !retainedGapBuffer.isEmpty,
-              (endpoint.state == .idle || endpoint.state == .onsetPending) else {
-            return
-        }
-        let exceedsNoiseLimit = retainedGapBuffer.count > maxNoiseSamples
-        let exceedsEnergyRetentionCap = energyRecallIsActive
-            && retainedGapBuffer.count > energyRetentionCapSamples
-        guard exceedsNoiseLimit || exceedsEnergyRetentionCap else { return }
-
-        if energyRecallIsActive && retainedGapHasEnergyEvidence {
-            if exceedsEnergyRetentionCap {
-                moveRetainedGapToAccumulator()
-            }
-            return
-        }
-        if !retainedGapHasSpeechEvidence {
-            shedRetainedGap()
-        } else {
-            moveRetainedGapToAccumulator()
-        }
     }
 
     private func shedRetainedGap() {
@@ -1671,8 +1500,6 @@ private final class VADContext: @unchecked Sendable {
             forSecurityApplicationGroupIdentifier: SharedConfig.Defaults.appGroupId
         ) else {
             telemetrySink?.event(VADTelemetryEvent(kind: .spill, samples: accumulator.count, reason: "container_unavailable"))
-            // Promotion is lossless here: without a container, all samples remain
-            // in memory and are still included by flush().
             FileLogger.shared.warn(.audio, "Chunk splitter accumulator spill unavailable; retaining audio in memory")
             return
         }
@@ -1721,7 +1548,6 @@ private final class VADContext: @unchecked Sendable {
         weightedSilenceCreditMs: Double = 0,
         physicalTrailingSilenceMs: Double? = nil
     ) -> VADEmission {
-        endEnergyEvidenceUtterance(emitted: true)
         var snapshot = assembledAccumulator()
         let id = chunkId
         var sampleCount = accumulatorSampleCount
@@ -1789,10 +1615,7 @@ private final class VADContext: @unchecked Sendable {
                 "physicalTrailingSilenceMs": emittedPhysicalTrailingSilenceMs
             ]
         ))
-        if energyRecallIsActive {
-            manageRetainedGapOverflow()
-        } else if retainedGapBuffer.count > maxNoiseSamples,
-                  !retainedGapHasSpeechEvidence {
+        if retainedGapBuffer.count > maxNoiseSamples, !retainedGapHasSpeechEvidence {
             shedRetainedGap()
         }
         return VADEmission(chunkId: id, samples: snapshot)
@@ -1813,10 +1636,6 @@ private final class VADContext: @unchecked Sendable {
         _ = endpoint.forceFinalize(kind: .stop)
         resetUtteranceLevelReference()
         let sampleCount = accumulatorSampleCount
-        let energyBearingTail = energyRecallIsActive
-            && (accumulatorPeakAboveFloorDb.map {
-                $0 >= SharedConfig.Defaults.streamVadGapSpeechPeakAboveFloorDbDefault
-            } ?? false)
         let trailingSpeechMs = Double(speechSamples) / 16.0
         let startSamples = chunkStartSessionSamples ?? (sessionElapsedSamples - sampleCount)
         let sourceEndSamples = chunkEndSessionSamples ?? sessionElapsedSamples
@@ -1825,7 +1644,7 @@ private final class VADContext: @unchecked Sendable {
         let flushReason: String
         if accumulatorSampleCount == 0 {
             flushReason = primingComplete ? "empty" : "priming_window"
-        } else if sampleCount < 250 * 16 && !energyBearingTail {
+        } else if sampleCount < 250 * 16 {
             flushReason = "tail_floor"
         } else {
             flushReason = "flush"
@@ -1844,18 +1663,11 @@ private final class VADContext: @unchecked Sendable {
             sourceEndSample: sampleCount > 0 ? sourceEndSamples : nil,
             endpointState: decisionTimeEndpointState
         ))
-        if !primingComplete, accumulatorSampleCount == 0 {
-            endEnergyEvidenceUtterance(emitted: false)
-            return nil
-        }
-        guard accumulatorSampleCount > 0 else {
-            endEnergyEvidenceUtterance(emitted: false)
-            return nil
-        }
+        if !primingComplete, accumulatorSampleCount == 0 { return nil }
+        guard accumulatorSampleCount > 0 else { return nil }
         // Sub-250 ms cannot contain an intelligible word, so the tail floor
         // prevents hallucinated tokens.
-        guard sampleCount >= 250 * 16 || energyBearingTail else {
-            endEnergyEvidenceUtterance(emitted: false)
+        guard sampleCount >= 250 * 16 else {
             recordDiscard(
                 samples: sampleCount,
                 reason: "tail_floor",
@@ -1873,7 +1685,7 @@ private final class VADContext: @unchecked Sendable {
         }
         FileLogger.shared.info(.audio, "Chunk splitter: stop → emit",
                                payload: ["count": accumulatorSampleCount])
-        if speechSamples > 0, (!isSileroEffective || energyRecallIsActive) {
+        if speechSamples > 0, !isSileroEffective {
             gate.noteUtteranceEnded(
                 quietestStrongDb: utteranceQuietestStrongDb,
                 trailingSilenceDb: contiguousTrailingSilenceMinimumDb
