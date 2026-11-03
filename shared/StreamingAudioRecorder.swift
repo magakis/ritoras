@@ -36,6 +36,13 @@ struct VADEmission {
     let samples: [Float]
 }
 
+private struct SourceSampleSpan: Sendable {
+    let startSample: Int
+    let endSample: Int
+
+    var sampleCount: Int { endSample - startSample }
+}
+
 struct EmissionSummary: Sendable {
     let chunkId: UInt32
     let reason: String
@@ -262,6 +269,11 @@ private final class VADContext: @unchecked Sendable {
 
     // MARK: Mutable state
     var accumulator: [Float] = []
+    private var accumulatorSourceSpans: [SourceSampleSpan] = []
+    private var retainedGapSourceSpans: [SourceSampleSpan] = []
+    private var emittedSourceSpans: [SourceSampleSpan] = []
+    private var discardedSourceSpans: [SourceSampleSpan] = []
+    private var sourcePositionWatermark = 0
     // This gap buffer stays near maxNoiseSamples (~6 s / 384 KB float32);
     // evidence-qualified audio moves to the spill-capable accumulator.
     private var retainedGapBuffer: [Float] = []
@@ -387,6 +399,11 @@ private final class VADContext: @unchecked Sendable {
         telemetrySink = sink
         telemetrySequence = 0
         sessionElapsedSamples = 0
+        accumulatorSourceSpans.removeAll(keepingCapacity: true)
+        retainedGapSourceSpans.removeAll(keepingCapacity: true)
+        emittedSourceSpans.removeAll(keepingCapacity: true)
+        discardedSourceSpans.removeAll(keepingCapacity: true)
+        sourcePositionWatermark = 0
         chunkStartSessionSamples = nil
         chunkEndSessionSamples = nil
         previousFrameDbForClassification = nil
@@ -902,8 +919,19 @@ private final class VADContext: @unchecked Sendable {
         samples: Int,
         reason: String,
         sourceStartSample: Int?,
-        sourceEndSample: Int?
+        sourceEndSample: Int?,
+        sourceSpans: [SourceSampleSpan]? = nil
     ) {
+        if let sourceSpans, !sourceSpans.isEmpty {
+            for span in sourceSpans {
+                insertSourceSpan(span, to: &discardedSourceSpans)
+            }
+        } else if let sourceStartSample, let sourceEndSample, sourceEndSample > sourceStartSample {
+            insertSourceSpan(
+                SourceSampleSpan(startSample: sourceStartSample, endSample: sourceEndSample),
+                to: &discardedSourceSpans
+            )
+        }
         telemetrySink?.event(VADTelemetryEvent(
             kind: .discard,
             samples: samples,
@@ -1003,7 +1031,7 @@ private final class VADContext: @unchecked Sendable {
             if accumulatorSampleCount == 0 {
                 chunkStartSessionSamples = frameStartSamples
             }
-            appendAccumulator(frame)
+            appendAccumulator(frame, sourceStartSample: frameStartSamples)
             chunkEndSessionSamples = frameStartSamples + frameLength
             trackAccumulatorSpeechEvidence(frameDb: frameDb, floorDb: output.floorDb, output: output)
             bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
@@ -1291,7 +1319,8 @@ private final class VADContext: @unchecked Sendable {
                 samples: accumulatorSampleCount,
                 reason: "noise_guard",
                 sourceStartSample: chunkStartSessionSamples,
-                sourceEndSample: chunkEndSessionSamples
+                sourceEndSample: chunkEndSessionSamples,
+                sourceSpans: accumulatorSourceSpans
             )
             clearAccumulator()
             chunkStartSessionSamples = nil
@@ -1341,6 +1370,10 @@ private final class VADContext: @unchecked Sendable {
             retainedGapStartSessionSamples = startSamples
         }
         retainedGapBuffer.append(contentsOf: samples)
+        appendSourceSpan(
+            SourceSampleSpan(startSample: startSamples, endSample: startSamples + samples.count),
+            to: &retainedGapSourceSpans
+        )
         if let floorDb {
             let peakAboveFloorDb = frameDb - floorDb
             if retainedGapPeakAboveFloorDb.map({ peakAboveFloorDb > $0 }) ?? true {
@@ -1399,8 +1432,15 @@ private final class VADContext: @unchecked Sendable {
         if let retainedGapStartSessionSamples {
             chunkEndSessionSamples = retainedGapStartSessionSamples + retainedGapBuffer.count
         }
-        appendAccumulator(retainedGapBuffer)
+        let gapStartSample = retainedGapStartSessionSamples
+            ?? (sessionElapsedSamples - retainedGapBuffer.count)
+        appendAccumulator(
+            retainedGapBuffer,
+            sourceStartSample: gapStartSample,
+            sourceSpans: retainedGapSourceSpans
+        )
         retainedGapBuffer.removeAll(keepingCapacity: true)
+        retainedGapSourceSpans.removeAll(keepingCapacity: true)
         retainedGapStartSessionSamples = nil
         retainedGapEvidenceSamples = 0
         retainedGapPeakAboveFloorDb = nil
@@ -1415,9 +1455,11 @@ private final class VADContext: @unchecked Sendable {
             samples: sampleCount,
             reason: "noise_guard",
             sourceStartSample: sourceStartSample,
-            sourceEndSample: sourceEndSample
+            sourceEndSample: sourceEndSample,
+            sourceSpans: retainedGapSourceSpans
         )
         retainedGapBuffer.removeAll(keepingCapacity: true)
+        retainedGapSourceSpans.removeAll(keepingCapacity: true)
         retainedGapStartSessionSamples = nil
         retainedGapEvidenceSamples = 0
         retainedGapPeakAboveFloorDb = nil
@@ -1452,6 +1494,7 @@ private final class VADContext: @unchecked Sendable {
             let restored = data.withUnsafeBytes { $0.bindMemory(to: Float.self) }
             accumulator.append(contentsOf: restored)
         } catch {
+            removeLeadingSourceSamples(spilledSampleCount, from: &accumulatorSourceSpans)
             FileLogger.shared.error(.audio, "Chunk splitter spill restore failed; audio lost",
                                     payload: ["spilledSamples": spilledSampleCount])
             telemetrySink?.event(VADTelemetryEvent(
@@ -1474,12 +1517,29 @@ private final class VADContext: @unchecked Sendable {
         accumulatorSpillURL = nil
         spilledSampleCount = 0
         accumulator.removeAll(keepingCapacity: true)
+        accumulatorSourceSpans.removeAll(keepingCapacity: true)
         accumulatorPeakAboveFloorDb = nil
         accumulatorHasSpeechEvidence = false
         chunkEndSessionSamples = nil
     }
 
-    private func appendAccumulator(_ samples: [Float]) {
+    private func appendAccumulator(
+        _ samples: [Float],
+        sourceStartSample: Int,
+        sourceSpans: [SourceSampleSpan]? = nil
+    ) {
+        let spansToAppend: [SourceSampleSpan]
+        if let sourceSpans, !sourceSpans.isEmpty {
+            spansToAppend = sourceSpans
+        } else {
+            spansToAppend = [SourceSampleSpan(
+                startSample: sourceStartSample,
+                endSample: sourceStartSample + samples.count
+            )]
+        }
+        for span in spansToAppend {
+            appendSourceSpan(span, to: &accumulatorSourceSpans)
+        }
         if let handle = accumulatorSpillHandle {
             do {
                 try handle.write(contentsOf: sampleData(samples))
@@ -1538,6 +1598,172 @@ private final class VADContext: @unchecked Sendable {
         return samples
     }
 
+    private func appendSourceSpan(_ span: SourceSampleSpan, to spans: inout [SourceSampleSpan]) {
+        guard span.endSample > span.startSample else { return }
+        if let lastSpan = spans.last, span.startSample <= lastSpan.endSample {
+            spans[spans.count - 1] = SourceSampleSpan(
+                startSample: lastSpan.startSample,
+                endSample: max(lastSpan.endSample, span.endSample)
+            )
+        } else {
+            spans.append(span)
+        }
+    }
+
+    private func normalizedSourceSpans(_ spans: [SourceSampleSpan]) -> [SourceSampleSpan] {
+        var normalized: [SourceSampleSpan] = []
+        for span in spans.sorted(by: { $0.startSample < $1.startSample }) {
+            appendSourceSpan(span, to: &normalized)
+        }
+        return normalized
+    }
+
+    private func insertSourceSpan(_ span: SourceSampleSpan, to spans: inout [SourceSampleSpan]) {
+        let normalized = normalizedSourceSpans(spans + [span])
+        spans.removeAll(keepingCapacity: true)
+        spans.append(contentsOf: normalized)
+    }
+
+    private func uncoveredSourceSpans(
+        from startSample: Int,
+        to endSample: Int,
+        coveredBy coverage: [SourceSampleSpan]
+    ) -> [SourceSampleSpan] {
+        guard endSample > startSample else { return [] }
+        var gaps: [SourceSampleSpan] = []
+        var cursor = startSample
+        for span in normalizedSourceSpans(coverage) {
+            let clippedStart = max(startSample, span.startSample)
+            let clippedEnd = min(endSample, span.endSample)
+            guard clippedEnd > clippedStart else { continue }
+            if clippedStart > cursor {
+                gaps.append(SourceSampleSpan(startSample: cursor, endSample: clippedStart))
+            }
+            cursor = max(cursor, clippedEnd)
+            if cursor >= endSample { break }
+        }
+        if cursor < endSample {
+            gaps.append(SourceSampleSpan(startSample: cursor, endSample: endSample))
+        }
+        return gaps
+    }
+
+    private func removeTrailingSourceSamples(
+        _ sampleCount: Int,
+        from spans: inout [SourceSampleSpan]
+    ) -> [SourceSampleSpan] {
+        var remainingSamples = sampleCount
+        var trailingSpans: [SourceSampleSpan] = []
+        while remainingSamples > 0, let lastSpan = spans.last {
+            let removedSamples = min(remainingSamples, lastSpan.sampleCount)
+            trailingSpans.insert(
+                SourceSampleSpan(
+                    startSample: lastSpan.endSample - removedSamples,
+                    endSample: lastSpan.endSample
+                ),
+                at: 0
+            )
+            if removedSamples == lastSpan.sampleCount {
+                spans.removeLast()
+            } else {
+                spans[spans.count - 1] = SourceSampleSpan(
+                    startSample: lastSpan.startSample,
+                    endSample: lastSpan.endSample - removedSamples
+                )
+            }
+            remainingSamples -= removedSamples
+        }
+        return trailingSpans
+    }
+
+    private func removeLeadingSourceSamples(
+        _ sampleCount: Int,
+        from spans: inout [SourceSampleSpan]
+    ) {
+        var remainingSamples = sampleCount
+        while remainingSamples > 0, let firstSpan = spans.first {
+            let removedSamples = min(remainingSamples, firstSpan.sampleCount)
+            if removedSamples == firstSpan.sampleCount {
+                spans.removeFirst()
+            } else {
+                spans[0] = SourceSampleSpan(
+                    startSample: firstSpan.startSample + removedSamples,
+                    endSample: firstSpan.endSample
+                )
+            }
+            remainingSamples -= removedSamples
+        }
+    }
+
+    func diskRecoverySpans(writtenSampleCount: Int) -> [SourceSampleSpan] {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+
+        let writtenEndSample = min(max(0, writtenSampleCount), sessionElapsedSamples)
+        guard writtenEndSample > 0 else { return [] }
+        let watermark = min(sourcePositionWatermark, writtenEndSample)
+        let emittedSpans = emittedSourceSpans.filter { $0.startSample < writtenEndSample }
+        let discardedSpans = discardedSourceSpans.compactMap { span -> SourceSampleSpan? in
+            let startSample = max(0, span.startSample)
+            let endSample = min(writtenEndSample, span.endSample)
+            guard endSample > startSample else { return nil }
+            return SourceSampleSpan(startSample: startSample, endSample: endSample)
+        }
+        let watermarkGaps = uncoveredSourceSpans(
+            from: 0,
+            to: watermark,
+            coveredBy: emittedSpans + discardedSpans
+        )
+        var candidates = watermarkGaps + discardedSpans
+        if watermark < writtenEndSample {
+            candidates.append(SourceSampleSpan(
+                startSample: watermark,
+                endSample: writtenEndSample
+            ))
+        }
+        var recoverySpans: [SourceSampleSpan] = []
+        for candidate in normalizedSourceSpans(candidates) {
+            recoverySpans.append(contentsOf: uncoveredSourceSpans(
+                from: candidate.startSample,
+                to: candidate.endSample,
+                coveredBy: emittedSpans
+            ))
+        }
+        return normalizedSourceSpans(recoverySpans)
+    }
+
+    func recordDiskRemainderEmission(_ span: SourceSampleSpan) -> UInt32 {
+        os_unfair_lock_lock(&unfairLock)
+        defer { os_unfair_lock_unlock(&unfairLock) }
+
+        let id = chunkId
+        chunkId &+= 1
+        insertSourceSpan(span, to: &emittedSourceSpans)
+        sourcePositionWatermark = max(sourcePositionWatermark, span.endSample)
+        let totalMs = Double(span.sampleCount) / 16.0
+        pendingEmissionSummary = EmissionSummary(
+            chunkId: id,
+            reason: "disk_remainder",
+            silenceMs: 0,
+            totalMs: totalMs,
+            speechMs: 0
+        )
+        telemetrySink?.event(VADTelemetryEvent(
+            kind: .emit,
+            chunkId: id,
+            samples: span.sampleCount,
+            reason: "disk_remainder",
+            speechMs: 0,
+            totalMs: totalMs,
+            startMs: Double(span.startSample) / 16.0,
+            endMs: Double(span.endSample) / 16.0,
+            sourceStartSample: span.startSample,
+            sourceEndSample: span.endSample,
+            endpointState: "stop"
+        ))
+        return id
+    }
+
     /// Emit the retained accumulator, carrying post-roll-trimmed silence into the next span.
     func emit(
         reason: String,
@@ -1553,6 +1779,11 @@ private final class VADContext: @unchecked Sendable {
         var sampleCount = accumulatorSampleCount
         let startSamples = chunkStartSessionSamples ?? (sessionElapsedSamples - sampleCount)
         var sourceEndSamples = chunkEndSessionSamples ?? sessionElapsedSamples
+        var emissionSourceSpans = accumulatorSourceSpans
+        let unavailableSamples = max(0, sampleCount - snapshot.count)
+        if unavailableSamples > 0 {
+            removeLeadingSourceSamples(unavailableSamples, from: &emissionSourceSpans)
+        }
         if trimToPostRoll {
             let trailingSamples = min(contiguousTrailingSilenceSamples, sampleCount)
             let excessTrailingSamples = max(0, trailingSamples - postRollSamples)
@@ -1562,12 +1793,22 @@ private final class VADContext: @unchecked Sendable {
                 snapshot.removeLast(retainedTailSamples)
                 sampleCount -= retainedTailSamples
                 sourceEndSamples -= retainedTailSamples
+                let retainedSourceSpans = removeTrailingSourceSamples(
+                    retainedTailSamples,
+                    from: &emissionSourceSpans
+                )
                 // Keep the post-roll-trimmed silence contiguous with the next chunk.
                 retainedGapBuffer = trimmedTail
-                retainedGapStartSessionSamples = sourceEndSamples
+                retainedGapSourceSpans = retainedSourceSpans
+                retainedGapStartSessionSamples = retainedSourceSpans.first?.startSample
+                    ?? sourceEndSamples
                 retainedGapEvidenceSamples = 0
                 retainedGapPeakAboveFloorDb = contiguousTrailingSilencePeakAboveFloorDb
             }
+        }
+        for span in emissionSourceSpans {
+            insertSourceSpan(span, to: &emittedSourceSpans)
+            sourcePositionWatermark = max(sourcePositionWatermark, span.endSample)
         }
         let emittedTotalMs = Double(sampleCount) / 16.0
         let startMs = Double(startSamples) / 16.0
@@ -1584,20 +1825,7 @@ private final class VADContext: @unchecked Sendable {
             speechMs: speechMs
         )
         clearAccumulator()
-        contiguousTrailingSilenceSamples = 0
-        contiguousTrailingSilenceMinimumDb = nil
-        contiguousTrailingSilencePeakAboveFloorDb = nil
-        chunkStartSessionSamples = nil
-        silenceSamples = 0
-        speechSamples = 0
-        endpoint.reset()
-        resetUtteranceLevelReference()
-        sawReanchorDuringUtterance = false
-        bufferHighWaterSamples = retainedGapBuffer.count
-        utteranceQuietestStrongDb = nil
-        loudFlatStreakMs = 0
-        loudFlatStreakStartSeconds = nil
-        loudFlatTerminatorActive = false
+        resetAfterEmission()
         telemetrySink?.event(VADTelemetryEvent(
             kind: .emit,
             chunkId: id,
@@ -1621,8 +1849,25 @@ private final class VADContext: @unchecked Sendable {
         return VADEmission(chunkId: id, samples: snapshot)
     }
 
-    /// Flush every retained stop tail of at least 250 ms, regardless of voice evidence.
-    func flush() -> VADEmission? {
+    private func resetAfterEmission() {
+        contiguousTrailingSilenceSamples = 0
+        contiguousTrailingSilenceMinimumDb = nil
+        contiguousTrailingSilencePeakAboveFloorDb = nil
+        chunkStartSessionSamples = nil
+        silenceSamples = 0
+        speechSamples = 0
+        endpoint.reset()
+        resetUtteranceLevelReference()
+        sawReanchorDuringUtterance = false
+        bufferHighWaterSamples = retainedGapBuffer.count
+        utteranceQuietestStrongDb = nil
+        loudFlatStreakMs = 0
+        loudFlatStreakStartSeconds = nil
+        loudFlatTerminatorActive = false
+    }
+
+    /// Finalize retained stop audio; the in-memory emission path keeps its 250 ms floor.
+    func flush(emitAudio: Bool = true) -> VADEmission? {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         loudFlatStreakMs = 0
@@ -1665,14 +1910,19 @@ private final class VADContext: @unchecked Sendable {
         ))
         if !primingComplete, accumulatorSampleCount == 0 { return nil }
         guard accumulatorSampleCount > 0 else { return nil }
-        // Sub-250 ms cannot contain an intelligible word, so the tail floor
-        // prevents hallucinated tokens.
+        // The memory path keeps its hallucination guard; disk recovery is not VAD-gated.
         guard sampleCount >= 250 * 16 else {
+            if !emitAudio {
+                clearAccumulator()
+                resetAfterEmission()
+                return nil
+            }
             recordDiscard(
                 samples: sampleCount,
                 reason: "tail_floor",
                 sourceStartSample: startSamples,
-                sourceEndSample: sourceEndSamples
+                sourceEndSample: sourceEndSamples,
+                sourceSpans: accumulatorSourceSpans
             )
             FileLogger.shared.debug(.audio, "Chunk splitter: flush dropped sub-250 ms tail",
                                     payload: ["sampleCount": sampleCount])
@@ -1683,13 +1933,21 @@ private final class VADContext: @unchecked Sendable {
             bufferHighWaterSamples = 0
             return nil
         }
-        FileLogger.shared.info(.audio, "Chunk splitter: stop → emit",
-                               payload: ["count": accumulatorSampleCount])
+        FileLogger.shared.info(
+            .audio,
+            emitAudio ? "Chunk splitter: stop → emit" : "Chunk splitter: stop → disk recovery",
+            payload: ["count": accumulatorSampleCount]
+        )
         if speechSamples > 0, !isSileroEffective {
             gate.noteUtteranceEnded(
                 quietestStrongDb: utteranceQuietestStrongDb,
                 trailingSilenceDb: contiguousTrailingSilenceMinimumDb
             )
+        }
+        guard emitAudio else {
+            clearAccumulator()
+            resetAfterEmission()
+            return nil
         }
         return emit(reason: "flush",
                     silenceMs: Double(contiguousTrailingSilenceSamples) / 16.0,
@@ -1755,10 +2013,12 @@ private final class ConverterHolder: @unchecked Sendable {
 private final class DiskWriterHolder: @unchecked Sendable {
     private var audioFile: AVAudioFile?
     private var disabled = false
+    private(set) var writtenSampleCount = 0
 
     /// Opens a WAV file for writing with the given format settings.
     /// Returns `false` on failure (sets the disabled flag internally).
     func open(url: URL, settings: [String: Any]) -> Bool {
+        writtenSampleCount = 0
         guard let file = try? AVAudioFile(forWriting: url, settings: settings) else {
             audioFile = nil
             disabled = true
@@ -1775,6 +2035,7 @@ private final class DiskWriterHolder: @unchecked Sendable {
         guard let file = audioFile, !disabled else { return }
         do {
             try file.write(from: buffer)
+            writtenSampleCount += Int(buffer.frameLength)
         } catch {
             FileLogger.shared.error(.audio, "stream WAV write failed — disabling disk recording")
             disabled = true
@@ -1788,6 +2049,109 @@ private final class DiskWriterHolder: @unchecked Sendable {
         audioFile = nil
         disabled = true
     }
+}
+
+private struct DiskRecoverySummary {
+    let sampleCount: Int
+    let chunkCount: Int
+    let completed: Bool
+}
+
+private struct StopQueueResult {
+    let memoryEmission: VADEmission?
+    let recoverySpans: [SourceSampleSpan]
+    let writtenSampleCount: Int
+    let finalizeTelemetryAfterRecovery: Bool
+}
+
+private let maximumDiskRecoveryChunkSamples = 60 * 16_000
+
+private func emitDiskRecoverySpans(
+    from url: URL,
+    spans: [SourceSampleSpan],
+    vad: VADContext,
+    handler: @escaping StreamingAudioRecorder.ChunkHandler,
+    beforeNextChunk: (@Sendable () async -> Bool)?
+) async throws -> DiskRecoverySummary {
+    let file = try AVAudioFile(forReading: url)
+    guard file.processingFormat.sampleRate == 16_000,
+          file.processingFormat.channelCount == 1,
+          file.processingFormat.commonFormat == .pcmFormatFloat32 else {
+        throw NSError(
+            domain: "StreamingAudioRecorder.DiskRecovery",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Session WAV format does not match 16 kHz mono float32"]
+        )
+    }
+
+    var recoveredSamples = 0
+    var recoveredChunks = 0
+    for span in spans {
+        var cursor = span.startSample
+        while cursor < span.endSample {
+            if let beforeNextChunk {
+                let mayContinue = await beforeNextChunk()
+                guard mayContinue else {
+                    return DiskRecoverySummary(
+                        sampleCount: recoveredSamples,
+                        chunkCount: recoveredChunks,
+                        completed: false
+                    )
+                }
+            }
+            let frameCount = min(maximumDiskRecoveryChunkSamples, span.endSample - cursor)
+            guard let buffer = AVAudioPCMBuffer(
+                pcmFormat: file.processingFormat,
+                frameCapacity: AVAudioFrameCount(frameCount)
+            ) else {
+                throw NSError(
+                    domain: "StreamingAudioRecorder.DiskRecovery",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Could not allocate session WAV recovery buffer"]
+                )
+            }
+            file.framePosition = Int64(cursor)
+            try file.read(into: buffer, frameCount: AVAudioFrameCount(frameCount))
+            let samplesRead = Int(buffer.frameLength)
+            guard samplesRead > 0,
+                  let channelSamples = buffer.floatChannelData?[0] else {
+                throw NSError(
+                    domain: "StreamingAudioRecorder.DiskRecovery",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "Session WAV ended before the confirmed sample count"]
+                )
+            }
+
+            let samples = Array(UnsafeBufferPointer(start: channelSamples, count: samplesRead))
+            if let beforeNextChunk {
+                let mayContinue = await beforeNextChunk()
+                guard mayContinue else {
+                    return DiskRecoverySummary(
+                        sampleCount: recoveredSamples,
+                        chunkCount: recoveredChunks,
+                        completed: false
+                    )
+                }
+            }
+            let chunkSpan = SourceSampleSpan(
+                startSample: cursor,
+                endSample: cursor + samplesRead
+            )
+            let chunkId = vad.recordDiskRemainderEmission(chunkSpan)
+            handler(chunkId, samples)
+            FileLogger.shared.debug(.audio, "Chunk splitter: disk remainder chunk",
+                                    payload: ["chunkId": chunkId,
+                                              "sampleCount": samplesRead])
+            recoveredSamples += samplesRead
+            recoveredChunks += 1
+            cursor += samplesRead
+        }
+    }
+    return DiskRecoverySummary(
+        sampleCount: recoveredSamples,
+        chunkCount: recoveredChunks,
+        completed: true
+    )
 }
 
 // MARK: - Stopped Flag (access via vadQueue serialization)
@@ -1845,6 +2209,7 @@ actor StreamingAudioRecorder {
 
     private let engine = AVAudioEngine()
     private var isRecording = false
+    private var sessionWAVURL: URL?
     private var onChunk: ChunkHandler?
     private var onChunkSplitterState: ((ChunkSplitterFrameState) -> Void)?
 
@@ -1962,6 +2327,7 @@ actor StreamingAudioRecorder {
         guard !isRecording else {
             throw StreamingRecorderError.alreadyStreaming
         }
+        sessionWAVURL = nil
 
         // 1. Check microphone permission
         let permission = AVAudioApplication.shared.recordPermission
@@ -2021,6 +2387,8 @@ actor StreamingAudioRecorder {
         if let wavURL = fileURL {
             if !diskWriter.open(url: wavURL, settings: targetFormat.settings) {
                 FileLogger.shared.error(.audio, "stream WAV open failed — disk recording disabled")
+            } else {
+                sessionWAVURL = wavURL
             }
         }
 
@@ -2365,9 +2733,18 @@ actor StreamingAudioRecorder {
     // MARK: - Stop
 
     /// Stops streaming audio capture and flushes any in-progress accumulator
-    /// as a final chunk.
-    func stop() async {
-        guard isRecording else { return }
+    /// as a final chunk. `false` indicates an incomplete requested disk recovery;
+    /// the caller should use its existing stop-time failure handling.
+    /// - Parameter recoverDiskRemainder: Disable stop-time audio delivery for
+    ///   cancel/unified teardown.
+    /// - Parameter beforeRecoveryChunk: Provides bounded producer backpressure;
+    ///   `false` leaves the WAV remainder retained.
+    @discardableResult
+    func stop(
+        recoverDiskRemainder: Bool = true,
+        beforeRecoveryChunk: (@Sendable () async -> Bool)? = nil
+    ) async -> Bool {
+        guard isRecording else { return true }
         isRecording = false
 
         if let observer = routeChangeObserver {
@@ -2384,22 +2761,53 @@ actor StreamingAudioRecorder {
         let vadQueue = self.vadQueue
         let vad = self.vad
         let diskWriter = self.diskWriter
+        let recoveryWAVURL = self.sessionWAVURL
+        let chunkHandler = self.onChunk
         let stateHandler = self.onChunkSplitterState
         let stoppedFlag = self.stoppedFlag
         let accounting = self.accounting
         let telemetryFlushable = self.telemetryFlushable
-        let emission: VADEmission? = await withCheckedContinuation { continuation in
+        let result: StopQueueResult = await withCheckedContinuation { continuation in
             vadQueue.async {
                 stoppedFlag.set(true)
-                let result = vad.flush()
-                vad.endTelemetrySession()
-                telemetryFlushable?.flush()
-                if let stateHandler = stateHandler {
-                    let emissionSummary = vad.takePendingEmissionSummary()
-                    stateHandler(vad.frameState(emissionSummary: emissionSummary))
+                let shouldRecoverDisk = recoveryWAVURL != nil && recoverDiskRemainder
+                let result = vad.flush(
+                    emitAudio: recoveryWAVURL == nil && recoverDiskRemainder
+                )
+                var recoverySpans: [SourceSampleSpan] = []
+                var writtenSampleCount = 0
+                if let recoveryWAVURL {
+                    vad.releaseSileroClassifier()
+                    diskWriter.close()
+                    writtenSampleCount = diskWriter.writtenSampleCount
+                    if shouldRecoverDisk {
+                        recoverySpans = vad.diskRecoverySpans(
+                            writtenSampleCount: writtenSampleCount
+                        )
+                        if recoverySpans.isEmpty {
+                            FileLogger.shared.info(.audio, "Chunk splitter: disk remainder recovery",
+                                                   payload: ["writtenSamples": writtenSampleCount,
+                                                             "requestedSamples": 0,
+                                                             "recoveredSamples": 0,
+                                                             "chunks": 0,
+                                                             "spans": 0,
+                                                             "completed": true])
+                        }
+                    }
                 }
-                vad.releaseSileroClassifier()
-                diskWriter.close()
+                let finalizeTelemetryAfterRecovery = shouldRecoverDisk && !recoverySpans.isEmpty
+                if !finalizeTelemetryAfterRecovery {
+                    vad.endTelemetrySession()
+                    telemetryFlushable?.flush()
+                    if let stateHandler {
+                        let emissionSummary = vad.takePendingEmissionSummary()
+                        stateHandler(vad.frameState(emissionSummary: emissionSummary))
+                    }
+                    if recoveryWAVURL == nil {
+                        vad.releaseSileroClassifier()
+                        diskWriter.close()
+                    }
+                }
                 let ratio = accounting.outputFramesTotal > 0
                     ? Double(accounting.inputFramesTotal) / Double(accounting.outputFramesTotal)
                     : 0.0
@@ -2414,20 +2822,84 @@ actor StreamingAudioRecorder {
                 accounting.outputFramesTotal = 0
                 accounting.expectedOutputTotal = 0.0
                 accounting.debugLoggedBuffers = 0
-                continuation.resume(returning: result)
+                continuation.resume(returning: StopQueueResult(
+                    memoryEmission: result,
+                    recoverySpans: recoverySpans,
+                    writtenSampleCount: writtenSampleCount,
+                    finalizeTelemetryAfterRecovery: finalizeTelemetryAfterRecovery
+                ))
+            }
+        }
+
+        var recoveryCompleted = true
+        if result.finalizeTelemetryAfterRecovery {
+            var recoverySummary = DiskRecoverySummary(sampleCount: 0, chunkCount: 0, completed: true)
+            var recoveryFailed = false
+            if let recoveryWAVURL, let chunkHandler {
+                do {
+                    recoverySummary = try await emitDiskRecoverySpans(
+                        from: recoveryWAVURL,
+                        spans: result.recoverySpans,
+                        vad: vad,
+                        handler: chunkHandler,
+                        beforeNextChunk: beforeRecoveryChunk
+                    )
+                } catch {
+                    recoveryFailed = true
+                    recoveryCompleted = false
+                    recoverySummary = DiskRecoverySummary(
+                        sampleCount: 0,
+                        chunkCount: 0,
+                        completed: false
+                    )
+                    let failure = error as NSError
+                    FileLogger.shared.error(.audio, "Session WAV remainder recovery failed",
+                                            payload: ["domain": failure.domain,
+                                                      "code": failure.code])
+                }
+            } else {
+                recoveryFailed = true
+                recoveryCompleted = false
+                FileLogger.shared.error(.audio, "Session WAV remainder has no chunk handler")
+            }
+            recoveryCompleted = recoveryCompleted && recoverySummary.completed
+            var recoveryPayload: [String: Any] = [
+                "writtenSamples": result.writtenSampleCount,
+                "requestedSamples": result.recoverySpans.reduce(0) { $0 + $1.sampleCount },
+                "spans": result.recoverySpans.count,
+                "completed": recoverySummary.completed && !recoveryFailed
+            ]
+            if !recoveryFailed {
+                recoveryPayload["recoveredSamples"] = recoverySummary.sampleCount
+                recoveryPayload["chunks"] = recoverySummary.chunkCount
+            }
+            FileLogger.shared.info(.audio, "Chunk splitter: disk remainder recovery",
+                                   payload: recoveryPayload)
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                vadQueue.async {
+                    vad.endTelemetrySession()
+                    telemetryFlushable?.flush()
+                    if let stateHandler {
+                        let emissionSummary = vad.takePendingEmissionSummary()
+                        stateHandler(vad.frameState(emissionSummary: emissionSummary))
+                    }
+                    continuation.resume()
+                }
             }
         }
 
         // Dispatch final chunk (synchronous call — stoppedFlag is already set)
-        if let emission = emission, let handler = onChunk {
-            handler(emission.chunkId, emission.samples)
+        if let emission = result.memoryEmission, let chunkHandler {
+            chunkHandler(emission.chunkId, emission.samples)
         }
 
         vad.setTelemetrySink(nil)
         self.telemetryFlushable = nil
+        sessionWAVURL = nil
         onChunk = nil
         onChunkSplitterState = nil
 
         FileLogger.shared.info(.audio, "Stopped")
+        return recoveryCompleted
     }
 }

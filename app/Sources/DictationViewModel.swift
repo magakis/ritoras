@@ -8,15 +8,29 @@ import UIKit
 /// @MainActor view model, and the background consumer Task. Marked
 /// @unchecked Sendable because all access is serialized via internal NSLock.
 final class ChunkSendQueue: @unchecked Sendable {
+    enum CapacityWaitResult: Sendable {
+        case available
+        case inactive
+        case timedOut
+        case cancelled
+    }
+
+    // The next recovery chunk can occupy one additional slot after this threshold.
+    static let maximumRecoveryQueueDepth = 1
+    private static let recoveryCapacityPollNanoseconds: UInt64 = 5_000_000
+
     private var chunks: [(UInt32, [Float])] = []
     private var producedChunks = 0
     private var recordingActive = false
     private let lock = NSLock()
 
-    func enqueue(id: UInt32, samples: [Float]) {
+    @discardableResult
+    func enqueue(id: UInt32, samples: [Float]) -> Bool {
         lock.lock(); defer { lock.unlock() }
+        guard recordingActive else { return false }
         chunks.append((id, samples))
         producedChunks += 1
+        return true
     }
 
     func dequeue() -> (UInt32, [Float])? {
@@ -29,6 +43,26 @@ final class ChunkSendQueue: @unchecked Sendable {
     var depth: Int { lock.lock(); defer { lock.unlock() }; return chunks.count }
     var producedCount: Int { lock.lock(); defer { lock.unlock() }; return producedChunks }
     var isRecordingActive: Bool { lock.lock(); defer { lock.unlock() }; return recordingActive }
+
+    func waitForRecoveryCapacity(until deadlineUptimeNanoseconds: UInt64) async -> CapacityWaitResult {
+        while true {
+            guard !Task.isCancelled else { return .cancelled }
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now < deadlineUptimeNanoseconds else { return .timedOut }
+            let snapshot = recoveryCapacitySnapshot()
+            guard snapshot.isRecordingActive else { return .inactive }
+            if snapshot.depth <= Self.maximumRecoveryQueueDepth { return .available }
+
+            do {
+                try await Task.sleep(nanoseconds: min(
+                    Self.recoveryCapacityPollNanoseconds,
+                    deadlineUptimeNanoseconds - now
+                ))
+            } catch {
+                return .cancelled
+            }
+        }
+    }
 
     func setRecordingActive(_ value: Bool) {
         lock.lock(); defer { lock.unlock() }
@@ -49,6 +83,16 @@ final class ChunkSendQueue: @unchecked Sendable {
         producedChunks = 0
         recordingActive = false
     }
+
+    private func recoveryCapacitySnapshot() -> (depth: Int, isRecordingActive: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        return (chunks.count, recordingActive)
+    }
+}
+
+private func remainingStopBudgetNanoseconds(until deadlineUptimeNanoseconds: UInt64) -> UInt64 {
+    let now = DispatchTime.now().uptimeNanoseconds
+    return deadlineUptimeNanoseconds > now ? deadlineUptimeNanoseconds - now : 0
 }
 
 /// Coalesces continuous PCM buffers on a serial queue and sends completed
@@ -1283,9 +1327,9 @@ final class DictationViewModel: ObservableObject {
                     fileURL: wavURL,
                     onChunk: { [chunkQueue = self.chunkSendQueue,
                                 audioStore = self.chunkAudioStore] chunkId, samples in
+                        guard chunkQueue.enqueue(id: chunkId, samples: samples) else { return }
                         FileLogger.shared.debug(.audio, "Stream: chunk produced",
                                                 payload: ["chunkId": chunkId, "sampleCount": samples.count])
-                        chunkQueue.enqueue(id: chunkId, samples: samples)
                         let audioURL = audioStore?.write(chunkId: chunkId, samples: samples)
                         Task { @MainActor [weak self] in
                             guard let self, self.activeID == id else { return }
@@ -1331,7 +1375,7 @@ final class DictationViewModel: ObservableObject {
                     telemetry: streamChunkSplitterTelemetry
                 )
                 if await shouldAbortStartingSession(id) {
-                    await recorder.stop()
+                    await recorder.stop(recoverDiskRemainder: false)
                     return
                 }
                 FileLogger.shared.info(.audio, "Stream: recorder started")
@@ -1351,7 +1395,7 @@ final class DictationViewModel: ObservableObject {
                 return
             } catch {
                 if await shouldAbortStartingSession(id) {
-                    await recorder.stop()
+                    await recorder.stop(recoverDiskRemainder: false)
                     return
                 }
                 serverSelectionTask?.cancel()
@@ -1444,7 +1488,7 @@ final class DictationViewModel: ObservableObject {
                 })
         } catch {
             if await shouldAbortStartingSession(id) {
-                await recorder.stop()
+                await recorder.stop(recoverDiskRemainder: false)
                 return
             }
             guard canContinueSession(id), activeDictationMode == .unifiedStream else { return }
@@ -1468,7 +1512,7 @@ final class DictationViewModel: ObservableObject {
         }
 
         if await shouldAbortStartingSession(id) {
-            await recorder.stop()
+            await recorder.stop(recoverDiskRemainder: false)
             return
         }
         guard canStartUnifiedStreamSession(id) else { return }
@@ -2027,7 +2071,35 @@ final class DictationViewModel: ObservableObject {
             }
 
             // Signal recording done and drain queue
-            await sessionRecorder?.stop()
+            let stopSafetyDeadline = DispatchTime.now().uptimeNanoseconds &+
+                UInt64(SharedConfig.Defaults.streamFinalTimeout * 1_000_000_000)
+            let recoveryQueue = chunkSendQueue
+            // Before each read, cap recovery at two queued chunks, one consumer-in-flight
+            // chunk, and one bounded AVAudioPCMBuffer/Float-array pair. This mirrors the
+            // existing network-stalled drain timeout: WAV remains retained for manual
+            // recovery if the shared budget expires. VAD decisions remain ungated; outage
+            // survival is not indefinite.
+            let recoveryCompleted: Bool
+            if let sessionRecorder {
+                recoveryCompleted = await sessionRecorder.stop(
+                    recoverDiskRemainder: true,
+                    beforeRecoveryChunk: {
+                        let outcome = await recoveryQueue.waitForRecoveryCapacity(
+                            until: stopSafetyDeadline
+                        )
+                        if case .available = outcome { return true }
+                        if case .timedOut = outcome {
+                            FileLogger.shared.warn(.network,
+                                                   "Stream: WAV recovery pacing budget exhausted; retaining recording",
+                                                   payload: ["jobId": id.uuidString,
+                                                             "queueDepth": recoveryQueue.depth,
+                                                             "budget_seconds": SharedConfig.Defaults.streamFinalTimeout])
+                        }
+                        return false
+                    })
+            } else {
+                recoveryCompleted = true
+            }
             let streamWavURL = RecordingStore.shared.streamWavURL(for: id)
             fullRecordingUploadTelemetry?.streamWavPresent = streamWavURL.map {
                 FileManager.default.fileExists(atPath: $0.path)
@@ -2051,7 +2123,13 @@ final class DictationViewModel: ObservableObject {
             if streamClient == nil {
                 connectGraceEntered = true
                 let connectGraceStart = Date()
-                let connectGraceTimeout = SharedConfig.Defaults.streamWsConnectTimeout
+                let remainingConnectGraceSeconds = Double(remainingStopBudgetNanoseconds(
+                    until: stopSafetyDeadline
+                )) / 1_000_000_000
+                let connectGraceTimeout = min(
+                    SharedConfig.Defaults.streamWsConnectTimeout,
+                    remainingConnectGraceSeconds
+                )
                 let connectGraceDeadline = connectGraceStart.addingTimeInterval(connectGraceTimeout)
                 FileLogger.shared.debug(.network, "Stream: connect grace started", payload: [
                     "jobId": id.uuidString,
@@ -2059,8 +2137,13 @@ final class DictationViewModel: ObservableObject {
                     "clientAttachedAtStop": clientAttachedAtStop,
                     "timeout_sec": connectGraceTimeout
                 ])
-                while streamClient == nil && Date() < connectGraceDeadline {
-                    try? await Task.sleep(nanoseconds: 200_000_000)
+                while streamClient == nil
+                    && Date() < connectGraceDeadline
+                    && DispatchTime.now().uptimeNanoseconds < stopSafetyDeadline {
+                    try? await Task.sleep(nanoseconds: min(
+                        200_000_000,
+                        remainingStopBudgetNanoseconds(until: stopSafetyDeadline)
+                    ))
                     guard canContinueSession(id) else { return }
                 }
                 guard canContinueSession(id) else { return }
@@ -2102,8 +2185,10 @@ final class DictationViewModel: ObservableObject {
                     drainContinuation.yield(outcome)
                     drainContinuation.finish()
                 }
-                let drainTimeoutNanoseconds = Int(
-                    SharedConfig.Defaults.streamFinalTimeout * 1_000_000_000)
+                let drainTimeoutNanoseconds = Int(min(
+                    remainingStopBudgetNanoseconds(until: stopSafetyDeadline),
+                    UInt64(Int.max)
+                ))
                 let drainTimeoutSource = DispatchSource.makeTimerSource(
                     flags: .strict,
                     queue: DispatchQueue.global(qos: .userInitiated))
@@ -2123,7 +2208,8 @@ final class DictationViewModel: ObservableObject {
                     return
                 }
                 queueDrainOutcome = await drainEvents.first(where: { _ in true }) ?? .timedOut
-                queueDrained = queueDrainOutcome == .drained
+                queueDrained = queueDrainOutcome == .drained && recoveryCompleted
+                if !recoveryCompleted { queueDrainOutcome = .sendFailed }
                 drainWaitTask.cancel()
                 drainTimeoutSource.cancel()
                 guard canContinueSession(id) else { return }
@@ -2485,7 +2571,7 @@ final class DictationViewModel: ObservableObject {
                 dictationID: id)
         }
 
-        await sessionRecorder?.stop()
+        await sessionRecorder?.stop(recoverDiskRemainder: false)
         guard await canContinueUnifiedSessionAfterAwait(id) else { return }
 
         let stopTailSampleCount = Int(16_000 * Self.unifiedStopTailDuration)
@@ -3664,7 +3750,7 @@ final class DictationViewModel: ObservableObject {
         streamConnectTask?.cancel()
         streamConnectTask = nil
         chunkSendQueue.clearAll()
-        await sessionRecorder?.stop()
+        await sessionRecorder?.stop(recoverDiskRemainder: false)
         guard activeID == id else { return }
         chunkSplitterState = nil
         lastChunkSplitterPublishTime = nil

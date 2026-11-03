@@ -513,7 +513,7 @@ export function normalizeConfig(rawConfig = {}) {
   } };
 }
 
-function harnessOptions(normalized) {
+function harnessOptions(normalized, session) {
   return {
     gateConfig: normalized.gateConfig,
     endpointConfig: normalized.endpoint.configuration,
@@ -524,6 +524,9 @@ function harnessOptions(normalized) {
     minChunkSamples: normalized.minChunkSamples,
     maxNoiseSamples: normalized.maxNoiseSamples,
     recorderConfig: normalized.recorderConfig,
+    diskRecovery: session.events.some(event => event.k === 'emit'
+      && typeof event.r === 'string'
+      && event.r.startsWith('disk_remainder')),
   };
 }
 
@@ -1146,7 +1149,7 @@ export function replaySession(session, configInput = session.config, {
   let time = 0;
   let eventTime = 0;
   const harness = makeRecorderHarness({
-    ...harnessOptions(normalized),
+    ...harnessOptions(normalized, session),
     onFrame: record => generatedFrames.push(makeTimelineFrame(record, eventTime)),
     onEvent: event => generatedEvents.push({ ...event, time: event.time ?? eventTime }),
   });

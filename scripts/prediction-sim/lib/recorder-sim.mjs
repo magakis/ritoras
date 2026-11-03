@@ -27,8 +27,70 @@ const MINIMUM_VOICE_EVIDENCE_SAMPLES = 100 * 16;
 const GAP_SPEECH_PEAK_ABOVE_FLOOR_DB = 6;
 const MAX_STRONG_GUST_FRAME_DURATION_S = 0.02;
 const STOP_FLUSH_MINIMUM_SAMPLES = 250 * 16;
+const MAX_DISK_RECOVERY_CHUNK_SAMPLES = 60 * 16_000;
 const POST_FINALIZE_SOFT_LATCH_SUPPRESSION_SAMPLES = 700 * 16;
 export const VAD_POST_ROLL_SAMPLES = 400 * 16;
+
+function appendSourceSpan(spans, span) {
+  if (span.endSample <= span.startSample) return;
+  const lastSpan = spans.at(-1);
+  if (lastSpan && span.startSample <= lastSpan.endSample) {
+    lastSpan.endSample = Math.max(lastSpan.endSample, span.endSample);
+  } else {
+    spans.push({ ...span });
+  }
+}
+
+function normalizeSourceSpans(spans) {
+  const normalized = [];
+  for (const span of [...spans].sort((left, right) => left.startSample - right.startSample)) {
+    appendSourceSpan(normalized, span);
+  }
+  return normalized;
+}
+
+function insertSourceSpan(spans, span) {
+  const normalized = normalizeSourceSpans([...spans, span]);
+  spans.length = 0;
+  for (const normalizedSpan of normalized) spans.push(normalizedSpan);
+}
+
+function uncoveredSourceSpans(startSample, endSample, coverage) {
+  if (endSample <= startSample) return [];
+  const gaps = [];
+  let cursor = startSample;
+  for (const span of normalizeSourceSpans(coverage)) {
+    const clippedStart = Math.max(startSample, span.startSample);
+    const clippedEnd = Math.min(endSample, span.endSample);
+    if (clippedEnd <= clippedStart) continue;
+    if (clippedStart > cursor) gaps.push({ startSample: cursor, endSample: clippedStart });
+    cursor = Math.max(cursor, clippedEnd);
+    if (cursor >= endSample) break;
+  }
+  if (cursor < endSample) gaps.push({ startSample: cursor, endSample });
+  return gaps;
+}
+
+function removeTrailingSourceSamples(spans, sampleCount) {
+  const remainingSpans = spans.map(span => ({ ...span }));
+  let remainingSamples = sampleCount;
+  const trailingSpans = [];
+  while (remainingSamples > 0 && remainingSpans.length > 0) {
+    const lastSpan = remainingSpans.at(-1);
+    const removedSamples = Math.min(remainingSamples, lastSpan.endSample - lastSpan.startSample);
+    trailingSpans.unshift({
+      startSample: lastSpan.endSample - removedSamples,
+      endSample: lastSpan.endSample,
+    });
+    if (removedSamples === lastSpan.endSample - lastSpan.startSample) {
+      remainingSpans.pop();
+    } else {
+      lastSpan.endSample -= removedSamples;
+    }
+    remainingSamples -= removedSamples;
+  }
+  return { remainingSpans, trailingSpans };
+}
 
 export function calculateSlowOnsetThreshold(floorDb, slowLevelDeltaDb, absoluteGuardDb) {
   return Math.max(floorDb + slowLevelDeltaDb, absoluteGuardDb);
@@ -244,6 +306,7 @@ export function makeRecorderHarness({
   utteranceRelativeResetEnabled = true,
   recorderConfig = {},
   gateConfig = {},
+  diskRecovery = false,
   onFrame,
   onEvent,
   onSlowOnsetDiagnostic,
@@ -351,6 +414,13 @@ export function makeRecorderHarness({
     postFinalizeSoftLatchSuppressionSamplesRemaining: 0,
     chunkCount: 0,
     emittedSampleCount: 0,
+    diskRecoveryEnabled: Boolean(diskRecovery),
+    diskWrittenSampleCount: 0,
+    emittedSourceSpans: [],
+    discardedSourceSpans: [],
+    accumulatorSourceSpans: [],
+    retainedGapSourceSpans: [],
+    sourcePositionWatermark: 0,
     nextChunkId: 0,
     idleGapRunSamples: 0,
     idleGapStartSessionSamples: null,
@@ -405,6 +475,105 @@ export function makeRecorderHarness({
 
     emitEvent(event) {
       if (typeof onEvent === 'function') onEvent(event);
+    },
+
+    appendAccumulatorSourceSpan(startSample, endSample) {
+      appendSourceSpan(this.accumulatorSourceSpans, { startSample, endSample });
+    },
+
+    recordEmission(event, sourceSpans) {
+      this.chunkCount += 1;
+      this.emittedSampleCount += event.n;
+      for (const span of sourceSpans) {
+        insertSourceSpan(this.emittedSourceSpans, span);
+        this.sourcePositionWatermark = Math.max(this.sourcePositionWatermark, span.endSample);
+      }
+      this.emitEvent(event);
+    },
+
+    diskRecoverySpans() {
+      const writtenEndSample = Math.min(this.diskWrittenSampleCount, this.sessionElapsedSamples);
+      if (writtenEndSample <= 0) return [];
+      const watermark = Math.min(this.sourcePositionWatermark, writtenEndSample);
+      const emittedSpans = this.emittedSourceSpans.filter(
+        span => span.startSample < writtenEndSample,
+      );
+      const discardedSpans = this.discardedSourceSpans.flatMap(span => {
+        const startSample = Math.max(0, span.startSample);
+        const endSample = Math.min(writtenEndSample, span.endSample);
+        return endSample > startSample ? [{ startSample, endSample }] : [];
+      });
+      const watermarkGaps = uncoveredSourceSpans(
+        0,
+        watermark,
+        [...emittedSpans, ...discardedSpans],
+      );
+      const candidates = [...watermarkGaps, ...discardedSpans];
+      if (watermark < writtenEndSample) {
+        candidates.push({ startSample: watermark, endSample: writtenEndSample });
+      }
+      const recoverySpans = [];
+      for (const candidate of normalizeSourceSpans(candidates)) {
+        recoverySpans.push(...uncoveredSourceSpans(
+          candidate.startSample,
+          candidate.endSample,
+          emittedSpans,
+        ));
+      }
+      return normalizeSourceSpans(recoverySpans);
+    },
+
+    emitDiskRemainder() {
+      const spans = this.diskRecoverySpans();
+      for (const span of spans) {
+        let cursor = span.startSample;
+        while (cursor < span.endSample) {
+          const samples = Math.min(MAX_DISK_RECOVERY_CHUNK_SAMPLES, span.endSample - cursor);
+          const chunkSpan = { startSample: cursor, endSample: cursor + samples };
+          const chunkId = this.nextChunkId;
+          this.nextChunkId += 1;
+          this.recordEmission({
+            t: 'ev',
+            k: 'emit',
+            id: chunkId,
+            n: samples,
+            r: 'disk_remainder',
+            sm: 0,
+            tm: samples / 16,
+            s0: cursor / 16,
+            s1: (cursor + samples) / 16,
+            sourceStartSample: cursor,
+            sourceEndSample: cursor + samples,
+            es: 'stop',
+          }, [chunkSpan]);
+          cursor += samples;
+        }
+      }
+      return spans;
+    },
+
+    clearDiskFlushAccumulator() {
+      this.accumulatorSamples = 0;
+      this.accumulatorSourceSpans.length = 0;
+      this.accumulatorPeakAboveFloorDb = null;
+      this.accumulatorHasSpeechEvidence = false;
+      this.chunkStartSessionSamples = null;
+      this.chunkEndSessionSamples = null;
+      this.speechSamples = 0;
+      this.silenceSamples = 0;
+      this.contiguousTrailingSilenceSamples = 0;
+      this.contiguousTrailingSilenceMinimumDb = null;
+      this.spilledSampleCount = 0;
+      this.headLive = false;
+      this.headSamples = 0;
+      this.utteranceQuietestStrongDb = null;
+      this.sustainedContinuingMs = 0;
+      this.streakStartFloorDb = null;
+      this.streakPeakDb = null;
+      this.sustainedContinuingOnsetLatched = false;
+      this.streakSawDynamics = false;
+      this.quietLatchRisingEdgeAtSessionSamples = null;
+      this.quietLatchRisingEdgeSeen = false;
     },
 
     resetAfterRouteChange() {
@@ -668,6 +837,10 @@ export function makeRecorderHarness({
         this.chunkStartSessionSamples = this.sessionElapsedSamples
           - this.headSamples + trimmedSamples;
         this.chunkEndSessionSamples = this.sessionElapsedSamples;
+        this.appendAccumulatorSourceSpan(
+          this.chunkStartSessionSamples,
+          this.chunkStartSessionSamples + this.accumulatorSamples,
+        );
       } else {
         let requestedPreRollMs = output.isLoudRegime
           ? Math.max(this.endpoint.configuration.preRollSamples / 16, this.loudPreRollMs)
@@ -680,6 +853,12 @@ export function makeRecorderHarness({
         this.accumulatorSamples = preRollSamples;
         this.chunkStartSessionSamples = this.sessionElapsedSamples - frameSamples - preRollSamples;
         this.chunkEndSessionSamples = this.sessionElapsedSamples;
+        if (preRollSamples > 0) {
+          this.appendAccumulatorSourceSpan(
+            this.chunkStartSessionSamples,
+            this.chunkStartSessionSamples + preRollSamples,
+          );
+        }
         this.postHeadPreRollSamples = 0;
       }
       return false;
@@ -690,6 +869,10 @@ export function makeRecorderHarness({
         this.retainedGapStartSessionSamples = frameStartSamples;
       }
       this.retainedGapSamples += frameSamples;
+      appendSourceSpan(this.retainedGapSourceSpans, {
+        startSample: frameStartSamples,
+        endSample: frameStartSamples + frameSamples,
+      });
       if (floorDb !== null && floorDb !== undefined) {
         const peakAboveFloorDb = frameDb - floorDb;
         if (this.retainedGapPeakAboveFloorDb === null
@@ -709,6 +892,15 @@ export function makeRecorderHarness({
       }
       this.accumulatorHasSpeechEvidence ||= this.retainedGapEvidenceSamples > 0;
       this.chunkEndSessionSamples = this.retainedGapStartSessionSamples + this.retainedGapSamples;
+      const gapSourceSpans = this.retainedGapSourceSpans.length > 0
+        ? this.retainedGapSourceSpans
+        : [{
+          startSample: this.retainedGapStartSessionSamples,
+          endSample: this.retainedGapStartSessionSamples + this.retainedGapSamples,
+        }];
+      for (const span of gapSourceSpans) {
+        this.appendAccumulatorSourceSpan(span.startSample, span.endSample);
+      }
       this.accumulatorSamples += this.retainedGapSamples;
       this.clearRetainedGap();
       return true;
@@ -717,6 +909,7 @@ export function makeRecorderHarness({
     clearRetainedGap() {
       this.retainedGapSamples = 0;
       this.retainedGapStartSessionSamples = null;
+      this.retainedGapSourceSpans.length = 0;
       this.retainedGapEvidenceSamples = 0;
       this.retainedGapPeakAboveFloorDb = null;
     },
@@ -751,6 +944,13 @@ export function makeRecorderHarness({
       const sampleCount = this.retainedGapSamples;
       this.retentionShedCount += 1;
       this.shedSampleCount += sampleCount;
+      const discardedSpans = this.retainedGapSourceSpans.length > 0
+        ? this.retainedGapSourceSpans
+        : [{
+          startSample: this.retainedGapStartSessionSamples,
+          endSample: this.retainedGapStartSessionSamples + sampleCount,
+        }];
+      for (const span of discardedSpans) appendSourceSpan(this.discardedSourceSpans, span);
       this.emitEvent({
         t: 'ev',
         k: 'discard',
@@ -815,6 +1015,7 @@ export function makeRecorderHarness({
       const hasRisingEdgeWitness = previousFrameDb !== null
         && frameDb - previousFrameDb >= this.gate.effectiveFlatSpreadDb;
       this.sessionElapsedSamples += frameSamples;
+      if (this.diskRecoveryEnabled) this.diskWrittenSampleCount += frameSamples;
       this.slowOnsetTriggerTime = null;
       const primingWasComplete = this.primingComplete;
       const output = this.effectiveVADSource === 'silero'
@@ -1268,6 +1469,7 @@ export function makeRecorderHarness({
           const seededFromGap = this.seedChunkFromPreRoll(frameSamples, output, softOnset);
           if (!this.headLive && !seededFromGap) {
             this.accumulatorSamples += frameSamples;
+            this.appendAccumulatorSourceSpan(frameStartSamples, this.sessionElapsedSamples);
             this.chunkEndSessionSamples = this.sessionElapsedSamples;
           }
           this.trackAccumulatorSpeechEvidence(output, frameDb);
@@ -1285,6 +1487,7 @@ export function makeRecorderHarness({
           || decision.type === 'finalizeUtterance')) {
           if (!synthesizedStartNow) {
             this.accumulatorSamples += frameSamples;
+            this.appendAccumulatorSourceSpan(frameStartSamples, this.sessionElapsedSamples);
             this.chunkEndSessionSamples = this.sessionElapsedSamples;
           }
           this.trackAccumulatorSpeechEvidence(output, frameDb);
@@ -1310,6 +1513,7 @@ export function makeRecorderHarness({
           this.chunkStartSessionSamples = this.sessionElapsedSamples - frameSamples;
         }
         this.accumulatorSamples += frameSamples;
+        this.appendAccumulatorSourceSpan(frameStartSamples, this.sessionElapsedSamples);
         this.chunkEndSessionSamples = this.sessionElapsedSamples;
         this.trackAccumulatorSpeechEvidence(output, frameDb);
         if (output.isSpeech) {
@@ -1335,7 +1539,11 @@ export function makeRecorderHarness({
             sourceStartSample: this.chunkStartSessionSamples,
             sourceEndSample: this.chunkEndSessionSamples,
           });
+          for (const span of this.accumulatorSourceSpans) {
+            appendSourceSpan(this.discardedSourceSpans, span);
+          }
           this.accumulatorSamples = 0;
+          this.accumulatorSourceSpans.length = 0;
           this.accumulatorPeakAboveFloorDb = null;
           this.accumulatorHasSpeechEvidence = false;
           this.chunkStartSessionSamples = null;
@@ -1472,8 +1680,10 @@ export function makeRecorderHarness({
           const sourceEndSamples = (this.chunkEndSessionSamples ?? this.sessionElapsedSamples)
             - trimmedTailSamples;
           this.nextChunkId += 1;
-          this.chunkCount += 1;
-          this.emittedSampleCount += totalSamples;
+          const { remainingSpans: emissionSourceSpans, trailingSpans } = removeTrailingSourceSamples(
+            this.accumulatorSourceSpans,
+            trimmedTailSamples,
+          );
           this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
           if (this.effectiveVADSource !== 'silero') {
             this.gate.noteUtteranceEnded(
@@ -1481,7 +1691,7 @@ export function makeRecorderHarness({
               this.contiguousTrailingSilenceMinimumDb,
             );
           }
-          this.emitEvent({
+          this.recordEmission({
             t: 'ev',
             k: 'emit',
             id: chunkId,
@@ -1496,10 +1706,11 @@ export function makeRecorderHarness({
             es: previousState,
             weightedSilenceCreditMs: decisionAmbiguousCreditSamples / 16,
             physicalTrailingSilenceMs: this.contiguousTrailingSilenceSamples / 16,
-          });
+          }, emissionSourceSpans);
           this.clearRetainedGap();
           // Clear the emitted chunk before overflow can promote its trimmed tail.
           this.accumulatorSamples = 0;
+          this.accumulatorSourceSpans.length = 0;
           this.accumulatorPeakAboveFloorDb = null;
           this.accumulatorHasSpeechEvidence = false;
           this.chunkStartSessionSamples = null;
@@ -1509,7 +1720,8 @@ export function makeRecorderHarness({
           if (trimmedTailSamples > 0) {
             // Keep the post-roll-trimmed silence contiguous with the next chunk.
             this.retainedGapSamples = trimmedTailSamples;
-            this.retainedGapStartSessionSamples = sourceEndSamples;
+            this.retainedGapSourceSpans = trailingSpans;
+            this.retainedGapStartSessionSamples = trailingSpans[0]?.startSample ?? sourceEndSamples;
             this.retainedGapPeakAboveFloorDb = this.contiguousTrailingSilencePeakAboveFloorDb;
             this.manageRetainedGapOverflow();
           }
@@ -1802,11 +2014,22 @@ export function makeRecorderHarness({
         ...(sampleCount > 0 ? { sourceStartSample, sourceEndSample } : {}),
         es: decisionTimeEndpointState,
       });
-      if (!this.primingComplete && sampleCount === 0) return { type: 'none' };
-      if (sampleCount === 0) return { type: 'none' };
+      if (!this.primingComplete && sampleCount === 0) {
+        if (this.diskRecoveryEnabled) this.emitDiskRemainder();
+        return { type: 'none' };
+      }
+      if (sampleCount === 0) {
+        if (this.diskRecoveryEnabled) this.emitDiskRemainder();
+        return { type: 'none' };
+      }
       // Sub-250 ms cannot contain an intelligible word, so the tail floor
       // prevents hallucinated tokens.
       if (sampleCount < STOP_FLUSH_MINIMUM_SAMPLES) {
+        if (this.diskRecoveryEnabled) {
+          this.clearDiskFlushAccumulator();
+          this.emitDiskRemainder();
+          return { type: 'none' };
+        }
         this.tailFloorSampleCount += sampleCount;
         this.emitEvent({
           t: 'ev',
@@ -1817,7 +2040,11 @@ export function makeRecorderHarness({
           sourceStartSample,
           sourceEndSample,
         });
+        for (const span of this.accumulatorSourceSpans) {
+          appendSourceSpan(this.discardedSourceSpans, span);
+        }
         this.accumulatorSamples = 0;
+        this.accumulatorSourceSpans.length = 0;
         this.accumulatorPeakAboveFloorDb = null;
         this.accumulatorHasSpeechEvidence = false;
         this.chunkStartSessionSamples = null;
@@ -1828,10 +2055,6 @@ export function makeRecorderHarness({
         this.contiguousTrailingSilenceMinimumDb = null;
         return { type: 'none' };
       }
-      const chunkId = this.nextChunkId;
-      this.nextChunkId += 1;
-      this.chunkCount += 1;
-      this.emittedSampleCount += sampleCount;
       this.emittedTotalMs = sampleCount / 16;
       if (this.speechSamples > 0) {
         this.noteUtteranceEndedValues.push(this.utteranceQuietestStrongDb);
@@ -1842,7 +2065,14 @@ export function makeRecorderHarness({
           );
         }
       }
-      this.emitEvent({
+      if (this.diskRecoveryEnabled) {
+        this.clearDiskFlushAccumulator();
+        this.emitDiskRemainder();
+        return { type: 'none' };
+      }
+      const chunkId = this.nextChunkId;
+      this.nextChunkId += 1;
+      this.recordEmission({
         t: 'ev',
         k: 'emit',
         id: chunkId,
@@ -1857,10 +2087,11 @@ export function makeRecorderHarness({
         es: decisionTimeEndpointState,
         weightedSilenceCreditMs: stopWeightedSilenceCreditMs,
         physicalTrailingSilenceMs: stopPhysicalTrailingSilenceMs,
-      });
+      }, [...this.accumulatorSourceSpans]);
       this.headLive = false;
       this.headSamples = 0;
       this.accumulatorSamples = 0;
+      this.accumulatorSourceSpans.length = 0;
       this.accumulatorPeakAboveFloorDb = null;
       this.accumulatorHasSpeechEvidence = false;
       this.chunkStartSessionSamples = null;
