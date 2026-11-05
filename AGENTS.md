@@ -167,12 +167,15 @@ Before every commit touching `.swift` files, run the mandatory syntax check (see
 
 This repository is checked out as multiple git worktrees. Agents work independently, each in its own worktree on its own branch. The shared `main` branch is the integration point.
 
-Agents may push `main` to the remote (`magakis/ritoras` — the "gate" repository) when the user explicitly requests it. Pushes to `main` must remain fast-forward only; never force-push. Unless explicitly requested, the default remains that the user pushes.
+Effective 2026-11-05, the repo owner has explicitly authorized agents to push `main` to the remote (`magakis/ritoras` — the "gate" repository) and monitor CI after every commit batch. This standing authorization applies to all current and future worktrees of this project. Pushes to `main` must remain fast-forward only; never force-push.
 
 **When an agent's commits are finished:**
 1. Make sure all work is committed on the worktree's branch.
 2. Integrate the branch into `main` using a fast-forward merge only — no merge commits: `git merge --ff-only <branch>`.
-3. By default, stop and report "merged to main, ready for you to push." If the user explicitly requested a push, push `main` and monitor CI.
+3. Always push `main` to the remote; do not stop and wait for the user to push.
+4. Monitor GitHub Actions CI on the pushed SHA. If CI passes, report the green status to the user. If CI fails, follow [CI failure triage](#ci-failure-triage), fix the issue as a new commit on the worktree branch, fast-forward merge and push again, then re-check CI.
+
+This commit→merge→push→CI-check loop does not include deployment to a device; the deploy-ipa pipeline still requires an explicit user request (see [CI / deploy](#ci--deploy)).
 
 If a fast-forward is not possible because another worktree has already merged new commits onto `main`, rebase the branch onto `main` first, then fast-forward merge again. Never force-push to `main`, and never create a merge commit for routine integration.
 
