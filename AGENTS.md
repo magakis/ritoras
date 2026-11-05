@@ -173,9 +173,9 @@ Effective 2026-11-05, the repo owner has explicitly authorized agents to push `m
 1. Make sure all work is committed on the worktree's branch.
 2. Integrate the branch into `main` using a fast-forward merge only — no merge commits: `git merge --ff-only <branch>`.
 3. Always push `main` to the remote; do not stop and wait for the user to push.
-4. Monitor GitHub Actions CI on the pushed SHA. If CI passes, report the green status to the user. If CI fails, follow [CI failure triage](#ci-failure-triage), fix the issue as a new commit on the worktree branch, fast-forward merge and push again, then re-check CI.
+4. Monitor GitHub Actions CI on the pushed SHA. If CI passes, report the green status to the user and, for build-affecting commits, deploy the CI-green build to the device (load the `ritoras-deploy-pipeline` skill first, then run `node scripts/deploy-ipa.mjs deploy`) and report the deploy status. If CI fails, follow [CI failure triage](#ci-failure-triage), fix the issue as a new commit on the worktree branch, fast-forward merge and push again, then re-check CI.
 
-This commit→merge→push→CI-check loop does not include deployment to a device; the deploy-ipa pipeline still requires an explicit user request (see [CI / deploy](#ci--deploy)).
+Deployment is part of the standing loop for build-affecting commits. Skip the device deploy only for commits that change none of `app/`, `keyboard/`, `shared/`, `project.yml`, or bundled assets/resources (for example, docs-only or policy-only commits); those commits leave the produced binary unchanged, so CI green concludes the loop.
 
 If a fast-forward is not possible because another worktree has already merged new commits onto `main`, rebase the branch onto `main` first, then fast-forward merge again. Never force-push to `main`, and never create a merge commit for routine integration.
 
@@ -187,7 +187,7 @@ Format: `subsystem: concise summary of the change` — subsystem from the table 
 
 Body required for non-trivial changes, wrapped at 75 columns.
 
-The repo uses the OpenCode committer protocol: dispatch the committer agent for a numbered commit plan, present it to the user, then execute the chosen commits. After execution, verify with `git log --oneline -5` — the committer sometimes returns empty output on success. After commits land, follow [Git workflow](#git-workflow): fast-forward merge into `main`; by default, stop and report ready-to-push, or push when the user explicitly requests it and monitor CI.
+The repo uses the OpenCode committer protocol: dispatch the committer agent for a numbered commit plan, present it to the user, then execute the chosen commits. After execution, verify with `git log --oneline -5` — the committer sometimes returns empty output on success. After commits land, follow the standing loop in [Git workflow](#git-workflow): commit → fast-forward merge into `main` → push → CI check → deploy the CI-green build for build-affecting commits.
 
 ## CI / deploy
 
@@ -195,7 +195,7 @@ The repo uses the OpenCode committer protocol: dispatch the committer agent for 
 
 The workflow produces an unsigned `Ritoras.ipa` (~3.1 MB) uploaded as a build artifact. Build time is 5–10 minutes once the runner starts.
 
-**Deploy to device:** SideStore (on-device signing). The full pipeline — push → CI wait → artifact download → HTTP serve → `sidestore://install?url=` — is automated in `scripts/deploy-ipa.mjs`. An agent may push `main` when the user explicitly requests it (see [Git workflow](#git-workflow)), and may run the deploy pipeline when the user explicitly requests it.
+**Deploy to device:** SideStore (on-device signing). The full pipeline — push → CI wait → artifact download → HTTP serve → `sidestore://install?url=` — is automated in `scripts/deploy-ipa.mjs`. Under the standing loop in [Git workflow](#git-workflow), agents deploy after CI passes for build-affecting commits; commits that change none of `app/`, `keyboard/`, `shared/`, `project.yml`, or bundled assets/resources skip the device deploy because the produced binary is unchanged. After the pipeline serves the build, the user taps **Install** on the phone in SideStore to sign and install it.
 
 **Load the `ritoras-deploy-pipeline` skill before any deploy**; it documents the complete commit-to-device cycle including rollback from `~/.local/share/ritoras/builds/<runId>/`. GitHub token lives at `/home/michael/.config/opencode/gh-token`; repo is `magakis/ritoras`. Agents may use the token to push and query CI status when the user has explicitly requested the push; it must never be committed or leaked.
 
