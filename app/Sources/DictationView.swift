@@ -219,6 +219,7 @@ struct DictationView: View {
             .foregroundColor(.secondary)
             .padding(.top, 8)
         }
+        .padding(.top, 48)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             startTimer()
