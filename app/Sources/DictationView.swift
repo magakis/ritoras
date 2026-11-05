@@ -11,13 +11,20 @@ struct DictationView: View {
     @State private var showHistory = false
     @State private var showChunkReview = false
     @State private var showSettings = false
+    @State private var shouldFollowLiveTranscript = true
+    @State private var isDraggingLiveTranscript = false
+    @State private var isLiveTranscriptNearBottom = true
+
+    private let liveTranscriptBottomAnchor = "live-transcript-bottom"
 
     var body: some View {
         ZStack {
             Color(.systemBackground).ignoresSafeArea()
 
             VStack(spacing: 24) {
-                Spacer()
+                if viewModel.phase != .recording {
+                    Spacer()
+                }
 
                 switch viewModel.phase {
                 case .connecting:
@@ -34,7 +41,9 @@ struct DictationView: View {
                     cancelledContent
                 }
 
-                Spacer()
+                if viewModel.phase != .recording {
+                    Spacer()
+                }
             }
             .padding()
         }
@@ -151,7 +160,7 @@ struct DictationView: View {
     }
 
     private var recordingContent: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 10) {
             HStack(spacing: 8) {
                 Text(viewModel.activeModeLabel)
                     .font(.caption2)
@@ -169,7 +178,7 @@ struct DictationView: View {
             }
 
             Image(systemName: "waveform")
-                .font(.system(size: 48))
+                .font(.system(size: 40))
                 .foregroundColor(Color(.systemRed))
 
             Text("Recording...")
@@ -182,14 +191,7 @@ struct DictationView: View {
                 .monospacedDigit()
                 .contentTransition(.numericText())
 
-            if !viewModel.livePartial.isEmpty {
-                Text(viewModel.livePartial)
-                    .font(.callout)
-                    .foregroundColor(.secondary)
-                    .lineLimit(3)
-                    .padding(.horizontal)
-                    .multilineTextAlignment(.center)
-            }
+            liveTranscriptView
 
             Button(action: {
                 timer?.invalidate()
@@ -217,9 +219,72 @@ struct DictationView: View {
             .foregroundColor(.secondary)
             .padding(.top, 8)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             startTimer()
         }
+    }
+
+    private var liveTranscriptView: some View {
+        GeometryReader { viewport in
+            ScrollViewReader { scrollProxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(viewModel.livePartial)
+                            .font(.callout)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+
+                        Color.clear
+                            .frame(height: 1)
+                            .id(liveTranscriptBottomAnchor)
+                    }
+                    .padding(.horizontal)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .background {
+                        GeometryReader { content in
+                            Color.clear.preference(
+                                key: LiveTranscriptContentMetricsPreferenceKey.self,
+                                value: LiveTranscriptContentMetrics(
+                                    minY: content.frame(in: .named("live-transcript-scroll")).minY,
+                                    height: content.size.height
+                                )
+                            )
+                        }
+                    }
+                }
+                .coordinateSpace(name: "live-transcript-scroll")
+                .onPreferenceChange(LiveTranscriptContentMetricsPreferenceKey.self) { metrics in
+                    let distanceFromBottom = metrics.height + metrics.minY - viewport.size.height
+                    isLiveTranscriptNearBottom = distanceFromBottom <= 40
+
+                    // Layout and programmatic scroll changes should not disable bottom-following.
+                    if isDraggingLiveTranscript {
+                        shouldFollowLiveTranscript = isLiveTranscriptNearBottom
+                    }
+                }
+                .onChange(of: viewModel.livePartial, initial: true) { _, _ in
+                    guard shouldFollowLiveTranscript else { return }
+
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        scrollProxy.scrollTo(liveTranscriptBottomAnchor, anchor: .bottom)
+                    }
+                }
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 4)
+                        .onChanged { _ in
+                            isDraggingLiveTranscript = true
+                            shouldFollowLiveTranscript = isLiveTranscriptNearBottom
+                        }
+                        .onEnded { _ in
+                            shouldFollowLiveTranscript = isLiveTranscriptNearBottom
+                            isDraggingLiveTranscript = false
+                        }
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: - Transcribing State
@@ -369,5 +434,21 @@ struct DictationView: View {
         let minutes = Int(interval) / 60
         let seconds = Int(interval) % 60
         return String(format: "%02d:%02d", minutes, seconds)
+    }
+}
+
+private struct LiveTranscriptContentMetrics: Equatable {
+    let minY: CGFloat
+    let height: CGFloat
+}
+
+private struct LiveTranscriptContentMetricsPreferenceKey: PreferenceKey {
+    static var defaultValue = LiveTranscriptContentMetrics(minY: 0, height: 0)
+
+    static func reduce(
+        value: inout LiveTranscriptContentMetrics,
+        nextValue: () -> LiveTranscriptContentMetrics
+    ) {
+        value = nextValue()
     }
 }
