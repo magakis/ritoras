@@ -14,6 +14,8 @@ struct DictationView: View {
     @State private var shouldFollowLiveTranscript = true
     @State private var isDraggingLiveTranscript = false
     @State private var isLiveTranscriptNearBottom = true
+    @State private var pendingLiveTranscriptFollowScroll = false
+    @State private var liveTranscriptRevision = 0
 
     private let liveTranscriptBottomAnchor = "live-transcript-bottom"
 
@@ -249,7 +251,8 @@ struct DictationView: View {
                                 key: LiveTranscriptContentMetricsPreferenceKey.self,
                                 value: LiveTranscriptContentMetrics(
                                     minY: content.frame(in: .named("live-transcript-scroll")).minY,
-                                    height: content.size.height
+                                    height: content.size.height,
+                                    revision: liveTranscriptRevision
                                 )
                             )
                         }
@@ -257,6 +260,8 @@ struct DictationView: View {
                 }
                 .coordinateSpace(name: "live-transcript-scroll")
                 .onPreferenceChange(LiveTranscriptContentMetricsPreferenceKey.self) { metrics in
+                    guard metrics.revision == liveTranscriptRevision else { return }
+
                     let distanceFromBottom = metrics.height + metrics.minY - viewport.size.height
                     isLiveTranscriptNearBottom = distanceFromBottom <= 40
 
@@ -264,13 +269,15 @@ struct DictationView: View {
                     if isDraggingLiveTranscript {
                         shouldFollowLiveTranscript = isLiveTranscriptNearBottom
                     }
+
+                    if pendingLiveTranscriptFollowScroll && shouldFollowLiveTranscript {
+                        scrollProxy.scrollTo(liveTranscriptBottomAnchor, anchor: .bottom)
+                        pendingLiveTranscriptFollowScroll = false
+                    }
                 }
                 .onChange(of: viewModel.livePartial, initial: true) { _, _ in
-                    guard shouldFollowLiveTranscript else { return }
-
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        scrollProxy.scrollTo(liveTranscriptBottomAnchor, anchor: .bottom)
-                    }
+                    pendingLiveTranscriptFollowScroll = true
+                    liveTranscriptRevision += 1
                 }
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 4)
@@ -441,10 +448,11 @@ struct DictationView: View {
 private struct LiveTranscriptContentMetrics: Equatable {
     let minY: CGFloat
     let height: CGFloat
+    let revision: Int
 }
 
 private struct LiveTranscriptContentMetricsPreferenceKey: PreferenceKey {
-    static var defaultValue = LiveTranscriptContentMetrics(minY: 0, height: 0)
+    static var defaultValue = LiveTranscriptContentMetrics(minY: 0, height: 0, revision: 0)
 
     static func reduce(
         value: inout LiveTranscriptContentMetrics,
