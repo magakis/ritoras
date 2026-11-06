@@ -169,6 +169,10 @@ actor AudioRecorder {
 
     // MARK: - Stop Recording
 
+    func isCurrentlyRecording() -> Bool {
+        recorder?.isRecording == true
+    }
+
     /// Stops the ongoing recording and validates the output file.
     ///
     /// The file must exist and be larger than 1 KB to be considered valid.

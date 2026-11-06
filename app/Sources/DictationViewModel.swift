@@ -2870,6 +2870,45 @@ final class DictationViewModel: ObservableObject {
         }
     }
 
+    // Retained actors are safe only when they are the same session's stopped recorders.
+    private func savedAudioRecoveryGuardAllows(
+        jobId: UUID,
+        initialSessionID: UUID?,
+        initialRecorder: AudioRecorder?,
+        initialStreamRecorder: StreamingAudioRecorder?
+    ) async -> Bool {
+        let recorderAtCheck = recorder
+        let streamRecorderAtCheck = streamRecorder
+        let recorderIsRecording = await recorderAtCheck?.isCurrentlyRecording() ?? false
+        let streamRecorderIsRecording = await streamRecorderAtCheck?.isCurrentlyRecording() ?? false
+        let activeSessionMatches = activeID == initialSessionID
+        let recorderReferenceStable = recorderAtCheck === initialRecorder
+            && recorder === recorderAtCheck
+        let streamRecorderReferenceStable = streamRecorderAtCheck === initialStreamRecorder
+            && streamRecorder === streamRecorderAtCheck
+        let recorderState = recorderAtCheck == nil
+            ? "absent"
+            : (recorderIsRecording ? "recording" : "retained-but-stopped")
+        let streamRecorderState = streamRecorderAtCheck == nil
+            ? "absent"
+            : (streamRecorderIsRecording ? "recording" : "retained-but-stopped")
+
+        FileLogger.shared.debug(.transcription, "Saved-audio recovery guard evaluated", payload: [
+            "jobId": jobId.uuidString,
+            "activeSessionMatches": activeSessionMatches,
+            "recorderState": recorderState,
+            "streamRecorderState": streamRecorderState,
+            "recorderReferenceStable": recorderReferenceStable,
+            "streamRecorderReferenceStable": streamRecorderReferenceStable
+        ])
+
+        return activeSessionMatches
+            && recorderReferenceStable
+            && streamRecorderReferenceStable
+            && !recorderIsRecording
+            && !streamRecorderIsRecording
+    }
+
     /// Loads saved audio for `jobId`, routes it through the unified transcription
     /// entrypoint, and on success cleans up the audio file + failed-job record.
     /// Returns the transcribed text on success; throws on failure. Does NOT touch
@@ -2919,8 +2958,15 @@ final class DictationViewModel: ObservableObject {
 
         let config = SharedConfig.load()
         let initialSessionID = activeID
+        let initialRecorder = recorder
+        let initialStreamRecorder = streamRecorder
         let liveUploadIDs = await BackgroundTranscriptionUploader.shared.liveUploadIDs()
-        guard activeID == initialSessionID, recorder == nil, streamRecorder == nil else {
+        guard await savedAudioRecoveryGuardAllows(
+            jobId: jobId,
+            initialSessionID: initialSessionID,
+            initialRecorder: initialRecorder,
+            initialStreamRecorder: initialStreamRecorder
+        ) else {
             throw WhisperError.jobFailed("A dictation started while recovery status was being checked")
         }
         guard !liveUploadIDs.contains(jobId) else {
@@ -2960,7 +3006,12 @@ final class DictationViewModel: ObservableObject {
                 } catch {
                     throw WhisperError.jobFailed("Server status is unknown: \(error.localizedDescription). Check status again before retrying.")
                 }
-                guard activeID == initialSessionID, recorder == nil, streamRecorder == nil else {
+                guard await savedAudioRecoveryGuardAllows(
+                    jobId: jobId,
+                    initialSessionID: initialSessionID,
+                    initialRecorder: initialRecorder,
+                    initialStreamRecorder: initialStreamRecorder
+                ) else {
                     throw WhisperError.jobFailed("A dictation started while recovery status was being checked")
                 }
                 guard let latestPending = FailedJobStore.shared.listPending().first(where: { $0.jobId == jobId }),

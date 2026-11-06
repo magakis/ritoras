@@ -2732,6 +2732,10 @@ actor StreamingAudioRecorder {
 
     // MARK: - Stop
 
+    func isCurrentlyRecording() -> Bool {
+        isRecording
+    }
+
     /// Stops streaming audio capture and flushes any in-progress accumulator
     /// as a final chunk. `false` indicates an incomplete requested disk recovery;
     /// the caller should use its existing stop-time failure handling.
