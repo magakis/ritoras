@@ -309,7 +309,7 @@ function renderIndexPage(versions, host, syncInfo) {
   let syncHtml = '';
   if (syncInfo) {
     const timeHtml = syncInfo.at ? fmtDate(syncInfo.at) : '';
-    syncHtml = '<div class="sync-banner">\n    <div class="sync-status">Currently serving: #' + escapeHtml(String(latest.runNumber)) + ' (<code>' + escapeHtml(latest.shortSha) + '</code>)</div>\n    <div class="sync-info">Last sync: ' + escapeHtml(syncInfo.status) + ' \u2014 ' + escapeHtml(syncInfo.message) + (timeHtml ? ' <span class="sync-time">' + escapeHtml(timeHtml) + '</span>' : '') + '</div>\n    <a class="btn btn-primary sync-btn" href="/sync">\u{1F504} Check for new build</a>\n  </div>';
+    syncHtml = '<div class="sync-banner">\n    <div class="sync-status">Currently serving: #' + escapeHtml(String(latest.runNumber)) + ' (run ' + escapeHtml(String(latest.runId)) + ', <code>' + escapeHtml(latest.sha) + '</code>)</div>\n    <div class="sync-info">Last sync: ' + escapeHtml(syncInfo.status) + ' \u2014 ' + escapeHtml(syncInfo.message) + (timeHtml ? ' <span class="sync-time">' + escapeHtml(timeHtml) + '</span>' : '') + '</div>\n    <a class="btn btn-primary sync-btn" href="/sync">\u{1F504} Check for new build</a>\n  </div>';
   }
 
   return '<!DOCTYPE html>\n<html>\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1">\n  <title>Ritoras Install</title>\n  <style>\n    * { margin: 0; padding: 0; box-sizing: border-box; }\n    body {\n      font-family: -apple-system, BlinkMacSystemFont, sans-serif;\n      display: flex;\n      flex-direction: column;\n      align-items: center;\n      justify-content: center;\n      min-height: 100vh;\n      padding: 24px;\n      background: #f5f5f7;\n      color: #1d1d1f;\n    }\n    @media (prefers-color-scheme: dark) {\n      body {\n        background: #1c1c1e;\n        color: #f5f5f7;\n      }\n    }\n    .container {\n      width: 100%;\n      max-width: 480px;\n      text-align: center;\n    }\n    h1 {\n      font-size: 28px;\n      font-weight: 700;\n      margin-bottom: 8px;\n    }\n    .subtitle {\n      font-size: 16px;\n      color: #6e6e73;\n      margin-bottom: 32px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .subtitle {\n        color: #98989d;\n      }\n    }\n    .btn {\n      display: block;\n      width: 100%;\n      padding: 14px 20px;\n      font-size: 17px;\n      font-family: inherit;\n      border-radius: 12px;\n      text-decoration: none;\n      text-align: center;\n      -webkit-tap-highlight-color: transparent;\n      transition: opacity 0.2s;\n    }\n    .btn:active {\n      opacity: 0.7;\n    }\n    .btn-primary {\n      background: #007aff;\n      color: #fff;\n      font-weight: 600;\n      margin-bottom: 12px;\n    }\n    .btn-secondary {\n      background: transparent;\n      color: #007aff;\n      border: 1.5px solid #007aff;\n      font-weight: 500;\n      margin-bottom: 12px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .btn-primary {\n        background: #0a84ff;\n      }\n      .btn-secondary {\n        color: #0a84ff;\n        border-color: #0a84ff;\n      }\n    }\n    .btn-muted {\n      color: #6e6e73;\n      border-color: #d2d2d7;\n    }\n    @media (prefers-color-scheme: dark) {\n      .btn-muted {\n        color: #98989d;\n        border-color: #48484a;\n      }\n    }\n    .badge {\n      display: inline-block;\n      background: #007aff;\n      color: #fff;\n      font-size: 12px;\n      font-weight: 600;\n      padding: 3px 10px;\n      border-radius: 10px;\n      margin-bottom: 16px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .badge {\n        background: #0a84ff;\n      }\n    }\n    .section-heading {\n      margin-top: 32px;\n      margin-bottom: 16px;\n      font-size: 20px;\n      font-weight: 600;\n      text-align: left;\n    }\n    .version-row {\n      display: flex;\n      align-items: center;\n      justify-content: space-between;\n      padding: 12px 0;\n      border-top: 1px solid #d2d2d7;\n      gap: 12px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .version-row {\n        border-top-color: #48484a;\n      }\n    }\n    .version-info {\n      text-align: left;\n      font-size: 14px;\n      line-height: 1.4;\n      min-width: 0;\n    }\n    .version-actions {\n      display: flex;\n      gap: 8px;\n      flex-shrink: 0;\n    }\n    .version-info .commit {\n      color: #6e6e73;\n      font-size: 13px;\n      overflow: hidden;\n      text-overflow: ellipsis;\n      white-space: nowrap;\n      max-width: 260px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .version-info .commit {\n        color: #98989d;\n      }\n    }\n    .version-actions .btn {\n      width: auto;\n      padding: 8px 16px;\n      font-size: 14px;\n      margin-bottom: 0;\n    }\n    .note {\n      margin-top: 24px;\n      font-size: 13px;\n      color: #6e6e73;\n    }\n    @media (prefers-color-scheme: dark) {\n      .note {\n        color: #98989d;\n      }\n    }\n    .sync-banner {\n      margin-top: 24px;\n      padding: 16px;\n      background: #e8e8ed;\n      border-radius: 12px;\n      text-align: center;\n    }\n    @media (prefers-color-scheme: dark) {\n      .sync-banner {\n        background: #2c2c2e;\n      }\n    }\n    .sync-status {\n      font-size: 15px;\n      font-weight: 600;\n      margin-bottom: 4px;\n    }\n    .sync-info {\n      font-size: 13px;\n      color: #6e6e73;\n      margin-bottom: 12px;\n    }\n    @media (prefers-color-scheme: dark) {\n      .sync-info {\n        color: #98989d;\n      }\n    }\n    .sync-time {\n      opacity: 0.7;\n    }\n    .sync-btn {\n      margin-bottom: 0 !important;\n    }\n  </style>\n</head>\n<body>\n  <div class="container">\n    <h1>Ritoras</h1>\n    <p class="subtitle">Build #' + escapeHtml(latest.runNumber) + ' \u2022 ' + escapeHtml(latest.shortSha) + ' \u2022 ' + escapeHtml(fmtDate(latest.builtAt)) + '</p>\n    <span class="badge">Latest</span>\n    <a class="btn btn-primary" href="sidestore://install?url=http://' + escapeHtml(host) + '/Ritoras.ipa">Install via SideStore</a>\n    <a class="btn btn-secondary" href="sidestore://">Open SideStore</a>\n    <a class="btn btn-secondary btn-muted" href="/Ritoras.ipa">Download .ipa</a>\n    ' + syncHtml + '\n    ' + prevHtml + '\n  </div>\n</body>\n</html>';
@@ -490,7 +490,7 @@ async function wait(sha) {
     if (updated.status === 'completed') {
       if (updated.conclusion === 'success') {
         console.log(`Build succeeded: ${updated.html_url}`);
-        return;
+        return updated;
       }
       throw new Error(
         `Build failed (${updated.conclusion}): ${updated.html_url}`,
@@ -502,7 +502,7 @@ async function wait(sha) {
   throw new Error('Timed out waiting for build to complete');
 }
 
-async function download(runId) {
+async function download(runId, expectedSha) {
   mkdirSync(DEPLOY_DIR, { recursive: true });
 
   let run;
@@ -517,6 +517,12 @@ async function download(runId) {
       throw new Error('No successful workflow runs found');
     }
     run = data.workflow_runs[0];
+  }
+
+  if (expectedSha && run.head_sha !== expectedSha) {
+    throw new Error(
+      `Run ${run.id} head SHA mismatch: expected ${expectedSha}, found ${run.head_sha}`,
+    );
   }
 
   // Locate the Ritoras.ipa artifact
@@ -553,10 +559,15 @@ async function download(runId) {
   };
 
   // Idempotency guard: meta.json is the LAST thing written on a successful
-  // store. Its presence means the build is complete on disk — skip the
-  // multi-MB artifact download entirely. A partial dir without meta.json is
-  // treated as absent and re-downloaded.
-  if (existsSync(join(versionDir(meta.runId), 'meta.json'))) {
+  // store. Skip only when the on-disk metadata identifies this exact run and
+  // SHA; a partial or mismatched build is downloaded again.
+  const existing = readMeta(versionDir(meta.runId));
+  if (
+    existing &&
+    String(existing.runId) === String(meta.runId) &&
+    existing.sha === meta.sha &&
+    (!expectedSha || existing.sha === expectedSha)
+  ) {
     console.log(`Build ${meta.runNumber} (${meta.shortSha}) already on disk, skipping.`);
     return;
   }
@@ -639,8 +650,34 @@ async function listRemote(count) {
 async function deploy() {
   const sha = await push();
   await ensureBuild(sha);
-  await wait(sha);
-  await download();
+  const run = await wait(sha);
+  if (run.head_sha !== sha) {
+    throw new Error(
+      `Run ${run.id} head SHA mismatch: expected pushed SHA ${sha}, found ${run.head_sha}`,
+    );
+  }
+  await download(run.id, sha);
+  const selectedBuild = findVersion(run.id);
+  if (!selectedBuild) {
+    throw new Error(`Refusing to serve: no build is stored for run ${run.id} (SHA ${sha})`);
+  }
+  if (selectedBuild.sha !== sha) {
+    throw new Error(
+      `Refusing to serve run ${selectedBuild.runId}: expected pushed SHA ${sha}, found ${selectedBuild.sha}`,
+    );
+  }
+  const latestBuild = resolveLatest();
+  if (
+    !latestBuild ||
+    String(latestBuild.runId) !== String(selectedBuild.runId) ||
+    latestBuild.sha !== sha
+  ) {
+    throw new Error(
+      `Refusing to serve unexpected latest build: expected run ${selectedBuild.runId} SHA ${sha}, ` +
+      `found run ${latestBuild?.runId ?? 'none'} SHA ${latestBuild?.sha ?? 'none'}`,
+    );
+  }
+  console.log(`Serving build run ${selectedBuild.runId} (SHA ${selectedBuild.sha})`);
   await serve();
 }
 
