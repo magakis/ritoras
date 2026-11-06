@@ -1535,7 +1535,42 @@ enum WhisperClient {
             // B.9 — Stuck-state detection
             let elapsed = Date().timeIntervalSince(lastSuccessfulPollAt)
             if elapsed >= 60 {
-                throw WhisperError.stuck
+                FileLogger.shared.debug(.network, "transcribeAsync final status check", payload: [
+                    "pollCount": pollCount,
+                    "elapsedSeconds": elapsed,
+                    "finalPoll": true
+                ])
+                let finalPollResult: JobStatusResponse
+                do {
+                    finalPollResult = try await pollJob(
+                        statusEndpoint: submitResponse.statusEndpoint,
+                        serverURL: serverURL,
+                        correlationId: correlationId
+                    )
+                } catch {
+                    throw WhisperError.stuck
+                }
+                if finalPollResult.status == "failed" {
+                    let reason = finalPollResult.error ?? "unknown error"
+                    FileLogger.shared.debug(.network, "transcribeAsync failed", payload: [
+                        "reason": reason,
+                        "finalPoll": true
+                    ])
+                    throw WhisperError.jobFailed(reason)
+                }
+                guard finalPollResult.status == "ready" else {
+                    throw WhisperError.stuck
+                }
+                guard let text = finalPollResult.text, !text.isEmpty else {
+                    throw WhisperError.decodingError("Job ready but text is empty")
+                }
+                FileLogger.shared.debug(.network, "transcribeAsync ready", payload: [
+                    "pollCount": pollCount,
+                    "textLength": text.count,
+                    "revision": finalPollResult.revision ?? -1,
+                    "finalPoll": true
+                ])
+                return text
             }
             if elapsed >= 30 && !stuckWarned {
                 FileLogger.shared.warn(.network, "transcribeAsync no successful poll in 30s", payload: [
