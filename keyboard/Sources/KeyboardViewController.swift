@@ -227,6 +227,9 @@ class KeyboardViewController: UIInputViewController {
     private let settingsCache = KeyboardSettingsCache()
     private var darwinSettingsChangedToken: DarwinObserverToken?
     private var darwinLearnedWordsChangedToken: DarwinObserverToken?
+    private var darwinKeyboardServicesPinChangedToken: DarwinObserverToken?
+    private var keyboardServicesSnapshotPollTimer: Timer?
+    private let keyboardServicesSuggestionCoordinator = KeyboardServicesSuggestionCoordinator()
 
     // Persisted across keyboard process restarts
     private var lastProcessedPayloadId: UUID? {
@@ -350,6 +353,22 @@ class KeyboardViewController: UIInputViewController {
         }
 
         setupKeyboardView()
+        keyboardServicesSuggestionCoordinator.onCandidates = { [weak self] endpoint,
+                                                                candidates,
+                                                                revision,
+                                                                epoch,
+                                                                contextToken in
+            self?.keyboardView?.applyServerSuggestionResult(
+                candidates,
+                from: endpoint,
+                revision: revision,
+                epoch: epoch,
+                contextToken: contextToken
+            )
+        }
+        keyboardServicesSuggestionCoordinator.onAugmentationInvalidated = { [weak self] in
+            self?.keyboardView?.clearServerSuggestionAugmentation()
+        }
         let legacyDeferredKeys = ["ritoras_deferred_text", "ritoras_deferred_ts", "ritoras_deferred_doc_id"]
         let hadLegacyDeferredValue = legacyDeferredKeys.contains { key in
             guard let value = UserDefaults.standard.object(forKey: key) else { return false }
@@ -369,6 +388,7 @@ class KeyboardViewController: UIInputViewController {
             DispatchQueue.main.async {
                 HapticsManager.shared.reloadEnabledFromAppGroup()
                 self.applyLanguageSetting()
+                self.refreshKeyboardServicesPinSnapshot()
             }
         }
         darwinLearnedWordsChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinLearnedWordsChangedNotificationName) { [weak self] in
@@ -378,6 +398,14 @@ class KeyboardViewController: UIInputViewController {
                 self.scheduleSuggestionRefresh()
             }
         }
+        darwinKeyboardServicesPinChangedToken = DarwinNotifier.observe(
+            SharedConfig.Defaults.darwinKeyboardServicesPinChangedNotificationName
+        ) { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                self?.refreshKeyboardServicesPinSnapshot()
+            }
+        }
+        refreshKeyboardServicesPinSnapshot()
         buildPredictionEngine()
         state = .idle
         FileLogger.shared.debug(.lifecycle, "process launch",
@@ -391,6 +419,8 @@ class KeyboardViewController: UIInputViewController {
         super.viewDidAppear(animated)
         keyboardView.updateFullAccess(hasFullAccess)
         registerStateChangedObserver()
+        refreshKeyboardServicesPinSnapshot()
+        startKeyboardServicesSnapshotPolling()
         followMeInboxCheck(reason: "viewDidAppear")
 
         // App-group snapshot polling (primary transport).
@@ -444,6 +474,7 @@ class KeyboardViewController: UIInputViewController {
         view.setNeedsLayout()
         view.layoutIfNeeded()
         applyLanguageSetting()
+        refreshKeyboardServicesPinSnapshot()
     }
 
     override func viewIsAppearing(_ animated: Bool) {
@@ -526,13 +557,12 @@ class KeyboardViewController: UIInputViewController {
         FileLogger.shared.info(.keyboard, "viewWillDisappear")
 
         // Cancel timers so they don't fire across app switches.
-        // The Darwin observer is intentionally kept alive: dictation may complete
-        // on the server while the keyboard is hidden (e.g. user is recording in
-        // the container app), and we want the notification to land immediately
-        // when the keyboard reappears without waiting for server polling.
-        // The observer auto-unregisters in deinit; stale notifications after a
-        // resolved dictation are filtered by pendingRequestId.
+        // Darwin observers are intentionally kept alive: dictation may complete
+        // while hidden, and pin revisions must also be observed on reappear.
+        // Dictation state notifications are filtered by pendingRequestId; pin
+        // revisions remain observable until the controller is deinitialized.
         cancelOutstandingAsyncWork()
+        stopKeyboardServicesSnapshotPolling()
     }
 
     override func viewDidDisappear(_ animated: Bool) {
@@ -550,6 +580,8 @@ class KeyboardViewController: UIInputViewController {
         darwinStateChangedToken = nil
         darwinSettingsChangedToken = nil
         darwinLearnedWordsChangedToken = nil
+        darwinKeyboardServicesPinChangedToken = nil
+        stopKeyboardServicesSnapshotPolling()
     }
 
     // MARK: - Setup
@@ -1431,9 +1463,8 @@ class KeyboardViewController: UIInputViewController {
     }
 
     /// Cancels the common subset of outstanding async work across both
-    /// viewWillDisappear and deinit. Does NOT touch Darwin tokens
-    /// (darwinStateChangedToken, darwinSettingsChangedToken), which are
-    /// intentionally kept alive across disappear and nilled only in deinit.
+    /// viewWillDisappear and deinit. Does NOT touch Darwin tokens, which stay
+    /// alive across disappear and are nilled only in deinit.
     private func cancelOutstandingAsyncWork() {
         // Timers
         waitTimer?.invalidate()
@@ -1483,6 +1514,41 @@ class KeyboardViewController: UIInputViewController {
 
         // Suggestion lookup (releases the engine-capturing work item)
         keyboardView?.cancelSuggestionLookup()
+        keyboardServicesSuggestionCoordinator.cancelPendingRequests()
+    }
+
+    private func startKeyboardServicesSnapshotPolling() {
+        guard SharedConfig.Defaults.serverSuggestionsEnabled,
+              keyboardServicesSnapshotPollTimer == nil else {
+            return
+        }
+        keyboardServicesSnapshotPollTimer = Timer.scheduledTimer(
+            withTimeInterval: 0.5,
+            repeats: true
+        ) { [weak self] _ in
+            self?.refreshKeyboardServicesPinSnapshot()
+        }
+    }
+
+    private func stopKeyboardServicesSnapshotPolling() {
+        keyboardServicesSnapshotPollTimer?.invalidate()
+        keyboardServicesSnapshotPollTimer = nil
+    }
+
+    private func refreshKeyboardServicesPinSnapshot() {
+        guard SharedConfig.Defaults.serverSuggestionsEnabled else { return }
+        let snapshot = KeyboardServicesPinSnapshotStore.snapshot()
+        let changed = keyboardServicesSuggestionCoordinator.updateSnapshot(
+            snapshot,
+            configuredServers: SharedConfig.load().servers
+        )
+        guard changed, SharedConfig.Defaults.serverSuggestionsEnabled else { return }
+
+        let activeRevision = keyboardServicesSuggestionCoordinator.activeSnapshotRevision
+        keyboardView?.setServerSuggestionSnapshotRevision(activeRevision)
+        if activeRevision != nil, keyboardView?.window != nil {
+            keyboardView.refreshSuggestions()
+        }
     }
 
     /// Cancels the current dictation: stops all polling, clears the pending
@@ -2162,12 +2228,39 @@ extension KeyboardViewController: KeyboardViewDelegate {
             currentWord: extracted.currentWord,
             lookupWord: extracted.lookupWord,
             previousWord: extracted.previousWord,
-            previousWord2: extracted.previousWord2
+            previousWord2: extracted.previousWord2,
+            context: SharedConfig.Defaults.serverSuggestionsEnabled
+                ? boundedSuggestionContext(context ?? "")
+                : ""
         )
+    }
+
+    private func boundedSuggestionContext(_ context: String) -> String {
+        var suffix = String.UnicodeScalarView()
+        for scalar in context.unicodeScalars.suffix(512) {
+            suffix.append(scalar)
+        }
+        return String(suffix)
     }
 
     func keyboardViewPredictionEngine(_ view: KeyboardView) -> PredictionEngine? {
         return predictionEngine
+    }
+
+    func keyboardView(
+        _ view: KeyboardView,
+        didDisplayLocalSuggestions suggestions: [String],
+        for input: SuggestionInputSnapshot,
+        epoch: UInt64,
+        contextToken: UInt64
+    ) {
+        keyboardServicesSuggestionCoordinator.requestSuggestions(
+            input: input,
+            localCandidates: suggestions,
+            language: view.currentLanguage,
+            epoch: epoch,
+            contextToken: contextToken
+        )
     }
 
     func keyboardContextToken(_ view: KeyboardView) -> UInt64 {

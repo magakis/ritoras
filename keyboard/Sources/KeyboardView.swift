@@ -50,11 +50,12 @@ enum UIMode: Equatable {
 
 // MARK: - Suggestion Input Snapshot
 
-struct SuggestionInputSnapshot {
+struct SuggestionInputSnapshot: Sendable {
     let currentWord: String
     let lookupWord: String
     let previousWord: String?
     let previousWord2: String?
+    let context: String
 }
 
 // MARK: - Delegate
@@ -65,6 +66,13 @@ protocol KeyboardViewDelegate: AnyObject {
     func keyboardView(_ view: KeyboardView, didLongPressSuggestion text: String)
     func keyboardViewSuggestionSnapshot(_ view: KeyboardView) -> SuggestionInputSnapshot?
     func keyboardViewPredictionEngine(_ view: KeyboardView) -> PredictionEngine?
+    func keyboardView(
+        _ view: KeyboardView,
+        didDisplayLocalSuggestions suggestions: [String],
+        for input: SuggestionInputSnapshot,
+        epoch: UInt64,
+        contextToken: UInt64
+    )
     func keyboardViewMicState(_ view: KeyboardView) -> KeyboardState
     func keyboardViewBackspaceDidBegin(_ view: KeyboardView)
     func keyboardViewBackspaceDidEnd(_ view: KeyboardView)
@@ -76,6 +84,13 @@ extension KeyboardViewDelegate {
     func keyboardViewBackspaceDidBegin(_ view: KeyboardView) {}
     func keyboardViewBackspaceDidEnd(_ view: KeyboardView) {}
     func keyboardView(_ view: KeyboardView, didLongPressSuggestion text: String) {}
+    func keyboardView(
+        _ view: KeyboardView,
+        didDisplayLocalSuggestions suggestions: [String],
+        for input: SuggestionInputSnapshot,
+        epoch: UInt64,
+        contextToken: UInt64
+    ) {}
     func keyboardViewDidRequestCancelDictation(_ view: KeyboardView) {}
     func keyboardContextToken(_ view: KeyboardView) -> UInt64 { return 0 }
 }
@@ -557,6 +572,18 @@ class KeyboardView: UIView {
     }
     /// Injected on every refreshSuggestions call and read by the suggestion-tap closure.
     private var suggestionCache = SuggestionDisplayCache()
+    private struct AppliedServerSuggestionResults {
+        let revision: UInt64
+        let contextToken: UInt64
+        var results = KeyboardServicesSuggestionResults()
+    }
+    private var localSuggestions: [String] = []
+    private var localSuggestionsAreBounded = true
+    private var localSuggestionEpoch: UInt64?
+    private var localSuggestionToken: UInt64?
+    private var localSuggestionIsEmptyPrefix = false
+    private var serverSuggestionSnapshotRevision: UInt64?
+    private var appliedServerSuggestionResults: AppliedServerSuggestionResults?
     private var _letterRegionContainer: UIView?
     private var letterRegionContainer: UIView {
         if let v = _letterRegionContainer { return v }
@@ -1436,7 +1463,10 @@ class KeyboardView: UIView {
     /// The controller mirrors this with its own `layoutMode = .letters`.
     func setLanguage(_ language: KeyboardLanguage) {
         guard language != currentLanguage else { return }
+        suggestionEpoch &+= 1
         currentLanguage = language
+        appliedServerSuggestionResults = nil
+        renderCurrentSuggestions()
         currentLayoutMode = .letters
         accentPicker.hide()   // defensive — the picker cannot follow a language switch
         rebuildKeyRows()
@@ -1444,6 +1474,52 @@ class KeyboardView: UIView {
 
     func noteSuggestionContextChange() {
         suggestionEpoch &+= 1
+    }
+
+    /// Clears old network results when the effective pin or configured list changes.
+    func setServerSuggestionSnapshotRevision(_ revision: UInt64?) {
+        serverSuggestionSnapshotRevision = revision
+        clearServerSuggestionAugmentation()
+    }
+
+    /// Drops cached server candidates after a failure advances or disables consumption.
+    func clearServerSuggestionAugmentation() {
+        appliedServerSuggestionResults = nil
+        renderCurrentSuggestions()
+    }
+
+    /// Applies network candidates only to the still-displayed local epoch and context.
+    func applyServerSuggestionResult(
+        _ candidates: [String],
+        from endpoint: KeyboardServicesSuggestionEndpoint,
+        revision: UInt64,
+        epoch: UInt64,
+        contextToken: UInt64
+    ) {
+        guard revision == serverSuggestionSnapshotRevision,
+              epoch == suggestionEpoch,
+              localSuggestionEpoch == epoch,
+              localSuggestionToken == contextToken,
+              contextToken != 0,
+              shouldApplyLookupResult(
+                capturedToken: contextToken,
+                liveToken: delegate?.keyboardContextToken(self) ?? 0
+              ) else {
+            return
+        }
+
+        if appliedServerSuggestionResults?.revision != revision
+            || appliedServerSuggestionResults?.contextToken != contextToken {
+            appliedServerSuggestionResults = AppliedServerSuggestionResults(
+                revision: revision,
+                contextToken: contextToken
+            )
+        }
+        appliedServerSuggestionResults?.results.set(
+            Array(candidates.prefix(KeyboardServicesSuggestionPolicy.maximumDisplayedCandidates)),
+            for: endpoint
+        )
+        renderCurrentSuggestions()
     }
 
     func refreshSuggestions() {
@@ -1455,6 +1531,12 @@ class KeyboardView: UIView {
             suggestionLookupWorkItem?.cancel()
             suggestionLookupWorkItem = nil
             suggestionEpoch &+= 1
+            localSuggestions = []
+            localSuggestionsAreBounded = true
+            localSuggestionEpoch = suggestionEpoch
+            localSuggestionToken = token
+            localSuggestionIsEmptyPrefix = false
+            appliedServerSuggestionResults = nil
             suggestionCache.update([], token: token)
             suggestionBar.update(with: [])
             return
@@ -1463,7 +1545,9 @@ class KeyboardView: UIView {
         // Capture the last-shown suggestion set synchronously (main thread)
         // before the async lookup hop. The sticky-rescue pass in the engine
         // uses it to keep long completions visible as the user types.
-        let previousDisplayed = suggestionCache.displayed
+        let previousDisplayed = localSuggestionsAreBounded
+            ? localSuggestions
+            : suggestionCache.displayed
 
         // Cancel any in-flight lookup before issuing a new one.
         // Guarantees at most one lookup in flight (48 MB Jetsam: no parallel
@@ -1501,12 +1585,58 @@ class KeyboardView: UIView {
                     }
                     return
                 }
-                self.suggestionCache.update(suggestions, token: token)
-                self.suggestionBar.update(with: suggestions)
+                self.localSuggestionEpoch = capturedEpoch
+                self.localSuggestionToken = token
+                self.localSuggestionIsEmptyPrefix = snapshot.currentWord.isEmpty
+                guard SharedConfig.Defaults.serverSuggestionsEnabled,
+                      suggestions.allSatisfy({
+                          $0.unicodeScalars.count
+                            <= KeyboardServicesSuggestionPolicy.maximumCandidateScalars
+                      }) else {
+                    self.localSuggestions = []
+                    self.localSuggestionsAreBounded = false
+                    self.appliedServerSuggestionResults = nil
+                    self.suggestionCache.update(suggestions, token: token)
+                    self.suggestionBar.update(with: suggestions)
+                    return
+                }
+                self.localSuggestionsAreBounded = true
+                self.localSuggestions = suggestions
+                if self.appliedServerSuggestionResults?.contextToken != token
+                    || self.appliedServerSuggestionResults?.revision
+                        != self.serverSuggestionSnapshotRevision {
+                    self.appliedServerSuggestionResults = nil
+                }
+                self.renderCurrentSuggestions()
+                self.delegate?.keyboardView(
+                    self,
+                    didDisplayLocalSuggestions: suggestions,
+                    for: snapshot,
+                    epoch: capturedEpoch,
+                    contextToken: token
+                )
             }
         }
         suggestionLookupWorkItem = workItem
         suggestionLookupQueue.async(execute: workItem)
+    }
+
+    private func renderCurrentSuggestions() {
+        guard localSuggestionsAreBounded else {
+            suggestionBar.update(with: suggestionCache.displayed)
+            return
+        }
+        let augmentation = appliedServerSuggestionResults
+        let suggestions = KeyboardServicesSuggestionPolicy.mergeForDisplay(
+            localCandidates: localSuggestions,
+            serverResults: augmentation?.results,
+            localContextToken: localSuggestionToken ?? 0,
+            serverContextToken: augmentation?.contextToken,
+            serverRevisionMatches: augmentation?.revision == serverSuggestionSnapshotRevision,
+            isEmptyPrefix: localSuggestionIsEmptyPrefix
+        )
+        suggestionCache.update(suggestions, token: localSuggestionToken ?? 0)
+        suggestionBar.update(with: suggestions)
     }
 
     /// Releases the engine-capturing suggestion work item. Called by the VC on
