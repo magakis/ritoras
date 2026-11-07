@@ -281,12 +281,18 @@ struct SharedConfig {
         static let learnedWordsPasteboardName = "com.ritoras.learnedWordsSync"
         static let learnedWordsPasteboardType = "com.ritoras.learnedwords"
         static let darwinLearnedWordsChangedNotificationName = "com.ritoras.learnedWordsChanged"
+        static let darwinKeyboardServicesPinChangedNotificationName =
+            "com.ritoras.keyboardServicesPinChanged"
         static let localhostServerPort: UInt16 = 47321
         static let localhostAuthTokenKey = "localhost.authToken"
         /// Shared by the app and keyboard when SideStore cannot expose the app group.
         static let localhostFallbackAuthToken =
             "55c65d1b44753f3d86f279b14f1731ff11f301fe1a05cdcd51c2038def38b781"
         static let dictationPayloadKey = "dictation.payload"
+        static let keyboardServicesPinSnapshotKey = "keyboardServices.pinSnapshot.v1"
+        static let keyboardServicesFailureTelemetryKey = "keyboardServices.failureTelemetry.v1"
+        /// App-local last-known `/slots` catalog; deliberately not shared with the extension.
+        static let serverSlotsCatalogKey = "ritoras.serverProbe.slotsCatalog.v1"
         static let dictationCancelKey = "dictation.cancel"
         /// How long a terminal `.cancelled` payload stays in the localhost /state
         /// holder before the delayed clear (see DictationViewModel.cancel()).
@@ -670,6 +676,11 @@ struct SharedConfig {
         static let serverProbeBreakerCooldownSeconds: TimeInterval = 600
         /// Foreground / active-session server status refresh cadence.
         static let serverProbeRefreshIntervalSeconds: TimeInterval = 15
+        /// Consecutive keyboard-service failures reported by the extension before
+        /// a server loses pin and fallback priority.
+        static let keyboardServicesFailureTelemetryThreshold = 3
+        /// Server-backed keyboard suggestion consumption is an opt-in device gate.
+        static let serverSuggestionsEnabled = false
         /// Maximum number of fast connection-failure attempts for one transcription.
         static let transcriptionAutoRetryMaxAttempts: Int = 3
         /// Delay between fast connection-failure transcription attempts.
@@ -1601,10 +1612,41 @@ struct SharedConfig {
         return defaults.string(forKey: Defaults.selectedServerKey)
     }
 
+    /// Reads bounded keyboard-extension failure telemetry from the App Group.
+    /// Missing or invalid data has no effect on server ranking.
+    static func keyboardServicesFailureTelemetry() -> KeyboardServicesFailureTelemetrySnapshot? {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId),
+              let data = defaults.data(forKey: Defaults.keyboardServicesFailureTelemetryKey),
+              let snapshot = try? JSONDecoder().decode(
+                KeyboardServicesFailureTelemetrySnapshot.self,
+                from: data
+              ),
+              snapshot.isValid else {
+            return nil
+        }
+        return snapshot
+    }
+
+    /// Reads the app-local, versioned last-known `/slots` catalog for Settings.
+    static func persistedServerSlotsCatalog() -> PersistedServerSlotsCatalog? {
+        guard let data = UserDefaults.standard.data(forKey: Defaults.serverSlotsCatalogKey),
+              let catalog = try? JSONDecoder().decode(PersistedServerSlotsCatalog.self, from: data),
+              catalog.isValid else {
+            return nil
+        }
+        return catalog
+    }
+
+    /// Stores the app-local slots catalog using the same UserDefaults pattern as server ranking.
+    static func setPersistedServerSlotsCatalog(_ catalog: PersistedServerSlotsCatalog) throws {
+        let data = try JSONEncoder().encode(catalog)
+        UserDefaults.standard.set(data, forKey: Defaults.serverSlotsCatalogKey)
+    }
+
     /// Writes (or clears) the server URL pinned by the current dictation stage.
     /// Passing nil removes the key.
-    /// NOTE: this is the only *writer* on SharedConfig — justified because
-    /// selectedServer is ephemeral runtime state, not a durable preference.
+    /// This is the only writer for `selectedServer`, which is ephemeral runtime
+    /// state rather than a durable preference.
     static func setSelectedServer(_ server: String?) {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return }
         if let server = server {
