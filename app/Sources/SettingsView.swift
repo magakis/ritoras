@@ -50,10 +50,12 @@ struct SettingsView: View {
         .navigationTitle("Ritoras Settings")
         .onAppear {
             settings.refreshLLMCleanupPreferences()
+            settings.refreshServerCapabilityBadges()
         }
         .onChange(of: scenePhase) { phase in
             if phase == .active {
                 settings.refreshLLMCleanupPreferences()
+                settings.refreshServerCapabilityBadges()
             }
         }
     }
@@ -64,7 +66,7 @@ struct SettingsView: View {
     private var serverSection: some View {
         Section {
             ForEach(settings.servers.indices, id: \.self) { index in
-                HStack(spacing: 8) {
+                HStack(alignment: .center, spacing: 8) {
                     if isEditingServers {
                         Button {
                             settings.servers.remove(at: index)
@@ -76,19 +78,24 @@ struct SettingsView: View {
                         .buttonStyle(.borderless)
                     }
 
-                    if isEditingServers {
-                        TextField("Server URL", text: $settings.servers[index])
-                            .textContentType(.URL)
-                            .textInputAutocapitalization(.never)
-                            .keyboardType(.URL)
-                            .font(.body)
-                    } else {
-                        Text(settings.servers[index])
-                            .font(.body)
-                            .foregroundColor(.primary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                    VStack(alignment: .leading, spacing: 6) {
+                        if isEditingServers {
+                            TextField("Server URL", text: $settings.servers[index])
+                                .textContentType(.URL)
+                                .textInputAutocapitalization(.never)
+                                .keyboardType(.URL)
+                                .font(.body)
+                        } else {
+                            Text(settings.servers[index])
+                                .font(.body)
+                                .foregroundColor(.primary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+
+                        serverCapabilityBadges(for: settings.servers[index])
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                     if !isEditingServers {
                         Button {
@@ -363,6 +370,76 @@ struct SettingsView: View {
         let version = (info?["CFBundleShortVersionString"] as? String) ?? "?"
         let build = (info?["CFBundleVersion"] as? String) ?? "?"
         return "\(version) (\(build))"
+    }
+
+    private func serverCapabilityBadges(for server: String) -> some View {
+        let badges = settings.capabilityBadges(for: server)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 5) {
+                capabilityBadge(
+                    title: "Dictation",
+                    value: badges.dictation.displayValue,
+                    color: color(for: badges.dictation)
+                )
+                capabilityBadge(
+                    title: "Spelling",
+                    value: badges.spelling.displayValue,
+                    color: color(for: badges.spelling)
+                )
+            }
+            HStack(spacing: 5) {
+                capabilityBadge(
+                    title: "Vocabulary",
+                    value: badges.vocabulary.displayValue,
+                    color: color(for: badges.vocabulary)
+                )
+                capabilityBadge(
+                    title: "Prediction",
+                    value: badges.prediction.displayValue,
+                    color: color(for: badges.prediction)
+                )
+            }
+            slotsCatalogTimestamp(for: badges)
+        }
+    }
+
+    private func capabilityBadge(title: String, value: String, color: Color) -> some View {
+        Text("\(title) · \(value)")
+            .font(.caption2)
+            .foregroundColor(color)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(color.opacity(0.12), in: Capsule())
+    }
+
+    private func color(for state: ServerCapabilityBadges.SlotState) -> Color {
+        switch state {
+        case .available: return .green
+        case .unavailable: return .secondary
+        case .unknown: return .secondary
+        case .undetected: return .orange
+        }
+    }
+
+    private func color(for state: ServerCapabilityBadges.DictationState) -> Color {
+        switch state {
+        case .warm: return .green
+        case .cold: return .orange
+        case .unknown: return .secondary
+        }
+    }
+
+    @ViewBuilder
+    private func slotsCatalogTimestamp(for badges: ServerCapabilityBadges) -> some View {
+        if let timestamp = badges.slotsCatalogTimestamp {
+            Text("Capabilities last detected \(timestamp, style: .relative)")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        } else if let timestamp = badges.slotsLastProbeTimestamp {
+            Text("Slots last checked \(timestamp, style: .relative)")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
     }
 
     private func testServer(at index: Int) {
