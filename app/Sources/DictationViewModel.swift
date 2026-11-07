@@ -577,7 +577,10 @@ final class DictationViewModel: ObservableObject {
                 }
             }
 
-            let selection = await WhisperClient.refreshServerRanking(servers: servers)
+            let selection = await WhisperClient.refreshServerRanking(
+                servers: servers,
+                collectKeyboardServicesSlots: true
+            )
             guard !Task.isCancelled,
                   self.serverProbeRefreshTaskID == refreshID,
                   let server = selection.server,

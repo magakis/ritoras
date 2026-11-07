@@ -201,6 +201,7 @@ private actor ServerProbeState {
 
     private var breakerRecords: [String: ServerCircuitBreakerRecord] = [:]
     private var halfOpenServers: Set<String> = []
+    private var latestFailureTelemetry: KeyboardServicesFailureTelemetrySnapshot?
 
     private init() {
         if let data = UserDefaults.standard.data(forKey: ServerProbeStateDefaults.circuitBreakersKey) {
@@ -303,6 +304,63 @@ private actor ServerProbeState {
         breakerRecords[server]?.openUntil == nil
     }
 
+    func acceptFailureTelemetry(
+        _ snapshot: KeyboardServicesFailureTelemetrySnapshot?
+    ) -> KeyboardServicesFailureTelemetrySnapshot? {
+        guard let snapshot, snapshot.isValid else { return nil }
+        if let latestFailureTelemetry,
+           latestFailureTelemetry.revision >= snapshot.revision {
+            return latestFailureTelemetry
+        }
+        latestFailureTelemetry = snapshot
+        return snapshot
+    }
+
+    func openBreakers(for servers: [String]) -> Set<String> {
+        Set(servers.filter { breakerRecords[$0]?.openUntil != nil })
+    }
+
+    func publishKeyboardServicesPin(
+        configuredServers: [String],
+        slotOutcomesByServer: [String: ServerSlotsProbeOutcome],
+        reportedFailureTelemetry: KeyboardServicesFailureTelemetrySnapshot?
+    ) {
+        let telemetry = acceptFailureTelemetry(reportedFailureTelemetry)
+        let previousSnapshot = KeyboardServicesPinSnapshotStore.snapshot()
+        let previousCatalog = SharedConfig.persistedServerSlotsCatalog()
+        let update = KeyboardServicesPinRoundIntegrator.recompute(
+            configuredServers: configuredServers,
+            slotOutcomesByServer: slotOutcomesByServer,
+            breakerOpenServers: openBreakers(for: configuredServers),
+            failureTelemetry: telemetry,
+            previousSnapshot: previousSnapshot,
+            previousCatalog: previousCatalog,
+            timestamp: Date()
+        )
+
+        do {
+            try SharedConfig.setPersistedServerSlotsCatalog(update.persistedCatalog)
+        } catch {
+            FileLogger.shared.warn(.network, "server slots catalog persistence failed", payload: [
+                "error": error.localizedDescription
+            ])
+        }
+
+        guard update.shouldPublishSnapshot else { return }
+        do {
+            _ = try KeyboardServicesPinSnapshotStore.publish(update.snapshot)
+            if previousSnapshot?.pinnedServer != update.snapshot.pinnedServer {
+                FileLogger.shared.info(.network, "keyboard services pin updated", payload: [
+                    "server": update.snapshot.pinnedServer ?? "none"
+                ])
+            }
+        } catch {
+            FileLogger.shared.warn(.network, "keyboard services pin snapshot publication failed", payload: [
+                "error": error.localizedDescription
+            ])
+        }
+    }
+
     func persistRanking(entries: [PersistedServerRankingEntry], timestamp: Date) {
         guard !Task.isCancelled else {
             FileLogger.shared.debug(.network, "server ranking persistence skipped after cancellation")
@@ -348,10 +406,17 @@ private struct ServerProbeRound: Sendable {
     let authenticatedResponderCount: Int
     let deadlineExpired: Bool
     let elapsedMilliseconds: Double
+    let slotProbeTask: Task<[ServerSlotsProbeOutcome], Never>?
 }
 
 private enum ServerProbeRoundEvent: Sendable {
     case probe(ServerProbeOutcome)
+    case deadline
+    case timerCancelled
+}
+
+private enum ServerSlotsProbeRoundEvent: Sendable {
+    case probe(ServerSlotsProbeOutcome)
     case deadline
     case timerCancelled
 }
@@ -717,15 +782,47 @@ enum WhisperClient {
 
     /// Runs the same bounded round used by selection and persists its ranking.
     /// The app refresher handles warming a cold winner.
-    static func refreshServerRanking(servers: [String]) async -> ServerSelectionResult {
+    static func refreshServerRanking(
+        servers: [String],
+        collectKeyboardServicesSlots: Bool
+    ) async -> ServerSelectionResult {
         let round = await probeServerRound(
             servers: servers,
             timeout: SharedConfig.Defaults.serverProbeTimeoutSeconds,
             deadline: SharedConfig.Defaults.serverProbeRoundDeadlineSeconds,
-            purpose: "refresh"
+            purpose: "refresh",
+            collectKeyboardServicesSlots: collectKeyboardServicesSlots
         )
         logServerSelection(round, purpose: "refresh")
+        if Task.isCancelled {
+            round.slotProbeTask?.cancel()
+        } else if collectKeyboardServicesSlots, let slotProbeTask = round.slotProbeTask {
+            publishKeyboardServicesPinAfterRound(
+                servers: servers,
+                slotProbeTask: slotProbeTask
+            )
+        }
         return round.selection
+    }
+
+    private static func publishKeyboardServicesPinAfterRound(
+        servers: [String],
+        slotProbeTask: Task<[ServerSlotsProbeOutcome], Never>
+    ) {
+        Task.detached(priority: .utility) {
+            let slotOutcomes = await slotProbeTask.value
+            let configuredServers = servers
+                .map(Self.normalizedServerURL)
+                .filter { !$0.isEmpty }
+            let outcomesByServer = slotOutcomes.reduce(into: [String: ServerSlotsProbeOutcome]()) {
+                $0[$1.serverURL] = $1
+            }
+            await ServerProbeState.shared.publishKeyboardServicesPin(
+                configuredServers: configuredServers,
+                slotOutcomesByServer: outcomesByServer,
+                reportedFailureTelemetry: SharedConfig.keyboardServicesFailureTelemetry()
+            )
+        }
     }
 
     /// Whether the connection loop should avoid a server until its half-open
@@ -739,7 +836,8 @@ enum WhisperClient {
         probeOnlyServers: Set<String>? = nil,
         timeout: TimeInterval,
         deadline: TimeInterval,
-        purpose: String
+        purpose: String,
+        collectKeyboardServicesSlots: Bool = false
     ) async -> ServerProbeRound {
         let roundStart = ProcessInfo.processInfo.systemUptime
         let previousRanking = await ServerProbeState.shared.persistedRankingEntries()
@@ -796,6 +894,22 @@ enum WhisperClient {
                 )
             }
             return emptyProbeRound(servers: candidates.map(\.server), startedAt: roundStart)
+        }
+
+        let slotProbeTask: Task<[ServerSlotsProbeOutcome], Never>?
+        let probesStartedAt = ProcessInfo.processInfo.systemUptime
+        if collectKeyboardServicesSlots {
+            let slotProbeCandidates = activeCandidates
+            slotProbeTask = Task.detached(priority: .utility) {
+                await Self.probeServerSlotsRound(
+                    candidates: slotProbeCandidates,
+                    roundStartedAt: probesStartedAt,
+                    timeout: timeout,
+                    deadline: deadline
+                )
+            }
+        } else {
+            slotProbeTask = nil
         }
 
         var outcomes: [String: ServerProbeOutcome] = [:]
@@ -869,6 +983,7 @@ enum WhisperClient {
         }
 
         if Task.isCancelled {
+            slotProbeTask?.cancel()
             for candidate in activeCandidates where !completedServers.contains(candidate.server) {
                 _ = await ServerProbeState.shared.finishProbe(
                     server: candidate.server,
@@ -906,10 +1021,12 @@ enum WhisperClient {
             )
         }
         guard !Task.isCancelled else {
+            slotProbeTask?.cancel()
             return emptyProbeRound(servers: candidates.map(\.server), startedAt: roundStart)
         }
         await ServerProbeState.shared.persistRanking(entries: rankingEntries, timestamp: Date())
         guard !Task.isCancelled else {
+            slotProbeTask?.cancel()
             return emptyProbeRound(servers: candidates.map(\.server), startedAt: roundStart)
         }
 
@@ -924,8 +1041,67 @@ enum WhisperClient {
             responderCount: outcomes.values.filter(\.receivedResponse).count,
             authenticatedResponderCount: outcomes.values.filter(\.isAuthenticated).count,
             deadlineExpired: deadlineExpired,
-            elapsedMilliseconds: max(0, (ProcessInfo.processInfo.systemUptime - roundStart) * 1000)
+            elapsedMilliseconds: max(0, (ProcessInfo.processInfo.systemUptime - roundStart) * 1000),
+            slotProbeTask: slotProbeTask
         )
+    }
+
+    private static func probeServerSlotsRound(
+        candidates: [ServerProbeCandidate],
+        roundStartedAt: TimeInterval,
+        timeout: TimeInterval,
+        deadline: TimeInterval
+    ) async -> [ServerSlotsProbeOutcome] {
+        var seenServers: Set<String> = []
+        let uniqueCandidates = candidates.filter { seenServers.insert($0.server).inserted }
+        guard !uniqueCandidates.isEmpty, !Task.isCancelled else { return [] }
+
+        let remainingSeconds = deadline
+            - (ProcessInfo.processInfo.systemUptime - roundStartedAt)
+        guard remainingSeconds > 0 else { return [] }
+        let deadlineNanoseconds = UInt64(max(0.001, remainingSeconds) * 1_000_000_000)
+
+        return await withTaskGroup(of: ServerSlotsProbeRoundEvent.self) { group in
+            for candidate in uniqueCandidates {
+                group.addTask {
+                    .probe(await ServerSlotsProbeClient.probe(
+                        serverURL: candidate.server,
+                        timeout: timeout
+                    ))
+                }
+            }
+            group.addTask {
+                do {
+                    try await Task.sleep(nanoseconds: deadlineNanoseconds)
+                    return .deadline
+                } catch {
+                    return .timerCancelled
+                }
+            }
+
+            var outcomesByServer: [String: ServerSlotsProbeOutcome] = [:]
+            var completedProbeCount = 0
+            while let event = await group.next() {
+                switch event {
+                case .probe(let outcome):
+                    completedProbeCount += 1
+                    let elapsedSeconds = ProcessInfo.processInfo.systemUptime - roundStartedAt
+                    if !Task.isCancelled,
+                       elapsedSeconds <= deadline,
+                       outcome.failure != .cancelled {
+                        outcomesByServer[outcome.serverURL] = outcome
+                    }
+                    if completedProbeCount == uniqueCandidates.count {
+                        group.cancelAll()
+                    }
+                case .deadline:
+                    group.cancelAll()
+                case .timerCancelled:
+                    break
+                }
+            }
+            return Array(outcomesByServer.values)
+        }
     }
 
     private static func emptyProbeRound(servers: [String], startedAt: TimeInterval) -> ServerProbeRound {
@@ -936,7 +1112,8 @@ enum WhisperClient {
             responderCount: 0,
             authenticatedResponderCount: 0,
             deadlineExpired: false,
-            elapsedMilliseconds: max(0, (ProcessInfo.processInfo.systemUptime - startedAt) * 1000)
+            elapsedMilliseconds: max(0, (ProcessInfo.processInfo.systemUptime - startedAt) * 1000),
+            slotProbeTask: nil
         )
     }
 

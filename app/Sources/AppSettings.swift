@@ -1,10 +1,69 @@
 import Foundation
 import Combine
 
+struct ServerCapabilityBadges: Equatable {
+    enum DictationState: Equatable {
+        case warm
+        case cold
+        case unknown
+
+        var displayValue: String {
+            switch self {
+            case .warm: return "Warm"
+            case .cold: return "Cold"
+            case .unknown: return "Unknown"
+            }
+        }
+    }
+
+    enum SlotState: Equatable {
+        case available
+        case unavailable
+        case unknown
+        case undetected
+
+        var displayValue: String {
+            switch self {
+            case .available: return "Ready"
+            case .unavailable: return "Unavailable"
+            case .unknown: return "Unknown"
+            case .undetected: return "Undetected"
+            }
+        }
+    }
+
+    let dictation: DictationState
+    let spelling: SlotState
+    let vocabulary: SlotState
+    let prediction: SlotState
+    let slotsCatalogTimestamp: Date?
+    let slotsLastProbeTimestamp: Date?
+
+    static let unknown = ServerCapabilityBadges(
+        dictation: .unknown,
+        spelling: .unknown,
+        vocabulary: .unknown,
+        prediction: .unknown,
+        slotsCatalogTimestamp: nil,
+        slotsLastProbeTimestamp: nil
+    )
+}
+
+private struct SettingsServerRankingSnapshot: Decodable {
+    let timestamp: Date
+    let entries: [SettingsServerRankingEntry]
+}
+
+private struct SettingsServerRankingEntry: Decodable {
+    let server: String
+    let modelLoaded: Bool?
+}
+
 class AppSettings: ObservableObject {
     static let shared = AppSettings()
 
     @Published var servers: [String] = []
+    @Published private(set) var capabilityBadgesByServer: [String: ServerCapabilityBadges] = [:]
     @Published var timeoutSeconds: TimeInterval = SharedConfig.Defaults.timeoutSeconds
     @Published var whisperApiKey: String = ""
     @Published var autoCapitalizationEnabled: Bool = true
@@ -215,6 +274,73 @@ class AppSettings: ObservableObject {
         llmCleanupStyling = SharedConfig.llmCleanupStyling()
         llmCleanupStructure = SharedConfig.llmCleanupStructure()
         llmCleanupContext = SharedConfig.llmCleanupContext()
+    }
+
+    func refreshServerCapabilityBadges() {
+        let ranking = Self.persistedServerRanking()
+        let slotsCatalog = SharedConfig.persistedServerSlotsCatalog()
+        var badgesByServer: [String: ServerCapabilityBadges] = [:]
+
+        for server in servers {
+            let normalizedServer = Self.normalizedProbeServer(server)
+            guard !normalizedServer.isEmpty else { continue }
+
+            let rankingEntry = ranking?.entries.first {
+                Self.normalizedProbeServer($0.server) == normalizedServer
+            }
+            let slotsEntry = slotsCatalog?.entries.first {
+                Self.normalizedProbeServer($0.server) == normalizedServer
+            }
+
+            badgesByServer[normalizedServer] = ServerCapabilityBadges(
+                dictation: Self.dictationState(for: rankingEntry?.modelLoaded),
+                spelling: Self.slotState(for: .spelling, in: slotsEntry),
+                vocabulary: Self.slotState(for: .vocabulary, in: slotsEntry),
+                prediction: Self.slotState(for: .prediction, in: slotsEntry),
+                slotsCatalogTimestamp: slotsEntry?.catalogTimestamp,
+                slotsLastProbeTimestamp: slotsEntry?.lastProbeTimestamp
+            )
+        }
+
+        capabilityBadgesByServer = badgesByServer
+    }
+
+    func capabilityBadges(for server: String) -> ServerCapabilityBadges {
+        capabilityBadgesByServer[Self.normalizedProbeServer(server)] ?? .unknown
+    }
+
+    // The ranking key is private to WhisperClient, so Settings mirrors its read-only store key.
+    private static let persistedServerRankingKey = "ritoras.serverProbe.ranking.v1"
+
+    private static func persistedServerRanking() -> SettingsServerRankingSnapshot? {
+        guard let data = UserDefaults.standard.data(forKey: persistedServerRankingKey) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(SettingsServerRankingSnapshot.self, from: data)
+    }
+
+    private static func dictationState(
+        for modelLoaded: Bool?
+    ) -> ServerCapabilityBadges.DictationState {
+        guard let modelLoaded else { return .unknown }
+        return modelLoaded ? .warm : .cold
+    }
+
+    private static func slotState(
+        for slotName: ServerSlotName,
+        in entry: PersistedServerSlotsCatalogEntry?
+    ) -> ServerCapabilityBadges.SlotState {
+        guard let entry else { return .unknown }
+        guard let catalog = entry.catalog else {
+            return entry.lastProbeTimestamp == nil ? .unknown : .undetected
+        }
+        guard let slot = catalog.slot(named: slotName) else { return .undetected }
+        return slot.enabled && slot.status == "ready" ? .available : .unavailable
+    }
+
+    private static func normalizedProbeServer(_ server: String) -> String {
+        // Match WhisperClient's probe URL normalization for persisted-state lookups.
+        server.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
 
     private func saveToAppGroup() {
