@@ -42,6 +42,7 @@ struct SettingsView: View {
             cleanupSection
             audioSection
             keyboardSection
+            serverSuggestionsSection
             dictionarySection
             historySection
             diagnosticsSection
@@ -290,6 +291,24 @@ struct SettingsView: View {
             Text("Keyboard")
         } footer: {
             Text("iOS's built-in Keyboard Feedback setting does not apply to custom keyboards. This toggle provides independent control.")
+        }
+    }
+
+    // MARK: - Server-Assisted Suggestions Section
+
+    private var serverSuggestionsSection: some View {
+        Section {
+            Toggle("Enable", isOn: $settings.serverSuggestionsEnabled)
+            Toggle("Spelling", isOn: $settings.serverSpellingSuggestionsEnabled)
+                .disabled(!settings.serverSuggestionsEnabled)
+            Toggle("Vocabulary", isOn: $settings.serverVocabularySuggestionsEnabled)
+                .disabled(!settings.serverSuggestionsEnabled)
+            Toggle("Prediction", isOn: $settings.serverPredictionSuggestionsEnabled)
+                .disabled(!settings.serverSuggestionsEnabled)
+        } header: {
+            Text("Server-assisted suggestions · Experimental")
+        } footer: {
+            Text("When enabled, selected spelling, vocabulary, or prediction requests are sent to the pinned server. Local prediction and autocorrection remain on-device.")
         }
     }
 

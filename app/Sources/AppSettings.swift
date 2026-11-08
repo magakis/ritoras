@@ -76,6 +76,10 @@ class AppSettings: ObservableObject {
     @Published var verboseLogging: Bool = SharedConfig.Defaults.verboseLoggingDefault
     @Published var hapticsEnabled: Bool = SharedConfig.Defaults.hapticsEnabledDefault
     @Published var keyboardLanguage: KeyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
+    @Published var serverSuggestionsEnabled: Bool = SharedConfig.Defaults.serverSuggestionsEnabledDefault
+    @Published var serverSpellingSuggestionsEnabled: Bool = SharedConfig.Defaults.serverSpellingSuggestionsEnabledDefault
+    @Published var serverVocabularySuggestionsEnabled: Bool = SharedConfig.Defaults.serverVocabularySuggestionsEnabledDefault
+    @Published var serverPredictionSuggestionsEnabled: Bool = SharedConfig.Defaults.serverPredictionSuggestionsEnabledDefault
     @Published var audioMeasurementModeEnabled: Bool = SharedConfig.Defaults.audioMeasurementModeEnabledDefault
     @Published var audioCaptureAttenuationEnabled: Bool = SharedConfig.Defaults.audioCaptureAttenuationEnabledDefault
 
@@ -117,6 +121,10 @@ class AppSettings: ObservableObject {
         verboseLogging = SharedConfig.verboseLoggingEnabled()
         hapticsEnabled = SharedConfig.hapticsEnabled()
         keyboardLanguage = SharedConfig.keyboardLanguage()
+        serverSuggestionsEnabled = SharedConfig.serverSuggestionsEnabled()
+        serverSpellingSuggestionsEnabled = SharedConfig.serverSpellingSuggestionsEnabled()
+        serverVocabularySuggestionsEnabled = SharedConfig.serverVocabularySuggestionsEnabled()
+        serverPredictionSuggestionsEnabled = SharedConfig.serverPredictionSuggestionsEnabled()
         audioMeasurementModeEnabled = SharedConfig.audioMeasurementModeEnabled()
         audioCaptureAttenuationEnabled = SharedConfig.audioCaptureAttenuationEnabled()
         chunkSplitterMode = SharedConfig.streamVadMode()
@@ -194,6 +202,18 @@ class AppSettings: ObservableObject {
             FileLogger.shared.info(.settings, "saving keyboardLanguage",
                                    payload: ["value": newValue.rawValue])
             self?.saveKeyboardLanguage(newValue)
+        }.store(in: &cancellables)
+        $serverSuggestionsEnabled.dropFirst().sink { [weak self] enabled in
+            self?.saveServerSuggestionsEnabled(enabled)
+        }.store(in: &cancellables)
+        $serverSpellingSuggestionsEnabled.dropFirst().sink { [weak self] enabled in
+            self?.saveServerSpellingSuggestionsEnabled(enabled)
+        }.store(in: &cancellables)
+        $serverVocabularySuggestionsEnabled.dropFirst().sink { [weak self] enabled in
+            self?.saveServerVocabularySuggestionsEnabled(enabled)
+        }.store(in: &cancellables)
+        $serverPredictionSuggestionsEnabled.dropFirst().sink { [weak self] enabled in
+            self?.saveServerPredictionSuggestionsEnabled(enabled)
         }.store(in: &cancellables)
         $audioMeasurementModeEnabled.dropFirst().sink { [weak self] value in
             self?.saveAudioMeasurementModeEnabled(value)
@@ -359,6 +379,10 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(verboseLogging, forKey: SharedConfig.Defaults.verboseLoggingKey)
         appGroupDefaults?.set(hapticsEnabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
         appGroupDefaults?.set(keyboardLanguage.rawValue, forKey: SharedConfig.Defaults.keyboardLanguageKey)
+        appGroupDefaults?.set(serverSuggestionsEnabled, forKey: SharedConfig.Defaults.serverSuggestionsEnabledKey)
+        appGroupDefaults?.set(serverSpellingSuggestionsEnabled, forKey: SharedConfig.Defaults.serverSpellingSuggestionsEnabledKey)
+        appGroupDefaults?.set(serverVocabularySuggestionsEnabled, forKey: SharedConfig.Defaults.serverVocabularySuggestionsEnabledKey)
+        appGroupDefaults?.set(serverPredictionSuggestionsEnabled, forKey: SharedConfig.Defaults.serverPredictionSuggestionsEnabledKey)
         saveAudioMeasurementModeEnabled(audioMeasurementModeEnabled)
         saveAudioCaptureAttenuationEnabled(audioCaptureAttenuationEnabled)
         appGroupDefaults?.set(chunkSplitterMode.rawValue, forKey: SharedConfig.Defaults.streamVadModeKey)
@@ -449,6 +473,26 @@ class AppSettings: ObservableObject {
 
     private func saveKeyboardLanguage(_ language: KeyboardLanguage) {
         appGroupDefaults?.set(language.rawValue, forKey: SharedConfig.Defaults.keyboardLanguageKey)
+        postSettingsChanged()
+    }
+
+    private func saveServerSuggestionsEnabled(_ enabled: Bool) {
+        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.serverSuggestionsEnabledKey)
+        postSettingsChanged()
+    }
+
+    private func saveServerSpellingSuggestionsEnabled(_ enabled: Bool) {
+        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.serverSpellingSuggestionsEnabledKey)
+        postSettingsChanged()
+    }
+
+    private func saveServerVocabularySuggestionsEnabled(_ enabled: Bool) {
+        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.serverVocabularySuggestionsEnabledKey)
+        postSettingsChanged()
+    }
+
+    private func saveServerPredictionSuggestionsEnabled(_ enabled: Bool) {
+        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.serverPredictionSuggestionsEnabledKey)
         postSettingsChanged()
     }
 
@@ -583,6 +627,10 @@ class AppSettings: ObservableObject {
         verboseLogging = SharedConfig.Defaults.verboseLoggingDefault
         hapticsEnabled = SharedConfig.Defaults.hapticsEnabledDefault
         keyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
+        serverSuggestionsEnabled = SharedConfig.Defaults.serverSuggestionsEnabledDefault
+        serverSpellingSuggestionsEnabled = SharedConfig.Defaults.serverSpellingSuggestionsEnabledDefault
+        serverVocabularySuggestionsEnabled = SharedConfig.Defaults.serverVocabularySuggestionsEnabledDefault
+        serverPredictionSuggestionsEnabled = SharedConfig.Defaults.serverPredictionSuggestionsEnabledDefault
         audioMeasurementModeEnabled = SharedConfig.Defaults.audioMeasurementModeEnabledDefault
         audioCaptureAttenuationEnabled = SharedConfig.Defaults.audioCaptureAttenuationEnabledDefault
         chunkSplitterMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive

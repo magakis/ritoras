@@ -181,9 +181,10 @@ final class KeyboardServicesSuggestionCoordinator {
         localCandidates: [String],
         language: KeyboardLanguage,
         epoch: UInt64,
-        contextToken: UInt64
+        contextToken: UInt64,
+        settings: KeyboardServerSuggestionSettings
     ) {
-        guard SharedConfig.Defaults.serverSuggestionsEnabled,
+        guard settings.enabled,
               contextToken != 0,
               let revision = activeSnapshotRevision else {
             return
@@ -192,7 +193,10 @@ final class KeyboardServicesSuggestionCoordinator {
         let endpoints: [KeyboardServicesSuggestionEndpoint]
         let requestInput: KeyboardServicesSuggestionRequestInput
         if input.currentWord.isEmpty {
-            guard language == .english else { return }
+            guard language == .english,
+                  settings.capabilityEnabled(.prediction) else {
+                return
+            }
             endpoints = [.prediction]
             requestInput = KeyboardServicesSuggestionRequestInput(
                 typedWord: "",
@@ -206,7 +210,10 @@ final class KeyboardServicesSuggestionCoordinator {
                     <= KeyboardServicesSuggestionPolicy.maximumCandidateScalars else {
                 return
             }
-            endpoints = [.spelling, .vocabulary]
+            endpoints = [.spelling, .vocabulary].filter {
+                settings.capabilityEnabled($0)
+            }
+            guard !endpoints.isEmpty else { return }
             requestInput = KeyboardServicesSuggestionRequestInput(
                 typedWord: input.lookupWord,
                 previousWord: input.previousWord ?? "",

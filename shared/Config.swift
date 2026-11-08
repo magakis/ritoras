@@ -679,8 +679,15 @@ struct SharedConfig {
         /// Consecutive keyboard-service failures reported by the extension before
         /// a server loses pin and fallback priority.
         static let keyboardServicesFailureTelemetryThreshold = 3
-        /// Server-backed keyboard suggestion consumption is an opt-in device gate.
-        static let serverSuggestionsEnabled = false
+        /// Server-assisted keyboard suggestions remain opt-in until enabled in Settings.
+        static let serverSuggestionsEnabledKey = "serverSuggestionsEnabled"
+        static let serverSuggestionsEnabledDefault = false
+        static let serverSpellingSuggestionsEnabledKey = "serverSpellingSuggestionsEnabled"
+        static let serverSpellingSuggestionsEnabledDefault = true
+        static let serverVocabularySuggestionsEnabledKey = "serverVocabularySuggestionsEnabled"
+        static let serverVocabularySuggestionsEnabledDefault = true
+        static let serverPredictionSuggestionsEnabledKey = "serverPredictionSuggestionsEnabled"
+        static let serverPredictionSuggestionsEnabledDefault = true
         /// Maximum number of fast connection-failure attempts for one transcription.
         static let transcriptionAutoRetryMaxAttempts: Int = 3
         /// Delay between fast connection-failure transcription attempts.
@@ -991,6 +998,42 @@ struct SharedConfig {
             return Defaults.keyboardLanguageDefault
         }
         return KeyboardLanguage(rawValue: raw) ?? Defaults.keyboardLanguageDefault
+    }
+
+    /// Reads the server-assisted suggestions master switch from the App Group.
+    static func serverSuggestionsEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.serverSuggestionsEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.serverSuggestionsEnabledKey) as? Bool)
+            ?? Defaults.serverSuggestionsEnabledDefault
+    }
+
+    /// Reads whether the keyboard may request server spelling suggestions.
+    static func serverSpellingSuggestionsEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.serverSpellingSuggestionsEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.serverSpellingSuggestionsEnabledKey) as? Bool)
+            ?? Defaults.serverSpellingSuggestionsEnabledDefault
+    }
+
+    /// Reads whether the keyboard may request server vocabulary suggestions.
+    static func serverVocabularySuggestionsEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.serverVocabularySuggestionsEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.serverVocabularySuggestionsEnabledKey) as? Bool)
+            ?? Defaults.serverVocabularySuggestionsEnabledDefault
+    }
+
+    /// Reads whether the keyboard may request server-ranked next-word predictions.
+    static func serverPredictionSuggestionsEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.serverPredictionSuggestionsEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.serverPredictionSuggestionsEnabledKey) as? Bool)
+            ?? Defaults.serverPredictionSuggestionsEnabledDefault
     }
 
     /// Writes the active keyboard language to the App Group and posts the

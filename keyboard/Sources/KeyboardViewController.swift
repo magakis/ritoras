@@ -1518,7 +1518,8 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func startKeyboardServicesSnapshotPolling() {
-        guard SharedConfig.Defaults.serverSuggestionsEnabled,
+        guard settingsCache.serverSuggestionSettings.enabled,
+              keyboardView?.window != nil,
               keyboardServicesSnapshotPollTimer == nil else {
             return
         }
@@ -1536,19 +1537,28 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func refreshKeyboardServicesPinSnapshot() {
-        guard SharedConfig.Defaults.serverSuggestionsEnabled else { return }
+        guard settingsCache.serverSuggestionSettings.enabled else {
+            stopKeyboardServicesSnapshotPolling()
+            keyboardServicesSuggestionCoordinator.cancelPendingRequests()
+            keyboardServicesSuggestionCoordinator.updateSnapshot(nil, configuredServers: [])
+            keyboardView?.setServerSuggestionSnapshotRevision(nil)
+            return
+        }
+
         let snapshot = KeyboardServicesPinSnapshotStore.snapshot()
         let changed = keyboardServicesSuggestionCoordinator.updateSnapshot(
             snapshot,
             configuredServers: SharedConfig.load().servers
         )
-        guard changed, SharedConfig.Defaults.serverSuggestionsEnabled else { return }
 
-        let activeRevision = keyboardServicesSuggestionCoordinator.activeSnapshotRevision
-        keyboardView?.setServerSuggestionSnapshotRevision(activeRevision)
-        if activeRevision != nil, keyboardView?.window != nil {
-            keyboardView.refreshSuggestions()
+        if changed {
+            let activeRevision = keyboardServicesSuggestionCoordinator.activeSnapshotRevision
+            keyboardView?.setServerSuggestionSnapshotRevision(activeRevision)
+            if activeRevision != nil, keyboardView?.window != nil {
+                keyboardView.refreshSuggestions()
+            }
         }
+        startKeyboardServicesSnapshotPolling()
     }
 
     /// Cancels the current dictation: stops all polling, clears the pending
@@ -2229,10 +2239,14 @@ extension KeyboardViewController: KeyboardViewDelegate {
             lookupWord: extracted.lookupWord,
             previousWord: extracted.previousWord,
             previousWord2: extracted.previousWord2,
-            context: SharedConfig.Defaults.serverSuggestionsEnabled
+            context: settingsCache.serverSuggestionSettings.enabled
                 ? boundedSuggestionContext(context ?? "")
                 : ""
         )
+    }
+
+    func keyboardViewServerSuggestionsEnabled(_ view: KeyboardView) -> Bool {
+        settingsCache.serverSuggestionSettings.enabled
     }
 
     private func boundedSuggestionContext(_ context: String) -> String {
@@ -2259,7 +2273,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
             localCandidates: suggestions,
             language: view.currentLanguage,
             epoch: epoch,
-            contextToken: contextToken
+            contextToken: contextToken,
+            settings: settingsCache.serverSuggestionSettings
         )
     }
 

@@ -66,6 +66,7 @@ protocol KeyboardViewDelegate: AnyObject {
     func keyboardView(_ view: KeyboardView, didLongPressSuggestion text: String)
     func keyboardViewSuggestionSnapshot(_ view: KeyboardView) -> SuggestionInputSnapshot?
     func keyboardViewPredictionEngine(_ view: KeyboardView) -> PredictionEngine?
+    func keyboardViewServerSuggestionsEnabled(_ view: KeyboardView) -> Bool
     func keyboardView(
         _ view: KeyboardView,
         didDisplayLocalSuggestions suggestions: [String],
@@ -84,6 +85,7 @@ extension KeyboardViewDelegate {
     func keyboardViewBackspaceDidBegin(_ view: KeyboardView) {}
     func keyboardViewBackspaceDidEnd(_ view: KeyboardView) {}
     func keyboardView(_ view: KeyboardView, didLongPressSuggestion text: String) {}
+    func keyboardViewServerSuggestionsEnabled(_ view: KeyboardView) -> Bool { false }
     func keyboardView(
         _ view: KeyboardView,
         didDisplayLocalSuggestions suggestions: [String],
@@ -1588,7 +1590,7 @@ class KeyboardView: UIView {
                 self.localSuggestionEpoch = capturedEpoch
                 self.localSuggestionToken = token
                 self.localSuggestionIsEmptyPrefix = snapshot.currentWord.isEmpty
-                guard SharedConfig.Defaults.serverSuggestionsEnabled,
+                guard delegate?.keyboardViewServerSuggestionsEnabled(self) ?? false,
                       suggestions.allSatisfy({
                           $0.unicodeScalars.count
                             <= KeyboardServicesSuggestionPolicy.maximumCandidateScalars

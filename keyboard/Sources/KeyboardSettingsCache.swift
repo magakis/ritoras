@@ -1,5 +1,20 @@
 import Foundation
 
+struct KeyboardServerSuggestionSettings {
+    let enabled: Bool
+    let spellingEnabled: Bool
+    let vocabularyEnabled: Bool
+    let predictionEnabled: Bool
+
+    func capabilityEnabled(_ endpoint: KeyboardServicesSuggestionEndpoint) -> Bool {
+        switch endpoint {
+        case .spelling: return spellingEnabled
+        case .vocabulary: return vocabularyEnabled
+        case .prediction: return predictionEnabled
+        }
+    }
+}
+
 /// In-memory cache for keyboard settings that are read on frequent keyboard paths.
 /// Refreshed by a Darwin notification from the container app when settings change,
 /// eliminating per-keystroke UserDefaults IPC.
@@ -12,6 +27,7 @@ final class KeyboardSettingsCache {
     private var _autocorrectOnSpace: Bool
     private var _haptics: Bool
     private var _language: KeyboardLanguage
+    private var _serverSuggestionSettings: KeyboardServerSuggestionSettings
 
     var autoCapitalization: Bool {
         lock.lock()
@@ -37,24 +53,42 @@ final class KeyboardSettingsCache {
         return _language
     }
 
+    var serverSuggestionSettings: KeyboardServerSuggestionSettings {
+        lock.lock()
+        defer { lock.unlock() }
+        return _serverSuggestionSettings
+    }
+
     init() {
         _autoCapitalization = SharedConfig.autoCapitalizationEnabled()
         _autocorrectOnSpace = SharedConfig.autocorrectOnSpaceEnabled()
         _haptics = SharedConfig.hapticsEnabled()
         _language = SharedConfig.keyboardLanguage()
+        _serverSuggestionSettings = Self.loadServerSuggestionSettings()
     }
 
-    /// Reads all four settings from the App Group under a single lock acquire.
+    /// Reads the settings from the App Group, then publishes one cache snapshot.
     func refresh() {
         let autoCap = SharedConfig.autoCapitalizationEnabled()
         let autoCorr = SharedConfig.autocorrectOnSpaceEnabled()
         let hapticsVal = SharedConfig.hapticsEnabled()
         let languageVal = SharedConfig.keyboardLanguage()
+        let serverSuggestionSettings = Self.loadServerSuggestionSettings()
         lock.lock()
         _autoCapitalization = autoCap
         _autocorrectOnSpace = autoCorr
         _haptics = hapticsVal
         _language = languageVal
+        _serverSuggestionSettings = serverSuggestionSettings
         lock.unlock()
+    }
+
+    private static func loadServerSuggestionSettings() -> KeyboardServerSuggestionSettings {
+        KeyboardServerSuggestionSettings(
+            enabled: SharedConfig.serverSuggestionsEnabled(),
+            spellingEnabled: SharedConfig.serverSpellingSuggestionsEnabled(),
+            vocabularyEnabled: SharedConfig.serverVocabularySuggestionsEnabled(),
+            predictionEnabled: SharedConfig.serverPredictionSuggestionsEnabled()
+        )
     }
 }
