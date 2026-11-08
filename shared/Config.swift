@@ -682,6 +682,9 @@ struct SharedConfig {
         /// Server-assisted keyboard suggestions remain opt-in until enabled in Settings.
         static let serverSuggestionsEnabledKey = "serverSuggestionsEnabled"
         static let serverSuggestionsEnabledDefault = false
+        /// Diagnostic mode that displays only results returned by keyboard services.
+        static let serverSuggestionsStrictRemoteEnabledKey = "serverSuggestionsStrictRemoteEnabled"
+        static let serverSuggestionsStrictRemoteEnabledDefault = false
         static let serverSpellingSuggestionsEnabledKey = "serverSpellingSuggestionsEnabled"
         static let serverSpellingSuggestionsEnabledDefault = true
         static let serverVocabularySuggestionsEnabledKey = "serverVocabularySuggestionsEnabled"
@@ -1007,6 +1010,15 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.serverSuggestionsEnabledKey) as? Bool)
             ?? Defaults.serverSuggestionsEnabledDefault
+    }
+
+    /// Reads whether strict remote-only display mode is enabled in the App Group.
+    static func serverSuggestionsStrictRemoteEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.serverSuggestionsStrictRemoteEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.serverSuggestionsStrictRemoteEnabledKey) as? Bool)
+            ?? Defaults.serverSuggestionsStrictRemoteEnabledDefault
     }
 
     /// Reads whether the keyboard may request server spelling suggestions.

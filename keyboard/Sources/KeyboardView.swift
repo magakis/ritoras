@@ -576,6 +576,7 @@ class KeyboardView: UIView {
     private var suggestionCache = SuggestionDisplayCache()
     private struct AppliedServerSuggestionResults {
         let revision: UInt64
+        let epoch: UInt64
         let contextToken: UInt64
         var results = KeyboardServicesSuggestionResults()
     }
@@ -1511,9 +1512,11 @@ class KeyboardView: UIView {
         }
 
         if appliedServerSuggestionResults?.revision != revision
-            || appliedServerSuggestionResults?.contextToken != contextToken {
+            || appliedServerSuggestionResults?.contextToken != contextToken
+            || (isStrictRemoteOnlyEnabled && appliedServerSuggestionResults?.epoch != epoch) {
             appliedServerSuggestionResults = AppliedServerSuggestionResults(
                 revision: revision,
+                epoch: epoch,
                 contextToken: contextToken
             )
         }
@@ -1590,7 +1593,10 @@ class KeyboardView: UIView {
                 self.localSuggestionEpoch = capturedEpoch
                 self.localSuggestionToken = token
                 self.localSuggestionIsEmptyPrefix = snapshot.currentWord.isEmpty
-                guard delegate?.keyboardViewServerSuggestionsEnabled(self) ?? false,
+                let serverSuggestionsEnabled = delegate?.keyboardViewServerSuggestionsEnabled(self) ?? false
+                let strictRemoteOnly = serverSuggestionsEnabled
+                    && KeyboardSettingsCache.strictRemoteOnlyEnabled
+                guard serverSuggestionsEnabled,
                       suggestions.allSatisfy({
                           $0.unicodeScalars.count
                             <= KeyboardServicesSuggestionPolicy.maximumCandidateScalars
@@ -1598,8 +1604,9 @@ class KeyboardView: UIView {
                     self.localSuggestions = []
                     self.localSuggestionsAreBounded = false
                     self.appliedServerSuggestionResults = nil
-                    self.suggestionCache.update(suggestions, token: token)
-                    self.suggestionBar.update(with: suggestions)
+                    let displayedSuggestions = strictRemoteOnly ? [] : suggestions
+                    self.suggestionCache.update(displayedSuggestions, token: token)
+                    self.suggestionBar.update(with: displayedSuggestions)
                     return
                 }
                 self.localSuggestionsAreBounded = true
@@ -1628,6 +1635,7 @@ class KeyboardView: UIView {
             suggestionBar.update(with: suggestionCache.displayed)
             return
         }
+        let strictRemoteOnly = isStrictRemoteOnlyEnabled
         let augmentation = appliedServerSuggestionResults
         let suggestions = KeyboardServicesSuggestionPolicy.mergeForDisplay(
             localCandidates: localSuggestions,
@@ -1635,10 +1643,18 @@ class KeyboardView: UIView {
             localContextToken: localSuggestionToken ?? 0,
             serverContextToken: augmentation?.contextToken,
             serverRevisionMatches: augmentation?.revision == serverSuggestionSnapshotRevision,
-            isEmptyPrefix: localSuggestionIsEmptyPrefix
+            isEmptyPrefix: localSuggestionIsEmptyPrefix,
+            localEpoch: localSuggestionEpoch,
+            serverEpoch: augmentation?.epoch,
+            strictRemoteOnly: strictRemoteOnly
         )
         suggestionCache.update(suggestions, token: localSuggestionToken ?? 0)
         suggestionBar.update(with: suggestions)
+    }
+
+    private var isStrictRemoteOnlyEnabled: Bool {
+        (delegate?.keyboardViewServerSuggestionsEnabled(self) ?? false)
+            && KeyboardSettingsCache.strictRemoteOnlyEnabled
     }
 
     /// Releases the engine-capturing suggestion work item. Called by the VC on

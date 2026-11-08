@@ -37,18 +37,24 @@ enum KeyboardServicesSuggestionPolicy {
         localContextToken: UInt64,
         serverContextToken: UInt64?,
         serverRevisionMatches: Bool,
-        isEmptyPrefix: Bool
+        isEmptyPrefix: Bool,
+        localEpoch: UInt64? = nil,
+        serverEpoch: UInt64? = nil,
+        strictRemoteOnly: Bool = false
     ) -> [String] {
         guard serverRevisionMatches,
+              !strictRemoteOnly || (localEpoch != nil && serverEpoch == localEpoch),
               localContextToken != 0,
               serverContextToken == localContextToken,
               let serverResults else {
+            if strictRemoteOnly { return [] }
             return Array(localCandidates.prefix(maximumDisplayedCandidates))
         }
         return merge(
             localCandidates: localCandidates,
             serverResults: serverResults,
-            isEmptyPrefix: isEmptyPrefix
+            isEmptyPrefix: isEmptyPrefix,
+            strictRemoteOnly: strictRemoteOnly
         )
     }
 
@@ -56,10 +62,17 @@ enum KeyboardServicesSuggestionPolicy {
     static func merge(
         localCandidates: [String],
         serverResults: KeyboardServicesSuggestionResults,
-        isEmptyPrefix: Bool
+        isEmptyPrefix: Bool,
+        strictRemoteOnly: Bool = false
     ) -> [String] {
         let orderedCandidates: [String]
-        if isEmptyPrefix {
+        if strictRemoteOnly {
+            // Prediction rank only reorders client-supplied candidates; filtering local
+            // overlap would make every strict next-word bar empty and mislead diagnosis.
+            orderedCandidates = isEmptyPrefix
+                ? serverResults.prediction
+                : serverResults.spelling + serverResults.vocabulary
+        } else if isEmptyPrefix {
             let localByFoldedText = Set(localCandidates.map { $0.lowercased() })
             let rankedLocal = serverResults.prediction.filter {
                 localByFoldedText.contains($0.lowercased())

@@ -107,6 +107,100 @@ describe('server suggestion display merge', () => {
     assert.deepStrictEqual(filled, ['server-only', 'another']);
     assert.deepStrictEqual(unchanged, ['the', 'I', 'and']);
   });
+
+  it('strict remote-only displays only server candidates for mid-word context', () => {
+    const displayed = mergeSuggestionsForDisplay({
+      localCandidates: ['local typo', 'local completion'],
+      spellingCandidates: ['server correction'],
+      vocabularyCandidates: ['server term'],
+      localContextToken: 20,
+      serverContextToken: 20,
+      serverRevisionMatches: true,
+      localEpoch: 1,
+      serverEpoch: 1,
+      strictRemoteOnly: true,
+    });
+
+    assert.deepStrictEqual(displayed, ['server correction', 'server term']);
+  });
+
+  it('strict remote-only preserves the server-ranked next-word order', () => {
+    // Prediction rank only reorders the client-supplied pool; overlap is
+    // expected. Filtering it would empty every word-boundary bar and mislead diagnosis.
+    const displayed = mergeSuggestionsForDisplay({
+      localCandidates: ['the', 'I', 'and'],
+      predictionCandidates: ['and', 'the'],
+      localContextToken: 21,
+      serverContextToken: 21,
+      serverRevisionMatches: true,
+      isEmptyPrefix: true,
+      localEpoch: 1,
+      serverEpoch: 1,
+      strictRemoteOnly: true,
+    });
+
+    assert.deepStrictEqual(displayed, ['and', 'the']);
+  });
+
+  it('strict remote-only leaves the bar empty when the current context has no server result', () => {
+    const midWord = mergeSuggestionsForDisplay({
+      localCandidates: ['local suggestion'],
+      localContextToken: 22,
+      serverContextToken: 22,
+      serverRevisionMatches: true,
+      strictRemoteOnly: true,
+    });
+    const nextWord = mergeSuggestionsForDisplay({
+      localCandidates: ['the', 'I', 'and'],
+      localContextToken: 22,
+      serverContextToken: 22,
+      serverRevisionMatches: true,
+      isEmptyPrefix: true,
+      strictRemoteOnly: true,
+    });
+
+    assert.deepStrictEqual(midWord, []);
+    assert.deepStrictEqual(nextWord, []);
+  });
+
+  it('strict remote-only is opt-in and strict-off output stays merged', () => {
+    const displayed = mergeSuggestionsForDisplay({
+      localCandidates: ['local suggestion', 'another local'],
+      spellingCandidates: ['server correction'],
+      localContextToken: 23,
+      serverContextToken: 23,
+      serverRevisionMatches: true,
+      strictRemoteOnly: false,
+    });
+
+    assert.deepStrictEqual(displayed, ['server correction', 'local suggestion', 'another local']);
+  });
+
+  it('strict remote-only keeps server results across a later same-context local render', () => {
+    const displayed = mergeSuggestionsForDisplay({
+      localCandidates: ['new local', 'old local'],
+      spellingCandidates: ['server result'],
+      localContextToken: 24,
+      serverContextToken: 24,
+      serverRevisionMatches: true,
+      localEpoch: 2,
+      serverEpoch: 2,
+      strictRemoteOnly: true,
+    });
+    const stale = mergeSuggestionsForDisplay({
+      localCandidates: ['new local', 'old local'],
+      spellingCandidates: ['server result'],
+      localContextToken: 24,
+      serverContextToken: 24,
+      serverRevisionMatches: true,
+      localEpoch: 3,
+      serverEpoch: 2,
+      strictRemoteOnly: true,
+    });
+
+    assert.deepStrictEqual(displayed, ['server result']);
+    assert.deepStrictEqual(stale, []);
+  });
 });
 
 describe('keyboard-services failover and latches', () => {

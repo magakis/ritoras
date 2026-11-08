@@ -305,6 +305,13 @@ struct SettingsView: View {
                 .disabled(!settings.serverSuggestionsEnabled)
             Toggle("Prediction", isOn: $settings.serverPredictionSuggestionsEnabled)
                 .disabled(!settings.serverSuggestionsEnabled)
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Strict remote-only (debug)", isOn: $settings.serverSuggestionsStrictRemoteEnabled)
+                Text("The suggestion bar shows only server results; an empty bar means the server returned nothing.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .disabled(!settings.serverSuggestionsEnabled)
         } header: {
             Text("Server-assisted suggestions · Experimental")
         } footer: {

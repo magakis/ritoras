@@ -269,20 +269,31 @@ export function mergeSuggestionsForDisplay({
   serverContextToken,
   serverRevisionMatches,
   isEmptyPrefix = false,
+  localEpoch,
+  serverEpoch,
+  strictRemoteOnly = false,
 }) {
   if (!serverRevisionMatches
+    || (strictRemoteOnly && (localEpoch === undefined || localEpoch !== serverEpoch))
     || localContextToken === 0
     || serverContextToken !== localContextToken) {
+    if (strictRemoteOnly) return [];
     return localCandidates.slice(0, MAXIMUM_DISPLAYED_CANDIDATES);
   }
 
   const localSet = new Set(localCandidates.map(candidate => candidate.toLowerCase()));
-  const orderedCandidates = isEmptyPrefix
-    ? [
-      ...predictionCandidates.filter(candidate => localSet.has(candidate.toLowerCase())),
-      ...localCandidates,
-    ]
-    : [...spellingCandidates, ...vocabularyCandidates, ...localCandidates];
+  // Prediction rank only reorders client-supplied candidates; filtering local
+  // overlap would make every strict next-word bar empty and mislead diagnosis.
+  const orderedCandidates = strictRemoteOnly
+    ? (isEmptyPrefix
+      ? [...predictionCandidates]
+      : [...spellingCandidates, ...vocabularyCandidates])
+    : isEmptyPrefix
+      ? [
+        ...predictionCandidates.filter(candidate => localSet.has(candidate.toLowerCase())),
+        ...localCandidates,
+      ]
+      : [...spellingCandidates, ...vocabularyCandidates, ...localCandidates];
   const seen = new Set();
   return orderedCandidates.filter(candidate => {
     const normalized = candidate.toLowerCase();

@@ -77,6 +77,7 @@ class AppSettings: ObservableObject {
     @Published var hapticsEnabled: Bool = SharedConfig.Defaults.hapticsEnabledDefault
     @Published var keyboardLanguage: KeyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
     @Published var serverSuggestionsEnabled: Bool = SharedConfig.Defaults.serverSuggestionsEnabledDefault
+    @Published var serverSuggestionsStrictRemoteEnabled: Bool = SharedConfig.Defaults.serverSuggestionsStrictRemoteEnabledDefault
     @Published var serverSpellingSuggestionsEnabled: Bool = SharedConfig.Defaults.serverSpellingSuggestionsEnabledDefault
     @Published var serverVocabularySuggestionsEnabled: Bool = SharedConfig.Defaults.serverVocabularySuggestionsEnabledDefault
     @Published var serverPredictionSuggestionsEnabled: Bool = SharedConfig.Defaults.serverPredictionSuggestionsEnabledDefault
@@ -122,6 +123,7 @@ class AppSettings: ObservableObject {
         hapticsEnabled = SharedConfig.hapticsEnabled()
         keyboardLanguage = SharedConfig.keyboardLanguage()
         serverSuggestionsEnabled = SharedConfig.serverSuggestionsEnabled()
+        serverSuggestionsStrictRemoteEnabled = SharedConfig.serverSuggestionsStrictRemoteEnabled()
         serverSpellingSuggestionsEnabled = SharedConfig.serverSpellingSuggestionsEnabled()
         serverVocabularySuggestionsEnabled = SharedConfig.serverVocabularySuggestionsEnabled()
         serverPredictionSuggestionsEnabled = SharedConfig.serverPredictionSuggestionsEnabled()
@@ -205,6 +207,9 @@ class AppSettings: ObservableObject {
         }.store(in: &cancellables)
         $serverSuggestionsEnabled.dropFirst().sink { [weak self] enabled in
             self?.saveServerSuggestionsEnabled(enabled)
+        }.store(in: &cancellables)
+        $serverSuggestionsStrictRemoteEnabled.dropFirst().sink { [weak self] enabled in
+            self?.saveServerSuggestionsStrictRemoteEnabled(enabled)
         }.store(in: &cancellables)
         $serverSpellingSuggestionsEnabled.dropFirst().sink { [weak self] enabled in
             self?.saveServerSpellingSuggestionsEnabled(enabled)
@@ -380,6 +385,7 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(hapticsEnabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
         appGroupDefaults?.set(keyboardLanguage.rawValue, forKey: SharedConfig.Defaults.keyboardLanguageKey)
         appGroupDefaults?.set(serverSuggestionsEnabled, forKey: SharedConfig.Defaults.serverSuggestionsEnabledKey)
+        appGroupDefaults?.set(serverSuggestionsStrictRemoteEnabled, forKey: SharedConfig.Defaults.serverSuggestionsStrictRemoteEnabledKey)
         appGroupDefaults?.set(serverSpellingSuggestionsEnabled, forKey: SharedConfig.Defaults.serverSpellingSuggestionsEnabledKey)
         appGroupDefaults?.set(serverVocabularySuggestionsEnabled, forKey: SharedConfig.Defaults.serverVocabularySuggestionsEnabledKey)
         appGroupDefaults?.set(serverPredictionSuggestionsEnabled, forKey: SharedConfig.Defaults.serverPredictionSuggestionsEnabledKey)
@@ -478,6 +484,11 @@ class AppSettings: ObservableObject {
 
     private func saveServerSuggestionsEnabled(_ enabled: Bool) {
         appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.serverSuggestionsEnabledKey)
+        postSettingsChanged()
+    }
+
+    private func saveServerSuggestionsStrictRemoteEnabled(_ enabled: Bool) {
+        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.serverSuggestionsStrictRemoteEnabledKey)
         postSettingsChanged()
     }
 
@@ -628,6 +639,7 @@ class AppSettings: ObservableObject {
         hapticsEnabled = SharedConfig.Defaults.hapticsEnabledDefault
         keyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
         serverSuggestionsEnabled = SharedConfig.Defaults.serverSuggestionsEnabledDefault
+        serverSuggestionsStrictRemoteEnabled = SharedConfig.Defaults.serverSuggestionsStrictRemoteEnabledDefault
         serverSpellingSuggestionsEnabled = SharedConfig.Defaults.serverSpellingSuggestionsEnabledDefault
         serverVocabularySuggestionsEnabled = SharedConfig.Defaults.serverVocabularySuggestionsEnabledDefault
         serverPredictionSuggestionsEnabled = SharedConfig.Defaults.serverPredictionSuggestionsEnabledDefault
