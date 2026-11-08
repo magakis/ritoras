@@ -490,6 +490,7 @@ export function normalizeConfig(rawConfig = {}) {
   };
   return { config: normalized, endpoint, gateConfig, minSpeechSamples: minimum('minSpeechMs'), minChunkSamples: minimum('minChunkMs'), maxNoiseSamples, recorderConfig: {
     vadSource: raw.vadSource,
+    trimTrailingSilenceOnStopEnabled: raw.trimTrailingSilenceOnStopEnabled === true,
     sileroStartThreshold: raw.sileroStartThreshold,
     sileroStopThreshold: raw.sileroStopThreshold,
     sileroSmoothingSteps: raw.sileroSmoothingSteps,

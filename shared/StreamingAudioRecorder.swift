@@ -34,6 +34,7 @@ enum StreamingRecorderError: LocalizedError {
 struct VADEmission {
     let chunkId: UInt32
     let samples: [Float]
+    let trimmedTrailingSilenceSamples: Int
 }
 
 private struct SourceSampleSpan: Sendable {
@@ -41,6 +42,31 @@ private struct SourceSampleSpan: Sendable {
     let endSample: Int
 
     var sampleCount: Int { endSample - startSample }
+}
+
+private enum StopTailAction: String, Equatable {
+    case passthrough
+    case trim
+    case suppress
+}
+
+private struct StopTailSnapshot {
+    let hasPendingSpeechEvidence: Bool
+    let contiguousTrailingSilenceSamples: Int
+    let lastEmittedEndSample: Int
+    let sessionEndSample: Int
+}
+
+private struct StopTailMetrics {
+    let action: StopTailAction
+    let trimmedSamples: Int
+    let suppressedSamples: Int
+}
+
+private struct VADFlushResult {
+    let emission: VADEmission?
+    let stopTailSnapshot: StopTailSnapshot
+    let stopTailMetrics: StopTailMetrics
 }
 
 struct EmissionSummary: Sendable {
@@ -259,6 +285,7 @@ private final class VADContext: @unchecked Sendable {
     let loudFlatTerminateEnabled: Bool
     let accumulatorSpillSamples: Int
     let requestedVADSource: VADSource
+    let trimTrailingSilenceOnStopEnabled: Bool
     let sileroConfiguration: SileroEvidenceConfiguration
     let postRollSamples = 400 * 16
     let analysisHpf: VADHighPassFilter?
@@ -343,6 +370,7 @@ private final class VADContext: @unchecked Sendable {
         analysisHpfEnabled: Bool,
         analysisHpfCutoffHz: Double,
         vadSource: VADSource,
+        trimTrailingSilenceOnStopEnabled: Bool,
         sileroConfiguration: SileroEvidenceConfiguration
     ) {
         let gate = VADThresholdGate(config: gateConfig)
@@ -353,6 +381,7 @@ private final class VADContext: @unchecked Sendable {
         self.minChunkSamples = minChunkSamples
         self.maxNoiseSamples = maxNoiseSamples
         self.requestedVADSource = vadSource
+        self.trimTrailingSilenceOnStopEnabled = trimTrailingSilenceOnStopEnabled
         self.sileroConfiguration = sileroConfiguration
         self.sileroEvidenceProcessor = SileroEvidenceProcessor(configuration: sileroConfiguration)
         self.accumulatorSpillSamples = SharedConfig.streamVadAccumulatorSpillSamples()
@@ -443,6 +472,7 @@ private final class VADContext: @unchecked Sendable {
         config["minChunkMs"] = Double(minChunkSamples) / 16.0
         config["maxNoiseSec"] = Double(maxNoiseSamples) / 16000.0
         config["analysisHpfEnabled"] = analysisHpf != nil
+        config["trimTrailingSilenceOnStopEnabled"] = trimTrailingSilenceOnStopEnabled
         config["analysisHpfCutoffHz"] = SharedConfig.Defaults.streamVadHpfCutoffHzDefault
         config["whisperHighPassCutoffHz"] = SharedConfig.Defaults.streamVadWhisperHighPassCutoffHzDefault
         config["whisperModulationSpreadDb"] =
@@ -1771,6 +1801,7 @@ private final class VADContext: @unchecked Sendable {
         speechMs: Double,
         endpointState: String,
         trimToPostRoll: Bool = false,
+        trailingSilenceSamples: Int? = nil,
         weightedSilenceCreditMs: Double = 0,
         physicalTrailingSilenceMs: Double? = nil
     ) -> VADEmission {
@@ -1780,15 +1811,20 @@ private final class VADContext: @unchecked Sendable {
         let startSamples = chunkStartSessionSamples ?? (sessionElapsedSamples - sampleCount)
         var sourceEndSamples = chunkEndSessionSamples ?? sessionElapsedSamples
         var emissionSourceSpans = accumulatorSourceSpans
+        var trimmedTrailingSilenceSamples = 0
         let unavailableSamples = max(0, sampleCount - snapshot.count)
         if unavailableSamples > 0 {
             removeLeadingSourceSamples(unavailableSamples, from: &emissionSourceSpans)
         }
         if trimToPostRoll {
-            let trailingSamples = min(contiguousTrailingSilenceSamples, sampleCount)
+            let trailingSamples = min(
+                trailingSilenceSamples ?? contiguousTrailingSilenceSamples,
+                sampleCount
+            )
             let excessTrailingSamples = max(0, trailingSamples - postRollSamples)
             let retainedTailSamples = min(excessTrailingSamples, snapshot.count)
             if retainedTailSamples > 0 {
+                trimmedTrailingSilenceSamples = retainedTailSamples
                 let trimmedTail = Array(snapshot.suffix(retainedTailSamples))
                 snapshot.removeLast(retainedTailSamples)
                 sampleCount -= retainedTailSamples
@@ -1846,7 +1882,11 @@ private final class VADContext: @unchecked Sendable {
         if retainedGapBuffer.count > maxNoiseSamples, !retainedGapHasSpeechEvidence {
             shedRetainedGap()
         }
-        return VADEmission(chunkId: id, samples: snapshot)
+        return VADEmission(
+            chunkId: id,
+            samples: snapshot,
+            trimmedTrailingSilenceSamples: trimmedTrailingSilenceSamples
+        )
     }
 
     private func resetAfterEmission() {
@@ -1867,13 +1907,22 @@ private final class VADContext: @unchecked Sendable {
     }
 
     /// Finalize retained stop audio; the in-memory emission path keeps its 250 ms floor.
-    func flush(emitAudio: Bool = true) -> VADEmission? {
+    func flush(
+        emitAudio: Bool = true,
+        trimTrailingSilence: Bool = false
+    ) -> VADFlushResult {
         os_unfair_lock_lock(&unfairLock)
         defer { os_unfair_lock_unlock(&unfairLock) }
         loudFlatStreakMs = 0
         loudFlatStreakStartSeconds = nil
         loudFlatTerminatorActive = false
         let decisionTimeEndpointState = endpoint.state.rawValue
+        let stopTailSnapshot = StopTailSnapshot(
+            hasPendingSpeechEvidence: speechSamples > 0 || retainedGapHasSpeechEvidence,
+            contiguousTrailingSilenceSamples: contiguousTrailingSilenceSamples,
+            lastEmittedEndSample: sourcePositionWatermark,
+            sessionEndSample: sessionElapsedSamples
+        )
         moveRetainedGapToAccumulator()
         finishIdleGapRun()
         let stopWeightedSilenceCreditMs = endpoint.accumulatedAmbiguousCreditSamples / 16.0
@@ -1894,6 +1943,13 @@ private final class VADContext: @unchecked Sendable {
         } else {
             flushReason = "flush"
         }
+        var stopTailMetrics = StopTailMetrics(
+            action: trimTrailingSilence
+                ? (stopTailSnapshot.hasPendingSpeechEvidence ? .trim : .suppress)
+                : .passthrough,
+            trimmedSamples: 0,
+            suppressedSamples: 0
+        )
         telemetrySink?.event(VADTelemetryEvent(
             kind: .stopFlush,
             samples: sampleCount,
@@ -1908,14 +1964,30 @@ private final class VADContext: @unchecked Sendable {
             sourceEndSample: sampleCount > 0 ? sourceEndSamples : nil,
             endpointState: decisionTimeEndpointState
         ))
-        if !primingComplete, accumulatorSampleCount == 0 { return nil }
-        guard accumulatorSampleCount > 0 else { return nil }
+        if !primingComplete, accumulatorSampleCount == 0 {
+            return VADFlushResult(
+                emission: nil,
+                stopTailSnapshot: stopTailSnapshot,
+                stopTailMetrics: stopTailMetrics
+            )
+        }
+        guard accumulatorSampleCount > 0 else {
+            return VADFlushResult(
+                emission: nil,
+                stopTailSnapshot: stopTailSnapshot,
+                stopTailMetrics: stopTailMetrics
+            )
+        }
         // The memory path keeps its hallucination guard; disk recovery is not VAD-gated.
         guard sampleCount >= 250 * 16 else {
             if !emitAudio {
                 clearAccumulator()
                 resetAfterEmission()
-                return nil
+                return VADFlushResult(
+                    emission: nil,
+                    stopTailSnapshot: stopTailSnapshot,
+                    stopTailMetrics: stopTailMetrics
+                )
             }
             recordDiscard(
                 samples: sampleCount,
@@ -1931,7 +2003,25 @@ private final class VADContext: @unchecked Sendable {
             speechSamples = 0
             silenceSamples = 0
             bufferHighWaterSamples = 0
-            return nil
+            return VADFlushResult(
+                emission: nil,
+                stopTailSnapshot: stopTailSnapshot,
+                stopTailMetrics: stopTailMetrics
+            )
+        }
+        if emitAudio, trimTrailingSilence, !stopTailSnapshot.hasPendingSpeechEvidence {
+            stopTailMetrics = StopTailMetrics(
+                action: .suppress,
+                trimmedSamples: 0,
+                suppressedSamples: sampleCount
+            )
+            clearAccumulator()
+            resetAfterEmission()
+            return VADFlushResult(
+                emission: nil,
+                stopTailSnapshot: stopTailSnapshot,
+                stopTailMetrics: stopTailMetrics
+            )
         }
         FileLogger.shared.info(
             .audio,
@@ -1947,14 +2037,34 @@ private final class VADContext: @unchecked Sendable {
         guard emitAudio else {
             clearAccumulator()
             resetAfterEmission()
-            return nil
+            return VADFlushResult(
+                emission: nil,
+                stopTailSnapshot: stopTailSnapshot,
+                stopTailMetrics: stopTailMetrics
+            )
         }
-        return emit(reason: "flush",
-                    silenceMs: Double(contiguousTrailingSilenceSamples) / 16.0,
-                    speechMs: Double(speechSamples) / 16.0,
-                    endpointState: decisionTimeEndpointState,
-                    weightedSilenceCreditMs: stopWeightedSilenceCreditMs,
-                    physicalTrailingSilenceMs: stopPhysicalTrailingSilenceMs)
+        let emission = emit(
+            reason: "flush",
+            silenceMs: Double(contiguousTrailingSilenceSamples) / 16.0,
+            speechMs: Double(speechSamples) / 16.0,
+            endpointState: decisionTimeEndpointState,
+            trimToPostRoll: trimTrailingSilence && stopTailSnapshot.hasPendingSpeechEvidence,
+            trailingSilenceSamples: stopTailSnapshot.contiguousTrailingSilenceSamples,
+            weightedSilenceCreditMs: stopWeightedSilenceCreditMs,
+            physicalTrailingSilenceMs: stopPhysicalTrailingSilenceMs
+        )
+        if trimTrailingSilence, stopTailSnapshot.hasPendingSpeechEvidence {
+            stopTailMetrics = StopTailMetrics(
+                action: .trim,
+                trimmedSamples: emission.trimmedTrailingSilenceSamples,
+                suppressedSamples: 0
+            )
+        }
+        return VADFlushResult(
+            emission: emission,
+            stopTailSnapshot: stopTailSnapshot,
+            stopTailMetrics: stopTailMetrics
+        )
     }
 }
 
@@ -2062,6 +2172,65 @@ private struct StopQueueResult {
     let recoverySpans: [SourceSampleSpan]
     let writtenSampleCount: Int
     let finalizeTelemetryAfterRecovery: Bool
+}
+
+private func adjustDiskRecoverySpansForStop(
+    _ spans: [SourceSampleSpan],
+    snapshot: StopTailSnapshot,
+    enabled: Bool,
+    writtenSampleCount: Int,
+    postRollSamples: Int
+) -> (spans: [SourceSampleSpan], metrics: StopTailMetrics) {
+    guard enabled else {
+        return (
+            spans,
+            StopTailMetrics(action: .passthrough, trimmedSamples: 0, suppressedSamples: 0)
+        )
+    }
+    // The silence counter reaches session end, but the WAV may stop inside speech.
+    if snapshot.hasPendingSpeechEvidence,
+       writtenSampleCount < snapshot.sessionEndSample {
+        return (
+            spans,
+            StopTailMetrics(action: .passthrough, trimmedSamples: 0, suppressedSamples: 0)
+        )
+    }
+
+    let action: StopTailAction = snapshot.hasPendingSpeechEvidence ? .trim : .suppress
+    let endSample = min(max(0, writtenSampleCount), snapshot.sessionEndSample)
+    let trailingSamples = min(snapshot.contiguousTrailingSilenceSamples, endSample)
+    let cutoffSample = snapshot.hasPendingSpeechEvidence
+        ? endSample - max(0, trailingSamples - postRollSamples)
+        : min(max(0, snapshot.lastEmittedEndSample), endSample)
+    let samplesToRemove = endSample - cutoffSample
+    guard samplesToRemove > 0 else {
+        return (spans, StopTailMetrics(action: action, trimmedSamples: 0, suppressedSamples: 0))
+    }
+
+    var adjustedSpans: [SourceSampleSpan] = []
+    var removedSamples = 0
+    for span in spans {
+        let spanEndSample = min(span.endSample, endSample)
+        guard spanEndSample > span.startSample else { continue }
+
+        let retainedEndSample = min(spanEndSample, cutoffSample)
+        if retainedEndSample > span.startSample {
+            adjustedSpans.append(SourceSampleSpan(
+                startSample: span.startSample,
+                endSample: retainedEndSample
+            ))
+        }
+        removedSamples += max(0, spanEndSample - max(span.startSample, cutoffSample))
+    }
+
+    return (
+        adjustedSpans,
+        StopTailMetrics(
+            action: action,
+            trimmedSamples: action == .trim ? removedSamples : 0,
+            suppressedSamples: action == .suppress ? removedSamples : 0
+        )
+    )
 }
 
 private let maximumDiskRecoveryChunkSamples = 60 * 16_000
@@ -2240,6 +2409,7 @@ actor StreamingAudioRecorder {
     /// Voice detector state machine; accessed only via `process()`/`flush()` which lock internally.
     private let vad: VADContext
     private let vadGateConfig: VADGateConfig
+    private let trimTrailingSilenceOnStopEnabled: Bool
     private var telemetryFlushable: VADTelemetryFlushable?
 
     // MARK: - Initialization
@@ -2250,6 +2420,8 @@ actor StreamingAudioRecorder {
         let minChunkSamples = Int(Double(SharedConfig.streamVadMinChunkMs()) * 16.0)
         let maxNoiseSamples = Int(SharedConfig.streamVadMaxNoiseSec() * 16000.0)
         let vadSource = SharedConfig.vadSource()
+        let trimTrailingSilenceOnStopEnabled = SharedConfig.trimTrailingSilenceOnStopEnabled()
+        self.trimTrailingSilenceOnStopEnabled = trimTrailingSilenceOnStopEnabled
         let sileroConfiguration = SharedConfig.sileroEvidenceConfiguration()
         let adaptiveThresholds = SharedConfig.streamVadAdaptiveThresholds()
         let endpointMachineEnabled = SharedConfig.streamEndpointMachineEnabled()
@@ -2295,6 +2467,7 @@ actor StreamingAudioRecorder {
             analysisHpfEnabled: SharedConfig.streamVadAnalysisHpfEnabled(),
             analysisHpfCutoffHz: SharedConfig.Defaults.streamVadHpfCutoffHzDefault,
             vadSource: vadSource,
+            trimTrailingSilenceOnStopEnabled: trimTrailingSilenceOnStopEnabled,
             sileroConfiguration: sileroConfiguration
         )
     }
@@ -2771,23 +2944,35 @@ actor StreamingAudioRecorder {
         let stoppedFlag = self.stoppedFlag
         let accounting = self.accounting
         let telemetryFlushable = self.telemetryFlushable
+        let trimStopTail = trimTrailingSilenceOnStopEnabled && recoverDiskRemainder
         let result: StopQueueResult = await withCheckedContinuation { continuation in
             vadQueue.async {
                 stoppedFlag.set(true)
                 let shouldRecoverDisk = recoveryWAVURL != nil && recoverDiskRemainder
-                let result = vad.flush(
-                    emitAudio: recoveryWAVURL == nil && recoverDiskRemainder
+                let flushResult = vad.flush(
+                    emitAudio: recoveryWAVURL == nil && recoverDiskRemainder,
+                    trimTrailingSilence: trimStopTail
                 )
                 var recoverySpans: [SourceSampleSpan] = []
                 var writtenSampleCount = 0
+                var stopTailMetrics = flushResult.stopTailMetrics
                 if let recoveryWAVURL {
                     vad.releaseSileroClassifier()
                     diskWriter.close()
                     writtenSampleCount = diskWriter.writtenSampleCount
                     if shouldRecoverDisk {
-                        recoverySpans = vad.diskRecoverySpans(
+                        let unadjustedSpans = vad.diskRecoverySpans(
                             writtenSampleCount: writtenSampleCount
                         )
+                        let adjustedRecovery = adjustDiskRecoverySpansForStop(
+                            unadjustedSpans,
+                            snapshot: flushResult.stopTailSnapshot,
+                            enabled: trimStopTail,
+                            writtenSampleCount: writtenSampleCount,
+                            postRollSamples: vad.postRollSamples
+                        )
+                        recoverySpans = adjustedRecovery.spans
+                        stopTailMetrics = adjustedRecovery.metrics
                         if recoverySpans.isEmpty {
                             FileLogger.shared.info(.audio, "Chunk splitter: disk remainder recovery",
                                                    payload: ["writtenSamples": writtenSampleCount,
@@ -2799,6 +2984,10 @@ actor StreamingAudioRecorder {
                         }
                     }
                 }
+                FileLogger.shared.info(.audio, "Chunk splitter: stop trailing-silence decision",
+                                       payload: ["case": stopTailMetrics.action.rawValue,
+                                                 "trimmedSamples": stopTailMetrics.trimmedSamples,
+                                                 "suppressedSamples": stopTailMetrics.suppressedSamples])
                 let finalizeTelemetryAfterRecovery = shouldRecoverDisk && !recoverySpans.isEmpty
                 if !finalizeTelemetryAfterRecovery {
                     vad.endTelemetrySession()
@@ -2827,7 +3016,7 @@ actor StreamingAudioRecorder {
                 accounting.expectedOutputTotal = 0.0
                 accounting.debugLoggedBuffers = 0
                 continuation.resume(returning: StopQueueResult(
-                    memoryEmission: result,
+                    memoryEmission: flushResult.emission,
                     recoverySpans: recoverySpans,
                     writtenSampleCount: writtenSampleCount,
                     finalizeTelemetryAfterRecovery: finalizeTelemetryAfterRecovery

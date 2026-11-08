@@ -92,6 +92,57 @@ function removeTrailingSourceSamples(spans, sampleCount) {
   return { remainingSpans, trailingSpans };
 }
 
+function adjustDiskRecoverySpansForStop(spans, snapshot, {
+  enabled,
+  writtenSampleCount,
+  postRollSamples,
+}) {
+  // A shorter WAV extent can end inside speech even though the tail counter reaches stop.
+  if (!enabled || (snapshot.hasPendingSpeechEvidence
+    && writtenSampleCount < snapshot.sessionEndSample)) {
+    return {
+      spans,
+      decision: { action: 'passthrough', trimmedSamples: 0, suppressedSamples: 0 },
+    };
+  }
+
+  const action = snapshot.hasPendingSpeechEvidence ? 'trim' : 'suppress';
+  const endSample = Math.min(Math.max(0, writtenSampleCount), snapshot.sessionEndSample);
+  const trailingSamples = Math.min(snapshot.contiguousTrailingSilenceSamples, endSample);
+  const cutoffSample = snapshot.hasPendingSpeechEvidence
+    ? endSample - Math.max(0, trailingSamples - postRollSamples)
+    : Math.min(Math.max(0, snapshot.lastEmittedEndSample), endSample);
+  const samplesToRemove = endSample - cutoffSample;
+  if (samplesToRemove === 0) {
+    return { spans, decision: { action, trimmedSamples: 0, suppressedSamples: 0 } };
+  }
+
+  const adjustedSpans = [];
+  let removedSamples = 0;
+  for (const span of spans) {
+    const spanEndSample = Math.min(span.endSample, endSample);
+    if (spanEndSample <= span.startSample) continue;
+
+    const retainedEndSample = Math.min(spanEndSample, cutoffSample);
+    if (retainedEndSample > span.startSample) {
+      adjustedSpans.push({ startSample: span.startSample, endSample: retainedEndSample });
+    }
+    removedSamples += Math.max(
+      0,
+      spanEndSample - Math.max(span.startSample, cutoffSample),
+    );
+  }
+
+  return {
+    spans: adjustedSpans,
+    decision: {
+      action,
+      trimmedSamples: action === 'trim' ? removedSamples : 0,
+      suppressedSamples: action === 'suppress' ? removedSamples : 0,
+    },
+  };
+}
+
 export function calculateSlowOnsetThreshold(floorDb, slowLevelDeltaDb, absoluteGuardDb) {
   return Math.max(floorDb + slowLevelDeltaDb, absoluteGuardDb);
 }
@@ -253,6 +304,7 @@ function makeSessionConfig(harness) {
     splitSearchWindowMs: 0,
     minSilenceAtSplitMs: 0,
     postRollMs: harness.postRollSamples / 16,
+    trimTrailingSilenceOnStopEnabled: harness.trimTrailingSilenceOnStopEnabled,
     analysisHpfEnabled: false,
     analysisHpfCutoffHz: 100,
     loudRegimeEnabled: gate.config.loudRegimeEnabled,
@@ -307,6 +359,7 @@ export function makeRecorderHarness({
   recorderConfig = {},
   gateConfig = {},
   diskRecovery = false,
+  diskWriteFailureAfterSamples = null,
   onFrame,
   onEvent,
   onSlowOnsetDiagnostic,
@@ -408,6 +461,8 @@ export function makeRecorderHarness({
     spilledSampleCount: 0,
     spillOccurred: false,
     postRollSamples: recorderConfig.postRollSamples ?? VAD_POST_ROLL_SAMPLES,
+    trimTrailingSilenceOnStopEnabled: recorderConfig.trimTrailingSilenceOnStopEnabled === true,
+    lastStopTailDecision: null,
     contiguousTrailingSilenceSamples: 0,
     contiguousTrailingSilenceMinimumDb: null,
     contiguousTrailingSilencePeakAboveFloorDb: null,
@@ -416,6 +471,9 @@ export function makeRecorderHarness({
     emittedSampleCount: 0,
     diskRecoveryEnabled: Boolean(diskRecovery),
     diskWrittenSampleCount: 0,
+    diskWriteFailureAfterSamples: Number.isFinite(diskWriteFailureAfterSamples)
+      ? Math.max(0, Math.trunc(diskWriteFailureAfterSamples))
+      : null,
     emittedSourceSpans: [],
     discardedSourceSpans: [],
     accumulatorSourceSpans: [],
@@ -523,8 +581,14 @@ export function makeRecorderHarness({
       return normalizeSourceSpans(recoverySpans);
     },
 
-    emitDiskRemainder() {
-      const spans = this.diskRecoverySpans();
+    emitDiskRemainder(stopSnapshot) {
+      const recovery = adjustDiskRecoverySpansForStop(this.diskRecoverySpans(), stopSnapshot, {
+        enabled: this.trimTrailingSilenceOnStopEnabled,
+        writtenSampleCount: this.diskWrittenSampleCount,
+        postRollSamples: this.postRollSamples,
+      });
+      const { spans } = recovery;
+      this.lastStopTailDecision = recovery.decision;
       for (const span of spans) {
         let cursor = span.startSample;
         while (cursor < span.endSample) {
@@ -1015,7 +1079,12 @@ export function makeRecorderHarness({
       const hasRisingEdgeWitness = previousFrameDb !== null
         && frameDb - previousFrameDb >= this.gate.effectiveFlatSpreadDb;
       this.sessionElapsedSamples += frameSamples;
-      if (this.diskRecoveryEnabled) this.diskWrittenSampleCount += frameSamples;
+      if (this.diskRecoveryEnabled) {
+        const remainingWritableSamples = this.diskWriteFailureAfterSamples === null
+          ? frameSamples
+          : Math.max(0, this.diskWriteFailureAfterSamples - this.diskWrittenSampleCount);
+        this.diskWrittenSampleCount += Math.min(frameSamples, remainingWritableSamples);
+      }
       this.slowOnsetTriggerTime = null;
       const primingWasComplete = this.primingComplete;
       const output = this.effectiveVADSource === 'silero'
@@ -1983,6 +2052,19 @@ export function makeRecorderHarness({
       this.previousProcessedFrameDb = null;
       this.quietLatchRisingEdgeAtSessionSamples = null;
       this.quietLatchRisingEdgeSeen = false;
+      const stopSnapshot = {
+        hasPendingSpeechEvidence: this.speechSamples > 0 || this.retainedGapHasSpeechEvidence(),
+        contiguousTrailingSilenceSamples: this.contiguousTrailingSilenceSamples,
+        lastEmittedEndSample: this.sourcePositionWatermark,
+        sessionEndSample: this.sessionElapsedSamples,
+      };
+      this.lastStopTailDecision = {
+        action: !this.trimTrailingSilenceOnStopEnabled
+          ? 'passthrough'
+          : stopSnapshot.hasPendingSpeechEvidence ? 'trim' : 'suppress',
+        trimmedSamples: 0,
+        suppressedSamples: 0,
+      };
       this.moveRetainedGapToAccumulator();
       this.finishIdleGapRun();
       const stopWeightedSilenceCreditMs = this.endpoint.accumulatedAmbiguousCreditSamples / 16;
@@ -2015,11 +2097,11 @@ export function makeRecorderHarness({
         es: decisionTimeEndpointState,
       });
       if (!this.primingComplete && sampleCount === 0) {
-        if (this.diskRecoveryEnabled) this.emitDiskRemainder();
+        if (this.diskRecoveryEnabled) this.emitDiskRemainder(stopSnapshot);
         return { type: 'none' };
       }
       if (sampleCount === 0) {
-        if (this.diskRecoveryEnabled) this.emitDiskRemainder();
+        if (this.diskRecoveryEnabled) this.emitDiskRemainder(stopSnapshot);
         return { type: 'none' };
       }
       // Sub-250 ms cannot contain an intelligible word, so the tail floor
@@ -2027,7 +2109,7 @@ export function makeRecorderHarness({
       if (sampleCount < STOP_FLUSH_MINIMUM_SAMPLES) {
         if (this.diskRecoveryEnabled) {
           this.clearDiskFlushAccumulator();
-          this.emitDiskRemainder();
+          this.emitDiskRemainder(stopSnapshot);
           return { type: 'none' };
         }
         this.tailFloorSampleCount += sampleCount;
@@ -2067,8 +2149,40 @@ export function makeRecorderHarness({
       }
       if (this.diskRecoveryEnabled) {
         this.clearDiskFlushAccumulator();
-        this.emitDiskRemainder();
+        this.emitDiskRemainder(stopSnapshot);
         return { type: 'none' };
+      }
+      if (this.trimTrailingSilenceOnStopEnabled && !stopSnapshot.hasPendingSpeechEvidence) {
+        this.lastStopTailDecision = {
+          action: 'suppress',
+          trimmedSamples: 0,
+          suppressedSamples: sampleCount,
+        };
+        this.clearDiskFlushAccumulator();
+        return { type: 'none' };
+      }
+
+      const trailingSamples = Math.min(
+        stopSnapshot.contiguousTrailingSilenceSamples,
+        sampleCount,
+      );
+      const trimmedTailSamples = this.trimTrailingSilenceOnStopEnabled
+        && stopSnapshot.hasPendingSpeechEvidence
+        ? Math.max(0, trailingSamples - this.postRollSamples)
+        : 0;
+      const emissionSamples = sampleCount - trimmedTailSamples;
+      const emissionSourceEndSample = sourceEndSample - trimmedTailSamples;
+      const { remainingSpans, trailingSpans } = removeTrailingSourceSamples(
+        this.accumulatorSourceSpans,
+        trimmedTailSamples,
+      );
+      this.emittedTotalMs = emissionSamples / 16;
+      if (this.trimTrailingSilenceOnStopEnabled && stopSnapshot.hasPendingSpeechEvidence) {
+        this.lastStopTailDecision = {
+          action: 'trim',
+          trimmedSamples: trimmedTailSamples,
+          suppressedSamples: 0,
+        };
       }
       const chunkId = this.nextChunkId;
       this.nextChunkId += 1;
@@ -2076,20 +2190,23 @@ export function makeRecorderHarness({
         t: 'ev',
         k: 'emit',
         id: chunkId,
-        n: sampleCount,
+        n: emissionSamples,
         r: 'flush',
         sm: speechMs,
-        tm: sampleCount / 16,
+        tm: emissionSamples / 16,
         s0: startMs,
-        s1: endMs,
+        s1: trimmedTailSamples > 0
+          ? (sourceStartSample + emissionSamples) / 16
+          : endMs,
         sourceStartSample,
-        sourceEndSample,
+        sourceEndSample: emissionSourceEndSample,
         es: decisionTimeEndpointState,
         weightedSilenceCreditMs: stopWeightedSilenceCreditMs,
         physicalTrailingSilenceMs: stopPhysicalTrailingSilenceMs,
-      }, [...this.accumulatorSourceSpans]);
+      }, remainingSpans);
       this.headLive = false;
       this.headSamples = 0;
+      this.clearRetainedGap();
       this.accumulatorSamples = 0;
       this.accumulatorSourceSpans.length = 0;
       this.accumulatorPeakAboveFloorDb = null;
@@ -2106,6 +2223,14 @@ export function makeRecorderHarness({
       this.streakSawDynamics = false;
       this.quietLatchRisingEdgeAtSessionSamples = null;
       this.quietLatchRisingEdgeSeen = false;
+      if (trimmedTailSamples > 0) {
+        this.retainedGapSamples = trimmedTailSamples;
+        this.retainedGapSourceSpans = trailingSpans;
+        this.retainedGapStartSessionSamples = trailingSpans[0]?.startSample
+          ?? emissionSourceEndSample;
+        this.retainedGapPeakAboveFloorDb = this.contiguousTrailingSilencePeakAboveFloorDb;
+        this.manageRetainedGapOverflow();
+      }
       return { type: 'finalizeUtterance', kind: 'stop' };
     },
 
