@@ -86,6 +86,8 @@ class AppSettings: ObservableObject {
 
     @Published var chunkSplitterMode: VADMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
     @Published var chunkSplitterVADSource: VADSource = .dsp
+    @Published var trimTrailingSilenceOnStopEnabled: Bool =
+        SharedConfig.Defaults.trimTrailingSilenceOnStopEnabledDefault
     @Published var sileroStartThreshold = SileroEvidenceConfiguration.defaultStartThreshold
     @Published var sileroStopThreshold = SileroEvidenceConfiguration.defaultStopThreshold
     @Published var sileroSmoothingSteps = SileroEvidenceConfiguration.defaultSmoothingSteps
@@ -101,6 +103,7 @@ class AppSettings: ObservableObject {
     private var appGroupDefaults: UserDefaults?
     private var cancellables = Set<AnyCancellable>()
     private var refreshingLLMCleanupPreferences = false
+    private var refreshingTrimTrailingSilenceOnStopEnabled = false
     private var chunkSplitterSilenceOverridePresent = false
     private var updatingDerivedChunkSplitterValue = false
 
@@ -131,6 +134,7 @@ class AppSettings: ObservableObject {
         audioCaptureAttenuationEnabled = SharedConfig.audioCaptureAttenuationEnabled()
         chunkSplitterMode = SharedConfig.streamVadMode()
         chunkSplitterVADSource = SharedConfig.vadSource()
+        trimTrailingSilenceOnStopEnabled = SharedConfig.trimTrailingSilenceOnStopEnabled()
         let sileroConfiguration = SharedConfig.sileroEvidenceConfiguration()
         sileroStartThreshold = sileroConfiguration.startThreshold
         sileroStopThreshold = sileroConfiguration.stopThreshold
@@ -236,6 +240,10 @@ class AppSettings: ObservableObject {
                                    payload: ["value": newValue.rawValue])
             self?.saveChunkSplitterVADSource(newValue)
         }.store(in: &cancellables)
+        $trimTrailingSilenceOnStopEnabled.dropFirst().sink { [weak self] enabled in
+            guard let self, !self.refreshingTrimTrailingSilenceOnStopEnabled else { return }
+            self.saveTrimTrailingSilenceOnStopEnabled(enabled)
+        }.store(in: &cancellables)
         $sileroStartThreshold.dropFirst().sink { [weak self] _ in
             self?.saveSileroEvidenceConfiguration()
         }.store(in: &cancellables)
@@ -299,6 +307,14 @@ class AppSettings: ObservableObject {
         llmCleanupStyling = SharedConfig.llmCleanupStyling()
         llmCleanupStructure = SharedConfig.llmCleanupStructure()
         llmCleanupContext = SharedConfig.llmCleanupContext()
+    }
+
+    func refreshTrimTrailingSilenceOnStopEnabled() {
+        let sharedValue = SharedConfig.trimTrailingSilenceOnStopEnabled()
+        guard trimTrailingSilenceOnStopEnabled != sharedValue else { return }
+        refreshingTrimTrailingSilenceOnStopEnabled = true
+        defer { refreshingTrimTrailingSilenceOnStopEnabled = false }
+        trimTrailingSilenceOnStopEnabled = sharedValue
     }
 
     func refreshServerCapabilityBadges() {
@@ -393,6 +409,10 @@ class AppSettings: ObservableObject {
         saveAudioCaptureAttenuationEnabled(audioCaptureAttenuationEnabled)
         appGroupDefaults?.set(chunkSplitterMode.rawValue, forKey: SharedConfig.Defaults.streamVadModeKey)
         appGroupDefaults?.set(chunkSplitterVADSource.rawValue, forKey: SharedConfig.Defaults.vadSourceKey)
+        appGroupDefaults?.set(
+            trimTrailingSilenceOnStopEnabled,
+            forKey: SharedConfig.Defaults.trimTrailingSilenceOnStopEnabledKey
+        )
         let sileroConfiguration = SileroEvidenceConfiguration(
             startThreshold: sileroStartThreshold,
             stopThreshold: sileroStopThreshold,
@@ -527,6 +547,14 @@ class AppSettings: ObservableObject {
         postSettingsChanged()
     }
 
+    private func saveTrimTrailingSilenceOnStopEnabled(_ enabled: Bool) {
+        appGroupDefaults?.set(
+            enabled,
+            forKey: SharedConfig.Defaults.trimTrailingSilenceOnStopEnabledKey
+        )
+        postSettingsChanged()
+    }
+
     private func saveSileroEvidenceConfiguration() {
         let configuration = SileroEvidenceConfiguration(
             startThreshold: sileroStartThreshold,
@@ -647,6 +675,8 @@ class AppSettings: ObservableObject {
         audioCaptureAttenuationEnabled = SharedConfig.Defaults.audioCaptureAttenuationEnabledDefault
         chunkSplitterMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
         chunkSplitterVADSource = VADSource(rawValue: SharedConfig.Defaults.vadSourceDefault) ?? .dsp
+        trimTrailingSilenceOnStopEnabled =
+            SharedConfig.Defaults.trimTrailingSilenceOnStopEnabledDefault
         sileroStartThreshold = SharedConfig.Defaults.sileroStartThresholdDefault
         sileroStopThreshold = SharedConfig.Defaults.sileroStopThresholdDefault
         sileroSmoothingSteps = SharedConfig.Defaults.sileroSmoothingStepsDefault
@@ -671,6 +701,8 @@ class AppSettings: ObservableObject {
         chunkSplitterPauseProfile = SharedConfig.Defaults.streamVadPauseProfileDefault
         chunkSplitterMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
         chunkSplitterVADSource = VADSource(rawValue: SharedConfig.Defaults.vadSourceDefault) ?? .dsp
+        trimTrailingSilenceOnStopEnabled =
+            SharedConfig.Defaults.trimTrailingSilenceOnStopEnabledDefault
         sileroStartThreshold = SharedConfig.Defaults.sileroStartThresholdDefault
         sileroStopThreshold = SharedConfig.Defaults.sileroStopThresholdDefault
         sileroSmoothingSteps = SharedConfig.Defaults.sileroSmoothingStepsDefault

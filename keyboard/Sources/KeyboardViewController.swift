@@ -680,6 +680,9 @@ class KeyboardViewController: UIInputViewController {
             panel.onVADSourceSelected = { source in
                 SharedConfig.setVADSource(source)
             }
+            panel.onTrimTrailingSilenceOnStopChange = { enabled in
+                SharedConfig.setTrimTrailingSilenceOnStopEnabled(enabled)
+            }
             panel.onLLMCleanupPreferencesChange = { preferences in
                 SharedConfig.setLLMCleanupPreferences(preferences)
             }
@@ -759,6 +762,7 @@ class KeyboardViewController: UIInputViewController {
         keyboardView.showSettingsPanel(
             activeLanguage: settingsCache.language,
             activeVADSource: SharedConfig.vadSource(),
+            trimTrailingSilenceOnStopEnabled: SharedConfig.trimTrailingSilenceOnStopEnabled(),
             cleanupPreferences: SharedConfig.llmCleanupPreferences()
         )
     }

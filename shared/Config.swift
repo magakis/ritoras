@@ -349,6 +349,11 @@ struct SharedConfig {
         static let fullRecordingUploadEnabledKey = "fullRecordingUploadEnabled"
         static let fullRecordingUploadEnabledDefault = false
 
+        // MARK: - Streaming Stop
+
+        static let trimTrailingSilenceOnStopEnabledKey = "trimTrailingSilenceOnStopEnabled"
+        static let trimTrailingSilenceOnStopEnabledDefault = true
+
         // MARK: - Streaming Audio Format
 
         static let streamAacEnabledKey = "streamAacEnabled"
@@ -1062,6 +1067,22 @@ struct SharedConfig {
     static func setVADSource(_ source: VADSource) {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return }
         defaults.set(source.rawValue, forKey: Defaults.vadSourceKey)
+        DarwinNotifier.post(Defaults.darwinSettingsChangedNotificationName)
+    }
+
+    /// Reads whether trailing silence should be trimmed when stopping a stream.
+    static func trimTrailingSilenceOnStopEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.trimTrailingSilenceOnStopEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.trimTrailingSilenceOnStopEnabledKey) as? Bool)
+            ?? Defaults.trimTrailingSilenceOnStopEnabledDefault
+    }
+
+    /// Writes the stop-trimming preference and posts the settings-changed notification.
+    static func setTrimTrailingSilenceOnStopEnabled(_ enabled: Bool) {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return }
+        defaults.set(enabled, forKey: Defaults.trimTrailingSilenceOnStopEnabledKey)
         DarwinNotifier.post(Defaults.darwinSettingsChangedNotificationName)
     }
 

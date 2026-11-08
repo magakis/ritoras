@@ -15,6 +15,9 @@ struct ChunkSplitterSettingsView: View {
     var body: some View {
         formWithTesterRebuildHandlers
         .navigationTitle("Streaming")
+        .onAppear {
+            settings.refreshTrimTrailingSilenceOnStopEnabled()
+        }
         .onDisappear {
             stopTester()
         }
@@ -41,6 +44,7 @@ struct ChunkSplitterSettingsView: View {
             aacSection
             testerSection
             controlsSection
+            trimTrailingSilenceSection
             resetSection
         }
         .alert("Reset Streaming Settings?", isPresented: $isShowingResetConfirmation) {
@@ -64,6 +68,7 @@ struct ChunkSplitterSettingsView: View {
             stopTester()
         }
         if phase == .active {
+            settings.refreshTrimTrailingSilenceOnStopEnabled()
             Task {
                 await tester.recheckPermission()
             }
@@ -312,6 +317,19 @@ struct ChunkSplitterSettingsView: View {
             Button("Reset Streaming Settings to Defaults", role: .destructive) {
                 isShowingResetConfirmation = true
             }
+        }
+    }
+
+    private var trimTrailingSilenceSection: some View {
+        Section {
+            Toggle(
+                "Trim trailing silence on stop",
+                isOn: $settings.trimTrailingSilenceOnStopEnabled
+            )
+        } header: {
+            Text("Manual Stop")
+        } footer: {
+            Text("Changes take effect next dictation session.")
         }
     }
 
