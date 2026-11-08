@@ -165,6 +165,7 @@ class KeyboardViewController: UIInputViewController {
     private var waitTimer: Timer?
     private var errorResetWorkItem: DispatchWorkItem?
     private var suggestionRefreshWorkItem: DispatchWorkItem?
+    private var lastSuggestionRefreshContextToken: UInt64?
     private var pollTimer: Timer?
     private var pollCount = 0
 
@@ -311,7 +312,7 @@ class KeyboardViewController: UIInputViewController {
         guard !SharedPredictionStack.shared.isReady, !SharedPredictionStack.shared.isLoading else { return }
         SharedPredictionStack.shared.loadIfNeeded { [weak self] ok in
             DispatchQueue.main.async {
-                self?.keyboardView?.refreshSuggestions()
+                self?.scheduleSuggestionRefresh()
             }
         }
     }
@@ -384,9 +385,25 @@ class KeyboardViewController: UIInputViewController {
         settingsCache.refresh()
         darwinSettingsChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinSettingsChangedNotificationName) { [weak self] in
             guard let self = self else { return }
+            let previousSuggestionSettings = self.settingsCache.serverSuggestionSettings
             self.settingsCache.refresh()
+            let currentSuggestionSettings = self.settingsCache.serverSuggestionSettings
+            let serverSuggestionSettingsChanged =
+                previousSuggestionSettings.enabled != currentSuggestionSettings.enabled
+                || previousSuggestionSettings.spellingEnabled
+                    != currentSuggestionSettings.spellingEnabled
+                || previousSuggestionSettings.vocabularyEnabled
+                    != currentSuggestionSettings.vocabularyEnabled
+                || previousSuggestionSettings.predictionEnabled
+                    != currentSuggestionSettings.predictionEnabled
+                || previousSuggestionSettings.strictRemoteOnlyEnabled
+                    != currentSuggestionSettings.strictRemoteOnlyEnabled
             DispatchQueue.main.async {
                 HapticsManager.shared.reloadEnabledFromAppGroup()
+                if serverSuggestionSettingsChanged {
+                    self.keyboardView?.noteSuggestionContextChange()
+                    self.keyboardView?.clearServerSuggestionAugmentation()
+                }
                 self.applyLanguageSetting()
                 self.refreshKeyboardServicesPinSnapshot()
             }
@@ -466,6 +483,8 @@ class KeyboardViewController: UIInputViewController {
             FileLogger.shared.info(.keyboard, "viewDidAppear — idle",
                                    payload: ["hasFullAccess": hasFullAccess])
         }
+
+        scheduleFocusSeededSuggestionRefresh()
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -473,6 +492,7 @@ class KeyboardViewController: UIInputViewController {
         installOrUpdateHeightConstraint()
         view.setNeedsLayout()
         view.layoutIfNeeded()
+        clearStrictRemoteSuggestionDisplayIfNeeded()
         applyLanguageSetting()
         refreshKeyboardServicesPinSnapshot()
     }
@@ -498,7 +518,7 @@ class KeyboardViewController: UIInputViewController {
         keyboardView.setLanguage(language)
         SharedPredictionStack.shared.switchLanguageIfNeeded(to: language) { [weak self] _ in
             DispatchQueue.main.async {
-                self?.keyboardView?.refreshSuggestions()
+                self?.scheduleSuggestionRefresh()
             }
         }
         logSpellLanguageUnavailableIfNeeded()
@@ -687,7 +707,7 @@ class KeyboardViewController: UIInputViewController {
         // and come back when the new stack is ready.
         SharedPredictionStack.shared.switchLanguageIfNeeded(to: language) { [weak self] _ in
             DispatchQueue.main.async {
-                self?.keyboardView?.refreshSuggestions()
+                self?.scheduleSuggestionRefresh()
             }
         }
         FileLogger.shared.info(.keyboard, "keyboard language switched",
@@ -1481,6 +1501,7 @@ class KeyboardViewController: UIInputViewController {
         errorResetWorkItem = nil
         suggestionRefreshWorkItem?.cancel()
         suggestionRefreshWorkItem = nil
+        lastSuggestionRefreshContextToken = nil
         deferredKeystrokeWorkItem?.cancel()
         deferredKeystrokeWorkItem = nil
 
@@ -1555,7 +1576,7 @@ class KeyboardViewController: UIInputViewController {
             let activeRevision = keyboardServicesSuggestionCoordinator.activeSnapshotRevision
             keyboardView?.setServerSuggestionSnapshotRevision(activeRevision)
             if activeRevision != nil, keyboardView?.window != nil {
-                keyboardView.refreshSuggestions()
+                scheduleSuggestionRefresh()
             }
         }
         startKeyboardServicesSnapshotPolling()
@@ -2199,7 +2220,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         lastAutoCorrection = nil          // Suggestion tap invalidates any pending revert
         lastSigmaConvertedWord = nil      // Suggestion tap rewrites the word region
         // Refresh is async; the token guard rejects any result whose captured state no longer matches.
-        keyboardView.refreshSuggestions()
+        scheduleSuggestionRefresh()
 
         // Learn the word the user kept.
         //
@@ -2227,7 +2248,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         if !SharedPredictionStack.shared.isReady, !SharedPredictionStack.shared.isLoading {
             SharedPredictionStack.shared.loadIfNeeded { [weak self] _ in
                 DispatchQueue.main.async {
-                    self?.keyboardView?.refreshSuggestions()
+                    self?.scheduleSuggestionRefresh()
                 }
             }
         }
@@ -2286,21 +2307,41 @@ extension KeyboardViewController: KeyboardViewDelegate {
             }
             return 0
         }
+        let documentIdentity = safeDocumentIdentifier()?.uuidString ?? "unknown"
         let context = textDocumentProxy.documentContextBeforeInput ?? ""
         let suffix = String(context.suffix(50))
         let currentWord = CurrentWordExtractor.extract(from: context).currentWord
-        return ContextHash.fnv1a("\(suffix)|\(currentWord)")
+        // A field switch can preserve identical text while changing the request target.
+        return ContextHash.fnv1a("\(documentIdentity)|\(suffix)|\(currentWord)")
     }
 
-    /// Debounced suggestion refresh (30ms coalescing window).
-    /// Replaces direct `keyboardView.refreshSuggestions()` calls at most typing
-    /// call sites so that rapid keystrokes do not re-query the prediction engine
-    /// redundantly. The 30ms window is below human perception but effectively
-    /// coalesces typematic-repeat bursts.
+    private func scheduleFocusSeededSuggestionRefresh() {
+        let hasDocumentContext = !(textDocumentProxy.documentContextBeforeInput ?? "").isEmpty
+        guard hasDocumentContext else {
+            clearStrictRemoteSuggestionDisplayIfNeeded()
+            return
+        }
+
+        let contextToken = keyboardContextToken(keyboardView)
+        guard contextToken != lastSuggestionRefreshContextToken else { return }
+        clearStrictRemoteSuggestionDisplayIfNeeded()
+        scheduleSuggestionRefresh()
+    }
+
+    private func clearStrictRemoteSuggestionDisplayIfNeeded() {
+        let suggestionSettings = settingsCache.serverSuggestionSettings
+        guard suggestionSettings.enabled && suggestionSettings.strictRemoteOnlyEnabled else { return }
+        keyboardView.clearServerSuggestionAugmentation()
+    }
+
+    /// Debounces keyboard-context refreshes so typing, host callbacks, and focus
+    /// activation coalesce through the same local lookup and server dispatch path.
     private func scheduleSuggestionRefresh(coalescing: TimeInterval = 0.03) {
         suggestionRefreshWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
-            self?.keyboardView.refreshSuggestions()
+            guard let self else { return }
+            self.lastSuggestionRefreshContextToken = self.keyboardContextToken(self.keyboardView)
+            self.keyboardView.refreshSuggestions()
         }
         suggestionRefreshWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + coalescing, execute: workItem)
@@ -2365,9 +2406,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
         lastAutoCorrection = nil  // host text change invalidates any pending revert
         lastSigmaConvertedWord = nil  // external text change invalidates the sigma revert window
         recentWordBuffer.clear()  // committed-word records are stale once the doc changes
-        // SYNC: system-signaled textDidChange bypasses debounce so the suggestion bar
-        // updates immediately — debounce here would feel laggy after external edits.
-        keyboardView.refreshSuggestions()
+        // Host edits and focus-activation callbacks share the same coalescing window.
+        scheduleSuggestionRefresh()
         recomputeAutoCap()
 
         // Flush deferred dictation result if one exists (the user has now
@@ -2406,6 +2446,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         recentWordBuffer.clear()  // committed-word records are stale once the cursor moves
         backspaceNilContextRetries = 0
         recomputeAutoCap()
+        scheduleSuggestionRefresh()
 
         // Flush deferred dictation result if one exists (the user has now
         // focused/activated a text field).

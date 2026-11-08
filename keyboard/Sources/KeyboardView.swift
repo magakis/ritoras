@@ -1477,6 +1477,7 @@ class KeyboardView: UIView {
 
     func noteSuggestionContextChange() {
         suggestionEpoch &+= 1
+        clearStrictRemoteSuggestions()
     }
 
     /// Clears old network results when the effective pin or configured list changes.
@@ -1529,16 +1530,19 @@ class KeyboardView: UIView {
 
     func refreshSuggestions() {
         let token = delegate?.keyboardContextToken(self) ?? 0
+        // Cancel any lookup before issuing a replacement; keep only one engine result set active.
+        suggestionLookupWorkItem?.cancel()
+        suggestionLookupWorkItem = nil
+        suggestionEpoch &+= 1
+        let capturedEpoch = suggestionEpoch
+        clearStrictRemoteSuggestions(token: token)
 
         guard let snapshot = delegate?.keyboardViewSuggestionSnapshot(self),
               let engine = delegate?.keyboardViewPredictionEngine(self) else {
             // Wrong target or engine not ready — clear synchronously, no hop needed.
-            suggestionLookupWorkItem?.cancel()
-            suggestionLookupWorkItem = nil
-            suggestionEpoch &+= 1
             localSuggestions = []
             localSuggestionsAreBounded = true
-            localSuggestionEpoch = suggestionEpoch
+            localSuggestionEpoch = capturedEpoch
             localSuggestionToken = token
             localSuggestionIsEmptyPrefix = false
             appliedServerSuggestionResults = nil
@@ -1553,13 +1557,6 @@ class KeyboardView: UIView {
         let previousDisplayed = localSuggestionsAreBounded
             ? localSuggestions
             : suggestionCache.displayed
-
-        // Cancel any in-flight lookup before issuing a new one.
-        // Guarantees at most one lookup in flight (48 MB Jetsam: no parallel
-        // SymSpell result sets).
-        suggestionLookupWorkItem?.cancel()
-        suggestionEpoch &+= 1
-        let capturedEpoch = suggestionEpoch
 
         let workItem = DispatchWorkItem { [weak self, weak engine] in
             guard let self = self, let engine = engine else { return }
@@ -1588,6 +1585,12 @@ class KeyboardView: UIView {
                             "currentEpoch": self.suggestionEpoch
                         ])
                     }
+                    return
+                }
+                guard shouldApplyLookupResult(
+                    capturedToken: token,
+                    liveToken: self.delegate?.keyboardContextToken(self) ?? 0
+                ) else {
                     return
                 }
                 self.localSuggestionEpoch = capturedEpoch
@@ -1632,7 +1635,12 @@ class KeyboardView: UIView {
 
     private func renderCurrentSuggestions() {
         guard localSuggestionsAreBounded else {
-            suggestionBar.update(with: suggestionCache.displayed)
+            let suggestions = KeyboardServicesSuggestionPolicy.fallbackForDisplay(
+                localCandidates: suggestionCache.displayed,
+                strictRemoteOnly: isStrictRemoteOnlyEnabled
+            )
+            suggestionCache.update(suggestions, token: localSuggestionToken ?? suggestionCache.token)
+            suggestionBar.update(with: suggestions)
             return
         }
         let strictRemoteOnly = isStrictRemoteOnlyEnabled
@@ -1655,6 +1663,15 @@ class KeyboardView: UIView {
     private var isStrictRemoteOnlyEnabled: Bool {
         (delegate?.keyboardViewServerSuggestionsEnabled(self) ?? false)
             && KeyboardSettingsCache.strictRemoteOnlyEnabled
+    }
+
+    private func clearStrictRemoteSuggestions(token: UInt64? = nil) {
+        guard isStrictRemoteOnlyEnabled else { return }
+        // Do not leave the previous local or server bar visible while this epoch is recomputed.
+        appliedServerSuggestionResults = nil
+        let contextToken = token ?? delegate?.keyboardContextToken(self) ?? 0
+        suggestionCache.update([], token: contextToken)
+        suggestionBar.update(with: [])
     }
 
     /// Releases the engine-capturing suggestion work item. Called by the VC on

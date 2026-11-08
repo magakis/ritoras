@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   applySuggestionRequestOutcome,
   createSuggestionFailoverState,
+  fallbackSuggestionsForDisplay,
   mergeSuggestionsForDisplay,
   suggestionServerForEndpoint,
   updateSuggestionFailoverSnapshot,
@@ -161,6 +162,20 @@ describe('server suggestion display merge', () => {
 
     assert.deepStrictEqual(midWord, []);
     assert.deepStrictEqual(nextWord, []);
+  });
+
+  it('strict remote-only suppresses the local cached fallback path', () => {
+    const strictFallback = fallbackSuggestionsForDisplay({
+      localCandidates: ['cached local', 'another local'],
+      strictRemoteOnly: true,
+    });
+    const normalFallback = fallbackSuggestionsForDisplay({
+      localCandidates: ['cached local', 'another local'],
+      strictRemoteOnly: false,
+    });
+
+    assert.deepStrictEqual(strictFallback, []);
+    assert.deepStrictEqual(normalFallback, ['cached local', 'another local']);
   });
 
   it('strict remote-only is opt-in and strict-off output stays merged', () => {

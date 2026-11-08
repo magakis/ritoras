@@ -277,8 +277,7 @@ export function mergeSuggestionsForDisplay({
     || (strictRemoteOnly && (localEpoch === undefined || localEpoch !== serverEpoch))
     || localContextToken === 0
     || serverContextToken !== localContextToken) {
-    if (strictRemoteOnly) return [];
-    return localCandidates.slice(0, MAXIMUM_DISPLAYED_CANDIDATES);
+    return fallbackSuggestionsForDisplay({ localCandidates, strictRemoteOnly });
   }
 
   const localSet = new Set(localCandidates.map(candidate => candidate.toLowerCase()));
@@ -301,4 +300,10 @@ export function mergeSuggestionsForDisplay({
     seen.add(normalized);
     return true;
   }).slice(0, MAXIMUM_DISPLAYED_CANDIDATES);
+}
+
+/** Mirrors the keyboard's empty-bar fallback when cached local candidates are unbounded. */
+export function fallbackSuggestionsForDisplay({ localCandidates, strictRemoteOnly = false }) {
+  if (strictRemoteOnly) return [];
+  return localCandidates.slice(0, MAXIMUM_DISPLAYED_CANDIDATES);
 }

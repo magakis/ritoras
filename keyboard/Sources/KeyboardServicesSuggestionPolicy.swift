@@ -30,6 +30,15 @@ enum KeyboardServicesSuggestionPolicy {
     static let maximumDisplayedCandidates = 3
     static let maximumCandidateScalars = 128
 
+    /// Keeps local cached candidates out of strict-mode fallback display paths.
+    static func fallbackForDisplay(
+        localCandidates: [String],
+        strictRemoteOnly: Bool
+    ) -> [String] {
+        guard !strictRemoteOnly else { return [] }
+        return Array(localCandidates.prefix(maximumDisplayedCandidates))
+    }
+
     /// Merges cached server results only when they belong to the current render context.
     static func mergeForDisplay(
         localCandidates: [String],
@@ -47,8 +56,10 @@ enum KeyboardServicesSuggestionPolicy {
               localContextToken != 0,
               serverContextToken == localContextToken,
               let serverResults else {
-            if strictRemoteOnly { return [] }
-            return Array(localCandidates.prefix(maximumDisplayedCandidates))
+            return fallbackForDisplay(
+                localCandidates: localCandidates,
+                strictRemoteOnly: strictRemoteOnly
+            )
         }
         return merge(
             localCandidates: localCandidates,
