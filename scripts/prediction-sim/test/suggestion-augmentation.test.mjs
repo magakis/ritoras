@@ -69,6 +69,32 @@ describe('server suggestion display merge', () => {
     assert.deepStrictEqual(fallback, ['the', 'I', 'and']);
   });
 
+  it('reorders only local mid-word completions from prediction rank', () => {
+    const displayed = mergeSuggestionsForDisplay({
+      localCandidates: ['typing', 'tomorrow', 'topic'],
+      predictionCandidates: ['topic', 'unrequested', 'typing'],
+      localContextToken: 8,
+      serverContextToken: 8,
+      serverRevisionMatches: true,
+    });
+
+    assert.deepStrictEqual(displayed, ['topic', 'typing', 'tomorrow']);
+  });
+
+  it('keeps spelling and vocabulary candidates ahead of ranked mid-word completions', () => {
+    const displayed = mergeSuggestionsForDisplay({
+      localCandidates: ['typing', 'topic', 'today'],
+      spellingCandidates: ['corrected'],
+      vocabularyCandidates: ['preferred', 'corrected'],
+      predictionCandidates: ['topic', 'typing'],
+      localContextToken: 9,
+      serverContextToken: 9,
+      serverRevisionMatches: true,
+    });
+
+    assert.deepStrictEqual(displayed, ['corrected', 'preferred', 'topic']);
+  });
+
   it('keeps an applied augmentation across a later same-context local render', () => {
     const displayed = mergeSuggestionsForDisplay({
       localCandidates: ['new local', 'old local', 'third local'],
@@ -87,6 +113,65 @@ describe('server suggestion display merge', () => {
 
     assert.deepStrictEqual(displayed, ['server result', 'second server result', 'new local']);
     assert.deepStrictEqual(stale, ['new local', 'old local']);
+  });
+
+  it('merges three endpoint arrivals across later local renders and rejects stale context', () => {
+    const afterPrediction = mergeSuggestionsForDisplay({
+      localCandidates: ['local one', 'local two'],
+      predictionCandidates: ['local two', 'local one'],
+      localContextToken: 14,
+      serverContextToken: 14,
+      serverRevisionMatches: true,
+    });
+    const afterSpelling = mergeSuggestionsForDisplay({
+      localCandidates: ['local one', 'local two'],
+      spellingCandidates: ['spelling correction'],
+      predictionCandidates: ['local two', 'local one'],
+      localContextToken: 14,
+      serverContextToken: 14,
+      serverRevisionMatches: true,
+    });
+    const afterVocabulary = mergeSuggestionsForDisplay({
+      localCandidates: ['local one', 'local two'],
+      spellingCandidates: ['spelling correction'],
+      vocabularyCandidates: ['vocabulary term'],
+      predictionCandidates: ['local two', 'local one'],
+      localContextToken: 14,
+      serverContextToken: 14,
+      serverRevisionMatches: true,
+    });
+    const laterLocalRender = mergeSuggestionsForDisplay({
+      localCandidates: ['local three', 'local one'],
+      spellingCandidates: ['spelling correction'],
+      vocabularyCandidates: ['vocabulary term'],
+      predictionCandidates: ['local two', 'local one'],
+      localContextToken: 14,
+      serverContextToken: 14,
+      serverRevisionMatches: true,
+    });
+    const stale = mergeSuggestionsForDisplay({
+      localCandidates: ['local three', 'local one'],
+      spellingCandidates: ['spelling correction'],
+      vocabularyCandidates: ['vocabulary term'],
+      predictionCandidates: ['local two', 'local one'],
+      localContextToken: 15,
+      serverContextToken: 14,
+      serverRevisionMatches: true,
+    });
+
+    assert.deepStrictEqual(afterPrediction, ['local two', 'local one']);
+    assert.deepStrictEqual(afterSpelling, ['spelling correction', 'local two', 'local one']);
+    assert.deepStrictEqual(afterVocabulary, [
+      'spelling correction',
+      'vocabulary term',
+      'local two',
+    ]);
+    assert.deepStrictEqual(laterLocalRender, [
+      'spelling correction',
+      'vocabulary term',
+      'local one',
+    ]);
+    assert.deepStrictEqual(stale, ['local three', 'local one']);
   });
 
   it('uses server candidates when the local bar is empty without changing empty-prefix defaults on failure', () => {
@@ -123,6 +208,27 @@ describe('server suggestion display merge', () => {
     });
 
     assert.deepStrictEqual(displayed, ['server correction', 'server term']);
+  });
+
+  it('strict remote-only includes ranked mid-word completions after spelling and vocabulary', () => {
+    const displayed = mergeSuggestionsForDisplay({
+      localCandidates: ['local typo', 'local completion', 'another completion'],
+      spellingCandidates: ['server correction'],
+      vocabularyCandidates: ['server term'],
+      predictionCandidates: ['another completion', 'local completion'],
+      localContextToken: 20,
+      serverContextToken: 20,
+      serverRevisionMatches: true,
+      localEpoch: 1,
+      serverEpoch: 1,
+      strictRemoteOnly: true,
+    });
+
+    assert.deepStrictEqual(displayed, [
+      'server correction',
+      'server term',
+      'another completion',
+    ]);
   });
 
   it('strict remote-only preserves the server-ranked next-word order', () => {

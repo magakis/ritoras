@@ -281,18 +281,23 @@ export function mergeSuggestionsForDisplay({
   }
 
   const localSet = new Set(localCandidates.map(candidate => candidate.toLowerCase()));
-  // Prediction rank only reorders client-supplied candidates; filtering local
-  // overlap would make every strict next-word bar empty and mislead diagnosis.
+  // For mid-word with all endpoints, order spelling, vocabulary, then
+  // ranked completions; non-strict mode appends unranked local completions.
   const orderedCandidates = strictRemoteOnly
     ? (isEmptyPrefix
       ? [...predictionCandidates]
-      : [...spellingCandidates, ...vocabularyCandidates])
+      : [...spellingCandidates, ...vocabularyCandidates, ...predictionCandidates])
     : isEmptyPrefix
       ? [
         ...predictionCandidates.filter(candidate => localSet.has(candidate.toLowerCase())),
         ...localCandidates,
       ]
-      : [...spellingCandidates, ...vocabularyCandidates, ...localCandidates];
+      : [
+        ...spellingCandidates,
+        ...vocabularyCandidates,
+        ...predictionCandidates.filter(candidate => localSet.has(candidate.toLowerCase())),
+        ...localCandidates,
+      ];
   const seen = new Set();
   return orderedCandidates.filter(candidate => {
     const normalized = candidate.toLowerCase();

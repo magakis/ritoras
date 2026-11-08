@@ -76,13 +76,15 @@ enum KeyboardServicesSuggestionPolicy {
         isEmptyPrefix: Bool,
         strictRemoteOnly: Bool = false
     ) -> [String] {
+        // For mid-word with all endpoints, order spelling, vocabulary, then
+        // ranked completions; non-strict mode appends unranked local completions.
         let orderedCandidates: [String]
         if strictRemoteOnly {
-            // Prediction rank only reorders client-supplied candidates; filtering local
-            // overlap would make every strict next-word bar empty and mislead diagnosis.
             orderedCandidates = isEmptyPrefix
                 ? serverResults.prediction
-                : serverResults.spelling + serverResults.vocabulary
+                : serverResults.spelling
+                    + serverResults.vocabulary
+                    + serverResults.prediction
         } else if isEmptyPrefix {
             let localByFoldedText = Set(localCandidates.map { $0.lowercased() })
             let rankedLocal = serverResults.prediction.filter {
@@ -90,8 +92,13 @@ enum KeyboardServicesSuggestionPolicy {
             }
             orderedCandidates = rankedLocal + localCandidates
         } else {
+            let localByFoldedText = Set(localCandidates.map { $0.lowercased() })
+            let rankedLocal = serverResults.prediction.filter {
+                localByFoldedText.contains($0.lowercased())
+            }
             orderedCandidates = serverResults.spelling
                 + serverResults.vocabulary
+                + rankedLocal
                 + localCandidates
         }
 

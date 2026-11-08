@@ -140,7 +140,7 @@ private final class KeyboardServicesFailureTelemetryReporter: @unchecked Sendabl
 /// - Failover lists, maps, and sets are bounded by the configured-server count
 ///   (at most 64, with server keys capped at 512 UTF-8 bytes); in-flight
 ///   request/task tracking is bounded by 3 endpoints, each capturing at most
-///   512 context scalars.
+///   512 context scalars and, for mid-word prediction, a 128-scalar prefix.
 ///
 /// These small-string caches are replaced, drained, or revision-bounded; none
 /// grows across keyboard cycles. No new indexes, mmaps, or large buffers are
@@ -201,23 +201,32 @@ final class KeyboardServicesSuggestionCoordinator {
             requestInput = KeyboardServicesSuggestionRequestInput(
                 typedWord: "",
                 previousWord: "",
-                context: input.context
+                context: input.context,
+                wordInProgress: nil
             )
         } else {
-            guard input.lookupWord.unicodeScalars.count
-                    <= KeyboardServicesSuggestionPolicy.maximumCandidateScalars,
-                  (input.previousWord?.unicodeScalars.count ?? 0)
-                    <= KeyboardServicesSuggestionPolicy.maximumCandidateScalars else {
-                return
+            let maximumWordScalars = KeyboardServicesSuggestionPolicy.maximumCandidateScalars
+            var midWordEndpoints: [KeyboardServicesSuggestionEndpoint] = []
+            if input.lookupWord.unicodeScalars.count <= maximumWordScalars,
+               (input.previousWord?.unicodeScalars.count ?? 0) <= maximumWordScalars {
+                midWordEndpoints = [.spelling, .vocabulary].filter {
+                    settings.capabilityEnabled($0)
+                }
             }
-            endpoints = [.spelling, .vocabulary].filter {
-                settings.capabilityEnabled($0)
+
+            if language == .english,
+               settings.capabilityEnabled(.prediction),
+               input.currentWord.unicodeScalars.count <= maximumWordScalars {
+                midWordEndpoints.append(.prediction)
             }
+
+            endpoints = midWordEndpoints
             guard !endpoints.isEmpty else { return }
             requestInput = KeyboardServicesSuggestionRequestInput(
                 typedWord: input.lookupWord,
                 previousWord: input.previousWord ?? "",
-                context: ""
+                context: input.context,
+                wordInProgress: input.currentWord
             )
         }
 

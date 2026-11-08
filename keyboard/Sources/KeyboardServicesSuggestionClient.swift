@@ -14,6 +14,7 @@ struct KeyboardServicesSuggestionRequestInput: Sendable {
     let typedWord: String
     let previousWord: String
     let context: String
+    let wordInProgress: String?
 }
 
 /// Authenticated, short-timeout requests for display-only server suggestions.
@@ -23,6 +24,7 @@ enum KeyboardServicesSuggestionClient {
     private static let maximumCandidateCount = KeyboardServicesSuggestionPolicy.maximumDisplayedCandidates
     private static let maximumWordLength = 128
     private static let maximumPredictionContextLength = 512
+    private static let maximumPredictionCandidateCount = 16
 
     private struct WordRequest: Encodable {
         let typedWord: String
@@ -37,7 +39,15 @@ enum KeyboardServicesSuggestionClient {
     private struct PredictionRequest: Encodable {
         let context: String
         let candidates: [String]
+        let wordInProgress: String?
         let language: String
+
+        enum CodingKeys: String, CodingKey {
+            case context
+            case candidates
+            case wordInProgress = "word_in_progress"
+            case language
+        }
     }
 
     private struct WordResponse: Decodable {
@@ -163,12 +173,19 @@ enum KeyboardServicesSuggestionClient {
 
         case .prediction:
             guard language == .english else { return nil }
+            if let wordInProgress = input.wordInProgress {
+                guard !wordInProgress.isEmpty,
+                      wordInProgress.unicodeScalars.count <= maximumWordLength else {
+                    return nil
+                }
+            }
             let candidates = boundedPredictionCandidates(localCandidates)
             guard !candidates.isEmpty else { return nil }
             path = "/slots/prediction/rank"
             let encodedRequest = PredictionRequest(
                 context: suffix(input.context, maximumScalars: maximumPredictionContextLength),
                 candidates: candidates,
+                wordInProgress: input.wordInProgress,
                 language: language.bcp47Tag
             )
             guard let encodedBody = try? JSONEncoder().encode(encodedRequest) else { return nil }
@@ -226,7 +243,7 @@ enum KeyboardServicesSuggestionClient {
     private static func boundedPredictionCandidates(_ candidates: [String]) -> [String] {
         candidates.filter { candidate in
             !candidate.isEmpty && candidate.unicodeScalars.count <= maximumWordLength
-        }.prefix(16).map { $0 }
+        }.prefix(maximumPredictionCandidateCount).map { $0 }
     }
 
     private static func suffix(_ value: String, maximumScalars: Int) -> String {
