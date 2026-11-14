@@ -2,10 +2,9 @@ import AVFoundation
 import Foundation
 import os
 
-// This chunk splitter segments a continuous
-// audio stream into chunks for streaming ASR while retaining all audio except
-// voiceless slabs over maxNoiseSec. Speech is never trimmed from chunks; do not
-// add silence-stripping or aggressive speech-gating here.
+// This chunk splitter segments a continuous audio stream into chunks for
+// streaming ASR. Optional VAD silence filtering applies only between chunks;
+// pauses inside an open chunk remain untouched.
 
 // MARK: - Streaming Recorder Error
 
@@ -249,11 +248,10 @@ struct ChunkSplitterFrameState: Sendable {
 // MARK: - VAD Context (Thread-safe via internal lock)
 
 /// This chunk splitter retains all audio except voiceless slabs over maxNoiseSec
-/// and finalizes utterances only at silence endpoints or an explicit stop.
-/// Speech is never trimmed from chunks; do not add silence-stripping or
-/// aggressive speech-gating here. During capture, the spill path keeps long
-/// utterances bounded in memory. This runs in the container app process, not the
-/// keyboard extension.
+/// and, when enabled, quiet gaps between emitted chunks. Intra-chunk pauses and
+/// speech-evident gap spans remain untouched. During capture, the spill path
+/// keeps long utterances bounded in memory. This runs in the container app
+/// process, not the keyboard extension.
 ///
 /// Thread safety through internal locking via `os_unfair_lock`.
 /// All mutable state is protected — callers call `process()`/`flush()` directly.
@@ -286,6 +284,8 @@ private final class VADContext: @unchecked Sendable {
     let accumulatorSpillSamples: Int
     let requestedVADSource: VADSource
     let trimTrailingSilenceOnStopEnabled: Bool
+    let vadSilenceFilteringEnabled: Bool
+    let vadSilenceFilteringPreRollSamples: Int
     let sileroConfiguration: SileroEvidenceConfiguration
     let postRollSamples = 400 * 16
     let analysisHpf: VADHighPassFilter?
@@ -302,10 +302,11 @@ private final class VADContext: @unchecked Sendable {
     private var discardedSourceSpans: [SourceSampleSpan] = []
     private var sourcePositionWatermark = 0
     // This gap buffer stays near maxNoiseSamples (~6 s / 384 KB float32);
-    // evidence-qualified audio moves to the spill-capable accumulator.
+    // filtered gaps compact to pre-roll plus speech-evident spans at transfer.
     private var retainedGapBuffer: [Float] = []
     private var retainedGapStartSessionSamples: Int?
     private var retainedGapEvidenceSamples = 0
+    private var retainedGapSpeechEvidenceSourceSpans: [SourceSampleSpan] = []
     private var accumulatorSpillURL: URL?
     private var accumulatorSpillHandle: FileHandle?
     private var spilledSampleCount = 0
@@ -313,8 +314,10 @@ private final class VADContext: @unchecked Sendable {
     private var contiguousTrailingSilenceMinimumDb: Double?
     private var contiguousTrailingSilencePeakAboveFloorDb: Double?
     private var retainedGapPeakAboveFloorDb: Double?
+    private var filteredSourceSpans: [SourceSampleSpan] = []
     private var accumulatorPeakAboveFloorDb: Double?
     private var accumulatorHasSpeechEvidence = false
+    private var accumulatorContainsUtteranceSamples = false
     private var chunkStartSessionSamples: Int?
     private var chunkEndSessionSamples: Int?
     var silenceSamples: Int = 0
@@ -371,6 +374,8 @@ private final class VADContext: @unchecked Sendable {
         analysisHpfCutoffHz: Double,
         vadSource: VADSource,
         trimTrailingSilenceOnStopEnabled: Bool,
+        vadSilenceFilteringEnabled: Bool,
+        vadSilenceFilteringPreRollSamples: Int,
         sileroConfiguration: SileroEvidenceConfiguration
     ) {
         let gate = VADThresholdGate(config: gateConfig)
@@ -382,6 +387,8 @@ private final class VADContext: @unchecked Sendable {
         self.maxNoiseSamples = maxNoiseSamples
         self.requestedVADSource = vadSource
         self.trimTrailingSilenceOnStopEnabled = trimTrailingSilenceOnStopEnabled
+        self.vadSilenceFilteringEnabled = vadSilenceFilteringEnabled && endpointMachineEnabled
+        self.vadSilenceFilteringPreRollSamples = max(0, vadSilenceFilteringPreRollSamples)
         self.sileroConfiguration = sileroConfiguration
         self.sileroEvidenceProcessor = SileroEvidenceProcessor(configuration: sileroConfiguration)
         self.accumulatorSpillSamples = SharedConfig.streamVadAccumulatorSpillSamples()
@@ -473,6 +480,8 @@ private final class VADContext: @unchecked Sendable {
         config["maxNoiseSec"] = Double(maxNoiseSamples) / 16000.0
         config["analysisHpfEnabled"] = analysisHpf != nil
         config["trimTrailingSilenceOnStopEnabled"] = trimTrailingSilenceOnStopEnabled
+        config["vadSilenceFilteringEnabled"] = vadSilenceFilteringEnabled
+        config["vadSilenceFilteringPreRollMs"] = Double(vadSilenceFilteringPreRollSamples) / 16.0
         config["analysisHpfCutoffHz"] = SharedConfig.Defaults.streamVadHpfCutoffHzDefault
         config["whisperHighPassCutoffHz"] = SharedConfig.Defaults.streamVadWhisperHighPassCutoffHzDefault
         config["whisperModulationSpreadDb"] =
@@ -1063,6 +1072,9 @@ private final class VADContext: @unchecked Sendable {
             }
             appendAccumulator(frame, sourceStartSample: frameStartSamples)
             chunkEndSessionSamples = frameStartSamples + frameLength
+            if endpointMachineEnabled {
+                accumulatorContainsUtteranceSamples = true
+            }
             trackAccumulatorSpeechEvidence(frameDb: frameDb, floorDb: output.floorDb, output: output)
             bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
         }
@@ -1268,6 +1280,7 @@ private final class VADContext: @unchecked Sendable {
         if endpointMachineEnabled {
             if case .startUtterance = decision {
                 moveRetainedGapToAccumulator()
+                accumulatorContainsUtteranceSamples = true
                 finishIdleGapRun()
                 telemetrySink?.event(VADTelemetryEvent(
                     kind: .startUtterance,
@@ -1332,10 +1345,21 @@ private final class VADContext: @unchecked Sendable {
             }
         }
 
+        let retainedGapLimit = vadSilenceFilteringEnabled && endpointMachineEnabled
+            && !accumulatorContainsUtteranceSamples
+            ? max(maxNoiseSamples, vadSilenceFilteringPreRollSamples)
+            : maxNoiseSamples
         if endpointMachineEnabled,
            (endpoint.state == .idle || endpoint.state == .onsetPending),
-           retainedGapBuffer.count > maxNoiseSamples {
-            if !retainedGapHasSpeechEvidence {
+           retainedGapBuffer.count > retainedGapLimit {
+            if vadSilenceFilteringEnabled,
+               !accumulatorContainsUtteranceSamples,
+               !retainedGapHasLocalSpeechEvidence {
+                filterRetainedGapToPreRollAndSpeechEvidence()
+                if retainedGapBuffer.isEmpty {
+                    clearRetainedGap()
+                }
+            } else if !retainedGapHasSpeechEvidence {
                 shedRetainedGap()
             } else {
                 moveRetainedGapToAccumulator()
@@ -1409,9 +1433,22 @@ private final class VADContext: @unchecked Sendable {
             if retainedGapPeakAboveFloorDb.map({ peakAboveFloorDb > $0 }) ?? true {
                 retainedGapPeakAboveFloorDb = peakAboveFloorDb
             }
+            if vadSilenceFilteringEnabled,
+               peakAboveFloorDb >= SharedConfig.Defaults.streamVadGapSpeechPeakAboveFloorDbDefault {
+                appendSourceSpan(
+                    SourceSampleSpan(startSample: startSamples, endSample: startSamples + samples.count),
+                    to: &retainedGapSpeechEvidenceSourceSpans
+                )
+            }
         }
         if evidence == .strong || evidence == .continuing {
             retainedGapEvidenceSamples += samples.count
+            if vadSilenceFilteringEnabled {
+                appendSourceSpan(
+                    SourceSampleSpan(startSample: startSamples, endSample: startSamples + samples.count),
+                    to: &retainedGapSpeechEvidenceSourceSpans
+                )
+            }
         }
         bufferHighWaterSamples = max(
             bufferHighWaterSamples,
@@ -1420,13 +1457,19 @@ private final class VADContext: @unchecked Sendable {
     }
 
     private var retainedGapHasSpeechEvidence: Bool {
+        if retainedGapHasLocalSpeechEvidence { return true }
+        // A held, VAD-accepted accumulator remains part of the un-emitted span.
+        return accumulatorHasSpeechEvidence
+    }
+
+    private var retainedGapHasLocalSpeechEvidence: Bool {
         if retainedGapEvidenceSamples > 0 { return true }
+        if vadSilenceFilteringEnabled && !retainedGapSpeechEvidenceSourceSpans.isEmpty { return true }
         if let retainedGapPeakAboveFloorDb,
            retainedGapPeakAboveFloorDb >= SharedConfig.Defaults.streamVadGapSpeechPeakAboveFloorDbDefault {
             return true
         }
-        // A held, VAD-accepted accumulator remains part of the un-emitted span.
-        return accumulatorHasSpeechEvidence
+        return false
     }
 
     private var accumulatorHasPlausibleSpeech: Bool {
@@ -1453,13 +1496,27 @@ private final class VADContext: @unchecked Sendable {
         }
     }
 
-    private func moveRetainedGapToAccumulator() {
+    private func moveRetainedGapToAccumulator(applySilenceFiltering: Bool = true) {
         guard !retainedGapBuffer.isEmpty else { return }
+        if applySilenceFiltering,
+           vadSilenceFilteringEnabled,
+           endpointMachineEnabled,
+           !accumulatorContainsUtteranceSamples {
+            filterRetainedGapToPreRollAndSpeechEvidence()
+        }
+        guard !retainedGapBuffer.isEmpty else {
+            clearRetainedGap()
+            return
+        }
         if accumulatorSampleCount == 0 {
             chunkStartSessionSamples = retainedGapStartSessionSamples
         }
-        accumulatorHasSpeechEvidence = accumulatorHasSpeechEvidence || retainedGapEvidenceSamples > 0
-        if let retainedGapStartSessionSamples {
+        accumulatorHasSpeechEvidence = accumulatorHasSpeechEvidence
+            || retainedGapEvidenceSamples > 0
+            || (vadSilenceFilteringEnabled && !retainedGapSpeechEvidenceSourceSpans.isEmpty)
+        if vadSilenceFilteringEnabled, let lastRetainedSpan = retainedGapSourceSpans.last {
+            chunkEndSessionSamples = lastRetainedSpan.endSample
+        } else if let retainedGapStartSessionSamples {
             chunkEndSessionSamples = retainedGapStartSessionSamples + retainedGapBuffer.count
         }
         let gapStartSample = retainedGapStartSessionSamples
@@ -1469,30 +1526,139 @@ private final class VADContext: @unchecked Sendable {
             sourceStartSample: gapStartSample,
             sourceSpans: retainedGapSourceSpans
         )
-        retainedGapBuffer.removeAll(keepingCapacity: true)
-        retainedGapSourceSpans.removeAll(keepingCapacity: true)
+        clearRetainedGap()
+        bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
+    }
+
+    private func filterRetainedGapToPreRollAndSpeechEvidence() {
+        // The retained source spans exclude the previous emission's trimmed tail before that
+        // emission is recorded; later spans come only from the advancing session clock.
+        let gapSourceSpans = retainedGapSourceSpans.isEmpty
+            ? [SourceSampleSpan(
+                startSample: retainedGapStartSessionSamples
+                    ?? (sessionElapsedSamples - retainedGapBuffer.count),
+                endSample: (retainedGapStartSessionSamples
+                    ?? (sessionElapsedSamples - retainedGapBuffer.count)) + retainedGapBuffer.count
+            )]
+            : retainedGapSourceSpans
+        let preRollStartOffset = max(0, retainedGapBuffer.count - vadSilenceFilteringPreRollSamples)
+        var preRollSpans: [SourceSampleSpan] = []
+        var bufferOffset = 0
+        for span in gapSourceSpans {
+            let spanBufferEnd = bufferOffset + span.sampleCount
+            let retainedBufferStart = max(bufferOffset, preRollStartOffset)
+            if retainedBufferStart < spanBufferEnd {
+                let sourceStart = span.startSample + retainedBufferStart - bufferOffset
+                preRollSpans.append(SourceSampleSpan(
+                    startSample: sourceStart,
+                    endSample: span.endSample
+                ))
+            }
+            bufferOffset = spanBufferEnd
+        }
+
+        var evidenceSpans = retainedGapSpeechEvidenceSourceSpans
+        if evidenceSpans.isEmpty,
+           retainedGapPeakAboveFloorDb.map({
+               $0 >= SharedConfig.Defaults.streamVadGapSpeechPeakAboveFloorDbDefault
+           }) == true {
+            // The retained post-roll tail has only aggregate peak evidence, so keep it whole.
+            evidenceSpans = gapSourceSpans
+        }
+        let keptSourceSpans = normalizedSourceSpans(preRollSpans + evidenceSpans)
+        for span in gapSourceSpans {
+            for filteredSpan in uncoveredSourceSpans(
+                from: span.startSample,
+                to: span.endSample,
+                coveredBy: keptSourceSpans
+            ) {
+                appendSourceSpan(filteredSpan, to: &filteredSourceSpans)
+            }
+        }
+
+        var sourceBufferOffset = 0
+        var keptBufferOffset = 0
+        for sourceSpan in gapSourceSpans {
+            for keptSpan in keptSourceSpans {
+                let keptStart = max(sourceSpan.startSample, keptSpan.startSample)
+                let keptEnd = min(sourceSpan.endSample, keptSpan.endSample)
+                guard keptEnd > keptStart else { continue }
+                let sampleCount = keptEnd - keptStart
+                let readOffset = sourceBufferOffset + keptStart - sourceSpan.startSample
+                if readOffset != keptBufferOffset {
+                    for sampleOffset in 0..<sampleCount {
+                        retainedGapBuffer[keptBufferOffset + sampleOffset] =
+                            retainedGapBuffer[readOffset + sampleOffset]
+                    }
+                }
+                keptBufferOffset += sampleCount
+            }
+            sourceBufferOffset += sourceSpan.sampleCount
+        }
+        if keptBufferOffset < retainedGapBuffer.count {
+            retainedGapBuffer.removeSubrange(keptBufferOffset..<retainedGapBuffer.count)
+        }
+        retainedGapSourceSpans = keptSourceSpans
+        retainedGapSpeechEvidenceSourceSpans = intersectSourceSpans(
+            evidenceSpans,
+            with: keptSourceSpans
+        )
+        retainedGapEvidenceSamples = retainedGapSpeechEvidenceSourceSpans.reduce(0) {
+            $0 + $1.sampleCount
+        }
+        retainedGapStartSessionSamples = keptSourceSpans.first?.startSample
+        retainedGapPeakAboveFloorDb = nil
+    }
+
+    private func intersectSourceSpans(
+        _ spans: [SourceSampleSpan],
+        with coverage: [SourceSampleSpan]
+    ) -> [SourceSampleSpan] {
+        var intersections: [SourceSampleSpan] = []
+        for span in spans {
+            for coveredSpan in coverage {
+                let startSample = max(span.startSample, coveredSpan.startSample)
+                let endSample = min(span.endSample, coveredSpan.endSample)
+                if endSample > startSample {
+                    appendSourceSpan(
+                        SourceSampleSpan(startSample: startSample, endSample: endSample),
+                        to: &intersections
+                    )
+                }
+            }
+        }
+        return normalizedSourceSpans(intersections)
+    }
+
+    private func clearRetainedGap() {
+        retainedGapBuffer.removeAll(keepingCapacity: !vadSilenceFilteringEnabled)
+        retainedGapSourceSpans.removeAll(keepingCapacity: !vadSilenceFilteringEnabled)
+        retainedGapSpeechEvidenceSourceSpans.removeAll(keepingCapacity: !vadSilenceFilteringEnabled)
         retainedGapStartSessionSamples = nil
         retainedGapEvidenceSamples = 0
         retainedGapPeakAboveFloorDb = nil
-        bufferHighWaterSamples = max(bufferHighWaterSamples, accumulatorSampleCount)
     }
 
     private func shedRetainedGap() {
         let sampleCount = retainedGapBuffer.count
         let sourceStartSample = retainedGapStartSessionSamples
         let sourceEndSample = sourceStartSample.map { $0 + sampleCount }
-        recordDiscard(
-            samples: sampleCount,
-            reason: "noise_guard",
-            sourceStartSample: sourceStartSample,
-            sourceEndSample: sourceEndSample,
-            sourceSpans: retainedGapSourceSpans
-        )
-        retainedGapBuffer.removeAll(keepingCapacity: true)
-        retainedGapSourceSpans.removeAll(keepingCapacity: true)
-        retainedGapStartSessionSamples = nil
-        retainedGapEvidenceSamples = 0
-        retainedGapPeakAboveFloorDb = nil
+        if vadSilenceFilteringEnabled,
+           endpointMachineEnabled,
+           !accumulatorContainsUtteranceSamples {
+            for span in retainedGapSourceSpans {
+                appendSourceSpan(span, to: &filteredSourceSpans)
+            }
+        } else {
+            recordDiscard(
+                samples: sampleCount,
+                reason: "noise_guard",
+                sourceStartSample: sourceStartSample,
+                sourceEndSample: sourceEndSample,
+                sourceSpans: retainedGapSourceSpans
+            )
+        }
+        clearRetainedGap()
         if accumulatorSampleCount == 0 {
             chunkStartSessionSamples = nil
             chunkEndSessionSamples = nil
@@ -1550,6 +1716,7 @@ private final class VADContext: @unchecked Sendable {
         accumulatorSourceSpans.removeAll(keepingCapacity: true)
         accumulatorPeakAboveFloorDb = nil
         accumulatorHasSpeechEvidence = false
+        accumulatorContainsUtteranceSamples = false
         chunkEndSessionSamples = nil
     }
 
@@ -1739,10 +1906,16 @@ private final class VADContext: @unchecked Sendable {
             guard endSample > startSample else { return nil }
             return SourceSampleSpan(startSample: startSample, endSample: endSample)
         }
+        let filteredSpans = filteredSourceSpans.compactMap { span -> SourceSampleSpan? in
+            let startSample = max(0, span.startSample)
+            let endSample = min(writtenEndSample, span.endSample)
+            guard endSample > startSample else { return nil }
+            return SourceSampleSpan(startSample: startSample, endSample: endSample)
+        }
         let watermarkGaps = uncoveredSourceSpans(
             from: 0,
             to: watermark,
-            coveredBy: emittedSpans + discardedSpans
+            coveredBy: emittedSpans + discardedSpans + filteredSpans
         )
         var candidates = watermarkGaps + discardedSpans
         if watermark < writtenEndSample {
@@ -1756,7 +1929,7 @@ private final class VADContext: @unchecked Sendable {
             recoverySpans.append(contentsOf: uncoveredSourceSpans(
                 from: candidate.startSample,
                 to: candidate.endSample,
-                coveredBy: emittedSpans
+                coveredBy: emittedSpans + filteredSpans
             ))
         }
         return normalizedSourceSpans(recoverySpans)
@@ -1794,7 +1967,7 @@ private final class VADContext: @unchecked Sendable {
         return id
     }
 
-    /// Emit the retained accumulator, carrying post-roll-trimmed silence into the next span.
+    /// Emit the retained accumulator, leaving post-roll-trimmed audio for the next span.
     func emit(
         reason: String,
         silenceMs: Double,
@@ -1840,6 +2013,12 @@ private final class VADContext: @unchecked Sendable {
                     ?? sourceEndSamples
                 retainedGapEvidenceSamples = 0
                 retainedGapPeakAboveFloorDb = contiguousTrailingSilencePeakAboveFloorDb
+                retainedGapSpeechEvidenceSourceSpans = vadSilenceFilteringEnabled
+                    && retainedGapPeakAboveFloorDb.map({
+                        $0 >= SharedConfig.Defaults.streamVadGapSpeechPeakAboveFloorDbDefault
+                    }) == true
+                    ? retainedSourceSpans
+                    : []
             }
         }
         for span in emissionSourceSpans {
@@ -1880,7 +2059,14 @@ private final class VADContext: @unchecked Sendable {
             ]
         ))
         if retainedGapBuffer.count > maxNoiseSamples, !retainedGapHasSpeechEvidence {
-            shedRetainedGap()
+            if vadSilenceFilteringEnabled && endpointMachineEnabled {
+                filterRetainedGapToPreRollAndSpeechEvidence()
+                if retainedGapBuffer.isEmpty {
+                    clearRetainedGap()
+                }
+            } else {
+                shedRetainedGap()
+            }
         }
         return VADEmission(
             chunkId: id,
@@ -1923,7 +2109,7 @@ private final class VADContext: @unchecked Sendable {
             lastEmittedEndSample: sourcePositionWatermark,
             sessionEndSample: sessionElapsedSamples
         )
-        moveRetainedGapToAccumulator()
+        moveRetainedGapToAccumulator(applySilenceFiltering: false)
         finishIdleGapRun()
         let stopWeightedSilenceCreditMs = endpoint.accumulatedAmbiguousCreditSamples / 16.0
         let stopPhysicalTrailingSilenceMs = Double(contiguousTrailingSilenceSamples) / 16.0
@@ -1946,7 +2132,11 @@ private final class VADContext: @unchecked Sendable {
         var stopTailMetrics = StopTailMetrics(
             action: trimTrailingSilence
                 ? (stopTailSnapshot.hasPendingSpeechEvidence ? .trim : .suppress)
-                : .passthrough,
+                : (vadSilenceFilteringEnabled
+                    && endpointMachineEnabled
+                    && !stopTailSnapshot.hasPendingSpeechEvidence
+                    ? .suppress
+                    : .passthrough),
             trimmedSamples: 0,
             suppressedSamples: 0
         )
@@ -2009,7 +2199,9 @@ private final class VADContext: @unchecked Sendable {
                 stopTailMetrics: stopTailMetrics
             )
         }
-        if emitAudio, trimTrailingSilence, !stopTailSnapshot.hasPendingSpeechEvidence {
+        if emitAudio,
+           (trimTrailingSilence || (vadSilenceFilteringEnabled && endpointMachineEnabled)),
+           !stopTailSnapshot.hasPendingSpeechEvidence {
             stopTailMetrics = StopTailMetrics(
                 action: .suppress,
                 trimmedSamples: 0,
@@ -2178,10 +2370,11 @@ private func adjustDiskRecoverySpansForStop(
     _ spans: [SourceSampleSpan],
     snapshot: StopTailSnapshot,
     enabled: Bool,
+    suppressSpeechlessRemainder: Bool,
     writtenSampleCount: Int,
     postRollSamples: Int
 ) -> (spans: [SourceSampleSpan], metrics: StopTailMetrics) {
-    guard enabled else {
+    guard enabled || (suppressSpeechlessRemainder && !snapshot.hasPendingSpeechEvidence) else {
         return (
             spans,
             StopTailMetrics(action: .passthrough, trimmedSamples: 0, suppressedSamples: 0)
@@ -2410,6 +2603,7 @@ actor StreamingAudioRecorder {
     private let vad: VADContext
     private let vadGateConfig: VADGateConfig
     private let trimTrailingSilenceOnStopEnabled: Bool
+    private let vadSilenceFilteringEnabled: Bool
     private var telemetryFlushable: VADTelemetryFlushable?
 
     // MARK: - Initialization
@@ -2421,7 +2615,13 @@ actor StreamingAudioRecorder {
         let maxNoiseSamples = Int(SharedConfig.streamVadMaxNoiseSec() * 16000.0)
         let vadSource = SharedConfig.vadSource()
         let trimTrailingSilenceOnStopEnabled = SharedConfig.trimTrailingSilenceOnStopEnabled()
+        let vadSilenceFilteringEnabled = SharedConfig.vadSilenceFilteringEnabled()
+        let vadSilenceFilteringPreRollMs = min(
+            1_000,
+            max(0, SharedConfig.vadSilenceFilteringPreRollMs())
+        )
         self.trimTrailingSilenceOnStopEnabled = trimTrailingSilenceOnStopEnabled
+        self.vadSilenceFilteringEnabled = vadSilenceFilteringEnabled
         let sileroConfiguration = SharedConfig.sileroEvidenceConfiguration()
         let adaptiveThresholds = SharedConfig.streamVadAdaptiveThresholds()
         let endpointMachineEnabled = SharedConfig.streamEndpointMachineEnabled()
@@ -2468,6 +2668,8 @@ actor StreamingAudioRecorder {
             analysisHpfCutoffHz: SharedConfig.Defaults.streamVadHpfCutoffHzDefault,
             vadSource: vadSource,
             trimTrailingSilenceOnStopEnabled: trimTrailingSilenceOnStopEnabled,
+            vadSilenceFilteringEnabled: vadSilenceFilteringEnabled,
+            vadSilenceFilteringPreRollSamples: vadSilenceFilteringPreRollMs * 16,
             sileroConfiguration: sileroConfiguration
         )
     }
@@ -2945,6 +3147,7 @@ actor StreamingAudioRecorder {
         let accounting = self.accounting
         let telemetryFlushable = self.telemetryFlushable
         let trimStopTail = trimTrailingSilenceOnStopEnabled && recoverDiskRemainder
+        let silenceFilteringEnabled = vadSilenceFilteringEnabled && vad.endpointMachineEnabled
         let result: StopQueueResult = await withCheckedContinuation { continuation in
             vadQueue.async {
                 stoppedFlag.set(true)
@@ -2968,6 +3171,7 @@ actor StreamingAudioRecorder {
                             unadjustedSpans,
                             snapshot: flushResult.stopTailSnapshot,
                             enabled: trimStopTail,
+                            suppressSpeechlessRemainder: silenceFilteringEnabled,
                             writtenSampleCount: writtenSampleCount,
                             postRollSamples: vad.postRollSamples
                         )

@@ -14,10 +14,9 @@ import {
 } from './vad-idle-gap.mjs';
 import { SileroEvidenceProcessor, normalizeSileroEvidenceConfig } from './silero-evidence.mjs';
 
-// This chunk splitter segments a continuous
-// audio stream into chunks for streaming ASR while retaining all audio except
-// voiceless slabs over maxNoiseSec. Speech is never trimmed from chunks; do not
-// add silence-stripping or aggressive speech-gating here.
+// This chunk splitter segments a continuous audio stream for streaming ASR.
+// Optional VAD silence filtering applies only between chunks; pauses inside an
+// open chunk remain untouched.
 
 const DEFAULT_FRAME_MS = 10;
 const DEFAULT_ENDPOINT_SILENCE_MS = 3000;
@@ -92,13 +91,27 @@ function removeTrailingSourceSamples(spans, sampleCount) {
   return { remainingSpans, trailingSpans };
 }
 
+function intersectSourceSpans(spans, coverage) {
+  const intersections = [];
+  for (const span of spans) {
+    for (const coveredSpan of coverage) {
+      const startSample = Math.max(span.startSample, coveredSpan.startSample);
+      const endSample = Math.min(span.endSample, coveredSpan.endSample);
+      if (endSample > startSample) appendSourceSpan(intersections, { startSample, endSample });
+    }
+  }
+  return normalizeSourceSpans(intersections);
+}
+
 function adjustDiskRecoverySpansForStop(spans, snapshot, {
   enabled,
+  suppressSpeechlessRemainder,
   writtenSampleCount,
   postRollSamples,
 }) {
   // A shorter WAV extent can end inside speech even though the tail counter reaches stop.
-  if (!enabled || (snapshot.hasPendingSpeechEvidence
+  if ((!enabled && !(suppressSpeechlessRemainder && !snapshot.hasPendingSpeechEvidence))
+    || (snapshot.hasPendingSpeechEvidence
     && writtenSampleCount < snapshot.sessionEndSample)) {
     return {
       spans,
@@ -305,6 +318,8 @@ function makeSessionConfig(harness) {
     minSilenceAtSplitMs: 0,
     postRollMs: harness.postRollSamples / 16,
     trimTrailingSilenceOnStopEnabled: harness.trimTrailingSilenceOnStopEnabled,
+    vadSilenceFilteringEnabled: harness.vadSilenceFilteringEnabled,
+    vadSilenceFilteringPreRollMs: harness.vadSilenceFilteringPreRollSamples / 16,
     analysisHpfEnabled: false,
     analysisHpfCutoffHz: 100,
     loudRegimeEnabled: gate.config.loudRegimeEnabled,
@@ -462,6 +477,14 @@ export function makeRecorderHarness({
     spillOccurred: false,
     postRollSamples: recorderConfig.postRollSamples ?? VAD_POST_ROLL_SAMPLES,
     trimTrailingSilenceOnStopEnabled: recorderConfig.trimTrailingSilenceOnStopEnabled === true,
+    vadSilenceFilteringEnabled: endpointMachineEnabled
+      && recorderConfig.vadSilenceFilteringEnabled === true,
+    vadSilenceFilteringPreRollSamples: Math.round(clampFinite(
+      recorderConfig.vadSilenceFilteringPreRollMs,
+      500,
+      0,
+      1_000,
+    ) * 16),
     lastStopTailDecision: null,
     contiguousTrailingSilenceSamples: 0,
     contiguousTrailingSilenceMinimumDb: null,
@@ -478,6 +501,8 @@ export function makeRecorderHarness({
     discardedSourceSpans: [],
     accumulatorSourceSpans: [],
     retainedGapSourceSpans: [],
+    retainedGapSpeechEvidenceSourceSpans: [],
+    filteredSourceSpans: [],
     sourcePositionWatermark: 0,
     nextChunkId: 0,
     idleGapRunSamples: 0,
@@ -494,6 +519,7 @@ export function makeRecorderHarness({
     accumulatorSamples: 0,
     accumulatorPeakAboveFloorDb: null,
     accumulatorHasSpeechEvidence: false,
+    accumulatorContainsUtteranceSamples: false,
     chunkStartSessionSamples: null,
     chunkEndSessionSamples: null,
     retainedGapSamples: 0,
@@ -561,10 +587,15 @@ export function makeRecorderHarness({
         const endSample = Math.min(writtenEndSample, span.endSample);
         return endSample > startSample ? [{ startSample, endSample }] : [];
       });
+      const filteredSpans = this.filteredSourceSpans.flatMap(span => {
+        const startSample = Math.max(0, span.startSample);
+        const endSample = Math.min(writtenEndSample, span.endSample);
+        return endSample > startSample ? [{ startSample, endSample }] : [];
+      });
       const watermarkGaps = uncoveredSourceSpans(
         0,
         watermark,
-        [...emittedSpans, ...discardedSpans],
+        [...emittedSpans, ...discardedSpans, ...filteredSpans],
       );
       const candidates = [...watermarkGaps, ...discardedSpans];
       if (watermark < writtenEndSample) {
@@ -575,7 +606,7 @@ export function makeRecorderHarness({
         recoverySpans.push(...uncoveredSourceSpans(
           candidate.startSample,
           candidate.endSample,
-          emittedSpans,
+          [...emittedSpans, ...filteredSpans],
         ));
       }
       return normalizeSourceSpans(recoverySpans);
@@ -584,6 +615,8 @@ export function makeRecorderHarness({
     emitDiskRemainder(stopSnapshot) {
       const recovery = adjustDiskRecoverySpansForStop(this.diskRecoverySpans(), stopSnapshot, {
         enabled: this.trimTrailingSilenceOnStopEnabled,
+        suppressSpeechlessRemainder: this.vadSilenceFilteringEnabled
+          && this.endpointMachineEnabled,
         writtenSampleCount: this.diskWrittenSampleCount,
         postRollSamples: this.postRollSamples,
       });
@@ -621,6 +654,7 @@ export function makeRecorderHarness({
       this.accumulatorSourceSpans.length = 0;
       this.accumulatorPeakAboveFloorDb = null;
       this.accumulatorHasSpeechEvidence = false;
+      this.accumulatorContainsUtteranceSamples = false;
       this.chunkStartSessionSamples = null;
       this.chunkEndSessionSamples = null;
       this.speechSamples = 0;
@@ -886,9 +920,9 @@ export function makeRecorderHarness({
 
     seedChunkFromPreRoll(frameSamples, output, softOnset = false) {
       if (this.retainedGapSamples > 0) {
-        const retainedGapSamples = this.retainedGapSamples;
+        const previousAccumulatorSamples = this.accumulatorSamples;
         this.moveRetainedGapToAccumulator();
-        this.headPrependedAtOnset = retainedGapSamples;
+        this.headPrependedAtOnset = this.accumulatorSamples - previousAccumulatorSamples;
         this.postHeadPreRollSamples = 0;
         return true;
       }
@@ -933,29 +967,52 @@ export function makeRecorderHarness({
         this.retainedGapStartSessionSamples = frameStartSamples;
       }
       this.retainedGapSamples += frameSamples;
-      appendSourceSpan(this.retainedGapSourceSpans, {
+      const sourceSpan = {
         startSample: frameStartSamples,
         endSample: frameStartSamples + frameSamples,
-      });
+      };
+      appendSourceSpan(this.retainedGapSourceSpans, sourceSpan);
+      let peakAboveFloorDb = null;
       if (floorDb !== null && floorDb !== undefined) {
-        const peakAboveFloorDb = frameDb - floorDb;
+        peakAboveFloorDb = frameDb - floorDb;
         if (this.retainedGapPeakAboveFloorDb === null
           || peakAboveFloorDb > this.retainedGapPeakAboveFloorDb) {
           this.retainedGapPeakAboveFloorDb = peakAboveFloorDb;
         }
+      }
+      if (this.vadSilenceFilteringEnabled
+        && (evidence === 'strong' || evidence === 'continuing'
+          || (peakAboveFloorDb !== null
+            && peakAboveFloorDb >= GAP_SPEECH_PEAK_ABOVE_FLOOR_DB))) {
+        appendSourceSpan(this.retainedGapSpeechEvidenceSourceSpans, sourceSpan);
       }
       if (evidence === 'strong' || evidence === 'continuing') {
         this.retainedGapEvidenceSamples += frameSamples;
       }
     },
 
-    moveRetainedGapToAccumulator() {
+    moveRetainedGapToAccumulator({ applySilenceFiltering = true } = {}) {
       if (this.retainedGapSamples === 0) return false;
+      if (applySilenceFiltering
+        && this.vadSilenceFilteringEnabled
+        && this.endpointMachineEnabled
+        && !this.accumulatorContainsUtteranceSamples) {
+        this.filterRetainedGapToPreRollAndSpeechEvidence();
+      }
+      if (this.retainedGapSamples === 0) {
+        this.clearRetainedGap();
+        return false;
+      }
       if (this.accumulatorSamples === 0) {
         this.chunkStartSessionSamples = this.retainedGapStartSessionSamples;
       }
-      this.accumulatorHasSpeechEvidence ||= this.retainedGapEvidenceSamples > 0;
-      this.chunkEndSessionSamples = this.retainedGapStartSessionSamples + this.retainedGapSamples;
+      this.accumulatorHasSpeechEvidence ||= this.retainedGapEvidenceSamples > 0
+        || (this.vadSilenceFilteringEnabled
+          && this.retainedGapSpeechEvidenceSourceSpans.length > 0);
+      const lastRetainedSpan = this.retainedGapSourceSpans.at(-1);
+      this.chunkEndSessionSamples = this.vadSilenceFilteringEnabled && lastRetainedSpan
+        ? lastRetainedSpan.endSample
+        : this.retainedGapStartSessionSamples + this.retainedGapSamples;
       const gapSourceSpans = this.retainedGapSourceSpans.length > 0
         ? this.retainedGapSourceSpans
         : [{
@@ -970,19 +1027,86 @@ export function makeRecorderHarness({
       return true;
     },
 
+    filterRetainedGapToPreRollAndSpeechEvidence() {
+      const gapSourceSpans = this.retainedGapSourceSpans.length > 0
+        ? this.retainedGapSourceSpans
+        : [{
+          startSample: this.retainedGapStartSessionSamples,
+          endSample: this.retainedGapStartSessionSamples + this.retainedGapSamples,
+        }];
+      const preRollStartOffset = Math.max(
+        0,
+        this.retainedGapSamples - this.vadSilenceFilteringPreRollSamples,
+      );
+      const preRollSpans = [];
+      let bufferOffset = 0;
+      for (const span of gapSourceSpans) {
+        const spanBufferEnd = bufferOffset + span.endSample - span.startSample;
+        const retainedBufferStart = Math.max(bufferOffset, preRollStartOffset);
+        if (retainedBufferStart < spanBufferEnd) {
+          preRollSpans.push({
+            startSample: span.startSample + retainedBufferStart - bufferOffset,
+            endSample: span.endSample,
+          });
+        }
+        bufferOffset = spanBufferEnd;
+      }
+
+      let evidenceSpans = this.retainedGapSpeechEvidenceSourceSpans;
+      if (evidenceSpans.length === 0
+        && this.retainedGapPeakAboveFloorDb !== null
+        && this.retainedGapPeakAboveFloorDb >= GAP_SPEECH_PEAK_ABOVE_FLOOR_DB) {
+        // The retained post-roll tail has only aggregate peak evidence, so keep it whole.
+        evidenceSpans = gapSourceSpans;
+      }
+      const keptSourceSpans = normalizeSourceSpans([...preRollSpans, ...evidenceSpans]);
+      for (const span of gapSourceSpans) {
+        for (const filteredSpan of uncoveredSourceSpans(
+          span.startSample,
+          span.endSample,
+          keptSourceSpans,
+        )) {
+          appendSourceSpan(this.filteredSourceSpans, filteredSpan);
+        }
+      }
+      this.retainedGapSamples = keptSourceSpans.reduce(
+        (total, span) => total + span.endSample - span.startSample,
+        0,
+      );
+      this.retainedGapSourceSpans = keptSourceSpans;
+      this.retainedGapSpeechEvidenceSourceSpans = intersectSourceSpans(
+        evidenceSpans,
+        keptSourceSpans,
+      );
+      this.retainedGapEvidenceSamples = this.retainedGapSpeechEvidenceSourceSpans.reduce(
+        (total, span) => total + span.endSample - span.startSample,
+        0,
+      );
+      this.retainedGapStartSessionSamples = keptSourceSpans[0]?.startSample ?? null;
+      this.retainedGapPeakAboveFloorDb = null;
+    },
+
     clearRetainedGap() {
       this.retainedGapSamples = 0;
       this.retainedGapStartSessionSamples = null;
       this.retainedGapSourceSpans.length = 0;
+      this.retainedGapSpeechEvidenceSourceSpans.length = 0;
       this.retainedGapEvidenceSamples = 0;
       this.retainedGapPeakAboveFloorDb = null;
     },
 
     retainedGapHasSpeechEvidence() {
+      if (this.retainedGapHasLocalSpeechEvidence()) return true;
+      return this.accumulatorHasSpeechEvidence;
+    },
+
+    retainedGapHasLocalSpeechEvidence() {
       if (this.retainedGapEvidenceSamples > 0) return true;
+      if (this.vadSilenceFilteringEnabled
+        && this.retainedGapSpeechEvidenceSourceSpans.length > 0) return true;
       if (this.retainedGapPeakAboveFloorDb !== null
         && this.retainedGapPeakAboveFloorDb >= GAP_SPEECH_PEAK_ABOVE_FLOOR_DB) return true;
-      return this.accumulatorHasSpeechEvidence;
+      return false;
     },
 
     accumulatorHasPlausibleSpeech() {
@@ -1014,7 +1138,15 @@ export function makeRecorderHarness({
           startSample: this.retainedGapStartSessionSamples,
           endSample: this.retainedGapStartSessionSamples + sampleCount,
         }];
-      for (const span of discardedSpans) appendSourceSpan(this.discardedSourceSpans, span);
+      const filteringGap = this.vadSilenceFilteringEnabled
+        && this.endpointMachineEnabled
+        && !this.accumulatorContainsUtteranceSamples;
+      for (const span of discardedSpans) {
+        appendSourceSpan(
+          filteringGap ? this.filteredSourceSpans : this.discardedSourceSpans,
+          span,
+        );
+      }
       this.emitEvent({
         t: 'ev',
         k: 'discard',
@@ -1042,11 +1174,20 @@ export function makeRecorderHarness({
     },
 
     manageRetainedGapOverflow() {
-      if (this.retainedGapSamples <= this.maxNoiseSamples
+      const filterEligible = this.vadSilenceFilteringEnabled
+        && this.endpointMachineEnabled
+        && !this.accumulatorContainsUtteranceSamples;
+      const retainedGapLimit = filterEligible
+        ? Math.max(this.maxNoiseSamples, this.vadSilenceFilteringPreRollSamples)
+        : this.maxNoiseSamples;
+      if (this.retainedGapSamples <= retainedGapLimit
         || (this.endpoint.state !== 'idle' && this.endpoint.state !== 'onsetPending')) {
         return;
       }
-      if (!this.retainedGapHasSpeechEvidence()) {
+      if (filterEligible && !this.retainedGapHasLocalSpeechEvidence()) {
+        this.filterRetainedGapToPreRollAndSpeechEvidence();
+        if (this.retainedGapSamples === 0) this.clearRetainedGap();
+      } else if (!this.retainedGapHasSpeechEvidence()) {
         this.shedRetainedGap();
       } else {
         this.moveRetainedGapToAccumulator();
@@ -1536,6 +1677,7 @@ export function makeRecorderHarness({
             && latchedContinuingOnset
             && !output.isLoudRegime;
           const seededFromGap = this.seedChunkFromPreRoll(frameSamples, output, softOnset);
+          this.accumulatorContainsUtteranceSamples = true;
           if (!this.headLive && !seededFromGap) {
             this.accumulatorSamples += frameSamples;
             this.appendAccumulatorSourceSpan(frameStartSamples, this.sessionElapsedSamples);
@@ -1559,6 +1701,7 @@ export function makeRecorderHarness({
             this.appendAccumulatorSourceSpan(frameStartSamples, this.sessionElapsedSamples);
             this.chunkEndSessionSamples = this.sessionElapsedSamples;
           }
+          this.accumulatorContainsUtteranceSamples = true;
           this.trackAccumulatorSpeechEvidence(output, frameDb);
         }
         if (adaptivePath && output.evidence === 'strong' && this.endpoint.state !== 'idle') {
@@ -1615,6 +1758,7 @@ export function makeRecorderHarness({
           this.accumulatorSourceSpans.length = 0;
           this.accumulatorPeakAboveFloorDb = null;
           this.accumulatorHasSpeechEvidence = false;
+          this.accumulatorContainsUtteranceSamples = false;
           this.chunkStartSessionSamples = null;
           this.chunkEndSessionSamples = null;
           this.speechSamples = 0;
@@ -1782,6 +1926,7 @@ export function makeRecorderHarness({
           this.accumulatorSourceSpans.length = 0;
           this.accumulatorPeakAboveFloorDb = null;
           this.accumulatorHasSpeechEvidence = false;
+          this.accumulatorContainsUtteranceSamples = false;
           this.chunkStartSessionSamples = null;
           this.chunkEndSessionSamples = null;
           this.speechSamples = 0;
@@ -1792,6 +1937,11 @@ export function makeRecorderHarness({
             this.retainedGapSourceSpans = trailingSpans;
             this.retainedGapStartSessionSamples = trailingSpans[0]?.startSample ?? sourceEndSamples;
             this.retainedGapPeakAboveFloorDb = this.contiguousTrailingSilencePeakAboveFloorDb;
+            this.retainedGapSpeechEvidenceSourceSpans = this.vadSilenceFilteringEnabled
+              && this.retainedGapPeakAboveFloorDb !== null
+              && this.retainedGapPeakAboveFloorDb >= GAP_SPEECH_PEAK_ABOVE_FLOOR_DB
+              ? trailingSpans
+              : [];
             this.manageRetainedGapOverflow();
           }
           this.headLive = false;
@@ -2059,13 +2209,16 @@ export function makeRecorderHarness({
         sessionEndSample: this.sessionElapsedSamples,
       };
       this.lastStopTailDecision = {
-        action: !this.trimTrailingSilenceOnStopEnabled
-          ? 'passthrough'
-          : stopSnapshot.hasPendingSpeechEvidence ? 'trim' : 'suppress',
+        action: stopSnapshot.hasPendingSpeechEvidence
+          ? this.trimTrailingSilenceOnStopEnabled ? 'trim' : 'passthrough'
+          : this.trimTrailingSilenceOnStopEnabled
+            || (this.vadSilenceFilteringEnabled && this.endpointMachineEnabled)
+            ? 'suppress'
+            : 'passthrough',
         trimmedSamples: 0,
         suppressedSamples: 0,
       };
-      this.moveRetainedGapToAccumulator();
+      this.moveRetainedGapToAccumulator({ applySilenceFiltering: false });
       this.finishIdleGapRun();
       const stopWeightedSilenceCreditMs = this.endpoint.accumulatedAmbiguousCreditSamples / 16;
       const stopPhysicalTrailingSilenceMs = this.contiguousTrailingSilenceSamples / 16;
@@ -2129,6 +2282,7 @@ export function makeRecorderHarness({
         this.accumulatorSourceSpans.length = 0;
         this.accumulatorPeakAboveFloorDb = null;
         this.accumulatorHasSpeechEvidence = false;
+        this.accumulatorContainsUtteranceSamples = false;
         this.chunkStartSessionSamples = null;
         this.chunkEndSessionSamples = null;
         this.speechSamples = 0;
@@ -2152,7 +2306,9 @@ export function makeRecorderHarness({
         this.emitDiskRemainder(stopSnapshot);
         return { type: 'none' };
       }
-      if (this.trimTrailingSilenceOnStopEnabled && !stopSnapshot.hasPendingSpeechEvidence) {
+      if ((this.trimTrailingSilenceOnStopEnabled
+        || (this.vadSilenceFilteringEnabled && this.endpointMachineEnabled))
+        && !stopSnapshot.hasPendingSpeechEvidence) {
         this.lastStopTailDecision = {
           action: 'suppress',
           trimmedSamples: 0,
@@ -2211,6 +2367,7 @@ export function makeRecorderHarness({
       this.accumulatorSourceSpans.length = 0;
       this.accumulatorPeakAboveFloorDb = null;
       this.accumulatorHasSpeechEvidence = false;
+      this.accumulatorContainsUtteranceSamples = false;
       this.chunkStartSessionSamples = null;
       this.chunkEndSessionSamples = null;
       this.speechSamples = 0;
@@ -2229,6 +2386,11 @@ export function makeRecorderHarness({
         this.retainedGapStartSessionSamples = trailingSpans[0]?.startSample
           ?? emissionSourceEndSample;
         this.retainedGapPeakAboveFloorDb = this.contiguousTrailingSilencePeakAboveFloorDb;
+        this.retainedGapSpeechEvidenceSourceSpans = this.vadSilenceFilteringEnabled
+          && this.retainedGapPeakAboveFloorDb !== null
+          && this.retainedGapPeakAboveFloorDb >= GAP_SPEECH_PEAK_ABOVE_FLOOR_DB
+          ? trailingSpans
+          : [];
         this.manageRetainedGapOverflow();
       }
       return { type: 'finalizeUtterance', kind: 'stop' };
