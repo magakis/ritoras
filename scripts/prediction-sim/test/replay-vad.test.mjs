@@ -304,6 +304,8 @@ describe('VAD replay', () => {
     assert.strictEqual(SHIPPING_SESSION_CONFIG.ambiguousDecayGraceMs, 800);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.ambiguousDecayRate, 0.75);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.maxNoiseSec, 6);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.vadSilenceFilteringEnabled, false);
+    assert.strictEqual(SHIPPING_SESSION_CONFIG.vadSilenceFilteringPreRollMs, 500);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.minSpeechMs, 300);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.minChunkMs, 300);
     assert.strictEqual(SHIPPING_SESSION_CONFIG.loudRegimeEnabled, true);

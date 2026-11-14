@@ -636,6 +636,17 @@ The endpoint-machine defaults are:
 
 The chunking semantics described here do not change the wire format or protocol.
 
+The app's Streaming settings also include **VAD silence filtering** (default off)
+and **Pre-roll before speech** (default **500 ms**, adjustable from **0–1000 ms**
+in **50 ms** steps). The keyboard settings panel exposes the filtering toggle;
+the pre-roll slider is app-only. When enabled, the recorder filters the
+retained gap between chunks to the configured pre-roll before detected speech
+plus any speech-evident spans; pauses within an open chunk remain untouched.
+Speech-less terminal remainders are suppressed at stop, and filtered spans are
+excluded from stop-time disk recovery. Both values are stored in the App Group
+and snapshotted when a dictation session starts, so changes take effect next
+dictation session.
+
 There is **no maximum chunk length** and no forced-finalization timer based on
 chunk duration. Unbounded continuous speech therefore produces one unbounded
 chunk; clients must treat chunk size as unbounded.

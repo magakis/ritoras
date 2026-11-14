@@ -55,6 +55,8 @@ export const SHIPPING_SESSION_CONFIG = Object.freeze({
   minSpeechMs: 300,
   minChunkMs: 300,
   maxNoiseSec: 6,
+  vadSilenceFilteringEnabled: false,
+  vadSilenceFilteringPreRollMs: 500,
   analysisHpfEnabled: false,
   analysisHpfCutoffHz: 100,
   loudRegimeEnabled: true,
@@ -437,6 +439,13 @@ export function normalizeConfig(rawConfig = {}) {
   const maxNoiseSamples = Math.max(0, Math.floor(
     asFiniteNumber(raw.maxNoiseSec, 'maxNoiseSec') * 16000,
   ));
+  const vadSilenceFilteringEnabled = Boolean(raw.vadSilenceFilteringEnabled);
+  const vadSilenceFilteringPreRollMs = boundedInteger(
+    raw.vadSilenceFilteringPreRollMs,
+    500,
+    0,
+    1_000,
+  );
   const normalized = {
     ...raw,
     mode: gate.config.mode,
@@ -475,6 +484,8 @@ export function normalizeConfig(rawConfig = {}) {
     minSpeechMs: minimum('minSpeechMs') / 16,
     minChunkMs: minimum('minChunkMs') / 16,
     maxNoiseSec: maxNoiseSamples / 16000,
+    vadSilenceFilteringEnabled,
+    vadSilenceFilteringPreRollMs,
     loudFlatTerminateEnabled: Boolean(raw.loudFlatTerminateEnabled),
     loudFlatSpreadDb: asFiniteNumber(raw.loudFlatSpreadDb, 'loudFlatSpreadDb'),
     loudFlatTerminateSeconds: asFiniteNumber(raw.loudFlatTerminateSeconds, 'loudFlatTerminateSeconds'),
@@ -491,6 +502,8 @@ export function normalizeConfig(rawConfig = {}) {
   return { config: normalized, endpoint, gateConfig, minSpeechSamples: minimum('minSpeechMs'), minChunkSamples: minimum('minChunkMs'), maxNoiseSamples, recorderConfig: {
     vadSource: raw.vadSource,
     trimTrailingSilenceOnStopEnabled: raw.trimTrailingSilenceOnStopEnabled === true,
+    vadSilenceFilteringEnabled,
+    vadSilenceFilteringPreRollMs,
     sileroStartThreshold: raw.sileroStartThreshold,
     sileroStopThreshold: raw.sileroStopThreshold,
     sileroSmoothingSteps: raw.sileroSmoothingSteps,
