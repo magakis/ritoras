@@ -8,6 +8,8 @@ struct SettingsView: View {
     @State private var apiKeyDraft: String = ""
     @FocusState private var apiKeyFieldFocused: Bool
     @State private var testStatuses: [Int: TestStatus] = [:]
+    @State private var keystrokeTraceSnapshot = KeystrokeTraceFileSnapshot.loading
+    @State private var keystrokeTraceReadGeneration = 0
 
     enum TestStatus: Equatable {
         case untested
@@ -52,11 +54,13 @@ struct SettingsView: View {
         .onAppear {
             settings.refreshLLMCleanupPreferences()
             settings.refreshServerCapabilityBadges()
+            refreshKeystrokeTraceStatus()
         }
         .onChange(of: scenePhase) { phase in
             if phase == .active {
                 settings.refreshLLMCleanupPreferences()
                 settings.refreshServerCapabilityBadges()
+                refreshKeystrokeTraceStatus()
             }
         }
     }
@@ -351,6 +355,30 @@ struct SettingsView: View {
     private var diagnosticsSection: some View {
         Section {
             Toggle("Verbose Logging", isOn: $settings.verboseLogging)
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle("Keystroke Tracing", isOn: $settings.keystrokeTraceEnabled)
+                Text("Records what you type while enabled. Off by default.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("Trace status")
+                Spacer()
+                Text(settings.keystrokeTraceEnabled ? "On" : "Off")
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("Trace size")
+                Spacer()
+                Text(keystrokeTraceSnapshot.totalSizeLabel)
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                Text("Oldest event")
+                Spacer()
+                Text(keystrokeTraceSnapshot.oldestEventAgeLabel)
+                    .foregroundStyle(.secondary)
+            }
             NavigationLink("Debug Log") {
                 DebugLogView()
             }
@@ -360,7 +388,24 @@ struct SettingsView: View {
         } header: {
             Text("Diagnostics")
         } footer: {
-            Text("Captures developer-level diagnostics in the debug log. Off by default.")
+            Text(
+                "Verbose Logging captures developer-level diagnostics in the debug log. " +
+                    "Keystroke Tracing is separate and records typed text only while enabled."
+            )
+        }
+    }
+
+    private func refreshKeystrokeTraceStatus() {
+        keystrokeTraceReadGeneration += 1
+        let generation = keystrokeTraceReadGeneration
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let snapshot = KeystrokeTraceFileStore.load()
+
+            DispatchQueue.main.async {
+                guard generation == keystrokeTraceReadGeneration else { return }
+                keystrokeTraceSnapshot = snapshot
+            }
         }
     }
 

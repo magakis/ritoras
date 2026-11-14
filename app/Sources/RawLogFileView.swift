@@ -211,7 +211,9 @@ private struct RawLogFileSnapshot {
 }
 
 struct RawLogFileView: View {
+    @EnvironmentObject private var settings: AppSettings
     @State private var rawLogSnapshot = RawLogFileSnapshot.empty
+    @State private var keystrokeTraceSnapshot = KeystrokeTraceFileSnapshot.loading
     @State private var rawLogPreviewText = ""
     @State private var rawLogShareText = ""
     @State private var rawLogReadGeneration = 0
@@ -219,9 +221,13 @@ struct RawLogFileView: View {
     @State private var isLoadingRawLog = true
     @State private var isUpdatingRawLogPresentation = false
     @State private var scrubPII = true
+    @State private var isConfirmingTraceDeletion = false
+    @State private var traceDeleteError: String?
+    @State private var keystrokeTraceReadGeneration = 0
 
     var body: some View {
         List {
+            keystrokeTraceFileSection
             rawLogFileSection
         }
         .listStyle(.plain)
@@ -236,7 +242,7 @@ struct RawLogFileView: View {
                 }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button(action: refreshRawLog) {
+                Button(action: refreshDiagnosticsFiles) {
                     Image(systemName: "arrow.clockwise")
                 }
             }
@@ -245,7 +251,19 @@ struct RawLogFileView: View {
             updateRawLogPresentation()
         }
         .onAppear {
-            refreshRawLog()
+            refreshDiagnosticsFiles()
+        }
+        .confirmationDialog(
+            "Delete all keystroke trace data?",
+            isPresented: $isConfirmingTraceDeletion,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Trace Data", role: .destructive) {
+                deleteKeystrokeTraceData()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the saved trace files and turns tracing off if enabled.")
         }
     }
 
@@ -333,6 +351,62 @@ struct RawLogFileView: View {
         }
     }
 
+    private var keystrokeTraceFileSection: some View {
+        Section {
+            ForEach(keystrokeTraceSnapshot.segments) { segment in
+                HStack {
+                    Text(segment.fileName)
+                        .font(.system(.caption, design: .monospaced))
+                    Spacer()
+                    Text(segment.sizeLabel)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            HStack {
+                Text("Total size")
+                Spacer()
+                Text(keystrokeTraceSnapshot.totalSizeLabel)
+                    .foregroundColor(.secondary)
+                ShareLink(item: keystrokeTraceSnapshot.shareContent) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.caption)
+                }
+                .accessibilityLabel("Share keystroke trace files")
+                .disabled(!keystrokeTraceSnapshot.hasData)
+            }
+
+            if !keystrokeTraceSnapshot.errors.isEmpty {
+                Text(keystrokeTraceSnapshot.errors.joined(separator: "\n"))
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+                    .textSelection(.enabled)
+            }
+            if let traceDeleteError {
+                Text(traceDeleteError)
+                    .font(.caption2)
+                    .foregroundColor(.red)
+                    .textSelection(.enabled)
+            }
+
+            Button("Delete All Trace Data", role: .destructive) {
+                isConfirmingTraceDeletion = true
+            }
+            .disabled(
+                !keystrokeTraceSnapshot.isAvailable
+                    || (!settings.keystrokeTraceEnabled && !keystrokeTraceSnapshot.hasFiles)
+            )
+        } header: {
+            Text("Keystroke Trace")
+        }
+    }
+
+    private func refreshDiagnosticsFiles() {
+        refreshRawLog()
+        refreshKeystrokeTrace()
+    }
+
     private func refreshRawLog() {
         rawLogReadGeneration += 1
         let generation = rawLogReadGeneration
@@ -348,6 +422,36 @@ struct RawLogFileView: View {
                 updateRawLogPresentation()
             }
         }
+    }
+
+    private func refreshKeystrokeTrace() {
+        keystrokeTraceReadGeneration += 1
+        let generation = keystrokeTraceReadGeneration
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let snapshot = KeystrokeTraceFileStore.load()
+
+            DispatchQueue.main.async {
+                guard generation == keystrokeTraceReadGeneration else { return }
+                keystrokeTraceSnapshot = snapshot
+            }
+        }
+    }
+
+    private func deleteKeystrokeTraceData() {
+        // The keyboard observes the disabled flag at its next checkpoint and drops
+        // its process-local ring without flushing it before these files are removed.
+        if settings.keystrokeTraceEnabled {
+            settings.keystrokeTraceEnabled = false
+        }
+
+        do {
+            try KeystrokeTraceFileStore.deleteAll()
+            traceDeleteError = nil
+        } catch {
+            traceDeleteError = error.localizedDescription
+        }
+        refreshKeystrokeTrace()
     }
 
     private func updateRawLogPresentation() {
