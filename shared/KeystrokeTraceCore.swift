@@ -1,0 +1,922 @@
+import Foundation
+
+/// Shared, UIKit-free schema and bounded recorder for keyboard keystroke traces.
+public enum KeystrokeTraceSchema {
+    /// Version written into every trace record.
+    public static let currentVersion = 1
+    /// Maximum context retained before and after the caret.
+    public static let contextWindowCharacters = 128
+    /// Maximum preallocated in-memory byte ring.
+    public static let ringCapacityBytes = 256 * 1024
+    /// Maximum size of either on-disk segment.
+    public static let segmentCapacityBytes = 2 * 1024 * 1024
+    /// Maximum combined size of the live and rotated segments.
+    public static let totalDiskCapacityBytes = 4 * 1024 * 1024
+    /// Active trace segment name.
+    public static let liveFileName = "ritoras-trace.log"
+    /// Single retained previous trace segment name.
+    public static let rotatedFileName = "ritoras-trace.log.1"
+}
+
+/// Stable reason codes shared by autocorrect guards, deferred applies, and host callbacks.
+public enum KeystrokeTraceReasonCode: String, CaseIterable, Codable, Equatable {
+    /// Autocorrect was disabled in settings.
+    case autocorrectSettingDisabled = "autocorrect-setting-disabled"
+    /// The current text-input traits do not permit autocorrect.
+    case autocorrectTraitsBlocked = "autocorrect-traits-blocked"
+    /// The current word did not originate from ordinary typing.
+    case autocorrectOriginNotTyping = "autocorrect-origin-not-typing"
+    /// Current-word extraction failed.
+    case autocorrectExtractionFailed = "autocorrect-extraction-failed"
+    /// The extracted current word differs from the lookup word.
+    case autocorrectCurrentWordLookupWordMismatch = "autocorrect-current-word-lookup-word-mismatch"
+    /// The prediction engine was not ready to make a correction.
+    case autocorrectEngineNotReady = "autocorrect-engine-not-ready"
+    /// The system spellchecker accepted the current word.
+    case autocorrectSpellcheckPass = "autocorrect-spellcheck-pass"
+    /// The current word is in the learned-word store.
+    case autocorrectLearnedWord = "autocorrect-learned-word"
+    /// The proposed correction does not preserve the first letter.
+    case autocorrectFirstLetterMismatch = "autocorrect-first-letter-mismatch"
+    /// The proposed correction score did not meet the configured threshold.
+    case autocorrectScoreBelowThreshold = "autocorrect-score-below-threshold"
+    /// The proposed correction is identical to the current word.
+    case autocorrectSameWord = "autocorrect-same-word"
+    /// The current word length is outside the supported correction bounds.
+    case autocorrectLengthOutOfBounds = "autocorrect-length-out-of-bounds"
+    /// A deferred apply was invalidated by a keyboard epoch change.
+    case deferredApplyEpochChanged = "deferred-apply-epoch-changed"
+    /// A deferred apply was invalidated by a context-token change.
+    case deferredApplyContextTokenChanged = "deferred-apply-context-token-changed"
+    /// A deferred apply was invalidated by a document identity change.
+    case deferredApplyDocumentIdentityChanged = "deferred-apply-document-identity-changed"
+    /// The keyboard was no longer live when the deferred apply ran.
+    case deferredApplyKeyboardNotLive = "deferred-apply-keyboard-not-live"
+    /// The deferred apply's host target no longer existed.
+    case deferredApplyHostTargetGone = "deferred-apply-host-target-gone"
+    /// The live text around the caret no longer matched the captured context.
+    case deferredApplyLiveContextMismatch = "deferred-apply-live-context-mismatch"
+    /// A successful autocorrect application.
+    case autocorrectApplied = "autocorrect-applied"
+    /// The host's textDidChange callback bumped the keyboard epoch.
+    case hostTextDidChangeEpochBump = "host-text-did-change-epoch-bump"
+    /// A host selection-change callback bumped the keyboard epoch.
+    case hostSelectionChangeEpochBump = "host-selection-change-epoch-bump"
+    /// The host callback path cleared the trace ring.
+    case hostRingCleared = "host-ring-cleared"
+}
+
+/// Kinds of key-path activity represented by a key event.
+public enum KeystrokeTraceKeyAction: String, Codable, Equatable {
+    case insert
+    case backspace
+    case shift
+    case mode
+    case trigger
+    case suggestionTap
+    case redacted
+}
+
+/// Context-bearing key event. `caretPosition` is the UTF-16 length of the full
+/// captured before-context, before context is clipped to 128 characters per side.
+public struct KeystrokeTraceKeyEvent: Codable, Equatable {
+    public let action: KeystrokeTraceKeyAction
+    public let keyValue: String?
+    public let epoch: UInt64
+    /// UTF-16 offset from the start of the full captured before-context to the caret.
+    public let caretPosition: Int?
+    public let contextBefore: String?
+    public let contextAfter: String?
+    public let deleteCount: Int?
+    public let liveContextSuffix: String?
+
+    /// Creates a key event and clips supplied caret context to the schema window.
+    public init(
+        action: KeystrokeTraceKeyAction,
+        keyValue: String? = nil,
+        epoch: UInt64,
+        caretPosition: Int? = nil,
+        contextBefore: String? = nil,
+        contextAfter: String? = nil,
+        deleteCount: Int? = nil,
+        liveContextSuffix: String? = nil
+    ) {
+        self.action = action
+        self.keyValue = action == .redacted ? nil : keyValue
+        self.epoch = epoch
+        self.caretPosition = action == .redacted ? nil : caretPosition
+        self.contextBefore = action == .redacted ? nil : contextBefore.map {
+            String($0.suffix(KeystrokeTraceSchema.contextWindowCharacters))
+        }
+        self.contextAfter = action == .redacted ? nil : contextAfter.map {
+            String($0.prefix(KeystrokeTraceSchema.contextWindowCharacters))
+        }
+        self.deleteCount = action == .redacted ? nil : deleteCount
+        self.liveContextSuffix = action == .redacted ? nil : liveContextSuffix.map {
+            String($0.suffix(KeystrokeTraceSchema.contextWindowCharacters))
+        }
+    }
+}
+
+/// One prediction candidate and its named component scores.
+public struct KeystrokeTraceCandidate: Codable, Equatable {
+    public let candidate: String
+    public let scoreComponents: [String: Double]
+
+    /// Creates one candidate with named numeric score components.
+    public init(candidate: String, scoreComponents: [String: Double]) {
+        self.candidate = candidate
+        self.scoreComponents = scoreComponents
+    }
+}
+
+/// Snapshot of a suggestion refresh, including scores and the displayed subset.
+public struct KeystrokeTraceSuggestionEvent: Codable, Equatable {
+    public let currentWord: String
+    public let lookupWord: String
+    public let previousWord: String?
+    public let previousWord2: String?
+    public let candidates: [KeystrokeTraceCandidate]
+    public let displayedCandidates: [String]
+    public let epoch: UInt64
+    public let contextToken: String?
+    public let documentContextLength: Int
+    public let documentContextSuffix: String
+
+    /// Creates a suggestion snapshot and bounds the stored context suffix.
+    public init(
+        currentWord: String,
+        lookupWord: String,
+        previousWord: String? = nil,
+        previousWord2: String? = nil,
+        candidates: [KeystrokeTraceCandidate],
+        displayedCandidates: [String],
+        epoch: UInt64,
+        contextToken: String? = nil,
+        documentContextLength: Int,
+        documentContextSuffix: String
+    ) {
+        self.currentWord = currentWord
+        self.lookupWord = lookupWord
+        self.previousWord = previousWord
+        self.previousWord2 = previousWord2
+        self.candidates = candidates
+        self.displayedCandidates = displayedCandidates
+        self.epoch = epoch
+        self.contextToken = contextToken
+        self.documentContextLength = documentContextLength
+        self.documentContextSuffix = String(
+            documentContextSuffix.suffix(KeystrokeTraceSchema.contextWindowCharacters)
+        )
+    }
+}
+
+/// Apply decisions require complete before/after text and edit counts; skips carry their guard.
+public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
+    case apply(
+        reasonCode: KeystrokeTraceReasonCode,
+        beforeText: String,
+        afterText: String,
+        deleteCount: Int,
+        insertCount: Int
+    )
+    case skip(reasonCode: KeystrokeTraceReasonCode)
+
+    private enum CodingKeys: String, CodingKey {
+        case outcome
+        case reasonCode
+        case beforeText
+        case afterText
+        case deleteCount
+        case insertCount
+    }
+
+    private enum Outcome: String, Codable {
+        case apply
+        case skip
+    }
+
+    /// Decodes the explicit apply/skip representation while requiring apply details.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let outcome = try container.decode(Outcome.self, forKey: .outcome)
+        let reasonCode = try container.decode(
+            KeystrokeTraceReasonCode.self,
+            forKey: .reasonCode
+        )
+        switch outcome {
+        case .apply:
+            self = .apply(
+                reasonCode: reasonCode,
+                beforeText: try container.decode(String.self, forKey: .beforeText),
+                afterText: try container.decode(String.self, forKey: .afterText),
+                deleteCount: try container.decode(Int.self, forKey: .deleteCount),
+                insertCount: try container.decode(Int.self, forKey: .insertCount)
+            )
+        case .skip:
+            self = .skip(reasonCode: reasonCode)
+        }
+    }
+
+    /// Encodes apply or skip fields without an ambiguous synthesized enum wrapper.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .apply(reasonCode, beforeText, afterText, deleteCount, insertCount):
+            try container.encode(Outcome.apply, forKey: .outcome)
+            try container.encode(reasonCode, forKey: .reasonCode)
+            try container.encode(beforeText, forKey: .beforeText)
+            try container.encode(afterText, forKey: .afterText)
+            try container.encode(deleteCount, forKey: .deleteCount)
+            try container.encode(insertCount, forKey: .insertCount)
+        case let .skip(reasonCode):
+            try container.encode(Outcome.skip, forKey: .outcome)
+            try container.encode(reasonCode, forKey: .reasonCode)
+        }
+    }
+}
+
+/// State changes emitted by the keyboard and trace store.
+public enum KeystrokeTraceStateAction: String, Codable, Equatable {
+    case epochBump
+    case ringCleared
+    case modelLoaded
+    case modelUnloaded
+    case segmentRolled
+}
+
+/// Epoch, ring, model, or segment state transition.
+public struct KeystrokeTraceStateEvent: Codable, Equatable {
+    public let action: KeystrokeTraceStateAction
+    public let epoch: UInt64?
+    public let reasonCode: KeystrokeTraceReasonCode?
+    public let model: String?
+    public let detail: String?
+
+    /// Creates a state transition with optional epoch, reason, and model details.
+    public init(
+        action: KeystrokeTraceStateAction,
+        epoch: UInt64? = nil,
+        reasonCode: KeystrokeTraceReasonCode? = nil,
+        model: String? = nil,
+        detail: String? = nil
+    ) {
+        self.action = action
+        self.epoch = epoch
+        self.reasonCode = reasonCode
+        self.model = model
+        self.detail = detail
+    }
+}
+
+/// Session and recorder lifecycle metadata kinds.
+public enum KeystrokeTraceMetaAction: String, Codable, Equatable {
+    case schemaVersion
+    case enabled
+    case disabled
+    case sessionStarted
+    case sessionEnded
+}
+
+/// Session identity or recorder lifecycle metadata.
+public struct KeystrokeTraceMetaEvent: Codable, Equatable {
+    public let action: KeystrokeTraceMetaAction
+    public let sessionID: String?
+    public let attributes: [String: String]?
+
+    /// Creates session metadata or a recorder lifecycle event.
+    public init(
+        action: KeystrokeTraceMetaAction,
+        sessionID: String? = nil,
+        attributes: [String: String]? = nil
+    ) {
+        self.action = action
+        self.sessionID = sessionID
+        self.attributes = attributes
+    }
+}
+
+/// Tagged payload for the five line-level event families.
+public enum KeystrokeTraceEvent: Equatable, Codable {
+    case key(KeystrokeTraceKeyEvent)
+    case suggestion(KeystrokeTraceSuggestionEvent)
+    case decision(KeystrokeTraceDecisionEvent)
+    case state(KeystrokeTraceStateEvent)
+    case meta(KeystrokeTraceMetaEvent)
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case payload
+    }
+
+    private enum EventType: String, Codable {
+        case key
+        case suggestion
+        case decision
+        case state
+        case meta
+    }
+
+    /// Decodes a tagged payload into its event-specific value type.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        switch try container.decode(EventType.self, forKey: .type) {
+        case .key:
+            self = .key(try container.decode(KeystrokeTraceKeyEvent.self, forKey: .payload))
+        case .suggestion:
+            self = .suggestion(
+                try container.decode(KeystrokeTraceSuggestionEvent.self, forKey: .payload)
+            )
+        case .decision:
+            self = .decision(
+                try container.decode(KeystrokeTraceDecisionEvent.self, forKey: .payload)
+            )
+        case .state:
+            self = .state(
+                try container.decode(KeystrokeTraceStateEvent.self, forKey: .payload)
+            )
+        case .meta:
+            self = .meta(try container.decode(KeystrokeTraceMetaEvent.self, forKey: .payload))
+        }
+    }
+
+    /// Encodes a compact tagged payload for this event family.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .key(payload):
+            try container.encode(EventType.key, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case let .suggestion(payload):
+            try container.encode(EventType.suggestion, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case let .decision(payload):
+            try container.encode(EventType.decision, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case let .state(payload):
+            try container.encode(EventType.state, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        case let .meta(payload):
+            try container.encode(EventType.meta, forKey: .type)
+            try container.encode(payload, forKey: .payload)
+        }
+    }
+}
+
+/// Common NDJSON envelope. `schemaVersion` is present on every encoded record.
+public struct KeystrokeTraceRecord: Codable, Equatable {
+    public static let currentSchemaVersion = KeystrokeTraceSchema.currentVersion
+
+    public let schemaVersion: Int
+    public let timestamp: String
+    public let event: KeystrokeTraceEvent
+
+    /// Creates a schema-versioned envelope for one event.
+    public init(
+        timestamp: String,
+        event: KeystrokeTraceEvent,
+        schemaVersion: Int = KeystrokeTraceRecord.currentSchemaVersion
+    ) {
+        self.schemaVersion = schemaVersion
+        self.timestamp = timestamp
+        self.event = event
+    }
+}
+
+/// Capture-path boundary at which buffered bytes may be written to disk.
+public enum KeystrokeTraceFlushBoundary: Equatable {
+    case highWaterMark
+    case idle
+    case triggerKey
+}
+
+/// Byte and event counts for one completed flush.
+public struct KeystrokeTraceFlushResult: Equatable {
+    public let boundary: KeystrokeTraceFlushBoundary
+    public let bytesWritten: Int
+    public let eventsWritten: Int
+    public let remainingByteCount: Int
+}
+
+/// Summary passed to the caller after a successful live-segment rotation.
+public struct KeystrokeTraceSegmentRoll: Equatable {
+    public let archivedBytes: Int
+    public let discardedBytes: Int
+    public let totalBytesAfterRoll: Int
+}
+
+/// Result of the cheap gated append operation.
+public enum KeystrokeTraceAppendResult: Equatable {
+    case disabled
+    case appended(
+        encodedByteCount: Int,
+        evictedByteCount: Int,
+        shouldFlushAtHighWaterMark: Bool
+    )
+    case eventExceedsRingCapacity(encodedByteCount: Int, capacity: Int)
+}
+
+/// Failures encountered while initializing or writing the bounded trace store.
+public enum KeystrokeTraceCoreError: Error {
+    case invalidRingCapacity(Int)
+    case invalidTraceDirectory(URL)
+    case segmentFileTooLarge(Int)
+    case segmentFileCreationFailed(URL)
+    case segmentFileSizeUnavailable(URL)
+    case segmentFileReadAndCloseFailed(URL, Error, Error)
+    case segmentFileWriteFailed(URL, Error)
+    case segmentFileCloseFailed(URL, Error)
+    case segmentFileWriteAndCloseFailed(URL, Error, Error)
+}
+
+/// Preallocated byte ring. Appends and evictions always preserve complete NDJSON lines.
+private final class KeystrokeTraceByteRing {
+    private var storage: [UInt8]
+    private var readIndex = 0
+    private var writeIndex = 0
+    private(set) var byteCount = 0
+
+    let capacity: Int
+
+    init(capacity: Int) {
+        self.capacity = capacity
+        storage = [UInt8](repeating: 0, count: capacity)
+    }
+
+    var shouldFlushAtHighWaterMark: Bool {
+        byteCount >= capacity * 3 / 4
+    }
+
+    func append(_ encodedRecord: Data) -> Int {
+        let incomingByteCount = encodedRecord.count + 1
+        var evictedByteCount = 0
+        while capacity - byteCount < incomingByteCount {
+            evictedByteCount += discardFirstLine()
+        }
+
+        for byte in encodedRecord {
+            storage[writeIndex] = byte
+            writeIndex += 1
+            if writeIndex == capacity {
+                writeIndex = 0
+            }
+        }
+        byteCount += encodedRecord.count
+        storage[writeIndex] = 0x0A
+        writeIndex += 1
+        if writeIndex == capacity {
+            writeIndex = 0
+        }
+        byteCount += 1
+        return evictedByteCount
+    }
+
+    func firstLineData() -> Data? {
+        guard let lineLength = firstLineLength() else { return nil }
+        var line = Data(capacity: lineLength)
+        for offset in 0..<lineLength {
+            line.append(byte(at: offset))
+        }
+        return line
+    }
+
+    func discardFirstLine() -> Int {
+        guard let lineLength = firstLineLength() else { return 0 }
+        for offset in 0..<lineLength {
+            storage[(readIndex + offset) % capacity] = 0
+        }
+        readIndex = (readIndex + lineLength) % capacity
+        byteCount -= lineLength
+        return lineLength
+    }
+
+    func clear() {
+        for index in storage.indices {
+            storage[index] = 0
+        }
+        readIndex = 0
+        writeIndex = 0
+        byteCount = 0
+    }
+
+    private func firstLineLength() -> Int? {
+        for offset in 0..<byteCount where byte(at: offset) == 0x0A {
+            return offset + 1
+        }
+        return nil
+    }
+
+    private func byte(at offset: Int) -> UInt8 {
+        storage[(readIndex + offset) % capacity]
+    }
+}
+
+/// Owns exactly one live and one rotated file, with a 2 MB limit on each.
+private final class KeystrokeTraceSegmentStore {
+    private let directoryURL: URL
+    private let fileManager: FileManager
+    private(set) var liveByteCount: Int
+    private(set) var rotatedByteCount: Int
+    private var liveEndsWithLineFeed: Bool
+    var onSegmentRoll: ((KeystrokeTraceSegmentRoll) -> Void)?
+
+    var liveFileURL: URL {
+        directoryURL.appendingPathComponent(KeystrokeTraceSchema.liveFileName)
+    }
+
+    var rotatedFileURL: URL {
+        directoryURL.appendingPathComponent(KeystrokeTraceSchema.rotatedFileName)
+    }
+
+    var totalByteCount: Int {
+        liveByteCount + rotatedByteCount
+    }
+
+    init(directoryURL: URL, fileManager: FileManager = .default) throws {
+        guard directoryURL.isFileURL else {
+            throw KeystrokeTraceCoreError.invalidTraceDirectory(directoryURL)
+        }
+        self.directoryURL = directoryURL
+        self.fileManager = fileManager
+        try fileManager.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true,
+            attributes: nil
+        )
+        liveByteCount = try Self.existingSegmentByteCount(
+            at: directoryURL.appendingPathComponent(KeystrokeTraceSchema.liveFileName),
+            fileManager: fileManager
+        )
+        liveEndsWithLineFeed = try Self.endsWithLineFeed(
+            at: directoryURL.appendingPathComponent(KeystrokeTraceSchema.liveFileName),
+            byteCount: liveByteCount
+        )
+        rotatedByteCount = try Self.existingSegmentByteCount(
+            at: directoryURL.appendingPathComponent(KeystrokeTraceSchema.rotatedFileName),
+            fileManager: fileManager
+        )
+    }
+
+    func append(_ line: Data) throws -> KeystrokeTraceSegmentRoll? {
+        guard line.count <= KeystrokeTraceSchema.segmentCapacityBytes,
+              line.last == 0x0A else {
+            throw KeystrokeTraceCoreError.segmentFileTooLarge(line.count)
+        }
+
+        reconcileMissingSegments()
+        var segmentRoll: KeystrokeTraceSegmentRoll?
+        if !liveEndsWithLineFeed, fileManager.fileExists(atPath: liveFileURL.path) {
+            segmentRoll = try rotate()
+        }
+        if liveByteCount + line.count > KeystrokeTraceSchema.segmentCapacityBytes {
+            if let capacityRoll = try rotate() {
+                segmentRoll = capacityRoll
+            }
+        }
+        liveEndsWithLineFeed = false
+        try appendToLiveSegment(line)
+        liveByteCount += line.count
+        liveEndsWithLineFeed = true
+        return segmentRoll
+    }
+
+    func removeAll() throws {
+        if fileManager.fileExists(atPath: liveFileURL.path) {
+            try fileManager.removeItem(at: liveFileURL)
+        }
+        liveByteCount = 0
+        liveEndsWithLineFeed = true
+        if fileManager.fileExists(atPath: rotatedFileURL.path) {
+            try fileManager.removeItem(at: rotatedFileURL)
+        }
+        rotatedByteCount = 0
+    }
+
+    private func rotate() throws -> KeystrokeTraceSegmentRoll? {
+        reconcileMissingSegments()
+        guard fileManager.fileExists(atPath: liveFileURL.path) else { return nil }
+
+        let discardedBytes = rotatedByteCount
+        if fileManager.fileExists(atPath: rotatedFileURL.path) {
+            try fileManager.removeItem(at: rotatedFileURL)
+        }
+        rotatedByteCount = 0
+
+        if liveByteCount > 0 {
+            do {
+                try fileManager.moveItem(at: liveFileURL, to: rotatedFileURL)
+            } catch {
+                guard fileManager.fileExists(atPath: liveFileURL.path) else {
+                    liveByteCount = 0
+                    liveEndsWithLineFeed = true
+                    return nil
+                }
+                throw error
+            }
+            rotatedByteCount = liveByteCount
+            liveByteCount = 0
+        } else if fileManager.fileExists(atPath: liveFileURL.path) {
+            try fileManager.removeItem(at: liveFileURL)
+        }
+        liveEndsWithLineFeed = true
+
+        let segmentRoll = KeystrokeTraceSegmentRoll(
+            archivedBytes: rotatedByteCount,
+            discardedBytes: discardedBytes,
+            totalBytesAfterRoll: totalByteCount
+        )
+        onSegmentRoll?(segmentRoll)
+        return segmentRoll
+    }
+
+    private func appendToLiveSegment(_ data: Data) throws {
+        if !fileManager.fileExists(atPath: liveFileURL.path) {
+            liveByteCount = 0
+            liveEndsWithLineFeed = true
+            let didCreateFile = fileManager.createFile(
+                atPath: liveFileURL.path,
+                contents: Data()
+            )
+            guard didCreateFile || fileManager.fileExists(atPath: liveFileURL.path) else {
+                throw KeystrokeTraceCoreError.segmentFileCreationFailed(liveFileURL)
+            }
+        }
+
+        let handle = try FileHandle(forWritingTo: liveFileURL)
+        var writeError: Error?
+        do {
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+        } catch {
+            writeError = error
+        }
+
+        var closeError: Error?
+        do {
+            try handle.close()
+        } catch {
+            closeError = error
+        }
+
+        if let writeError, let closeError {
+            throw KeystrokeTraceCoreError.segmentFileWriteAndCloseFailed(
+                liveFileURL,
+                writeError,
+                closeError
+            )
+        }
+        if let writeError {
+            throw KeystrokeTraceCoreError.segmentFileWriteFailed(liveFileURL, writeError)
+        }
+        if let closeError {
+            throw KeystrokeTraceCoreError.segmentFileCloseFailed(liveFileURL, closeError)
+        }
+    }
+
+    private func reconcileMissingSegments() {
+        if !fileManager.fileExists(atPath: liveFileURL.path) {
+            liveByteCount = 0
+            liveEndsWithLineFeed = true
+        }
+        if !fileManager.fileExists(atPath: rotatedFileURL.path) {
+            rotatedByteCount = 0
+        }
+    }
+
+    private static func existingSegmentByteCount(
+        at url: URL,
+        fileManager: FileManager
+    ) throws -> Int {
+        guard fileManager.fileExists(atPath: url.path) else { return 0 }
+        let attributes = try fileManager.attributesOfItem(atPath: url.path)
+        guard let size = attributes[.size] as? NSNumber else {
+            throw KeystrokeTraceCoreError.segmentFileSizeUnavailable(url)
+        }
+        let byteCount = size.intValue
+        if byteCount > KeystrokeTraceSchema.segmentCapacityBytes {
+            try fileManager.removeItem(at: url)
+            return 0
+        }
+        return byteCount
+    }
+
+    private static func endsWithLineFeed(at url: URL, byteCount: Int) throws -> Bool {
+        guard byteCount > 0 else { return true }
+        let handle = try FileHandle(forReadingFrom: url)
+        do {
+            try handle.seek(toOffset: UInt64(byteCount - 1))
+            let lastByte = try handle.read(upToCount: 1)
+            try handle.close()
+            return lastByte?.first == 0x0A
+        } catch {
+            let readError = error
+            do {
+                try handle.close()
+            } catch {
+                throw KeystrokeTraceCoreError.segmentFileReadAndCloseFailed(
+                    url,
+                    readError,
+                    error
+                )
+            }
+            throw readError
+        }
+    }
+}
+
+/// Stateful recorder with a preallocated ring and no per-event retained objects.
+///
+/// The ring is allocated when enabled, accepted records retain only encoded bytes, and disk
+/// copies are made only at explicit flush boundaries. Serialize calls on one owner so the
+/// `isEnabled` gate remains lock-free.
+public final class KeystrokeTraceRecorder {
+    /// Lock-free capture gate; check before constructing per-event payloads.
+    public private(set) var isEnabled = false
+
+    private let ringCapacityBytes: Int
+    private let segmentStore: KeystrokeTraceSegmentStore
+    private let encoder: JSONEncoder
+    private let dateFormatter: ISO8601DateFormatter
+    private var ring: KeystrokeTraceByteRing?
+
+    /// Called once after each successful segment roll; the core never logs.
+    public var onSegmentRoll: ((KeystrokeTraceSegmentRoll) -> Void)? {
+        get { segmentStore.onSegmentRoll }
+        set { segmentStore.onSegmentRoll = newValue }
+    }
+
+    /// Number of bytes currently buffered but not yet written to disk.
+    public var unflushedByteCount: Int {
+        ring?.byteCount ?? 0
+    }
+
+    /// Indicates that the keyboard may request a high-water flush.
+    public var shouldFlushAtHighWaterMark: Bool {
+        ring?.shouldFlushAtHighWaterMark ?? false
+    }
+
+    /// URL of the active trace segment.
+    public var liveFileURL: URL {
+        segmentStore.liveFileURL
+    }
+
+    /// URL of the one retained previous trace segment.
+    public var rotatedFileURL: URL {
+        segmentStore.rotatedFileURL
+    }
+
+    /// Total bytes currently accounted for across both disk segments.
+    public var onDiskByteCount: Int {
+        segmentStore.totalByteCount
+    }
+
+    /// Creates the output directory, validates the ring bound, and retains only bounded segments.
+    public init(
+        directoryURL: URL,
+        ringCapacityBytes: Int = KeystrokeTraceSchema.ringCapacityBytes
+    ) throws {
+        guard ringCapacityBytes > 0,
+              ringCapacityBytes <= KeystrokeTraceSchema.ringCapacityBytes else {
+            throw KeystrokeTraceCoreError.invalidRingCapacity(ringCapacityBytes)
+        }
+        self.ringCapacityBytes = ringCapacityBytes
+        segmentStore = try KeystrokeTraceSegmentStore(directoryURL: directoryURL)
+        encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        dateFormatter = ISO8601DateFormatter()
+        dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    }
+
+    /// Enables capture and preallocates the ring; disabling drops pending data without writing.
+    public func setEnabled(_ enabled: Bool) throws {
+        if enabled {
+            if ring == nil {
+                ring = KeystrokeTraceByteRing(capacity: ringCapacityBytes)
+            }
+            isEnabled = true
+            return
+        }
+
+        guard isEnabled else { return }
+        isEnabled = false
+        ring?.clear()
+        ring = nil
+    }
+
+    /// Encodes one event when enabled; callers should check `isEnabled` before constructing it.
+    @discardableResult
+    public func append(
+        _ event: KeystrokeTraceEvent,
+        timestamp: Date? = nil
+    ) throws -> KeystrokeTraceAppendResult {
+        guard isEnabled, let ring else { return .disabled }
+        let record = KeystrokeTraceRecord(
+            timestamp: dateFormatter.string(from: timestamp ?? Date()),
+            event: event
+        )
+        let encodedRecord = try encoder.encode(record)
+        let encodedByteCount = encodedRecord.count + 1
+        guard encodedByteCount <= ring.capacity else {
+            return .eventExceedsRingCapacity(
+                encodedByteCount: encodedByteCount,
+                capacity: ring.capacity
+            )
+        }
+
+        let evictedByteCount = ring.append(encodedRecord)
+        return .appended(
+            encodedByteCount: encodedByteCount,
+            evictedByteCount: evictedByteCount,
+            shouldFlushAtHighWaterMark: ring.shouldFlushAtHighWaterMark
+        )
+    }
+
+    /// Flushes complete records at the caller-selected high-water, idle, or trigger-key boundary.
+    @discardableResult
+    public func flush(
+        at boundary: KeystrokeTraceFlushBoundary
+    ) throws -> KeystrokeTraceFlushResult {
+        guard let ring else {
+            return KeystrokeTraceFlushResult(
+                boundary: boundary,
+                bytesWritten: 0,
+                eventsWritten: 0,
+                remainingByteCount: 0
+            )
+        }
+
+        var bytesWritten = 0
+        var eventsWritten = 0
+        var pendingSegmentRolls: [KeystrokeTraceSegmentRoll] = []
+        while true {
+            while let line = ring.firstLineData() {
+                if let segmentRoll = try segmentStore.append(line) {
+                    pendingSegmentRolls.append(segmentRoll)
+                }
+                let lineByteCount = ring.discardFirstLine()
+                bytesWritten += lineByteCount
+                eventsWritten += 1
+            }
+
+            guard !pendingSegmentRolls.isEmpty else { break }
+            let completedSegmentRolls = pendingSegmentRolls
+            pendingSegmentRolls.removeAll(keepingCapacity: true)
+            for segmentRoll in completedSegmentRolls {
+                let line = try encodeSegmentRollEvent(segmentRoll)
+                if let subsequentRoll = try segmentStore.append(line) {
+                    pendingSegmentRolls.append(subsequentRoll)
+                }
+                bytesWritten += line.count
+                eventsWritten += 1
+            }
+        }
+        return KeystrokeTraceFlushResult(
+            boundary: boundary,
+            bytesWritten: bytesWritten,
+            eventsWritten: eventsWritten,
+            remainingByteCount: ring.byteCount
+        )
+    }
+
+    private func encodeSegmentRollEvent(_ segmentRoll: KeystrokeTraceSegmentRoll) throws -> Data {
+        let detail = "archivedBytes=\(segmentRoll.archivedBytes);" +
+            "discardedBytes=\(segmentRoll.discardedBytes);" +
+            "totalBytesAfterRoll=\(segmentRoll.totalBytesAfterRoll)"
+        let record = KeystrokeTraceRecord(
+            timestamp: dateFormatter.string(from: Date()),
+            event: .state(
+                KeystrokeTraceStateEvent(action: .segmentRolled, detail: detail)
+            )
+        )
+        var line = try encoder.encode(record)
+        line.append(0x0A)
+        return line
+    }
+
+    /// Removes both segments and zeroes pending memory without changing enablement.
+    public func clear() throws {
+        ring?.clear()
+        try segmentStore.removeAll()
+    }
+}
+
+/// Returns only newline-terminated records, ignoring a possibly torn final write.
+public enum KeystrokeTraceSegmentReader {
+    /// Returns complete LF-terminated lines and ignores an incomplete trailing line.
+    public static func completeLines(from data: Data) -> [Data] {
+        var lines: [Data] = []
+        var lineStart = 0
+        for (offset, byte) in data.enumerated() where byte == 0x0A {
+            if offset > lineStart {
+                lines.append(data.subdata(in: lineStart..<offset))
+            }
+            lineStart = offset + 1
+        }
+        return lines
+    }
+
+    /// Reads a trace segment while tolerating a truncated final record.
+    public static func readCompleteLines(from fileURL: URL) throws -> [Data] {
+        completeLines(from: try Data(contentsOf: fileURL))
+    }
+}

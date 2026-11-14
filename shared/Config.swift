@@ -668,6 +668,11 @@ struct SharedConfig {
         static let verboseLoggingKey = "verboseLogging"
         static let verboseLoggingDefault = false
 
+        // MARK: - Keystroke Trace
+
+        static let keystrokeTraceEnabledKey = "keystrokeTraceEnabled"
+        static let keystrokeTraceEnabledDefault = false
+
         // MARK: - Server Selection (Health Probe)
 
         /// Ephemeral App Group key holding the server URL pinned for the current
@@ -988,6 +993,16 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.verboseLoggingKey) as? Bool)
             ?? Defaults.verboseLoggingDefault
+    }
+
+    /// Reads the keystroke-tracing flag from the App Group.
+    /// Returns the default (`false`) when the App Group is unavailable or the key is unset.
+    static func keystrokeTraceEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.keystrokeTraceEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.keystrokeTraceEnabledKey) as? Bool)
+            ?? Defaults.keystrokeTraceEnabledDefault
     }
 
     /// Reads the haptics enabled flag from the App Group.
