@@ -5,6 +5,7 @@ final class KeyboardSettingsPanel: UIView {
     var onLanguageChange: ((KeyboardLanguage) -> Void)?
     var onVADSourceSelected: ((VADSource) -> Void)?
     var onTrimTrailingSilenceOnStopChange: ((Bool) -> Void)?
+    var onVADSilenceFilteringChange: ((Bool) -> Void)?
     var onLLMCleanupPreferencesChange: ((LLMCleanupPreferences) -> Void)?
 
     private let backdrop = UIView()
@@ -24,6 +25,7 @@ final class KeyboardSettingsPanel: UIView {
         }
     })
     private let trimTrailingSilenceOnStopSwitch = UISwitch()
+    private let vadSilenceFilteringSwitch = UISwitch()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -119,6 +121,27 @@ final class KeyboardSettingsPanel: UIView {
         trimTrailingSilenceRow.spacing = 8
         contentStack.addArrangedSubview(trimTrailingSilenceRow)
 
+        let vadSilenceFilteringLabel = UILabel()
+        vadSilenceFilteringLabel.text = "VAD silence filtering"
+        vadSilenceFilteringLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        vadSilenceFilteringLabel.textColor = .secondaryLabel
+        vadSilenceFilteringLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        vadSilenceFilteringSwitch.accessibilityLabel = "VAD silence filtering"
+        vadSilenceFilteringSwitch.addTarget(
+            self,
+            action: #selector(vadSilenceFilteringChanged),
+            for: .valueChanged
+        )
+        let vadSilenceFilteringRow = UIStackView(
+            arrangedSubviews: [vadSilenceFilteringLabel, vadSilenceFilteringSwitch]
+        )
+        vadSilenceFilteringRow.axis = .horizontal
+        vadSilenceFilteringRow.alignment = .center
+        vadSilenceFilteringRow.distribution = .fill
+        vadSilenceFilteringRow.spacing = 8
+        contentStack.addArrangedSubview(vadSilenceFilteringRow)
+
         let cleanupLabel = UILabel()
         cleanupLabel.text = "LLM Cleanup"
         cleanupLabel.font = .systemFont(ofSize: 13, weight: .medium)
@@ -180,11 +203,13 @@ final class KeyboardSettingsPanel: UIView {
         activeLanguage: KeyboardLanguage,
         activeVADSource: VADSource,
         trimTrailingSilenceOnStopEnabled: Bool,
+        vadSilenceFilteringEnabled: Bool,
         cleanupPreferences: LLMCleanupPreferences
     ) {
         update(activeLanguage: activeLanguage)
         update(activeVADSource: activeVADSource)
         update(trimTrailingSilenceOnStopEnabled: trimTrailingSilenceOnStopEnabled)
+        update(vadSilenceFilteringEnabled: vadSilenceFilteringEnabled)
         update(cleanupPreferences: cleanupPreferences)
         guard isHidden else { return }
         isHidden = false
@@ -207,6 +232,10 @@ final class KeyboardSettingsPanel: UIView {
 
     func update(trimTrailingSilenceOnStopEnabled: Bool) {
         trimTrailingSilenceOnStopSwitch.isOn = trimTrailingSilenceOnStopEnabled
+    }
+
+    func update(vadSilenceFilteringEnabled: Bool) {
+        vadSilenceFilteringSwitch.isOn = vadSilenceFilteringEnabled
     }
 
     private func configureMenuControl(_ control: UIButton, accessibilityLabel: String) {
@@ -333,6 +362,10 @@ final class KeyboardSettingsPanel: UIView {
 
     @objc private func trimTrailingSilenceOnStopChanged() {
         onTrimTrailingSilenceOnStopChange?(trimTrailingSilenceOnStopSwitch.isOn)
+    }
+
+    @objc private func vadSilenceFilteringChanged() {
+        onVADSilenceFilteringChange?(vadSilenceFilteringSwitch.isOn)
     }
 
     @objc private func closeTapped() {

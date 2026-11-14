@@ -1295,6 +1295,7 @@ class KeyboardView: UIView {
         activeLanguage: KeyboardLanguage,
         activeVADSource: VADSource,
         trimTrailingSilenceOnStopEnabled: Bool,
+        vadSilenceFilteringEnabled: Bool,
         cleanupPreferences: LLMCleanupPreferences
     ) {
         let panel = settingsPanel
@@ -1302,6 +1303,7 @@ class KeyboardView: UIView {
             activeLanguage: activeLanguage,
             activeVADSource: activeVADSource,
             trimTrailingSilenceOnStopEnabled: trimTrailingSilenceOnStopEnabled,
+            vadSilenceFilteringEnabled: vadSilenceFilteringEnabled,
             cleanupPreferences: cleanupPreferences
         )
         bringSubviewToFront(panel)

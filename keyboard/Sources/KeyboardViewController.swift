@@ -683,6 +683,9 @@ class KeyboardViewController: UIInputViewController {
             panel.onTrimTrailingSilenceOnStopChange = { enabled in
                 SharedConfig.setTrimTrailingSilenceOnStopEnabled(enabled)
             }
+            panel.onVADSilenceFilteringChange = { enabled in
+                SharedConfig.setVADSilenceFilteringEnabled(enabled)
+            }
             panel.onLLMCleanupPreferencesChange = { preferences in
                 SharedConfig.setLLMCleanupPreferences(preferences)
             }
@@ -763,6 +766,7 @@ class KeyboardViewController: UIInputViewController {
             activeLanguage: settingsCache.language,
             activeVADSource: SharedConfig.vadSource(),
             trimTrailingSilenceOnStopEnabled: SharedConfig.trimTrailingSilenceOnStopEnabled(),
+            vadSilenceFilteringEnabled: SharedConfig.vadSilenceFilteringEnabled(),
             cleanupPreferences: SharedConfig.llmCleanupPreferences()
         )
     }

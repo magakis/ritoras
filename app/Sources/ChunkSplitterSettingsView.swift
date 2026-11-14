@@ -17,6 +17,7 @@ struct ChunkSplitterSettingsView: View {
         .navigationTitle("Streaming")
         .onAppear {
             settings.refreshTrimTrailingSilenceOnStopEnabled()
+            settings.refreshVADSilenceFilteringSettings()
         }
         .onDisappear {
             stopTester()
@@ -44,6 +45,7 @@ struct ChunkSplitterSettingsView: View {
             aacSection
             testerSection
             controlsSection
+            vadSilenceFilteringSection
             trimTrailingSilenceSection
             resetSection
         }
@@ -69,6 +71,7 @@ struct ChunkSplitterSettingsView: View {
         }
         if phase == .active {
             settings.refreshTrimTrailingSilenceOnStopEnabled()
+            settings.refreshVADSilenceFilteringSettings()
             Task {
                 await tester.recheckPermission()
             }
@@ -330,6 +333,37 @@ struct ChunkSplitterSettingsView: View {
             Text("Manual Stop")
         } footer: {
             Text("Changes take effect next dictation session.")
+        }
+    }
+
+    private var vadSilenceFilteringSection: some View {
+        Section {
+            Toggle(
+                "VAD silence filtering",
+                isOn: $settings.vadSilenceFilteringEnabled
+            )
+            preRollBeforeSpeechRow
+        } footer: {
+            Text("Pre-roll is the audio retained before detected speech (0–1000 ms in 50 ms steps). Changes take effect next dictation session.")
+        }
+    }
+
+    private var preRollBeforeSpeechRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Pre-roll before speech")
+                Spacer()
+                Text("\(settings.vadSilenceFilteringPreRollMs) ms")
+                    .foregroundColor(.secondary)
+            }
+            Slider(
+                value: Binding(
+                    get: { Double(settings.vadSilenceFilteringPreRollMs) },
+                    set: { settings.vadSilenceFilteringPreRollMs = Int($0) }
+                ),
+                in: 0...1000,
+                step: 50
+            )
         }
     }
 

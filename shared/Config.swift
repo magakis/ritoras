@@ -354,6 +354,13 @@ struct SharedConfig {
         static let trimTrailingSilenceOnStopEnabledKey = "trimTrailingSilenceOnStopEnabled"
         static let trimTrailingSilenceOnStopEnabledDefault = true
 
+        // MARK: - VAD Silence Filtering
+
+        static let vadSilenceFilteringEnabledKey = "vadSilenceFilteringEnabled"
+        static let vadSilenceFilteringEnabledDefault = false
+        static let vadSilenceFilteringPreRollMsKey = "vadSilenceFilteringPreRollMs"
+        static let vadSilenceFilteringPreRollMsDefault = 500
+
         // MARK: - Streaming Audio Format
 
         static let streamAacEnabledKey = "streamAacEnabled"
@@ -1083,6 +1090,38 @@ struct SharedConfig {
     static func setTrimTrailingSilenceOnStopEnabled(_ enabled: Bool) {
         guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return }
         defaults.set(enabled, forKey: Defaults.trimTrailingSilenceOnStopEnabledKey)
+        DarwinNotifier.post(Defaults.darwinSettingsChangedNotificationName)
+    }
+
+    /// Reads whether VAD silence filtering is enabled in the App Group.
+    static func vadSilenceFilteringEnabled() -> Bool {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.vadSilenceFilteringEnabledDefault
+        }
+        return (defaults.object(forKey: Defaults.vadSilenceFilteringEnabledKey) as? Bool)
+            ?? Defaults.vadSilenceFilteringEnabledDefault
+    }
+
+    /// Writes the VAD silence-filtering preference and notifies other processes.
+    static func setVADSilenceFilteringEnabled(_ enabled: Bool) {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return }
+        defaults.set(enabled, forKey: Defaults.vadSilenceFilteringEnabledKey)
+        DarwinNotifier.post(Defaults.darwinSettingsChangedNotificationName)
+    }
+
+    /// Reads the configured pre-roll before detected speech, in milliseconds.
+    static func vadSilenceFilteringPreRollMs() -> Int {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
+            return Defaults.vadSilenceFilteringPreRollMsDefault
+        }
+        return (defaults.object(forKey: Defaults.vadSilenceFilteringPreRollMsKey) as? Int)
+            ?? Defaults.vadSilenceFilteringPreRollMsDefault
+    }
+
+    /// Writes the speech pre-roll preference and notifies other processes.
+    static func setVADSilenceFilteringPreRollMs(_ milliseconds: Int) {
+        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else { return }
+        defaults.set(milliseconds, forKey: Defaults.vadSilenceFilteringPreRollMsKey)
         DarwinNotifier.post(Defaults.darwinSettingsChangedNotificationName)
     }
 

@@ -88,6 +88,10 @@ class AppSettings: ObservableObject {
     @Published var chunkSplitterVADSource: VADSource = .dsp
     @Published var trimTrailingSilenceOnStopEnabled: Bool =
         SharedConfig.Defaults.trimTrailingSilenceOnStopEnabledDefault
+    @Published var vadSilenceFilteringEnabled: Bool =
+        SharedConfig.Defaults.vadSilenceFilteringEnabledDefault
+    @Published var vadSilenceFilteringPreRollMs: Int =
+        SharedConfig.Defaults.vadSilenceFilteringPreRollMsDefault
     @Published var sileroStartThreshold = SileroEvidenceConfiguration.defaultStartThreshold
     @Published var sileroStopThreshold = SileroEvidenceConfiguration.defaultStopThreshold
     @Published var sileroSmoothingSteps = SileroEvidenceConfiguration.defaultSmoothingSteps
@@ -104,6 +108,7 @@ class AppSettings: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var refreshingLLMCleanupPreferences = false
     private var refreshingTrimTrailingSilenceOnStopEnabled = false
+    private var refreshingVADSilenceFilteringSettings = false
     private var chunkSplitterSilenceOverridePresent = false
     private var updatingDerivedChunkSplitterValue = false
 
@@ -135,6 +140,8 @@ class AppSettings: ObservableObject {
         chunkSplitterMode = SharedConfig.streamVadMode()
         chunkSplitterVADSource = SharedConfig.vadSource()
         trimTrailingSilenceOnStopEnabled = SharedConfig.trimTrailingSilenceOnStopEnabled()
+        vadSilenceFilteringEnabled = SharedConfig.vadSilenceFilteringEnabled()
+        vadSilenceFilteringPreRollMs = SharedConfig.vadSilenceFilteringPreRollMs()
         let sileroConfiguration = SharedConfig.sileroEvidenceConfiguration()
         sileroStartThreshold = sileroConfiguration.startThreshold
         sileroStopThreshold = sileroConfiguration.stopThreshold
@@ -244,6 +251,14 @@ class AppSettings: ObservableObject {
             guard let self, !self.refreshingTrimTrailingSilenceOnStopEnabled else { return }
             self.saveTrimTrailingSilenceOnStopEnabled(enabled)
         }.store(in: &cancellables)
+        $vadSilenceFilteringEnabled.dropFirst().sink { [weak self] enabled in
+            guard let self, !self.refreshingVADSilenceFilteringSettings else { return }
+            self.saveVADSilenceFilteringEnabled(enabled)
+        }.store(in: &cancellables)
+        $vadSilenceFilteringPreRollMs.dropFirst().sink { [weak self] milliseconds in
+            guard let self, !self.refreshingVADSilenceFilteringSettings else { return }
+            self.saveVADSilenceFilteringPreRollMs(milliseconds)
+        }.store(in: &cancellables)
         $sileroStartThreshold.dropFirst().sink { [weak self] _ in
             self?.saveSileroEvidenceConfiguration()
         }.store(in: &cancellables)
@@ -315,6 +330,19 @@ class AppSettings: ObservableObject {
         refreshingTrimTrailingSilenceOnStopEnabled = true
         defer { refreshingTrimTrailingSilenceOnStopEnabled = false }
         trimTrailingSilenceOnStopEnabled = sharedValue
+    }
+
+    func refreshVADSilenceFilteringSettings() {
+        let filteringEnabled = SharedConfig.vadSilenceFilteringEnabled()
+        let preRollMs = SharedConfig.vadSilenceFilteringPreRollMs()
+        guard
+            vadSilenceFilteringEnabled != filteringEnabled
+                || vadSilenceFilteringPreRollMs != preRollMs
+        else { return }
+        refreshingVADSilenceFilteringSettings = true
+        defer { refreshingVADSilenceFilteringSettings = false }
+        vadSilenceFilteringEnabled = filteringEnabled
+        vadSilenceFilteringPreRollMs = preRollMs
     }
 
     func refreshServerCapabilityBadges() {
@@ -412,6 +440,14 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(
             trimTrailingSilenceOnStopEnabled,
             forKey: SharedConfig.Defaults.trimTrailingSilenceOnStopEnabledKey
+        )
+        appGroupDefaults?.set(
+            vadSilenceFilteringEnabled,
+            forKey: SharedConfig.Defaults.vadSilenceFilteringEnabledKey
+        )
+        appGroupDefaults?.set(
+            vadSilenceFilteringPreRollMs,
+            forKey: SharedConfig.Defaults.vadSilenceFilteringPreRollMsKey
         )
         let sileroConfiguration = SileroEvidenceConfiguration(
             startThreshold: sileroStartThreshold,
@@ -555,6 +591,19 @@ class AppSettings: ObservableObject {
         postSettingsChanged()
     }
 
+    private func saveVADSilenceFilteringEnabled(_ enabled: Bool) {
+        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.vadSilenceFilteringEnabledKey)
+        postSettingsChanged()
+    }
+
+    private func saveVADSilenceFilteringPreRollMs(_ milliseconds: Int) {
+        appGroupDefaults?.set(
+            milliseconds,
+            forKey: SharedConfig.Defaults.vadSilenceFilteringPreRollMsKey
+        )
+        postSettingsChanged()
+    }
+
     private func saveSileroEvidenceConfiguration() {
         let configuration = SileroEvidenceConfiguration(
             startThreshold: sileroStartThreshold,
@@ -677,6 +726,8 @@ class AppSettings: ObservableObject {
         chunkSplitterVADSource = VADSource(rawValue: SharedConfig.Defaults.vadSourceDefault) ?? .dsp
         trimTrailingSilenceOnStopEnabled =
             SharedConfig.Defaults.trimTrailingSilenceOnStopEnabledDefault
+        vadSilenceFilteringEnabled = SharedConfig.Defaults.vadSilenceFilteringEnabledDefault
+        vadSilenceFilteringPreRollMs = SharedConfig.Defaults.vadSilenceFilteringPreRollMsDefault
         sileroStartThreshold = SharedConfig.Defaults.sileroStartThresholdDefault
         sileroStopThreshold = SharedConfig.Defaults.sileroStopThresholdDefault
         sileroSmoothingSteps = SharedConfig.Defaults.sileroSmoothingStepsDefault
@@ -703,6 +754,8 @@ class AppSettings: ObservableObject {
         chunkSplitterVADSource = VADSource(rawValue: SharedConfig.Defaults.vadSourceDefault) ?? .dsp
         trimTrailingSilenceOnStopEnabled =
             SharedConfig.Defaults.trimTrailingSilenceOnStopEnabledDefault
+        vadSilenceFilteringEnabled = SharedConfig.Defaults.vadSilenceFilteringEnabledDefault
+        vadSilenceFilteringPreRollMs = SharedConfig.Defaults.vadSilenceFilteringPreRollMsDefault
         sileroStartThreshold = SharedConfig.Defaults.sileroStartThresholdDefault
         sileroStopThreshold = SharedConfig.Defaults.sileroStopThresholdDefault
         sileroSmoothingSteps = SharedConfig.Defaults.sileroSmoothingStepsDefault
