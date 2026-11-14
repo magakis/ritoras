@@ -79,8 +79,10 @@ class KeyboardViewController: UIInputViewController {
         didSet {
             // Any input-target switch invalidates a pending deferred autocorrect.
             keystrokeEpoch &+= 1
+            captureTraceState(action: .epochBump, detail: "input-target-changed")
             keyboardView?.noteSuggestionContextChange()
             recentWordBuffer.clear()
+            captureTraceState(action: .ringCleared, reasonCode: .hostRingCleared)
         }
     }
 
@@ -89,6 +91,148 @@ class KeyboardViewController: UIInputViewController {
     /// sites keep working unchanged while the real storage lives in the stack.
     private var predictionEngine: PredictionEngine? { SharedPredictionStack.shared.engineIfReady() }
     private var isPredictionEngineReady: Bool { SharedPredictionStack.shared.isReady }
+
+    private var traceInputIsSecure: Bool {
+        isTraceInputSecure(for: inputTarget)
+    }
+
+    private func isTraceInputSecure(for target: InputTarget) -> Bool {
+        guard view.window != nil else {
+            lastTraceInputWasSecure = true
+            return true
+        }
+
+        let isSecure: Bool
+        switch target {
+        case .hostApp:
+            isSecure = textDocumentProxy.isSecureTextEntry
+        case .emojiSearch:
+            isSecure = keyboardView.emojiSearchOverlay.searchField.isSecureTextEntry
+        }
+        lastTraceInputWasSecure = isSecure
+        return isSecure
+    }
+
+    private func refreshKeystrokeTraceConfiguration() {
+        let wasEnabled = keystrokeTrace.isEnabled
+        keystrokeTrace.refreshConfiguration()
+        guard !wasEnabled, keystrokeTrace.isEnabled else { return }
+
+        traceRecordedPredictionStackLoaded = false
+        traceRecordedTrigramLoaded = false
+        recordPredictionStackLoadedForTraceIfNeeded()
+        recordTrigramLoadedForTraceIfNeeded()
+    }
+
+    private func recordPredictionStackLoadedForTraceIfNeeded() {
+        guard !traceRecordedPredictionStackLoaded,
+              SharedPredictionStack.shared.isReady else { return }
+        guard keystrokeTrace.isEnabled else { return }
+        guard !traceInputIsSecure else {
+            appendTraceRedactionMarker()
+            return
+        }
+        keystrokeTrace.append(.state(KeystrokeTraceStateEvent(
+            action: .modelLoaded,
+            model: "prediction-stack"
+        )))
+        traceRecordedPredictionStackLoaded = true
+    }
+
+    private func recordTrigramLoadedForTraceIfNeeded() {
+        guard !traceRecordedTrigramLoaded,
+              SharedPredictionStack.shared.isTrigramReady else { return }
+        guard keystrokeTrace.isEnabled else { return }
+        guard !traceInputIsSecure else {
+            appendTraceRedactionMarker()
+            return
+        }
+        keystrokeTrace.append(.state(KeystrokeTraceStateEvent(
+            action: .modelLoaded,
+            model: "trigram"
+        )))
+        traceRecordedTrigramLoaded = true
+    }
+
+    private func captureTraceState(
+        action: KeystrokeTraceStateAction,
+        reasonCode: KeystrokeTraceReasonCode? = nil,
+        model: String? = nil,
+        detail: String? = nil
+    ) {
+        guard keystrokeTrace.isEnabled else { return }
+        guard !traceInputIsSecure else {
+            appendTraceRedactionMarker()
+            return
+        }
+        keystrokeTrace.append(.state(KeystrokeTraceStateEvent(
+            action: action,
+            epoch: keystrokeEpoch,
+            reasonCode: reasonCode,
+            model: model,
+            detail: detail
+        )))
+    }
+
+    private func captureTraceSkip(
+        _ reasonCode: KeystrokeTraceReasonCode,
+        secureInputAvailable: Bool = true
+    ) {
+        guard keystrokeTrace.isEnabled else { return }
+        let isSecure = secureInputAvailable ? traceInputIsSecure : lastTraceInputWasSecure
+        if isSecure {
+            appendTraceRedactionMarker()
+            return
+        }
+        keystrokeTrace.append(.decision(.skip(reasonCode: reasonCode)))
+    }
+
+    private func appendTraceRedactionMarker(
+        flushAt boundary: KeystrokeTraceFlushBoundary? = nil
+    ) {
+        keystrokeTrace.append(
+            .key(KeystrokeTraceKeyEvent(action: .redacted, epoch: keystrokeEpoch)),
+            flushAt: boundary
+        )
+    }
+
+    private func captureKeyTrace(
+        action: KeystrokeTraceKeyAction,
+        keyValue: String? = nil,
+        deleteCount: Int? = nil,
+        liveContextSuffix: String? = nil,
+        contextTarget: InputTarget? = nil,
+        flushAt boundary: KeystrokeTraceFlushBoundary? = nil
+    ) {
+        guard keystrokeTrace.isEnabled else { return }
+        let captureTarget = contextTarget ?? inputTarget
+        guard !isTraceInputSecure(for: captureTarget) else {
+            appendTraceRedactionMarker(flushAt: boundary)
+            return
+        }
+
+        let contextBefore: String?
+        let contextAfter: String?
+        switch captureTarget {
+        case .hostApp:
+            contextBefore = textDocumentProxy.documentContextBeforeInput
+            contextAfter = textDocumentProxy.documentContextAfterInput
+        case .emojiSearch:
+            contextBefore = keyboardView.emojiSearchOverlay.searchField.text
+            contextAfter = nil
+        }
+        let event = KeystrokeTraceKeyEvent(
+            action: action,
+            keyValue: keyValue,
+            epoch: keystrokeEpoch,
+            caretPosition: contextBefore?.utf16.count,
+            contextBefore: contextBefore,
+            contextAfter: contextAfter,
+            deleteCount: deleteCount,
+            liveContextSuffix: liveContextSuffix ?? contextBefore
+        )
+        keystrokeTrace.append(.key(event), flushAt: boundary)
+    }
 
     /// Identifies the keyboard process across VC instances. Set once per process launch.
     static let processLaunchId: String = UUID().uuidString
@@ -107,6 +251,11 @@ class KeyboardViewController: UIInputViewController {
     private var currentPollTask: URLSessionDataTask?
 
     private var keyboardView: KeyboardView!
+
+    private let keystrokeTrace = KeyboardKeystrokeTrace()
+    private var traceRecordedPredictionStackLoaded = false
+    private var traceRecordedTrigramLoaded = false
+    private var lastTraceInputWasSecure = false
 
     private var heightConstraint: NSLayoutConstraint?
 
@@ -312,6 +461,9 @@ class KeyboardViewController: UIInputViewController {
         guard !SharedPredictionStack.shared.isReady, !SharedPredictionStack.shared.isLoading else { return }
         SharedPredictionStack.shared.loadIfNeeded { [weak self] ok in
             DispatchQueue.main.async {
+                if ok {
+                    self?.recordPredictionStackLoadedForTraceIfNeeded()
+                }
                 self?.scheduleSuggestionRefresh()
             }
         }
@@ -461,6 +613,8 @@ class KeyboardViewController: UIInputViewController {
 
         // Defensive: never resume in search mode after keyboard dismiss/reappear
         inputTarget = .hostApp
+        recordPredictionStackLoadedForTraceIfNeeded()
+        recordTrigramLoadedForTraceIfNeeded()
         if uiMode == .emojiSearch {
             keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
             uiMode = .emoji
@@ -489,6 +643,7 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        refreshKeystrokeTraceConfiguration()
         installOrUpdateHeightConstraint()
         view.setNeedsLayout()
         view.layoutIfNeeded()
@@ -516,8 +671,11 @@ class KeyboardViewController: UIInputViewController {
         let language = settingsCache.language
         primaryLanguage = language.bcp47Tag
         keyboardView.setLanguage(language)
-        SharedPredictionStack.shared.switchLanguageIfNeeded(to: language) { [weak self] _ in
+        SharedPredictionStack.shared.switchLanguageIfNeeded(to: language) { [weak self] ok in
             DispatchQueue.main.async {
+                if ok {
+                    self?.recordPredictionStackLoadedForTraceIfNeeded()
+                }
                 self?.scheduleSuggestionRefresh()
             }
         }
@@ -547,6 +705,10 @@ class KeyboardViewController: UIInputViewController {
         let before = MemoryMonitor.currentFootprint()
         let freed = SharedPredictionStack.shared.unloadTrigram()
         let after = MemoryMonitor.currentFootprint()
+        if freed > 0 {
+            traceRecordedTrigramLoaded = false
+            captureTraceState(action: .modelUnloaded, model: "trigram")
+        }
         FileLogger.shared.warn(.lifecycle,
             "didReceiveMemoryWarning: trigram shed \(before) → \(after) (\(freed) freed)")
 
@@ -573,6 +735,7 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        keystrokeTrace.flush(at: .idle)
         shedPredictionEngine()
         FileLogger.shared.info(.keyboard, "viewWillDisappear")
 
@@ -650,6 +813,11 @@ class KeyboardViewController: UIInputViewController {
                 // Insert directly into host document (NOT via insertTargeted, which would
                 // route into the search field since inputTarget == .emojiSearch).
                 self.textDocumentProxy.insertText(emoji)
+                self.captureKeyTrace(
+                    action: .insert,
+                    keyValue: emoji,
+                    contextTarget: .hostApp
+                )
                 // EmojiRecents.add is already called inside the overlay on tap.
             }
 
@@ -2061,6 +2229,9 @@ extension KeyboardViewController: KeyboardViewDelegate {
         case .insertText(let s):
             let isTriggerPunct = SharedConfig.Defaults.autocorrectTriggerPunctuation.contains(s)
             let shouldAutoCorrect = isTriggerPunct && uiMode != .emoji
+            if isTriggerPunct {
+                refreshKeystrokeTraceConfiguration()
+            }
             let text = applyShift(to: s)
             if shouldAutoCorrect {
                 // Final-sigma conversion runs BEFORE the commit trigger lands,
@@ -2082,6 +2253,11 @@ extension KeyboardViewController: KeyboardViewDelegate {
             if shouldAutoCorrect {
                 wordOrigin.resetToTyping()
             }
+            captureKeyTrace(
+                action: isTriggerPunct ? .trigger : .insert,
+                keyValue: text,
+                flushAt: isTriggerPunct ? .triggerKey : nil
+            )
 
         case .backspace:
             // REVERT-ON-BACKSPACE: If cursor is immediately after "corrected_word " and
@@ -2109,6 +2285,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             }
             recomputeAutoCap()
             scheduleSuggestionRefresh()
+            captureKeyTrace(action: .backspace)
 
         case .shift:
             lastSigmaConvertedWord = nil  // any other keystroke clears the revert window
@@ -2122,12 +2299,15 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 case .locked: shiftState = .lower
                 }
             }
+            captureKeyTrace(action: .shift, keyValue: "shift")
 
         case .shiftLock:
             lastSigmaConvertedWord = nil  // any other keystroke clears the revert window
             shiftState = .locked
+            captureKeyTrace(action: .shift, keyValue: "shift-lock")
 
         case .space:
+            refreshKeystrokeTraceConfiguration()
             applyFinalSigmaToCommittedWord()
             insertTargeted(" ")
             applyAutocorrectForTrigger(triggerChar: " ")
@@ -2135,8 +2315,10 @@ extension KeyboardViewController: KeyboardViewDelegate {
             recomputeAutoCap()
             scheduleSuggestionRefresh()
             wordOrigin.resetToTyping()
+            captureKeyTrace(action: .trigger, keyValue: " ", flushAt: .triggerKey)
 
         case .return:
+            refreshKeystrokeTraceConfiguration()
             if inputTarget == .emojiSearch {
                 keyboardView.emojiPanelView.onSearchReturn?()
             } else {
@@ -2148,22 +2330,27 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 wordOrigin.resetToTyping()
                 scheduleSuggestionRefresh()
             }
+            captureKeyTrace(action: .trigger, keyValue: "\n", flushAt: .triggerKey)
 
         case .toggleNumber:
             lastSigmaConvertedWord = nil  // surface navigation clears the revert window
             layoutMode = .numbers
+            captureKeyTrace(action: .mode, keyValue: "numbers")
 
         case .toggleLetters:
             lastSigmaConvertedWord = nil  // surface navigation clears the revert window
             layoutMode = .letters
+            captureKeyTrace(action: .mode, keyValue: "letters")
 
         case .toggleSymbols:
             lastSigmaConvertedWord = nil  // surface navigation clears the revert window
             layoutMode = .symbols
+            captureKeyTrace(action: .mode, keyValue: "symbols")
 
         case .mic:
             lastSigmaConvertedWord = nil  // surface navigation clears the revert window
             handleMicButtonTap()
+            captureKeyTrace(action: .mode, keyValue: "mic")
 
         case .emoji:
             lastSigmaConvertedWord = nil  // surface navigation clears the revert window
@@ -2175,10 +2362,12 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 keyboardView.emojiSearchOverlay.searchField.resignFirstResponder()
                 uiMode = .emoji
             }
+            captureKeyTrace(action: .mode, keyValue: "emoji")
 
         case .globe:
             lastSigmaConvertedWord = nil  // surface navigation clears the revert window
             advanceToNextInputMode()
+            captureKeyTrace(action: .mode, keyValue: "globe")
         }
     }
 
@@ -2224,6 +2413,12 @@ extension KeyboardViewController: KeyboardViewDelegate {
             deleteTargetedBackward()
         }
         insertTargeted(insertText + " ")
+        captureKeyTrace(
+            action: .suggestionTap,
+            keyValue: insertText,
+            deleteCount: deleteCount,
+            liveContextSuffix: context
+        )
         wordOrigin.markSuggestionTap()    // Lock persists until the next separator handler clears it
         lastAutoCorrection = nil          // Suggestion tap invalidates any pending revert
         lastSigmaConvertedWord = nil      // Suggestion tap rewrites the word region
@@ -2254,8 +2449,11 @@ extension KeyboardViewController: KeyboardViewDelegate {
         // refresh → snapshot → loadIfNeeded(.ready) → refresh → … forever.
         // Every subsequent show finds the stack `.ready` and reuses it — no rebuild.
         if !SharedPredictionStack.shared.isReady, !SharedPredictionStack.shared.isLoading {
-            SharedPredictionStack.shared.loadIfNeeded { [weak self] _ in
+            SharedPredictionStack.shared.loadIfNeeded { [weak self] ok in
                 DispatchQueue.main.async {
+                    if ok {
+                        self?.recordPredictionStackLoadedForTraceIfNeeded()
+                    }
                     self?.scheduleSuggestionRefresh()
                 }
             }
@@ -2359,6 +2557,43 @@ extension KeyboardViewController: KeyboardViewDelegate {
         return state
     }
 
+    var keyboardViewKeystrokeTraceEnabled: Bool {
+        keystrokeTrace.isEnabled
+    }
+
+    func keyboardViewTraceShouldRedact(_ view: KeyboardView) -> Bool {
+        traceInputIsSecure
+    }
+
+    func keyboardViewTraceDocumentContext(_ view: KeyboardView) -> String {
+        textDocumentProxy.documentContextBeforeInput ?? ""
+    }
+
+    func keyboardViewTraceSuggestionSnapshot(_ view: KeyboardView) -> SuggestionInputSnapshot? {
+        guard inputTarget == .hostApp else { return nil }
+        let context = textDocumentProxy.documentContextBeforeInput
+        let extracted = CurrentWordExtractor.extract(from: context)
+        return SuggestionInputSnapshot(
+            currentWord: extracted.currentWord,
+            lookupWord: extracted.lookupWord,
+            previousWord: extracted.previousWord,
+            previousWord2: extracted.previousWord2,
+            context: ""
+        )
+    }
+
+    func keyboardView(_ view: KeyboardView, didCaptureTrace event: KeystrokeTraceEvent) {
+        guard keystrokeTrace.isEnabled else { return }
+        guard !traceInputIsSecure else {
+            appendTraceRedactionMarker()
+            return
+        }
+        keystrokeTrace.append(event)
+        if case .suggestion = event {
+            recordTrigramLoadedForTraceIfNeeded()
+        }
+    }
+
     func keyboardViewDidRequestCancelDictation(_ view: KeyboardView) {
         guard state == .recording || state == .waiting else { return }
         requestCancel()
@@ -2377,6 +2612,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         if !revertSigmaIfNeeded() {
             deleteTargetedBackward()
         }
+        captureKeyTrace(action: .backspace)
         backspaceSingleCharCount = 1
         scheduleSuggestionRefresh()
         backspacePhase = .charRepeat
@@ -2410,10 +2646,15 @@ extension KeyboardViewController: KeyboardViewDelegate {
         observeIdentityForFlapDetection()
 
         keystrokeEpoch &+= 1  // any text change invalidates a pending deferred autocorrect
+        captureTraceState(
+            action: .epochBump,
+            reasonCode: .hostTextDidChangeEpochBump
+        )
         keyboardView.noteSuggestionContextChange()
         lastAutoCorrection = nil  // host text change invalidates any pending revert
         lastSigmaConvertedWord = nil  // external text change invalidates the sigma revert window
         recentWordBuffer.clear()  // committed-word records are stale once the doc changes
+        captureTraceState(action: .ringCleared, reasonCode: .hostRingCleared)
         // Host edits and focus-activation callbacks share the same coalescing window.
         scheduleSuggestionRefresh()
         recomputeAutoCap()
@@ -2435,7 +2676,12 @@ extension KeyboardViewController: KeyboardViewDelegate {
         observeIdentityForFlapDetection()
         keyboardView.noteSuggestionContextChange()
         keystrokeEpoch &+= 1  // any selection change invalidates a pending deferred autocorrect
+        captureTraceState(
+            action: .epochBump,
+            reasonCode: .hostSelectionChangeEpochBump
+        )
         recentWordBuffer.clear()  // cursor moves invalidate committed-word offsets
+        captureTraceState(action: .ringCleared, reasonCode: .hostRingCleared)
         backspaceTimer?.invalidate()
         backspaceTimer = nil
         backspacePhase = nil
@@ -2449,9 +2695,14 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         keyboardView.noteSuggestionContextChange()
         keystrokeEpoch &+= 1  // any selection change invalidates a pending deferred autocorrect
+        captureTraceState(
+            action: .epochBump,
+            reasonCode: .hostSelectionChangeEpochBump
+        )
         lastAutoCorrection = nil  // cursor move invalidates any pending revert
         lastSigmaConvertedWord = nil  // cursor move invalidates the sigma revert window
         recentWordBuffer.clear()  // committed-word records are stale once the cursor moves
+        captureTraceState(action: .ringCleared, reasonCode: .hostRingCleared)
         backspaceNilContextRetries = 0
         recomputeAutoCap()
         scheduleSuggestionRefresh()
@@ -2477,16 +2728,28 @@ extension KeyboardViewController: KeyboardViewDelegate {
     /// state change since the keystroke silently drops the result.
     private func applyAutocorrectForTrigger(triggerChar: String) {
         // --- Synchronous early-return guards (same as today) ---
-        guard inputTarget == .hostApp else { return }
-        guard settingsCache.autocorrectOnSpace else { return }
+        guard inputTarget == .hostApp else {
+            captureTraceSkip(.autocorrectExtractionFailed)
+            return
+        }
+        guard settingsCache.autocorrectOnSpace else {
+            captureTraceSkip(.autocorrectSettingDisabled)
+            return
+        }
 
         if AutoCorrectTraits.shouldSuppress(
             keyboardType: textDocumentProxy.keyboardType,
             autocorrectionType: textDocumentProxy.autocorrectionType,
             spellCheckingType: textDocumentProxy.spellCheckingType
-        ) { return }
+        ) {
+            captureTraceSkip(.autocorrectTraitsBlocked)
+            return
+        }
 
-        guard wordOrigin.current == .typing else { return }
+        guard wordOrigin.current == .typing else {
+            captureTraceSkip(.autocorrectOriginNotTyping)
+            return
+        }
 
         // The trigger has already been inserted. Extract the typed word from
         // context BEFORE the trigger char was appended.
@@ -2494,10 +2757,18 @@ extension KeyboardViewController: KeyboardViewDelegate {
         let contextBeforeTrigger = String(contextAfterInsert.dropLast())
         let extracted = CurrentWordExtractor.extract(from: contextBeforeTrigger)
 
-        guard extracted.currentWord == extracted.lookupWord else { return }
-        guard !extracted.lookupWord.isEmpty,
-              let engine = predictionEngine,
-              isPredictionEngineReady else { return }
+        guard extracted.currentWord == extracted.lookupWord else {
+            captureTraceSkip(.autocorrectCurrentWordLookupWordMismatch)
+            return
+        }
+        guard !extracted.lookupWord.isEmpty else {
+            captureTraceSkip(.autocorrectExtractionFailed)
+            return
+        }
+        guard let engine = predictionEngine, isPredictionEngineReady else {
+            captureTraceSkip(.autocorrectEngineNotReady)
+            return
+        }
 
         // --- Snapshot on main thread (all Sendable) ---
         let typedWord = extracted.lookupWord
@@ -2510,7 +2781,10 @@ extension KeyboardViewController: KeyboardViewDelegate {
         let languageAtDispatch = settingsCache.language
 
         // Defensive: the suffix must match what we expect.
-        guard contextAtDispatch.hasSuffix(typedWord + triggerChar) else { return }
+        guard contextAtDispatch.hasSuffix(typedWord + triggerChar) else {
+            captureTraceSkip(.autocorrectExtractionFailed)
+            return
+        }
 
         // --- Main-thread spell-check (UITextChecker is a UIKit API) ---
         let computeStart = Date()
@@ -2534,7 +2808,10 @@ extension KeyboardViewController: KeyboardViewDelegate {
         // epoch and the content-hash context token. Both are re-checked on the
         // main-hop so stale background results are dropped.
         let capturedEpoch = keystrokeEpoch
-        guard let capturedDocId = safeDocumentIdentifier() else { return }
+        guard let capturedDocId = safeDocumentIdentifier() else {
+            captureTraceSkip(.deferredApplyHostTargetGone)
+            return
+        }
         let capturedToken = keyboardContextToken(keyboardView)
 
         // --- Retroactive candidate snapshot (all main-thread work) ---
@@ -2549,6 +2826,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             candidates: recentWordBuffer.candidates,
             liveContext: contextAfterInsert
         )
+        let shouldCaptureAutocorrectDecisions = keystrokeTrace.isEnabled
 
         scheduleDeferredKeystrokeWork(
             typedWord: typedWord,
@@ -2564,7 +2842,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
             engine: engine,
             capturedEpoch: capturedEpoch,
             capturedToken: capturedToken,
-            capturedDocId: capturedDocId
+            capturedDocId: capturedDocId,
+            captureDecisions: shouldCaptureAutocorrectDecisions
         )
     }
 
@@ -2612,10 +2891,16 @@ extension KeyboardViewController: KeyboardViewDelegate {
         for candidate in candidates.reversed() {
             guard let live = recentWords.first(where: {
                 $0.lookupWord == candidate.typedWord || $0.word == candidate.typedWord
-            }) else { continue }
+            }) else {
+                captureTraceSkip(.deferredApplyLiveContextMismatch)
+                continue
+            }
             // The committed context (~50 chars before the word) must still be
             // present, proving the word's region has not been edited.
-            guard liveContext.contains(candidate.commitContextSuffix) else { continue }
+            guard liveContext.contains(candidate.commitContextSuffix) else {
+                captureTraceSkip(.deferredApplyLiveContextMismatch)
+                continue
+            }
             resolved.append(RetroactiveCandidateSnapshot(
                 typedWord: candidate.typedWord,
                 lookupWord: live.lookupWord,
@@ -2665,6 +2950,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         capturedEpoch: UInt64,
         capturedToken: UInt64,
         capturedDocId: UUID,
+        captureDecisions: Bool,
         coalescing: TimeInterval = 0.016
     ) {
         deferredKeystrokeWorkItem?.cancel()
@@ -2698,6 +2984,17 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 language: languageAtDispatch,
                 config: config
             )
+            let decisionSkipReason = captureDecisions
+                ? autocorrectSkipReason(
+                    decision: decision,
+                    typedWord: typedWord,
+                    origin: originAtDispatch,
+                    topCorrection: top,
+                    isLearned: isLearned,
+                    isMisspelled: isMisspelled,
+                    config: config
+                )
+                : nil
             FileLogger.shared.debug(.keyboard, "autocorrect compute",
                 payload: ["ms": Int(Date().timeIntervalSince(computeStart) * 1000)])
 
@@ -2708,7 +3005,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
                     triggerChar: triggerChar,
                     capturedEpoch: capturedEpoch,
                     capturedToken: capturedToken,
-                    capturedDocId: capturedDocId
+                    capturedDocId: capturedDocId,
+                    decisionSkipReason: decisionSkipReason
                 )
             }
 
@@ -2722,6 +3020,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
             if !retroactiveCandidates.isEmpty {
                 let retroactiveStart = Date()
                 var evaluatedTypedWords: [String] = []
+                var retroactiveSkipReasons: [KeystrokeTraceReasonCode]? =
+                    captureDecisions ? [] : nil
                 var pendingCorrection: (plan: RetroactiveApplyPlan.Plan, typedWord: String)?
                 for entry in retroactiveCandidates {
                     guard pendingCorrection == nil else { break }
@@ -2740,6 +3040,18 @@ extension KeyboardViewController: KeyboardViewDelegate {
                         language: languageAtDispatch,
                         config: config
                     )
+                    if captureDecisions,
+                       let reason = autocorrectSkipReason(
+                           decision: retroactiveDecision,
+                           typedWord: entry.lookupWord,
+                           origin: entry.origin,
+                           topCorrection: retroactiveTop,
+                           isLearned: entry.isLearned,
+                           isMisspelled: entry.isMisspelled,
+                           config: config
+                       ) {
+                        retroactiveSkipReasons?.append(reason)
+                    }
                     guard case .correct(_, let correction) = retroactiveDecision else { continue }
 
                     let plan = RetroactiveApplyPlan.plan(
@@ -2751,6 +3063,13 @@ extension KeyboardViewController: KeyboardViewDelegate {
                     break
                 }
 
+                if let reasons = retroactiveSkipReasons, !reasons.isEmpty {
+                    DispatchQueue.main.async { [weak self] in
+                        for reason in reasons {
+                            self?.captureTraceSkip(reason)
+                        }
+                    }
+                }
                 if let correction = pendingCorrection {
                     DispatchQueue.main.async { [weak self] in
                         self?.applyRetroactiveCorrection(
@@ -2783,6 +3102,47 @@ extension KeyboardViewController: KeyboardViewDelegate {
         keyboardProcessingQueue.asyncAfter(deadline: .now() + coalescing, execute: workItem)
     }
 
+    private func autocorrectSkipReason(
+        decision: AutocorrectController.Decision,
+        typedWord: String,
+        origin: WordOrigin,
+        topCorrection: Suggestion?,
+        isLearned: Bool,
+        isMisspelled: Bool,
+        config: AutocorrectController.Config
+    ) -> KeystrokeTraceReasonCode? {
+        guard case .leaveAsIs = decision else { return nil }
+        guard origin == .typing else { return .autocorrectOriginNotTyping }
+        guard typedWord.count >= config.minWordLength,
+              typedWord.count <= config.maxWordLength else {
+            return .autocorrectLengthOutOfBounds
+        }
+
+        let isContraction = topCorrection?.source == .contraction
+        let isAmbiguousContraction = topCorrection?.source == .ambiguousContraction
+        if !isContraction, isLearned {
+            return .autocorrectLearnedWord
+        }
+        if !isContraction, !isAmbiguousContraction, !isMisspelled {
+            return .autocorrectSpellcheckPass
+        }
+        guard let candidate = topCorrection else {
+            return .autocorrectScoreBelowThreshold
+        }
+        guard candidate.text.lowercased() != typedWord.lowercased() else {
+            return .autocorrectSameWord
+        }
+        if !isContraction, candidate.score < config.minConfidenceScore {
+            return .autocorrectScoreBelowThreshold
+        }
+        guard let typedFirst = typedWord.lowercased().first,
+              let candidateFirst = candidate.text.lowercased().first,
+              typedFirst == candidateFirst else {
+            return .autocorrectFirstLetterMismatch
+        }
+        return nil
+    }
+
     /// Main-thread apply for a deferred autocorrect result. Every guard runs
     /// BEFORE any shared-state access or document mutation: the keyboard
     /// liveness gate, the monotonic keystroke epoch (supersession guard — this
@@ -2796,36 +3156,66 @@ extension KeyboardViewController: KeyboardViewDelegate {
         triggerChar: String,
         capturedEpoch: UInt64,
         capturedToken: UInt64,
-        capturedDocId: UUID
+        capturedDocId: UUID,
+        decisionSkipReason: KeystrokeTraceReasonCode?
     ) {
         // Liveness gate: if the keyboard is no longer in a window,
         // the textDocumentProxy is dead — reading it in the guards below
         // would crash with SIGSEGV.
         if self.view.window == nil {
+            captureTraceSkip(.deferredApplyKeyboardNotLive, secureInputAvailable: false)
             return
         }
 
         // Supersession guard (monotonic epoch): any text/selection/target
         // mutation since dispatch bumped keystrokeEpoch — the result is stale.
-        guard keystrokeEpoch == capturedEpoch else { return }
+        guard keystrokeEpoch == capturedEpoch else {
+            captureTraceSkip(.deferredApplyEpochChanged)
+            return
+        }
 
         // Target-bound guard: the first-responder field must be unchanged.
-        guard safeDocumentIdentifier() == capturedDocId else { return }
+        let liveDocumentId = safeDocumentIdentifier()
+        guard liveDocumentId == capturedDocId else {
+            let reasonCode: KeystrokeTraceReasonCode =
+                liveDocumentId == nil || liveDocumentId == Self.noFieldDocumentId
+                    ? .deferredApplyHostTargetGone
+                    : .deferredApplyDocumentIdentityChanged
+            captureTraceSkip(reasonCode)
+            return
+        }
 
         // Content-hash guard: the live context must still match dispatch.
         let liveToken = keyboardContextToken(keyboardView)
-        guard shouldApplyLookupResult(capturedToken: capturedToken, liveToken: liveToken) else { return }
+        guard shouldApplyLookupResult(capturedToken: capturedToken, liveToken: liveToken) else {
+            captureTraceSkip(.deferredApplyContextTokenChanged)
+            return
+        }
 
         // Application guard: all three must hold or the result is stale.
-        guard AutocorrectApplicationGuard.shouldApply(
+        let liveContext = textDocumentProxy.documentContextBeforeInput ?? ""
+        let isHostApp = inputTarget == .hostApp
+        let shouldApply = AutocorrectApplicationGuard.shouldApply(
             snapshot: AutocorrectAsyncSnapshot(
                 typedWord: typedWord,
                 triggerChar: triggerChar
             ),
-            liveContext: textDocumentProxy.documentContextBeforeInput ?? "",
-            isHostApp: inputTarget == .hostApp,
+            liveContext: liveContext,
+            isHostApp: isHostApp,
             wordOrigin: wordOrigin.current
-        ) else { return }
+        )
+        guard shouldApply else {
+            let reasonCode: KeystrokeTraceReasonCode
+            if !isHostApp {
+                reasonCode = .deferredApplyHostTargetGone
+            } else if wordOrigin.current != .typing {
+                reasonCode = .autocorrectOriginNotTyping
+            } else {
+                reasonCode = .deferredApplyLiveContextMismatch
+            }
+            captureTraceSkip(reasonCode)
+            return
+        }
 
         switch decision {
         case .correct(_, let correction):
@@ -2843,10 +3233,29 @@ extension KeyboardViewController: KeyboardViewDelegate {
             for _ in 0..<deleteCount {
                 deleteTargetedBackward()
             }
-            insertTargeted(correction + triggerChar)
+            let appliedText = correction + triggerChar
+            insertTargeted(appliedText)
             lastAutoCorrection = (typed: typedWord, replacement: correction)
+            let traceApplyEnabled = keystrokeTrace.isEnabled
+            if traceApplyEnabled {
+                if traceInputIsSecure {
+                    appendTraceRedactionMarker()
+                } else {
+                    let afterText = textDocumentProxy.documentContextBeforeInput ?? ""
+                    keystrokeTrace.append(.decision(.apply(
+                        reasonCode: .autocorrectApplied,
+                        beforeText: liveContext,
+                        afterText: afterText,
+                        deleteCount: deleteCount,
+                        insertCount: appliedText.count
+                    )))
+                }
+            }
         case .leaveAsIs:
             lastAutoCorrection = nil
+            if let decisionSkipReason {
+                captureTraceSkip(decisionSkipReason)
+            }
         }
     }
 
@@ -2867,27 +3276,53 @@ extension KeyboardViewController: KeyboardViewDelegate {
         capturedDocId: UUID,
         capturedToken: UInt64
     ) {
-        if self.view.window == nil { return }
+        if self.view.window == nil {
+            captureTraceSkip(
+                .deferredApplyKeyboardNotLive,
+                secureInputAvailable: false
+            )
+            return
+        }
 
         // Defensive mode: the host is flapping document identities (input-session
         // churn, e.g. WKWebView+React), so the cursor-reanchoring retroactive
         // mutation pattern would fight the re-anchoring host. Pause until stable.
         guard !identityMonitor.isDefensive else {
             FileLogger.shared.debug(.keyboard, "retroactive correction suppressed — defensive mode")
+            captureTraceSkip(.deferredApplyDocumentIdentityChanged)
             return
         }
 
         // Supersession guard (monotonic epoch): if the inline apply or any other
         // mutation ran first, the epoch moved and this stale plan is dropped.
-        guard keystrokeEpoch == capturedEpoch else { return }
+        guard keystrokeEpoch == capturedEpoch else {
+            captureTraceSkip(.deferredApplyEpochChanged)
+            return
+        }
 
         // Target-bound guard: the first-responder field must be unchanged.
-        guard safeDocumentIdentifier() == capturedDocId else { return }
+        let liveDocumentId = safeDocumentIdentifier()
+        guard liveDocumentId == capturedDocId else {
+            let reasonCode: KeystrokeTraceReasonCode =
+                liveDocumentId == nil || liveDocumentId == Self.noFieldDocumentId
+                    ? .deferredApplyHostTargetGone
+                    : .deferredApplyDocumentIdentityChanged
+            captureTraceSkip(reasonCode)
+            return
+        }
 
         // Content-hash guard: the live context must still match dispatch.
         let liveToken = keyboardContextToken(keyboardView)
-        guard shouldApplyLookupResult(capturedToken: capturedToken, liveToken: liveToken) else { return }
+        guard shouldApplyLookupResult(capturedToken: capturedToken, liveToken: liveToken) else {
+            captureTraceSkip(.deferredApplyContextTokenChanged)
+            return
+        }
 
+        let traceApplyEnabled = keystrokeTrace.isEnabled
+        let traceApplyIsSecure = traceApplyEnabled && traceInputIsSecure
+        let beforeText = traceApplyEnabled && !traceApplyIsSecure
+            ? textDocumentProxy.documentContextBeforeInput ?? ""
+            : nil
         textDocumentProxy.adjustTextPosition(byCharacterOffset: plan.backMove)
         for _ in 0..<plan.deleteCount {
             textDocumentProxy.deleteBackward()
@@ -2898,6 +3333,19 @@ extension KeyboardViewController: KeyboardViewDelegate {
         // Re-read the context to verify the correction landed; no retry.
         let verifyContext = textDocumentProxy.documentContextBeforeInput ?? ""
         let verified = verifyContext.contains(plan.insert)
+        if traceApplyEnabled {
+            if traceApplyIsSecure {
+                appendTraceRedactionMarker()
+            } else {
+                keystrokeTrace.append(.decision(.apply(
+                    reasonCode: .autocorrectApplied,
+                    beforeText: beforeText ?? "",
+                    afterText: verifyContext,
+                    deleteCount: plan.deleteCount,
+                    insertCount: plan.insert.count
+                )))
+            }
+        }
         if verified {
             FileLogger.shared.debug(.keyboard, "retroactive autocorrect",
                 payload: ["typed": typedWord,
@@ -2926,11 +3374,31 @@ extension KeyboardViewController: KeyboardViewDelegate {
         capturedDocId: UUID,
         capturedToken: UInt64
     ) {
-        if self.view.window == nil { return }
-        guard keystrokeEpoch == capturedEpoch else { return }
-        guard safeDocumentIdentifier() == capturedDocId else { return }
+        if self.view.window == nil {
+            captureTraceSkip(
+                .deferredApplyKeyboardNotLive,
+                secureInputAvailable: false
+            )
+            return
+        }
+        guard keystrokeEpoch == capturedEpoch else {
+            captureTraceSkip(.deferredApplyEpochChanged)
+            return
+        }
+        let liveDocumentId = safeDocumentIdentifier()
+        guard liveDocumentId == capturedDocId else {
+            let reasonCode: KeystrokeTraceReasonCode =
+                liveDocumentId == nil || liveDocumentId == Self.noFieldDocumentId
+                    ? .deferredApplyHostTargetGone
+                    : .deferredApplyDocumentIdentityChanged
+            captureTraceSkip(reasonCode)
+            return
+        }
         let liveToken = keyboardContextToken(keyboardView)
-        guard shouldApplyLookupResult(capturedToken: capturedToken, liveToken: liveToken) else { return }
+        guard shouldApplyLookupResult(capturedToken: capturedToken, liveToken: liveToken) else {
+            captureTraceSkip(.deferredApplyContextTokenChanged)
+            return
+        }
         for typedWord in typedWords {
             recentWordBuffer.markEvaluated(typedWord: typedWord)
         }
@@ -3118,6 +3586,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 return
             }
             deleteTargetedBackward()
+            captureKeyTrace(action: .backspace)
             HapticsManager.shared.tapImpact()
             scheduleSuggestionRefresh()
             scheduleBackspaceTimer(after: SharedConfig.Defaults.backspaceCharRepeatInterval, repeats: true)
@@ -3127,6 +3596,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         switch backspacePhase {
         case .charRepeat:
             deleteTargetedBackward()
+            captureKeyTrace(action: .backspace)
             HapticsManager.shared.tapImpact()
             backspaceSingleCharCount += 1
             scheduleSuggestionRefresh()
@@ -3181,6 +3651,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             }
             for _ in 0..<n {
                 deleteTargetedBackward()
+                captureKeyTrace(action: .backspace)
                 HapticsManager.shared.tapImpact()
             }
             scheduleSuggestionRefresh()

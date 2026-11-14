@@ -51,6 +51,8 @@ final class PredictionEngine {
     ///   - previousSuggestions: The suggestion strings displayed on the previous
     ///     keystroke (nil for stateless callers). Used by the sticky-rescue pass
     ///     to keep long completions visible as the user types.
+    ///   - onComputedCandidates: Optional observer for the merged pool before
+    ///     display-only pinning, sticky rescue, and truncation.
     /// - Returns: Sorted array of suggestion strings.
     func suggestions(
         forCurrentWord currentWord: String,
@@ -58,7 +60,8 @@ final class PredictionEngine {
         previousWord: String? = nil,
         previousWord2: String? = nil,
         limit: Int = 3,
-        previousSuggestions: [String]? = nil
+        previousSuggestions: [String]? = nil,
+        onComputedCandidates: (([Suggestion]) -> Void)? = nil
     ) -> [String] {
         let context = SuggestionContext(
             currentWord: currentWord,
@@ -79,13 +82,13 @@ final class PredictionEngine {
             }
 
             if pool.isEmpty {
+                onComputedCandidates?([])
                 return Self.defaultTopSuggestions
             }
 
-            return pool
-                .sorted { $0.score > $1.score }
-                .prefix(limit)
-                .map { $0.text }
+            let sortedPool = pool.sorted { $0.score > $1.score }
+            onComputedCandidates?(sortedPool)
+            return sortedPool.prefix(limit).map { $0.text }
         }
 
         // ──────────────────────────────────────────────
@@ -97,6 +100,7 @@ final class PredictionEngine {
             previousWord: previousWord,
             previousWord2: previousWord2
         )
+        onComputedCandidates?(allSuggestions)
 
         // — Pin verbatim/current word to #1 (iOS QuickType convention),
         // then sort corrections by score descending —

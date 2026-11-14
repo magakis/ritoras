@@ -80,6 +80,13 @@ final class SharedPredictionStack: @unchecked Sendable {
         return state == .loading
     }
 
+    var isTrigramReady: Bool {
+        lock.lock()
+        let provider = trigramProvider
+        lock.unlock()
+        return provider?.isReady == true
+    }
+
     /// The language the prediction stack was last built for. `.english` until
     /// the first explicit language selection triggers a switch.
     var language: KeyboardLanguage {

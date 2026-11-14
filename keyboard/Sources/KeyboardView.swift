@@ -61,9 +61,14 @@ struct SuggestionInputSnapshot: Sendable {
 // MARK: - Delegate
 
 protocol KeyboardViewDelegate: AnyObject {
+    var keyboardViewKeystrokeTraceEnabled: Bool { get }
     func keyboardView(_ view: KeyboardView, didPerform action: KeyAction)
     func keyboardView(_ view: KeyboardView, didTapSuggestion text: String)
     func keyboardView(_ view: KeyboardView, didLongPressSuggestion text: String)
+    func keyboardViewTraceShouldRedact(_ view: KeyboardView) -> Bool
+    func keyboardViewTraceDocumentContext(_ view: KeyboardView) -> String
+    func keyboardViewTraceSuggestionSnapshot(_ view: KeyboardView) -> SuggestionInputSnapshot?
+    func keyboardView(_ view: KeyboardView, didCaptureTrace event: KeystrokeTraceEvent)
     func keyboardViewSuggestionSnapshot(_ view: KeyboardView) -> SuggestionInputSnapshot?
     func keyboardViewPredictionEngine(_ view: KeyboardView) -> PredictionEngine?
     func keyboardViewServerSuggestionsEnabled(_ view: KeyboardView) -> Bool
@@ -82,9 +87,16 @@ protocol KeyboardViewDelegate: AnyObject {
 }
 
 extension KeyboardViewDelegate {
+    var keyboardViewKeystrokeTraceEnabled: Bool { false }
     func keyboardViewBackspaceDidBegin(_ view: KeyboardView) {}
     func keyboardViewBackspaceDidEnd(_ view: KeyboardView) {}
     func keyboardView(_ view: KeyboardView, didLongPressSuggestion text: String) {}
+    func keyboardViewTraceShouldRedact(_ view: KeyboardView) -> Bool { false }
+    func keyboardViewTraceDocumentContext(_ view: KeyboardView) -> String { "" }
+    func keyboardViewTraceSuggestionSnapshot(_ view: KeyboardView) -> SuggestionInputSnapshot? {
+        nil
+    }
+    func keyboardView(_ view: KeyboardView, didCaptureTrace event: KeystrokeTraceEvent) {}
     func keyboardViewServerSuggestionsEnabled(_ view: KeyboardView) -> Bool { false }
     func keyboardView(
         _ view: KeyboardView,
@@ -1534,6 +1546,12 @@ class KeyboardView: UIView {
 
     func refreshSuggestions() {
         let token = delegate?.keyboardContextToken(self) ?? 0
+        let traceCandidatesEnabled =
+            delegate?.keyboardViewKeystrokeTraceEnabled == true
+                && delegate?.keyboardViewTraceShouldRedact(self) != true
+        let traceDocumentContext = traceCandidatesEnabled
+            ? delegate?.keyboardViewTraceDocumentContext(self)
+            : nil
         // Cancel any lookup before issuing a replacement; keep only one engine result set active.
         suggestionLookupWorkItem?.cancel()
         suggestionLookupWorkItem = nil
@@ -1544,6 +1562,25 @@ class KeyboardView: UIView {
         guard let snapshot = delegate?.keyboardViewSuggestionSnapshot(self),
               let engine = delegate?.keyboardViewPredictionEngine(self) else {
             // Wrong target or engine not ready — clear synchronously, no hop needed.
+            if delegate?.keyboardViewKeystrokeTraceEnabled == true {
+                if delegate?.keyboardViewTraceShouldRedact(self) == true {
+                    delegate?.keyboardView(
+                        self,
+                        didCaptureTrace: .key(
+                            KeystrokeTraceKeyEvent(action: .redacted, epoch: capturedEpoch)
+                        )
+                    )
+                } else if let traceSnapshot =
+                            delegate?.keyboardViewTraceSuggestionSnapshot(self) {
+                    captureSuggestionTrace(
+                        snapshot: traceSnapshot,
+                        candidates: nil,
+                        displayedCandidates: nil,
+                        epoch: capturedEpoch,
+                        contextToken: token
+                    )
+                }
+            }
             localSuggestions = []
             localSuggestionsAreBounded = true
             localSuggestionEpoch = capturedEpoch
@@ -1562,6 +1599,15 @@ class KeyboardView: UIView {
             ? localSuggestions
             : suggestionCache.displayed
 
+        var traceCandidates: [Suggestion]?
+        let captureCandidates: (([Suggestion]) -> Void)? = traceCandidatesEnabled
+            ? { candidates in
+                traceCandidates = Array(
+                    candidates.sorted { $0.score > $1.score }.prefix(10)
+                )
+            }
+            : nil
+
         let workItem = DispatchWorkItem { [weak self, weak engine] in
             guard let self = self, let engine = engine else { return }
             let suggestions = engine.suggestions(
@@ -1570,19 +1616,36 @@ class KeyboardView: UIView {
                 previousWord: snapshot.previousWord,
                 previousWord2: snapshot.previousWord2,
                 limit: 3,
-                previousSuggestions: previousDisplayed
+                previousSuggestions: previousDisplayed,
+                onComputedCandidates: captureCandidates
             )
             DispatchQueue.main.async { [weak self] in
                 // Supersession guard: context changes and lookup cancellation
                 // invalidate any result still queued for the main hop.
                 guard let self else { return }
                 guard self.window != nil else {
+                    self.captureSuggestionTrace(
+                        snapshot: snapshot,
+                        candidates: traceCandidates,
+                        displayedCandidates: nil,
+                        epoch: capturedEpoch,
+                        contextToken: token,
+                        documentContext: traceDocumentContext
+                    )
                     if SharedConfig.Defaults.predictionDebugLoggingEnabled {
                         FileLogger.shared.debug(.keyboard, "suggestion result rejected: window nil")
                     }
                     return
                 }
                 guard self.suggestionEpoch == capturedEpoch else {
+                    self.captureSuggestionTrace(
+                        snapshot: snapshot,
+                        candidates: traceCandidates,
+                        displayedCandidates: nil,
+                        epoch: capturedEpoch,
+                        contextToken: token,
+                        documentContext: traceDocumentContext
+                    )
                     if SharedConfig.Defaults.predictionDebugLoggingEnabled {
                         FileLogger.shared.debug(.keyboard, "suggestion result rejected: epoch mismatch", payload: [
                             "capturedEpoch": capturedEpoch,
@@ -1595,6 +1658,14 @@ class KeyboardView: UIView {
                     capturedToken: token,
                     liveToken: self.delegate?.keyboardContextToken(self) ?? 0
                 ) else {
+                    self.captureSuggestionTrace(
+                        snapshot: snapshot,
+                        candidates: traceCandidates,
+                        displayedCandidates: nil,
+                        epoch: capturedEpoch,
+                        contextToken: token,
+                        documentContext: traceDocumentContext
+                    )
                     return
                 }
                 self.localSuggestionEpoch = capturedEpoch
@@ -1614,6 +1685,14 @@ class KeyboardView: UIView {
                     let displayedSuggestions = strictRemoteOnly ? [] : suggestions
                     self.suggestionCache.update(displayedSuggestions, token: token)
                     self.suggestionBar.update(with: displayedSuggestions)
+                    self.captureSuggestionTrace(
+                        snapshot: snapshot,
+                        candidates: traceCandidates,
+                        displayedCandidates: displayedSuggestions,
+                        epoch: capturedEpoch,
+                        contextToken: token,
+                        documentContext: traceDocumentContext
+                    )
                     return
                 }
                 self.localSuggestionsAreBounded = true
@@ -1624,6 +1703,14 @@ class KeyboardView: UIView {
                     self.appliedServerSuggestionResults = nil
                 }
                 self.renderCurrentSuggestions()
+                self.captureSuggestionTrace(
+                    snapshot: snapshot,
+                    candidates: traceCandidates,
+                    displayedCandidates: self.suggestionCache.displayed,
+                    epoch: capturedEpoch,
+                    contextToken: token,
+                    documentContext: traceDocumentContext
+                )
                 self.delegate?.keyboardView(
                     self,
                     didDisplayLocalSuggestions: suggestions,
@@ -1635,6 +1722,49 @@ class KeyboardView: UIView {
         }
         suggestionLookupWorkItem = workItem
         suggestionLookupQueue.async(execute: workItem)
+    }
+
+    private func captureSuggestionTrace(
+        snapshot: SuggestionInputSnapshot,
+        candidates: [Suggestion]?,
+        displayedCandidates: [String]?,
+        epoch: UInt64,
+        contextToken: UInt64,
+        documentContext capturedDocumentContext: String? = nil
+    ) {
+        guard delegate?.keyboardViewKeystrokeTraceEnabled == true else { return }
+        guard delegate?.keyboardViewTraceShouldRedact(self) != true else {
+            delegate?.keyboardView(
+                self,
+                didCaptureTrace: .key(
+                    KeystrokeTraceKeyEvent(action: .redacted, epoch: epoch)
+                )
+            )
+            return
+        }
+
+        let documentContext = capturedDocumentContext
+            ?? delegate?.keyboardViewTraceDocumentContext(self)
+            ?? ""
+        let traceCandidates = candidates?.prefix(10).map { candidate in
+            KeystrokeTraceCandidate(
+                candidate: candidate.text,
+                scoreComponents: ["score": candidate.score]
+            )
+        } ?? []
+        let event = KeystrokeTraceSuggestionEvent(
+            currentWord: snapshot.currentWord,
+            lookupWord: snapshot.lookupWord,
+            previousWord: snapshot.previousWord,
+            previousWord2: snapshot.previousWord2,
+            candidates: traceCandidates,
+            displayedCandidates: displayedCandidates ?? [],
+            epoch: epoch,
+            contextToken: String(contextToken),
+            documentContextLength: documentContext.count,
+            documentContextSuffix: documentContext
+        )
+        delegate?.keyboardView(self, didCaptureTrace: .suggestion(event))
     }
 
     private func renderCurrentSuggestions() {
