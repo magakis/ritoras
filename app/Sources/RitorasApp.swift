@@ -36,6 +36,7 @@ struct RitorasApp: App {
             .environmentObject(settings)
             .environmentObject(dictationViewModel)
             .task {
+                dictationViewModel.startLocalhostServer()
                 dictationViewModel.setSceneActive(scenePhase == .active)
                 // Request microphone permission from the container app.
                 // The keyboard extension CANNOT show this dialog without being dismissed.
@@ -102,6 +103,7 @@ struct RitorasApp: App {
                 switch newPhase {
                 case .active:
                     phaseName = "active"
+                    dictationViewModel.startLocalhostServer()
                     dictationViewModel.reconcileOnActivation()
                     dictationViewModel.ensureLocalhostServerHealthy()
                 case .background:

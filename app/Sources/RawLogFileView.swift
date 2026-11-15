@@ -211,9 +211,10 @@ private struct RawLogFileSnapshot {
 }
 
 struct RawLogFileView: View {
-    @EnvironmentObject private var settings: AppSettings
     @State private var rawLogSnapshot = RawLogFileSnapshot.empty
     @State private var keystrokeTraceSnapshot = KeystrokeTraceFileSnapshot.loading
+    @State private var keystrokeTraceTestInput = ""
+    @FocusState private var isKeystrokeTraceTestFieldFocused: Bool
     @State private var rawLogPreviewText = ""
     @State private var rawLogShareText = ""
     @State private var rawLogReadGeneration = 0
@@ -253,6 +254,17 @@ struct RawLogFileView: View {
         .onAppear {
             refreshDiagnosticsFiles()
         }
+        .task(id: isKeystrokeTraceTestFieldFocused) {
+            guard isKeystrokeTraceTestFieldFocused else { return }
+            while !Task.isCancelled {
+                refreshKeystrokeTrace()
+                do {
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                } catch {
+                    return
+                }
+            }
+        }
         .confirmationDialog(
             "Delete all keystroke trace data?",
             isPresented: $isConfirmingTraceDeletion,
@@ -263,7 +275,10 @@ struct RawLogFileView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This removes the saved trace files and turns tracing off if enabled.")
+            Text(
+                "This clears the app’s saved traces and bumps the delivery epoch so the keyboard " +
+                    "clears its buffered traces the next time it contacts the app."
+            )
         }
     }
 
@@ -377,6 +392,48 @@ struct RawLogFileView: View {
                 .disabled(!keystrokeTraceSnapshot.hasData)
             }
 
+            HStack {
+                Text("Oldest event")
+                Spacer()
+                Text(keystrokeTraceSnapshot.oldestEventAgeLabel)
+                    .foregroundColor(.secondary)
+            }
+
+            HStack {
+                Text("Last delivery")
+                Spacer()
+                Text(keystrokeTraceSnapshot.lastDeliveryLabel)
+                    .foregroundColor(.secondary)
+            }
+
+            if !keystrokeTraceSnapshot.hasData,
+               keystrokeTraceSnapshot.isAvailable,
+               !keystrokeTraceSnapshot.isLoading {
+                Text(
+                    "No traces yet. They arrive when the keyboard ships while this app is open."
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text(
+                "Tracing is off by default. Long-press the keyboard’s settings key to toggle it. " +
+                    "Traces arrive while this app is open."
+            )
+            .font(.caption)
+            .foregroundColor(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            TextField(
+                "Tap to open the keyboard and collect traces",
+                text: $keystrokeTraceTestInput
+            )
+            .focused($isKeystrokeTraceTestFieldFocused)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .accessibilityLabel("Keystroke trace test field")
+
             if !keystrokeTraceSnapshot.errors.isEmpty {
                 Text(keystrokeTraceSnapshot.errors.joined(separator: "\n"))
                     .font(.caption2)
@@ -393,10 +450,7 @@ struct RawLogFileView: View {
             Button("Delete All Trace Data", role: .destructive) {
                 isConfirmingTraceDeletion = true
             }
-            .disabled(
-                !keystrokeTraceSnapshot.isAvailable
-                    || (!settings.keystrokeTraceEnabled && !keystrokeTraceSnapshot.hasFiles)
-            )
+            .disabled(!keystrokeTraceSnapshot.isAvailable)
         } header: {
             Text("Keystroke Trace")
         }
@@ -439,12 +493,6 @@ struct RawLogFileView: View {
     }
 
     private func deleteKeystrokeTraceData() {
-        // The keyboard observes the disabled flag at its next checkpoint and drops
-        // its process-local ring without flushing it before these files are removed.
-        if settings.keystrokeTraceEnabled {
-            settings.keystrokeTraceEnabled = false
-        }
-
         do {
             try KeystrokeTraceFileStore.deleteAll()
             traceDeleteError = nil

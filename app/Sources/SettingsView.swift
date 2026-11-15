@@ -355,29 +355,41 @@ struct SettingsView: View {
     private var diagnosticsSection: some View {
         Section {
             Toggle("Verbose Logging", isOn: $settings.verboseLogging)
-            VStack(alignment: .leading, spacing: 4) {
-                Toggle("Keystroke Tracing", isOn: $settings.keystrokeTraceEnabled)
-                Text("Records what you type while enabled. Off by default.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            HStack {
-                Text("Trace status")
-                Spacer()
-                Text(settings.keystrokeTraceEnabled ? "On" : "Off")
-                    .foregroundStyle(.secondary)
-            }
-            HStack {
-                Text("Trace size")
-                Spacer()
-                Text(keystrokeTraceSnapshot.totalSizeLabel)
-                    .foregroundStyle(.secondary)
-            }
-            HStack {
-                Text("Oldest event")
-                Spacer()
-                Text(keystrokeTraceSnapshot.oldestEventAgeLabel)
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Keystroke Trace")
+                    .font(.headline)
+                HStack {
+                    Text("Trace size")
+                    Spacer()
+                    Text(keystrokeTraceSnapshot.totalSizeLabel)
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Text("Oldest event")
+                    Spacer()
+                    Text(keystrokeTraceSnapshot.oldestEventAgeLabel)
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Text("Last delivery")
+                    Spacer()
+                    Text(keystrokeTraceSnapshot.lastDeliveryLabel)
+                        .foregroundStyle(.secondary)
+                }
+                if !keystrokeTraceSnapshot.hasData,
+                   keystrokeTraceSnapshot.isAvailable,
+                   !keystrokeTraceSnapshot.isLoading {
+                    Text("No traces yet.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text(
+                    "Tracing is off by default. Long-press the keyboard’s settings key to toggle it. " +
+                        "Traces arrive while this app is open."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             }
             NavigationLink("Debug Log") {
                 DebugLogView()
@@ -390,7 +402,7 @@ struct SettingsView: View {
         } footer: {
             Text(
                 "Verbose Logging captures developer-level diagnostics in the debug log. " +
-                    "Keystroke Tracing is separate and records typed text only while enabled."
+                    "Keystroke tracing is controlled on the keyboard by long-pressing its settings key."
             )
         }
     }

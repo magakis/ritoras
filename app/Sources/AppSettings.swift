@@ -74,7 +74,6 @@ class AppSettings: ObservableObject {
     @Published var llmCleanupStructure: LLMCleanupStructure = SharedConfig.Defaults.llmCleanupStructureDefault
     @Published var llmCleanupContext: LLMCleanupContext = SharedConfig.Defaults.llmCleanupContextDefault
     @Published var verboseLogging: Bool = SharedConfig.Defaults.verboseLoggingDefault
-    @Published var keystrokeTraceEnabled: Bool = SharedConfig.Defaults.keystrokeTraceEnabledDefault
     @Published var hapticsEnabled: Bool = SharedConfig.Defaults.hapticsEnabledDefault
     @Published var keyboardLanguage: KeyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
     @Published var serverSuggestionsEnabled: Bool = SharedConfig.Defaults.serverSuggestionsEnabledDefault
@@ -129,7 +128,6 @@ class AppSettings: ObservableObject {
         llmCleanupStructure = SharedConfig.llmCleanupStructure()
         llmCleanupContext = SharedConfig.llmCleanupContext()
         verboseLogging = SharedConfig.verboseLoggingEnabled()
-        keystrokeTraceEnabled = SharedConfig.keystrokeTraceEnabled()
         hapticsEnabled = SharedConfig.hapticsEnabled()
         keyboardLanguage = SharedConfig.keyboardLanguage()
         serverSuggestionsEnabled = SharedConfig.serverSuggestionsEnabled()
@@ -207,9 +205,6 @@ class AppSettings: ObservableObject {
             FileLogger.shared.info(.settings, "saving verboseLogging",
                                    payload: ["value": newValue])
             self?.saveVerboseLogging(newValue)
-        }.store(in: &cancellables)
-        $keystrokeTraceEnabled.dropFirst().sink { [weak self] newValue in
-            self?.saveKeystrokeTraceEnabled(newValue)
         }.store(in: &cancellables)
         $hapticsEnabled.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving hapticsEnabled",
@@ -431,10 +426,6 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(llmCleanupStructure.rawValue, forKey: SharedConfig.Defaults.llmCleanupStructureKey)
         appGroupDefaults?.set(llmCleanupContext.rawValue, forKey: SharedConfig.Defaults.llmCleanupContextKey)
         appGroupDefaults?.set(verboseLogging, forKey: SharedConfig.Defaults.verboseLoggingKey)
-        appGroupDefaults?.set(
-            keystrokeTraceEnabled,
-            forKey: SharedConfig.Defaults.keystrokeTraceEnabledKey
-        )
         appGroupDefaults?.set(hapticsEnabled, forKey: SharedConfig.Defaults.hapticsEnabledKey)
         appGroupDefaults?.set(keyboardLanguage.rawValue, forKey: SharedConfig.Defaults.keyboardLanguageKey)
         appGroupDefaults?.set(serverSuggestionsEnabled, forKey: SharedConfig.Defaults.serverSuggestionsEnabledKey)
@@ -534,11 +525,6 @@ class AppSettings: ObservableObject {
 
     private func saveVerboseLogging(_ enabled: Bool) {
         appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.verboseLoggingKey)
-        postSettingsChanged()
-    }
-
-    private func saveKeystrokeTraceEnabled(_ enabled: Bool) {
-        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.keystrokeTraceEnabledKey)
         postSettingsChanged()
     }
 
@@ -727,7 +713,6 @@ class AppSettings: ObservableObject {
         llmCleanupStructure = SharedConfig.Defaults.llmCleanupStructureDefault
         llmCleanupContext = SharedConfig.Defaults.llmCleanupContextDefault
         verboseLogging = SharedConfig.Defaults.verboseLoggingDefault
-        keystrokeTraceEnabled = SharedConfig.Defaults.keystrokeTraceEnabledDefault
         hapticsEnabled = SharedConfig.Defaults.hapticsEnabledDefault
         keyboardLanguage = SharedConfig.Defaults.keyboardLanguageDefault
         serverSuggestionsEnabled = SharedConfig.Defaults.serverSuggestionsEnabledDefault

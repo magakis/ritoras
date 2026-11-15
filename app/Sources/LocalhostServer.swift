@@ -3,8 +3,8 @@ import Network
 
 // MARK: - LocalhostServer
 
-/// Lightweight HTTP/1.1 server on a localhost port that exposes health
-/// and log-shipping endpoints.
+/// Lightweight HTTP/1.1 server on a localhost port for health, log-shipping,
+/// and keystroke-trace endpoints.
 final class LocalhostServer {
     private struct CancelRequest: Decodable {
         let id: UUID
@@ -427,6 +427,8 @@ final class LocalhostServer {
         if method == "POST" {
             if rawPath == "/logs" {
                 return handlePostLogs(bodyData: data[headerEndOffset...])
+            } else if rawPath == KeystrokeTraceWireContract.route {
+                return handlePostTrace(bodyData: Data(data[headerEndOffset...]))
             } else if rawPath == "/stop" {
                 return handlePostStop()
             } else if rawPath == "/cancel" {
@@ -646,6 +648,12 @@ final class LocalhostServer {
         }
     }
 
+    /// Handles one authenticated, bounded keyboard trace chunk.
+    private func handlePostTrace(bodyData: Data) -> Data {
+        let result = KeystrokeTraceFileStore.receive(bodyData: bodyData)
+        return Self.makeJSONResponse(status: result.statusCode, body: result.response)
+    }
+
     // MARK: - POST /stop and POST /cancel
 
     /// Handles `POST /stop`: asks the container app to stop the active
@@ -752,6 +760,8 @@ final class LocalhostServer {
         case 405: statusLine = "HTTP/1.1 405 Method Not Allowed"
         case 401: statusLine = "HTTP/1.1 401 Unauthorized"
         case 503: statusLine = "HTTP/1.1 503 Service Unavailable"
+        case 413: statusLine = "HTTP/1.1 413 Payload Too Large"
+        case 500: statusLine = "HTTP/1.1 500 Internal Server Error"
         default:  statusLine = "HTTP/1.1 \(status)"
         }
 

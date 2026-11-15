@@ -469,30 +469,31 @@ final class DictationViewModel: ObservableObject {
     }
 
     /// Verifies the localhost server is still responding and restarts it if not.
-    /// Called on app activation (scenePhase .active). Heals an already-started
-    /// server only — never eagerly starts one (that is the ritoras://dictate
-    /// URL path's job). Not async: the SwiftUI scenePhase call site stays
-    /// synchronous; the async work runs in a @MainActor Task guarded against
-    /// re-entrancy.
+    /// Called on app activation after the idempotent launch/activation start.
+    /// Not async: the SwiftUI scenePhase call site stays synchronous; the async
+    /// work runs in a @MainActor Task guarded against re-entrancy.
     func ensureLocalhostServerHealthy() {
-        guard localhostServer != nil else { return }
+        guard let server = localhostServer else { return }
 
         Task { @MainActor [weak self] in
-            guard !(self?.isEnsuringLocalhostHealth ?? true) else { return }
-            self?.isEnsuringLocalhostHealth = true
-            defer { self?.isEnsuringLocalhostHealth = false }
+            guard let self, !self.isEnsuringLocalhostHealth else { return }
+            self.isEnsuringLocalhostHealth = true
+            defer { self.isEnsuringLocalhostHealth = false }
 
-            let token = self?.ensureHealthToken ?? 0
+            let token = self.ensureHealthToken
             let healthy = await LocalhostClient.healthCheck()
 
-            guard let self = self, token == self.ensureHealthToken, self.localhostServer != nil else { return }
+            guard token == self.ensureHealthToken,
+                  self.localhostServer === server else { return }
 
             if healthy {
                 FileLogger.shared.debug(.network, "localhost health check ok")
                 return
             }
+            // Replacing a non-ready listener can race its startup or automatic retry.
+            if !server.isHealthy && server.hasListener { return }
             FileLogger.shared.warn(.network, "localhost server unhealthy on probe, restarting")
-            self.localhostServer?.restart()
+            server.restart()
         }
     }
 
