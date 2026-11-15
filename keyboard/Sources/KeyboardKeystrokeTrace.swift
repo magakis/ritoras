@@ -28,7 +28,7 @@ final class KeyboardKeystrokeTrace {
     private var lastFailureDescription: String?
     private var lastFailurePendingRingBytes = 0
     private lazy var shipper = KeyboardKeystrokeTraceShipper(
-        directoryURL: Self.documentsDirectoryURL
+        directoryURLProvider: { Self.documentsDirectoryURL }
     ) { [weak self] in
         guard let self else { return false }
         do {

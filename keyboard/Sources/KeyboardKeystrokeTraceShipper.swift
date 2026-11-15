@@ -21,6 +21,11 @@ final class KeyboardKeystrokeTraceShipper {
         let nextOffset: UInt64
     }
 
+    private enum UploadAttemptResult {
+        case attempt(UploadAttempt)
+        case skipped(SkipReason)
+    }
+
     private struct UploadFailure: Sendable {
         let kind: UploadErrorKind
         let httpStatus: Int?
@@ -32,6 +37,18 @@ final class KeyboardKeystrokeTraceShipper {
         case unauthorized = "401"
         case notFound = "404"
         case other
+    }
+
+    enum SkipReason: String {
+        case notRunning = "not-running"
+        case noDirectory = "no-directory"
+        case noSegments = "no-segments"
+        case allAtEOF = "all-at-eof"
+        case noCompleteLine = "no-complete-line"
+        case firstLineOverLimit = "first-line-over-limit"
+        case bodySizeMismatch = "body-size-mismatch"
+        case epochResetInFlight = "epoch-reset-in-flight"
+        case requestInFlight = "request-in-flight"
     }
 
     private enum PayloadResult {
@@ -49,7 +66,7 @@ final class KeyboardKeystrokeTraceShipper {
         KeystrokeTraceSchema.liveFileName
     ]
 
-    private let directoryURL: URL?
+    private let directoryURLProvider: () -> URL?
     private let queue = DispatchQueue(label: "com.ritoras.keystroke-trace-shipper")
     private let onEpochMismatch: () -> Bool
     private var state: CursorStore
@@ -57,6 +74,7 @@ final class KeyboardKeystrokeTraceShipper {
     private var isRunning = false
     private var requestInFlight = false
     private var epochResetInProgress = false
+    private var lastSkipReason: SkipReason?
     private var uploadAttemptCount: UInt64 = 0
     private var lastAttemptAt: Date?
     private var lastUploadErrorKind: String?
@@ -74,13 +92,14 @@ final class KeyboardKeystrokeTraceShipper {
         let lastUploadErrorKind: String?
         let lastUploadHTTPStatus: Int?
         let lastAttemptAt: Date?
+        let lastSkipReason: SkipReason?
     }
 
     init(
-        directoryURL: URL?,
+        directoryURLProvider: @escaping () -> URL?,
         onEpochMismatch: @escaping () -> Bool
     ) {
-        self.directoryURL = directoryURL
+        self.directoryURLProvider = directoryURLProvider
         self.onEpochMismatch = onEpochMismatch
         state = Self.loadCursorStore()
     }
@@ -132,7 +151,8 @@ final class KeyboardKeystrokeTraceShipper {
                 cursorOffsets: state.offsets,
                 lastUploadErrorKind: lastUploadErrorKind,
                 lastUploadHTTPStatus: lastUploadHTTPStatus,
-                lastAttemptAt: lastAttemptAt
+                lastAttemptAt: lastAttemptAt,
+                lastSkipReason: lastSkipReason
             )
         }
     }
@@ -156,15 +176,39 @@ final class KeyboardKeystrokeTraceShipper {
     }
 
     private func shipOldestPendingChunk() {
-        guard isRunning,
-              !requestInFlight,
-              !epochResetInProgress,
-              let directoryURL else { return }
+        lastSkipReason = nil
+        guard isRunning else {
+            lastSkipReason = .notRunning
+            return
+        }
+        guard !requestInFlight else {
+            lastSkipReason = .requestInFlight
+            return
+        }
+        guard !epochResetInProgress else {
+            lastSkipReason = .epochResetInFlight
+            return
+        }
+        guard let directoryURL = directoryURLProvider() else {
+            lastSkipReason = .noDirectory
+            return
+        }
 
         do {
             let segments = try existingSegments(in: directoryURL)
             try reconcileCursors(with: segments)
-            guard let attempt = try nextUploadAttempt(from: segments) else { return }
+            guard !segments.isEmpty else {
+                lastSkipReason = .noSegments
+                return
+            }
+            let attempt: UploadAttempt
+            switch try nextUploadAttempt(from: segments) {
+            case let .attempt(builtAttempt):
+                attempt = builtAttempt
+            case let .skipped(reason):
+                lastSkipReason = reason
+                return
+            }
 
             requestInFlight = true
             uploadAttemptCount &+= 1
@@ -386,11 +430,14 @@ final class KeyboardKeystrokeTraceShipper {
         }
     }
 
-    private func nextUploadAttempt(from segments: [Segment]) throws -> UploadAttempt? {
+    private func nextUploadAttempt(from segments: [Segment]) throws -> UploadAttemptResult {
+        var hasUnreadBytes = false
+
         for segment in segments {
             let offset = state.offsets[segment.identity] ?? 0
             guard offset < segment.byteCount else { continue }
 
+            hasUnreadBytes = true
             let bytes = try readBytes(from: segment, offset: offset)
             switch try lineAlignedPayload(
                 bytes,
@@ -409,20 +456,20 @@ final class KeyboardKeystrokeTraceShipper {
                 guard body.count == estimatedBodyByteCount,
                       estimatedBodyByteCount
                         <= KeystrokeTraceWireContract.maximumRequestBodyBytes else {
-                    return nil
+                    return .skipped(.bodySizeMismatch)
                 }
-                return UploadAttempt(
+                return .attempt(UploadAttempt(
                     request: request,
                     nextOffset: offset + UInt64(payload.count)
-                )
+                ))
             case .firstLineExceedsRequestLimit:
                 // Do not send newer records around an unshippable oldest line.
-                return nil
+                return .skipped(.firstLineOverLimit)
             case .noCompleteLines:
                 continue
             }
         }
-        return nil
+        return .skipped(hasUnreadBytes ? .noCompleteLine : .allAtEOF)
     }
 
     private func readBytes(

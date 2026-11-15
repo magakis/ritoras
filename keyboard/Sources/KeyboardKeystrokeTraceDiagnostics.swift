@@ -32,6 +32,7 @@ enum KeyboardKeystrokeTraceDiagnostics {
                 "\($0)=\(shipper.cursorOffsets[$0] ?? 0)"
             }.joined(separator: ", ")
         let attemptAt = shipper.lastAttemptAt.map { now.string(from: $0) } ?? "none"
+        let lastSkipReason = shipper.lastSkipReason?.rawValue ?? "none"
         let enabledAt = state.enabledAt.map { now.string(from: $0) } ?? "not tracked"
         let lastError = shipper.lastUploadErrorKind ?? "none"
         let httpStatus = shipper.lastUploadHTTPStatus.map { String($0) } ?? "none"
@@ -74,6 +75,7 @@ enum KeyboardKeystrokeTraceDiagnostics {
             "  Cadence timer running: \(shipper.timerRunning)",
             "  Upload attempts: \(shipper.uploadAttemptCount)",
             "  Request in flight: \(shipper.requestInFlight)",
+            "  Last skip reason: \(lastSkipReason)",
             "  Cursor epoch: \(shipper.cursorEpoch)",
             "  Cursor offsets (segment identity=byte offset): \(cursorOffsets)",
             "  Last upload error kind: \(lastError)",
