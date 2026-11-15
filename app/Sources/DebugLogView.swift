@@ -211,6 +211,18 @@ private func logDebugLogQueryPerformance(_ performance: DebugLogQueryPerformance
     FileLogger.shared.info(.performance, "Debug log query", payload: payload)
 }
 
+private func makeDebugLogQueryHandle() -> LogQueryHandle {
+    LogStore.shared.makeQueryCancellationHandle { durationMilliseconds in
+        logDebugLogQueryPerformance(
+            DebugLogQueryPerformance(
+                action: "cancel",
+                durationMilliseconds: durationMilliseconds,
+                footprintDeltaBytes: nil
+            )
+        )
+    }
+}
+
 private func color(for level: LogLevel?) -> Color {
     switch level {
     case .debug: return .secondary
@@ -298,6 +310,8 @@ struct DebugLogView: View {
     @State private var refreshGeneration = 0
     @State private var isLoading = false
     @State private var isViewVisible = false
+    @State private var activeQueryHandle: LogQueryHandle?
+    @State private var activeDeleteHandle: LogQueryHandle?
     @State private var isExportingCustomRange = false
     @State private var pendingLargeExport: LargeCustomLogExportConfirmation?
     @State private var showLargeExportConfirmation = false
@@ -420,6 +434,9 @@ struct DebugLogView: View {
         }
         .onDisappear {
             isViewVisible = false
+            cancelActiveQuery()
+            cancelActiveDelete()
+            clearLoadedLogState()
             if !isRangeExportSheetPresented { cleanupRangeExportFile() }
         }
         .overlay(alignment: .bottom) {
@@ -843,6 +860,47 @@ struct DebugLogView: View {
 
     // MARK: - Actions
 
+    private func beginQuery() -> LogQueryHandle {
+        cancelActiveQuery()
+        let handle = makeDebugLogQueryHandle()
+        activeQueryHandle = handle
+        return handle
+    }
+
+    private func beginDelete() -> LogQueryHandle {
+        cancelActiveQuery()
+        cancelActiveDelete()
+        let handle = makeDebugLogQueryHandle()
+        activeDeleteHandle = handle
+        return handle
+    }
+
+    private func cancelActiveQuery() {
+        guard let handle = activeQueryHandle else { return }
+        activeQueryHandle = nil
+        handle.cancel()
+    }
+
+    private func cancelActiveDelete() {
+        guard let handle = activeDeleteHandle else { return }
+        activeDeleteHandle = nil
+        handle.cancel()
+    }
+
+    private func clearLoadedLogState() {
+        lines = []
+        diagnostics = []
+        crashReports = []
+        selectedIDs = []
+        expandedKeys = []
+        newestSeenId = nil
+        oldestLoadedId = nil
+        totalCount = 0
+        cachedShareText = ""
+        isLoading = false
+        isLoadingMore = false
+    }
+
     private func refreshGuard() {
         let paused = !isViewVisible || !selectedIDs.isEmpty || !expandedKeys.isEmpty || expandedReportID != nil
         guard !paused else {
@@ -870,11 +928,15 @@ struct DebugLogView: View {
         let search = searchText.isEmpty ? nil : searchText
         let piiScrub = scrubPII
 
+        let handle = beginQuery()
         refreshGeneration += 1
         let gen = refreshGeneration
         isLoading = true
+        isLoadingMore = false
 
         DispatchQueue.global(qos: .userInitiated).async {
+            defer { handle.finish() }
+
             let recentQuery = measureDebugLogQuery(
                 action: "refresh_page",
                 includesFootprintDelta: true
@@ -885,19 +947,30 @@ struct DebugLogView: View {
                     components: components,
                     sinceNs: bounds.sinceNs,
                     untilNs: bounds.untilNs,
-                    search: search)
+                    search: search,
+                    cancellation: handle)
             }
+            logDebugLogQueryPerformance(recentQuery.performance)
+            guard !handle.isCancelled else { return }
+
             let countQuery = measureDebugLogQuery(action: "refresh_count") {
                 LogStore.shared.count(
                     levels: levels,
                     components: components,
                     sinceNs: bounds.sinceNs,
                     untilNs: bounds.untilNs,
-                    search: search)
+                    search: search,
+                    cancellation: handle)
             }
+            logDebugLogQueryPerformance(countQuery.performance)
+            guard !handle.isCancelled else { return }
+
             let diagnosticsQuery = measureDebugLogQuery(action: "refresh_diagnostics") {
-                LogStore.shared.recentDiagnostics()
+                LogStore.shared.recentDiagnostics(cancellation: handle)
             }
+            logDebugLogQueryPerformance(diagnosticsQuery.performance)
+            guard !handle.isCancelled else { return }
+
             let newLines = recentQuery.value
             let newCount = countQuery.value
             let newDiagnostics = diagnosticsQuery.value
@@ -905,12 +978,19 @@ struct DebugLogView: View {
 
             let rawText = newLines.map(\.raw).joined(separator: "\n")
             let newShareText = piiScrub ? LogScrubber.scrub(rawText) : rawText
-            logDebugLogQueryPerformance(recentQuery.performance)
-            logDebugLogQueryPerformance(countQuery.performance)
-            logDebugLogQueryPerformance(diagnosticsQuery.performance)
 
             DispatchQueue.main.async {
-                guard gen == refreshGeneration else { return }
+                guard activeQueryHandle === handle,
+                      !handle.isCancelled,
+                      isViewVisible,
+                      gen == refreshGeneration else {
+                    if activeQueryHandle === handle {
+                        activeQueryHandle = nil
+                        isLoading = false
+                    }
+                    return
+                }
+                activeQueryHandle = nil
                 lines = newLines
                 newestSeenId = newLines.first?.rowId
                 oldestLoadedId = newLines.last?.rowId
@@ -921,11 +1001,6 @@ struct DebugLogView: View {
                 isLoading = false
             }
         }
-    }
-
-    private func clear() {
-        try? LogStore.shared.clear()
-        refresh()
     }
 
     private func updateShareText() {
@@ -1150,50 +1225,99 @@ struct DebugLogView: View {
     }
 
     private func executeDelete(_ action: DeleteAction) {
-        do {
-            switch action {
-            case .visible:
-                if selectedComponents.isEmpty {
-                    showDeleteFeedback(text: "Deleted 0 logs", isError: false)
-                } else {
-                    let bounds = timeRangeToBounds()
+        if case .crashReports = action {
+            MetricKitSubscriber.clear()
+            crashReports = []
+            showDeleteFeedback(text: "Cleared crash reports", isError: false)
+            return
+        }
+
+        if case .everything = action {
+            MetricKitSubscriber.clear()
+            crashReports = []
+        }
+        if case .visible = action, selectedComponents.isEmpty {
+            showDeleteFeedback(text: "Deleted 0 logs", isError: false)
+            refresh()
+            return
+        }
+
+        let handle = beginDelete()
+        let levels = levelFilterToSet()
+        let components = componentsForQuery(selectedComponents)
+        let bounds = timeRangeToBounds()
+        let search = searchText.isEmpty ? nil : searchText
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let feedbackText: String
+                switch action {
+                case .visible:
                     let count = try LogStore.shared.deleteFiltered(
-                        levels: levelFilterToSet(),
-                        components: componentsForQuery(selectedComponents),
+                        levels: levels,
+                        components: components,
                         sinceNs: bounds.sinceNs,
                         untilNs: bounds.untilNs,
-                        search: searchText.isEmpty ? nil : searchText)
-                    showDeleteFeedback(text: "Deleted \(count) logs", isError: false)
+                        search: search,
+                        cancellation: handle)
+                    feedbackText = "Deleted \(count) logs"
+                case .olderThan1Day:
+                    let cutoff = Int64(
+                        (Date().addingTimeInterval(-86400)).timeIntervalSince1970 * 1_000_000_000
+                    )
+                    let count = try LogStore.shared.deleteOlderThan(
+                        tsNs: cutoff,
+                        cancellation: handle
+                    )
+                    feedbackText = "Deleted \(count) logs"
+                case .olderThan1Week:
+                    let cutoff = Int64(
+                        (Date().addingTimeInterval(-604800)).timeIntervalSince1970 * 1_000_000_000
+                    )
+                    let count = try LogStore.shared.deleteOlderThan(
+                        tsNs: cutoff,
+                        cancellation: handle
+                    )
+                    feedbackText = "Deleted \(count) logs"
+                case .olderThan1Month:
+                    let cutoff = Int64(
+                        (Date().addingTimeInterval(-2592000)).timeIntervalSince1970 * 1_000_000_000
+                    )
+                    let count = try LogStore.shared.deleteOlderThan(
+                        tsNs: cutoff,
+                        cancellation: handle
+                    )
+                    feedbackText = "Deleted \(count) logs"
+                case .all:
+                    try LogStore.shared.clear(cancellation: handle)
+                    feedbackText = "Deleted all logs"
+                case .crashReports:
+                    feedbackText = "Cleared crash reports"
+                case .everything:
+                    try LogStore.shared.clear(cancellation: handle)
+                    feedbackText = "Deleted crash reports and all logs"
                 }
-            case .olderThan1Day:
-                let cutoff = Int64((Date().addingTimeInterval(-86400)).timeIntervalSince1970 * 1_000_000_000)
-                let count = try LogStore.shared.deleteOlderThan(tsNs: cutoff)
-                showDeleteFeedback(text: "Deleted \(count) logs", isError: false)
-            case .olderThan1Week:
-                let cutoff = Int64((Date().addingTimeInterval(-604800)).timeIntervalSince1970 * 1_000_000_000)
-                let count = try LogStore.shared.deleteOlderThan(tsNs: cutoff)
-                showDeleteFeedback(text: "Deleted \(count) logs", isError: false)
-            case .olderThan1Month:
-                let cutoff = Int64((Date().addingTimeInterval(-2592000)).timeIntervalSince1970 * 1_000_000_000)
-                let count = try LogStore.shared.deleteOlderThan(tsNs: cutoff)
-                showDeleteFeedback(text: "Deleted \(count) logs", isError: false)
-            case .all:
-                try LogStore.shared.clear()
-                showDeleteFeedback(text: "Deleted all logs", isError: false)
-            case .crashReports:
-                MetricKitSubscriber.clear()
-                crashReports = []
-                showDeleteFeedback(text: "Cleared crash reports", isError: false)
-            case .everything:
-                MetricKitSubscriber.clear()
-                crashReports = []
-                try LogStore.shared.clear()
-                showDeleteFeedback(text: "Deleted crash reports and all logs", isError: false)
+                handle.finish()
+
+                DispatchQueue.main.async {
+                    guard activeDeleteHandle === handle else { return }
+                    activeDeleteHandle = nil
+                    showDeleteFeedback(text: feedbackText)
+                    refresh()
+                }
+            } catch {
+                handle.finish()
+                DispatchQueue.main.async {
+                    guard activeDeleteHandle === handle else { return }
+                    activeDeleteHandle = nil
+                    guard !handle.isCancelled else { return }
+                    showDeleteFeedback(
+                        text: "Delete failed — database may be corrupted; recovering…",
+                        isError: true
+                    )
+                    refresh()
+                }
             }
-            refresh()
-        } catch {
-            showDeleteFeedback(text: "Delete failed — database may be corrupted; recovering…", isError: true)
-            refresh()
         }
     }
 
@@ -1241,8 +1365,11 @@ struct DebugLogView: View {
         let search = searchText.isEmpty ? nil : searchText
         let piiScrub = scrubPII
         let gen = refreshGeneration
+        let handle = beginQuery()
 
         DispatchQueue.global(qos: .userInitiated).async {
+            defer { handle.finish() }
+
             let pageQuery = measureDebugLogQuery(
                 action: "load_page",
                 includesFootprintDelta: true
@@ -1253,21 +1380,35 @@ struct DebugLogView: View {
                     components: components,
                     sinceNs: bounds.sinceNs,
                     untilNs: bounds.untilNs,
-                    search: search)
+                    search: search,
+                    cancellation: handle)
             }
             let more = pageQuery.value
             logDebugLogQueryPerformance(pageQuery.performance)
+            guard !handle.isCancelled else { return }
+
             guard !more.isEmpty else {
                 DispatchQueue.main.async {
+                    guard activeQueryHandle === handle else { return }
+                    activeQueryHandle = nil
                     isLoadingMore = false
-                    guard gen == refreshGeneration else { return }
                 }
                 return
             }
 
             DispatchQueue.main.async {
+                guard activeQueryHandle === handle,
+                      !handle.isCancelled,
+                      isViewVisible,
+                      gen == refreshGeneration else {
+                    if activeQueryHandle === handle {
+                        activeQueryHandle = nil
+                        isLoadingMore = false
+                    }
+                    return
+                }
+                activeQueryHandle = nil
                 isLoadingMore = false
-                guard gen == refreshGeneration else { return }
                 lines.append(contentsOf: more)
                 oldestLoadedId = more.last?.rowId
 
@@ -1290,10 +1431,13 @@ struct DebugLogView: View {
         let search = searchText.isEmpty ? nil : searchText
         let piiScrub = scrubPII
 
+        let handle = beginQuery()
         refreshGeneration += 1
         let gen = refreshGeneration
 
         DispatchQueue.global(qos: .userInitiated).async {
+            defer { handle.finish() }
+
             let recentQuery = measureDebugLogQuery(
                 action: "incremental_page",
                 includesFootprintDelta: true
@@ -1305,11 +1449,14 @@ struct DebugLogView: View {
                     sinceNs: bounds.sinceNs,
                     untilNs: bounds.untilNs,
                     afterId: newest,
-                    search: search)
+                    search: search,
+                    cancellation: handle)
             }
             let newer = recentQuery.value
+            logDebugLogQueryPerformance(recentQuery.performance)
+            guard !handle.isCancelled else { return }
+
             var newCount: Int?
-            var countPerformance: DebugLogQueryPerformance?
             if !newer.isEmpty {
                 let countQuery = measureDebugLogQuery(action: "incremental_count") {
                     LogStore.shared.count(
@@ -1317,18 +1464,26 @@ struct DebugLogView: View {
                         components: components,
                         sinceNs: bounds.sinceNs,
                         untilNs: bounds.untilNs,
-                        search: search)
+                        search: search,
+                        cancellation: handle)
                 }
                 newCount = countQuery.value
-                countPerformance = countQuery.performance
-            }
-            logDebugLogQueryPerformance(recentQuery.performance)
-            if let countPerformance {
-                logDebugLogQueryPerformance(countPerformance)
+                logDebugLogQueryPerformance(countQuery.performance)
+                guard !handle.isCancelled else { return }
             }
 
             DispatchQueue.main.async {
-                guard gen == refreshGeneration else { return }
+                guard activeQueryHandle === handle,
+                      !handle.isCancelled,
+                      isViewVisible,
+                      gen == refreshGeneration else {
+                    if activeQueryHandle === handle {
+                        activeQueryHandle = nil
+                        isLoading = false
+                    }
+                    return
+                }
+                activeQueryHandle = nil
                 isLoading = false
 
                 guard !newer.isEmpty else { return }
@@ -1359,6 +1514,7 @@ struct DebugLogView: View {
     }
 
     private func clearFilteredLogResults() {
+        cancelActiveQuery()
         refreshGeneration += 1
         lines = []
         newestSeenId = nil
@@ -1366,6 +1522,7 @@ struct DebugLogView: View {
         totalCount = 0
         cachedShareText = ""
         isLoading = false
+        isLoadingMore = false
     }
 
     private func timeRangeToBounds() -> (sinceNs: Int64?, untilNs: Int64?) {

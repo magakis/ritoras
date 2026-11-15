@@ -5,12 +5,19 @@ import SQLite3
 /// SQLITE_STATIC (nil) would assume the pointer stays valid until step/reset,
 /// but ARC may release the source NSString before sqlite3_step reads it.
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+private let logQueryProgressHandler:
+    @convention(c) (UnsafeMutableRawPointer?) -> Int32 = { context in
+        guard let context else { return 0 }
+        let handle = Unmanaged<LogQueryHandle>.fromOpaque(context).takeUnretainedValue()
+        return handle.shouldInterrupt ? 1 : 0
+    }
 
 // MARK: - Error type
 
 enum LogStoreError: Error {
     case openFailed(String)
     case executeFailed(String)
+    case cancelled
 }
 
 // MARK: - Notifications
@@ -27,19 +34,27 @@ extension Notification.Name {
 ///
 /// This class is compiled into both the container app and the keyboard extension
 /// via the `shared/` glob, but the keyboard never opens the database at runtime
-/// (48 MB Jetsam cap). All database methods are safe to call from any thread.
+/// (48 MB Jetsam cap). Cancellation handles are used by the container app's
+/// debug-log view; FileLogger's keyboard-mode routing does not instantiate this
+/// store. All database methods are safe to call from any thread.
 ///
 /// ## LogLine.id mapping
 ///
 /// `LogLine.id` is `Int`. LogStore sets it to `Int(sqliteRowId)` — lossless on
 /// 64-bit iOS where `Int == Int64`. FileLogger uses `LogLine.id` as a line-offset
-/// index; the two interpretations never collide because LogStore is dead code
-/// during Phase 1.
+/// index; the two interpretations stay separate because the keyboard uses
+/// FileLogger's flat-file path and never loads rows from this store.
 final class LogStore {
 
     // MARK: - Singleton
 
     static let shared = LogStore()
+
+    func makeQueryCancellationHandle(
+        onCancellation: @escaping @Sendable (Double) -> Void
+    ) -> LogQueryHandle {
+        LogQueryHandle(onCancellation: onCancellation)
+    }
 
     // MARK: - Serial queue & deadlock guard
 
@@ -133,11 +148,15 @@ final class LogStore {
     }
 
     /// Returns a copy of recent diagnostic entries. Thread-safe.
-    func recentDiagnostics() -> [String] {
+    func recentDiagnostics(cancellation: LogQueryHandle? = nil) -> [String] {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            guard cancellation?.canRunQuery ?? true else { return [] }
             return Array(diagnostics)
         } else {
-            return queue.sync { Array(diagnostics) }
+            return queue.sync {
+                guard cancellation?.canRunQuery ?? true else { return [] }
+                return Array(diagnostics)
+            }
         }
     }
 
@@ -534,16 +553,19 @@ final class LogStore {
                 sinceNs: Int64? = nil,
                 untilNs: Int64? = nil,
                 afterId: Int64? = nil,
-                search: String? = nil) -> [LogLine] {
+                search: String? = nil,
+                cancellation: LogQueryHandle? = nil) -> [LogLine] {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            guard cancellation?.canRunQuery ?? true else { return [] }
             return _recent(limit: limit, beforeId: beforeId, levels: levels,
                            components: components, sinceNs: sinceNs, untilNs: untilNs,
-                           afterId: afterId, search: search)
+                           afterId: afterId, search: search, cancellation: cancellation)
         } else {
             return queue.sync {
-                self._recent(limit: limit, beforeId: beforeId, levels: levels,
-                             components: components, sinceNs: sinceNs, untilNs: untilNs,
-                             afterId: afterId, search: search)
+                guard cancellation?.canRunQuery ?? true else { return [] }
+                return self._recent(limit: limit, beforeId: beforeId, levels: levels,
+                                    components: components, sinceNs: sinceNs, untilNs: untilNs,
+                                    afterId: afterId, search: search, cancellation: cancellation)
             }
         }
     }
@@ -554,7 +576,8 @@ final class LogStore {
                          sinceNs: Int64? = nil,
                          untilNs: Int64? = nil,
                          afterId: Int64? = nil,
-                         search: String? = nil) -> [LogLine] {
+                         search: String? = nil,
+                         cancellation: LogQueryHandle? = nil) -> [LogLine] {
         ensureOpen()
         guard let db = db else { return [] }
 
@@ -604,12 +627,36 @@ final class LogStore {
         sql += " ORDER BY id DESC LIMIT ?"
         params.append(.int(Int32(limit)))
 
-        return executeLogLineQuery(db: db, sql: sql, params: params)
+        return executeLogLineQuery(db: db, sql: sql, params: params, cancellation: cancellation)
+    }
+
+    private func withCancellationProgressHandler<Value>(
+        db: OpaquePointer,
+        cancellation: LogQueryHandle?,
+        operation: () -> Value
+    ) -> Value? {
+        guard let cancellation else { return operation() }
+        guard cancellation.beginStepLoop() else { return nil }
+
+        // SQLite invokes this callback while stepping on the store's serial queue.
+        // The handle's locked epoch is the only state shared with the cancelling thread.
+        sqlite3_progress_handler(
+            db,
+            1_000,
+            logQueryProgressHandler,
+            Unmanaged.passUnretained(cancellation).toOpaque()
+        )
+        defer {
+            sqlite3_progress_handler(db, 0, nil, nil)
+            cancellation.endStepLoop()
+        }
+        return operation()
     }
 
     /// Executes the built SQL and returns LogLine objects.
     private func executeLogLineQuery(db: OpaquePointer, sql: String,
-                                     params: [QueryParam]) -> [LogLine] {
+                                     params: [QueryParam],
+                                     cancellation: LogQueryHandle?) -> [LogLine] {
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt = stmt else {
             recordDiagnostic("log query prepare failed: \(String(cString: sqlite3_errmsg(db)))")
@@ -631,13 +678,26 @@ final class LogStore {
             }
         }
 
-        // Collect results
-        var results: [LogLine] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            results.append(logLine(from: stmt))
+        let results = withCancellationProgressHandler(db: db, cancellation: cancellation) {
+            var lines: [LogLine] = []
+            while true {
+                let stepCode = sqlite3_step(stmt)
+                if stepCode == SQLITE_ROW {
+                    lines.append(logLine(from: stmt))
+                } else if stepCode == SQLITE_DONE {
+                    break
+                } else {
+                    if cancellation?.isCancelled != true {
+                        recordDiagnostic("log query step failed: \(stepCode)")
+                    }
+                    break
+                }
+            }
+            return lines
         }
 
-        return results
+        guard cancellation?.isCancelled != true else { return [] }
+        return results ?? []
     }
 
     private func logLine(from stmt: OpaquePointer) -> LogLine {
@@ -740,14 +800,19 @@ final class LogStore {
                components: Set<LogComponent>? = nil,
                sinceNs: Int64? = nil,
                untilNs: Int64? = nil,
-               search: String? = nil) -> Int {
+               search: String? = nil,
+               cancellation: LogQueryHandle? = nil) -> Int {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            guard cancellation?.canRunQuery ?? true else { return 0 }
             return _count(levels: levels, components: components,
-                          sinceNs: sinceNs, untilNs: untilNs, search: search)
+                          sinceNs: sinceNs, untilNs: untilNs, search: search,
+                          cancellation: cancellation)
         } else {
             return queue.sync {
-                self._count(levels: levels, components: components,
-                            sinceNs: sinceNs, untilNs: untilNs, search: search)
+                guard cancellation?.canRunQuery ?? true else { return 0 }
+                return self._count(levels: levels, components: components,
+                                   sinceNs: sinceNs, untilNs: untilNs, search: search,
+                                   cancellation: cancellation)
             }
         }
     }
@@ -756,7 +821,8 @@ final class LogStore {
                         components: Set<LogComponent>? = nil,
                         sinceNs: Int64? = nil,
                         untilNs: Int64? = nil,
-                        search: String? = nil) -> Int {
+                        search: String? = nil,
+                        cancellation: LogQueryHandle? = nil) -> Int {
         ensureOpen()
         guard let db = db else { return 0 }
 
@@ -811,7 +877,14 @@ final class LogStore {
             }
         }
 
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        guard let stepCode = withCancellationProgressHandler(
+            db: db,
+            cancellation: cancellation,
+            operation: { sqlite3_step(stmt) }
+        ), stepCode == SQLITE_ROW else {
+            return 0
+        }
+        guard cancellation?.isCancelled != true else { return 0 }
         return Int(sqlite3_column_int64(stmt, 0))
     }
 
@@ -892,20 +965,43 @@ final class LogStore {
 
     /// Deletes all rows from the log table and rebuilds the FTS5 index.
     func clear() throws {
+        try performClear(cancellation: nil)
+    }
+
+    func clear(cancellation: LogQueryHandle) throws {
+        try performClear(cancellation: cancellation)
+    }
+
+    private func performClear(cancellation: LogQueryHandle?) throws {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
-            try _clear()
+            guard cancellation?.canRunQuery ?? true else { return }
+            try _clear(cancellation: cancellation)
         } else {
-            try queue.sync { try self._clear() }
+            try queue.sync {
+                guard cancellation?.canRunQuery ?? true else { return }
+                try self._clear(cancellation: cancellation)
+            }
         }
     }
 
-    private func _clear() throws {
+    private func _clear(cancellation: LogQueryHandle?) throws {
         ensureOpen()
         guard let db = db else { return }
-        guard exec("DELETE FROM log;") else {
+        guard withCancellationProgressHandler(
+            db: db,
+            cancellation: cancellation,
+            operation: { exec("DELETE FROM log;") }
+        ) == true else {
+            if cancellation?.isCancelled == true { throw LogStoreError.cancelled }
             throw LogStoreError.executeFailed(String(cString: sqlite3_errmsg(db)))
         }
-        guard exec("INSERT INTO log_fts(log_fts) VALUES('rebuild');") else {
+        guard cancellation?.canRunQuery ?? true else { throw LogStoreError.cancelled }
+        guard withCancellationProgressHandler(
+            db: db,
+            cancellation: cancellation,
+            operation: { exec("INSERT INTO log_fts(log_fts) VALUES('rebuild');") }
+        ) == true else {
+            if cancellation?.isCancelled == true { throw LogStoreError.cancelled }
             throw LogStoreError.executeFailed(String(cString: sqlite3_errmsg(db)))
         }
     }
@@ -965,23 +1061,29 @@ final class LogStore {
                         components: Set<LogComponent>? = nil,
                         sinceNs: Int64? = nil,
                         untilNs: Int64? = nil,
-                        search: String? = nil) throws -> Int {
+                        search: String? = nil,
+                        cancellation: LogQueryHandle? = nil) throws -> Int {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            guard cancellation?.canRunQuery ?? true else { return 0 }
             return try _deleteFiltered(levels: levels, components: components,
-                                       sinceNs: sinceNs, untilNs: untilNs, search: search)
+                                       sinceNs: sinceNs, untilNs: untilNs, search: search,
+                                       cancellation: cancellation)
         } else {
             return try queue.sync {
-                try self._deleteFiltered(levels: levels, components: components,
-                                         sinceNs: sinceNs, untilNs: untilNs, search: search)
+                guard cancellation?.canRunQuery ?? true else { return 0 }
+                return try self._deleteFiltered(levels: levels, components: components,
+                                                sinceNs: sinceNs, untilNs: untilNs, search: search,
+                                                cancellation: cancellation)
             }
         }
     }
 
     private func _deleteFiltered(levels: Set<LogLevel>? = nil,
-                                  components: Set<LogComponent>? = nil,
-                                  sinceNs: Int64? = nil,
-                                  untilNs: Int64? = nil,
-                                  search: String? = nil) throws -> Int {
+                                   components: Set<LogComponent>? = nil,
+                                   sinceNs: Int64? = nil,
+                                   untilNs: Int64? = nil,
+                                   search: String? = nil,
+                                   cancellation: LogQueryHandle? = nil) throws -> Int {
         ensureOpen()
         guard let db = db else { return 0 }
 
@@ -1036,28 +1138,43 @@ final class LogStore {
             }
         }
 
-        guard sqlite3_step(stmt) == SQLITE_DONE else {
+        guard let stepCode = withCancellationProgressHandler(
+            db: db,
+            cancellation: cancellation,
+            operation: { sqlite3_step(stmt) }
+        ), stepCode == SQLITE_DONE else {
+            if cancellation?.isCancelled == true { throw LogStoreError.cancelled }
             recordDiagnostic("deleteFiltered step failed: \(String(cString: sqlite3_errmsg(db)))")
             throw LogStoreError.executeFailed(String(cString: sqlite3_errmsg(db)))
         }
 
+        guard cancellation?.canRunQuery ?? true else { throw LogStoreError.cancelled }
         let count = Int(sqlite3_changes(db))
-        exec("PRAGMA wal_checkpoint(PASSIVE);")
+        _ = withCancellationProgressHandler(
+            db: db,
+            cancellation: cancellation,
+            operation: { exec("PRAGMA wal_checkpoint(PASSIVE);") }
+        )
+        guard cancellation?.canRunQuery ?? true else { throw LogStoreError.cancelled }
         return count
     }
 
     /// Deletes rows with ts_ns older than the given cutoff. Returns count deleted.
-    func deleteOlderThan(tsNs: Int64) throws -> Int {
+    func deleteOlderThan(tsNs: Int64,
+                         cancellation: LogQueryHandle? = nil) throws -> Int {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
-            return try _deleteOlderThan(tsNs: tsNs)
+            guard cancellation?.canRunQuery ?? true else { return 0 }
+            return try _deleteOlderThan(tsNs: tsNs, cancellation: cancellation)
         } else {
             return try queue.sync {
-                try self._deleteOlderThan(tsNs: tsNs)
+                guard cancellation?.canRunQuery ?? true else { return 0 }
+                return try self._deleteOlderThan(tsNs: tsNs, cancellation: cancellation)
             }
         }
     }
 
-    private func _deleteOlderThan(tsNs: Int64) throws -> Int {
+    private func _deleteOlderThan(tsNs: Int64,
+                                  cancellation: LogQueryHandle?) throws -> Int {
         ensureOpen()
         guard let db = db else { return 0 }
 
@@ -1072,13 +1189,24 @@ final class LogStore {
 
         sqlite3_bind_int64(stmt, 1, tsNs)
 
-        guard sqlite3_step(stmt) == SQLITE_DONE else {
+        guard let stepCode = withCancellationProgressHandler(
+            db: db,
+            cancellation: cancellation,
+            operation: { sqlite3_step(stmt) }
+        ), stepCode == SQLITE_DONE else {
+            if cancellation?.isCancelled == true { throw LogStoreError.cancelled }
             recordDiagnostic("deleteOlderThan step failed: \(String(cString: sqlite3_errmsg(db)))")
             throw LogStoreError.executeFailed(String(cString: sqlite3_errmsg(db)))
         }
 
+        guard cancellation?.canRunQuery ?? true else { throw LogStoreError.cancelled }
         let count = Int(sqlite3_changes(db))
-        exec("PRAGMA wal_checkpoint(PASSIVE);")
+        _ = withCancellationProgressHandler(
+            db: db,
+            cancellation: cancellation,
+            operation: { exec("PRAGMA wal_checkpoint(PASSIVE);") }
+        )
+        guard cancellation?.canRunQuery ?? true else { throw LogStoreError.cancelled }
         return count
     }
 }
