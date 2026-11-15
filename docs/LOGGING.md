@@ -157,6 +157,7 @@ Each `LogComponent` (defined in `shared/FileLogger.swift`) maps to a subsystem i
 | `.app` | ContainerApp (RitorasApp, SettingsView) | — | `"App did finish launching"`, `"Settings updated"` | app-group container unavailable | `"AppGroup resolution failed"` |
 | `.settings` | AppSettings, SettingsView | — | `"setting changed: dictationMode → stream"` | — | — |
 | `.lifecycle` | AppDelegate, scene-phase changes, background/foreground | — | `"ScenePhase: active"`, `"ScenePhase: background"` | unexpected lifecycle transition | — |
+| `.performance` | DebugLogView | — | debug-log query durations and app-process phys_footprint deltas | — | — |
 
 ---
 

@@ -13,6 +13,7 @@ public enum LogComponent: String {
     case network = "Network"
     case settings = "Settings"
     case lifecycle = "Lifecycle"
+    case performance = "Performance"
 }
 
 final class FileLogger {

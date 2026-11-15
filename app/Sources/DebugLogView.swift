@@ -13,7 +13,8 @@ private extension LogComponent {
         .prediction,
         .network,
         .settings,
-        .lifecycle
+        .lifecycle,
+        .performance
     ]
 }
 
@@ -166,6 +167,48 @@ private enum DateFormat {
         f.dateFormat = "MMMM d, yyyy"
         return f
     }()
+}
+
+// MARK: - Query Performance
+
+private struct DebugLogQueryPerformance {
+    let action: String
+    let durationMilliseconds: Double
+    let footprintDeltaBytes: Double?
+}
+
+private func measureDebugLogQuery<Value>(
+    action: String,
+    includesFootprintDelta: Bool = false,
+    operation: () -> Value
+) -> (value: Value, performance: DebugLogQueryPerformance) {
+    let footprintBefore = includesFootprintDelta ? MemoryMonitor.currentFootprint() : nil
+    let start = DispatchTime.now().uptimeNanoseconds
+    let value = operation()
+    let end = DispatchTime.now().uptimeNanoseconds
+    let footprintDeltaBytes = footprintBefore.map { before in
+        Double(MemoryMonitor.currentFootprint()) - Double(before)
+    }
+
+    return (
+        value: value,
+        performance: DebugLogQueryPerformance(
+            action: action,
+            durationMilliseconds: Double(end - start) / 1_000_000,
+            footprintDeltaBytes: footprintDeltaBytes
+        )
+    )
+}
+
+private func logDebugLogQueryPerformance(_ performance: DebugLogQueryPerformance) {
+    var payload: [String: Any] = [
+        "action": performance.action,
+        "duration_ms": performance.durationMilliseconds
+    ]
+    if let footprintDeltaBytes = performance.footprintDeltaBytes {
+        payload["phys_footprint_delta_bytes"] = footprintDeltaBytes
+    }
+    FileLogger.shared.info(.performance, "Debug log query", payload: payload)
 }
 
 private func color(for level: LogLevel?) -> Color {
@@ -832,24 +875,39 @@ struct DebugLogView: View {
         isLoading = true
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let newLines = LogStore.shared.recent(
-                limit: pageSize,
-                levels: levels,
-                components: components,
-                sinceNs: bounds.sinceNs,
-                untilNs: bounds.untilNs,
-                search: search)
-            let newCount = LogStore.shared.count(
-                levels: levels,
-                components: components,
-                sinceNs: bounds.sinceNs,
-                untilNs: bounds.untilNs,
-                search: search)
-            let newDiagnostics = LogStore.shared.recentDiagnostics()
+            let recentQuery = measureDebugLogQuery(
+                action: "refresh_page",
+                includesFootprintDelta: true
+            ) {
+                LogStore.shared.recent(
+                    limit: pageSize,
+                    levels: levels,
+                    components: components,
+                    sinceNs: bounds.sinceNs,
+                    untilNs: bounds.untilNs,
+                    search: search)
+            }
+            let countQuery = measureDebugLogQuery(action: "refresh_count") {
+                LogStore.shared.count(
+                    levels: levels,
+                    components: components,
+                    sinceNs: bounds.sinceNs,
+                    untilNs: bounds.untilNs,
+                    search: search)
+            }
+            let diagnosticsQuery = measureDebugLogQuery(action: "refresh_diagnostics") {
+                LogStore.shared.recentDiagnostics()
+            }
+            let newLines = recentQuery.value
+            let newCount = countQuery.value
+            let newDiagnostics = diagnosticsQuery.value
             let newCrashReports = MetricKitSubscriber.loadReports()
 
             let rawText = newLines.map(\.raw).joined(separator: "\n")
             let newShareText = piiScrub ? LogScrubber.scrub(rawText) : rawText
+            logDebugLogQueryPerformance(recentQuery.performance)
+            logDebugLogQueryPerformance(countQuery.performance)
+            logDebugLogQueryPerformance(diagnosticsQuery.performance)
 
             DispatchQueue.main.async {
                 guard gen == refreshGeneration else { return }
@@ -1185,13 +1243,20 @@ struct DebugLogView: View {
         let gen = refreshGeneration
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let more = LogStore.shared.recent(
-                limit: pageSize, beforeId: before,
-                levels: levels,
-                components: components,
-                sinceNs: bounds.sinceNs,
-                untilNs: bounds.untilNs,
-                search: search)
+            let pageQuery = measureDebugLogQuery(
+                action: "load_page",
+                includesFootprintDelta: true
+            ) {
+                LogStore.shared.recent(
+                    limit: pageSize, beforeId: before,
+                    levels: levels,
+                    components: components,
+                    sinceNs: bounds.sinceNs,
+                    untilNs: bounds.untilNs,
+                    search: search)
+            }
+            let more = pageQuery.value
+            logDebugLogQueryPerformance(pageQuery.performance)
             guard !more.isEmpty else {
                 DispatchQueue.main.async {
                     isLoadingMore = false
@@ -1229,21 +1294,38 @@ struct DebugLogView: View {
         let gen = refreshGeneration
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let newer = LogStore.shared.recent(
-                limit: pageSize,
-                levels: levels,
-                components: components,
-                sinceNs: bounds.sinceNs,
-                untilNs: bounds.untilNs,
-                afterId: newest,
-                search: search)
-
-            let newCount: Int? = newer.isEmpty ? nil : LogStore.shared.count(
-                levels: levels,
-                components: components,
-                sinceNs: bounds.sinceNs,
-                untilNs: bounds.untilNs,
-                search: search)
+            let recentQuery = measureDebugLogQuery(
+                action: "incremental_page",
+                includesFootprintDelta: true
+            ) {
+                LogStore.shared.recent(
+                    limit: pageSize,
+                    levels: levels,
+                    components: components,
+                    sinceNs: bounds.sinceNs,
+                    untilNs: bounds.untilNs,
+                    afterId: newest,
+                    search: search)
+            }
+            let newer = recentQuery.value
+            var newCount: Int?
+            var countPerformance: DebugLogQueryPerformance?
+            if !newer.isEmpty {
+                let countQuery = measureDebugLogQuery(action: "incremental_count") {
+                    LogStore.shared.count(
+                        levels: levels,
+                        components: components,
+                        sinceNs: bounds.sinceNs,
+                        untilNs: bounds.untilNs,
+                        search: search)
+                }
+                newCount = countQuery.value
+                countPerformance = countQuery.performance
+            }
+            logDebugLogQueryPerformance(recentQuery.performance)
+            if let countPerformance {
+                logDebugLogQueryPerformance(countPerformance)
+            }
 
             DispatchQueue.main.async {
                 guard gen == refreshGeneration else { return }
