@@ -33,6 +33,8 @@ enum KeyboardKeystrokeTraceDiagnostics {
             }.joined(separator: ", ")
         let attemptAt = shipper.lastAttemptAt.map { now.string(from: $0) } ?? "none"
         let lastSkipReason = shipper.lastSkipReason?.rawValue ?? "none"
+        let lastChunkEstimate = shipper.lastChunkEstimate.map { "\($0) bytes" } ?? "none"
+        let lastChunkActual = shipper.lastChunkActual.map { "\($0) bytes" } ?? "none"
         let enabledAt = state.enabledAt.map { now.string(from: $0) } ?? "not tracked"
         let lastError = shipper.lastUploadErrorKind ?? "none"
         let httpStatus = shipper.lastUploadHTTPStatus.map { String($0) } ?? "none"
@@ -76,6 +78,8 @@ enum KeyboardKeystrokeTraceDiagnostics {
             "  Upload attempts: \(shipper.uploadAttemptCount)",
             "  Request in flight: \(shipper.requestInFlight)",
             "  Last skip reason: \(lastSkipReason)",
+            "  Last chunk estimate: \(lastChunkEstimate)",
+            "  Last chunk actual: \(lastChunkActual)",
             "  Cursor epoch: \(shipper.cursorEpoch)",
             "  Cursor offsets (segment identity=byte offset): \(cursorOffsets)",
             "  Last upload error kind: \(lastError)",

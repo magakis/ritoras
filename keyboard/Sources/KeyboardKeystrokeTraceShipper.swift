@@ -52,9 +52,8 @@ final class KeyboardKeystrokeTraceShipper {
     }
 
     private enum PayloadResult {
-        case complete(Data, bodyByteCount: Int)
+        case complete(Data, fixedBodyByteCount: Int)
         case noCompleteLines
-        case firstLineExceedsRequestLimit
     }
 
     private static let cadenceSeconds: TimeInterval = 2
@@ -75,6 +74,8 @@ final class KeyboardKeystrokeTraceShipper {
     private var requestInFlight = false
     private var epochResetInProgress = false
     private var lastSkipReason: SkipReason?
+    private var lastChunkEstimate: Int?
+    private var lastChunkActual: Int?
     private var uploadAttemptCount: UInt64 = 0
     private var lastAttemptAt: Date?
     private var lastUploadErrorKind: String?
@@ -93,6 +94,8 @@ final class KeyboardKeystrokeTraceShipper {
         let lastUploadHTTPStatus: Int?
         let lastAttemptAt: Date?
         let lastSkipReason: SkipReason?
+        let lastChunkEstimate: Int?
+        let lastChunkActual: Int?
     }
 
     init(
@@ -152,7 +155,9 @@ final class KeyboardKeystrokeTraceShipper {
                 lastUploadErrorKind: lastUploadErrorKind,
                 lastUploadHTTPStatus: lastUploadHTTPStatus,
                 lastAttemptAt: lastAttemptAt,
-                lastSkipReason: lastSkipReason
+                lastSkipReason: lastSkipReason,
+                lastChunkEstimate: lastChunkEstimate,
+                lastChunkActual: lastChunkActual
             )
         }
     }
@@ -444,27 +449,44 @@ final class KeyboardKeystrokeTraceShipper {
                 segment: segment,
                 offset: offset
             ) {
-            case .complete(let payload, let estimatedBodyByteCount):
-                let request = KeystrokeTraceUploadRequest(
-                    segmentName: segment.name,
-                    segmentIdentity: segment.identity,
-                    offset: offset,
-                    epoch: state.epoch,
-                    payload: payload
-                )
-                let body = try KeystrokeTraceWireContract.encode(request)
-                guard body.count == estimatedBodyByteCount,
-                      estimatedBodyByteCount
-                        <= KeystrokeTraceWireContract.maximumRequestBodyBytes else {
-                    return .skipped(.bodySizeMismatch)
+            case .complete(var payload, let fixedBodyByteCount):
+                var shouldDropOneTrailingLine = true
+                while true {
+                    let request = KeystrokeTraceUploadRequest(
+                        segmentName: segment.name,
+                        segmentIdentity: segment.identity,
+                        offset: offset,
+                        epoch: state.epoch,
+                        payload: payload
+                    )
+                    let body = try KeystrokeTraceWireContract.encode(request)
+                    let estimatedBodyByteCount = requestBodyByteCount(
+                        fixedBodyByteCount: fixedBodyByteCount,
+                        payloadByteCount: payload.count
+                    )
+                    if body.count != estimatedBodyByteCount {
+                        lastChunkEstimate = estimatedBodyByteCount
+                        lastChunkActual = body.count
+                    }
+                    guard body.count > KeystrokeTraceWireContract.maximumRequestBodyBytes else {
+                        return .attempt(UploadAttempt(
+                            request: request,
+                            nextOffset: offset + UInt64(payload.count)
+                        ))
+                    }
+
+                    let smallerPayload: Data?
+                    if shouldDropOneTrailingLine {
+                        smallerPayload = payloadByDroppingLastLine(payload)
+                        shouldDropOneTrailingLine = false
+                    } else {
+                        smallerPayload = payloadByKeepingFirstHalfOfLines(payload)
+                    }
+                    guard let smallerPayload else {
+                        return .skipped(.firstLineOverLimit)
+                    }
+                    payload = smallerPayload
                 }
-                return .attempt(UploadAttempt(
-                    request: request,
-                    nextOffset: offset + UInt64(payload.count)
-                ))
-            case .firstLineExceedsRequestLimit:
-                // Do not send newer records around an unshippable oldest line.
-                return .skipped(.firstLineOverLimit)
             case .noCompleteLines:
                 continue
             }
@@ -539,7 +561,7 @@ final class KeyboardKeystrokeTraceShipper {
             payload: Data()
         )
         let emptyBodyByteCount = try KeystrokeTraceWireContract.encode(emptyRequest).count
-        // Data encodes as a base64 JSON string; replace the empty string's two quotes.
+        // The empty base64 string's quotes are replaced by the payload's base64 bytes.
         let fixedBodyByteCount = emptyBodyByteCount - 2
         var payload = Data()
         var lineStart = 0
@@ -552,27 +574,48 @@ final class KeyboardKeystrokeTraceShipper {
                 payloadByteCount: nextPayloadByteCount
             )
             guard candidateBodyByteCount <= KeystrokeTraceWireContract.maximumRequestBodyBytes else {
-                guard !payload.isEmpty else { return .firstLineExceedsRequestLimit }
-                return .complete(
-                    payload,
-                    bodyByteCount: requestBodyByteCount(
-                        fixedBodyByteCount: fixedBodyByteCount,
-                        payloadByteCount: payload.count
-                    )
-                )
+                // Estimates may drift, so let the actual encoder enforce the hard cap.
+                payload.append(contentsOf: bytes[lineStart...index])
+                return .complete(payload, fixedBodyByteCount: fixedBodyByteCount)
             }
             payload.append(contentsOf: bytes[lineStart...index])
             lineStart = index + 1
         }
 
         guard !payload.isEmpty else { return .noCompleteLines }
-        return .complete(
-            payload,
-            bodyByteCount: requestBodyByteCount(
-                fixedBodyByteCount: fixedBodyByteCount,
-                payloadByteCount: payload.count
-            )
-        )
+        return .complete(payload, fixedBodyByteCount: fixedBodyByteCount)
+    }
+
+    private func payloadByDroppingLastLine(_ payload: Data) -> Data? {
+        let lineCount = completeLineCount(in: payload)
+        guard lineCount > 1 else { return nil }
+        return payloadPrefix(payload, keepingLineCount: lineCount - 1)
+    }
+
+    private func payloadByKeepingFirstHalfOfLines(_ payload: Data) -> Data? {
+        let lineCount = completeLineCount(in: payload)
+        guard lineCount > 1 else { return nil }
+        return payloadPrefix(payload, keepingLineCount: max(1, lineCount / 2))
+    }
+
+    private func completeLineCount(in payload: Data) -> Int {
+        payload.reduce(into: 0) { count, byte in
+            if byte == 0x0A {
+                count += 1
+            }
+        }
+    }
+
+    private func payloadPrefix(_ payload: Data, keepingLineCount lineCount: Int) -> Data? {
+        guard lineCount > 0 else { return nil }
+        var currentLineCount = 0
+        for (index, byte) in payload.enumerated() where byte == 0x0A {
+            currentLineCount += 1
+            if currentLineCount == lineCount {
+                return Data(payload[...index])
+            }
+        }
+        return nil
     }
 
     private func requestBodyByteCount(

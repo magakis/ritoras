@@ -126,6 +126,35 @@ describe('keystroke trace shipper policy mirror', () => {
     );
   });
 
+  it('shrinks an underestimated fill against the actual body before dispatch', () => {
+    const largeLine = JSON.stringify({ text: 'x'.repeat(18 * 1024) });
+    const source = segment(
+      TRACE_UPLOAD_LIVE_FILE_NAME,
+      'live-estimate-drift',
+      [largeLine, largeLine, largeLine]
+    );
+    const result = nextTraceUploadChunk(
+      createInitialTraceShipState(4),
+      [source],
+      TRACE_UPLOAD_MAX_BODY_BYTES,
+      { estimateBodyBytes: () => 0 }
+    );
+    assert.ok(result.chunk);
+    const expectedPayload = Buffer.concat([
+      Buffer.from(`${largeLine}\n`),
+      Buffer.from(`${largeLine}\n`),
+    ]);
+    const oversizedBody = Buffer.from(JSON.stringify({
+      ...result.chunk.request,
+      payload: source.bytes.toString('base64'),
+    }));
+
+    assert.ok(oversizedBody.length > TRACE_UPLOAD_MAX_BODY_BYTES);
+    assert.ok(result.chunk.body.length <= TRACE_UPLOAD_MAX_BODY_BYTES);
+    assert.deepStrictEqual(result.chunk.payload, expectedPayload);
+    assert.strictEqual(result.chunk.nextOffset, expectedPayload.length);
+  });
+
   it('leaves an incomplete trailing record out of the upload chunk', () => {
     const source = {
       name: TRACE_UPLOAD_LIVE_FILE_NAME,

@@ -6,6 +6,10 @@ export const TRACE_UPLOAD_LIVE_FILE_NAME = 'ritoras-trace.log';
 
 const base64ByteCount = byteCount => 4 * Math.ceil(byteCount / 3);
 
+function estimatedRequestBodyByteCount(fixedBodyByteCount, payloadByteCount) {
+  return fixedBodyByteCount + base64ByteCount(payloadByteCount);
+}
+
 function validateState(state) {
   if (!state
       || !Number.isSafeInteger(state.epoch)
@@ -43,6 +47,19 @@ function requestFor(segment, offset, epoch, payload) {
     offset,
     epoch,
     payload: payload.toString('base64'),
+  };
+}
+
+function encodeChunk(segment, offset, epoch, lines) {
+  const payloadByteCount = lines.reduce((total, line) => total + line.length, 0);
+  const payload = Buffer.concat(lines, payloadByteCount);
+  const request = requestFor(segment, offset, epoch, payload);
+  const body = Buffer.from(JSON.stringify(request));
+  return {
+    request,
+    body,
+    payload,
+    nextOffset: offset + payload.length,
   };
 }
 
@@ -145,10 +162,20 @@ export function reconcileTraceShipState(state, segments) {
  * Selects one oldest-first, line-aligned upload whose actual JSON body fits the
  * configured budget. Incomplete trailing lines are left pending.
  */
-export function nextTraceUploadChunk(state, segments, maximumBodyBytes = TRACE_UPLOAD_MAX_BODY_BYTES) {
+export function nextTraceUploadChunk(
+  state,
+  segments,
+  maximumBodyBytes = TRACE_UPLOAD_MAX_BODY_BYTES,
+  options = {}
+) {
   validateState(state);
   if (!Number.isSafeInteger(maximumBodyBytes) || maximumBodyBytes < 1) {
     throw new RangeError('The trace request body limit must be a positive integer');
+  }
+  // Tests can inject estimator drift while actual JSON bytes remain authoritative.
+  const { estimateBodyBytes = estimatedRequestBodyByteCount } = options;
+  if (typeof estimateBodyBytes !== 'function') {
+    throw new TypeError('The trace body-size estimator must be a function');
   }
   for (const segment of segments) validateSegment(segment);
 
@@ -160,39 +187,38 @@ export function nextTraceUploadChunk(state, segments, maximumBodyBytes = TRACE_U
     const emptyRequest = requestFor(segment, offset, state.epoch, Buffer.alloc(0));
     const fixedBodyBytes = Buffer.byteLength(JSON.stringify(emptyRequest)) - 2;
     const payloadLines = [];
-    let payloadByteCount = 0;
-    let firstLineExceedsLimit = false;
+    let candidatePayloadByteCount = 0;
 
     for (const line of completeLines(segment.bytes, offset)) {
-      const nextByteCount = payloadByteCount + line.length;
-      if (fixedBodyBytes + base64ByteCount(nextByteCount) > maximumBodyBytes) {
-        firstLineExceedsLimit = payloadLines.length === 0;
+      const nextByteCount = candidatePayloadByteCount + line.length;
+      if (estimateBodyBytes(fixedBodyBytes, nextByteCount) > maximumBodyBytes) {
+        if (payloadLines.length === 0) {
+          payloadLines.push(line);
+          candidatePayloadByteCount = nextByteCount;
+        }
         break;
       }
       payloadLines.push(line);
-      payloadByteCount = nextByteCount;
+      candidatePayloadByteCount = nextByteCount;
     }
 
     if (payloadLines.length === 0) {
-      if (firstLineExceedsLimit) return { ...reconciled, chunk: null };
       continue;
     }
 
-    const payload = Buffer.concat(payloadLines, payloadByteCount);
-    const request = requestFor(segment, offset, state.epoch, payload);
-    const body = Buffer.from(JSON.stringify(request));
-    if (body.length > maximumBodyBytes) {
-      return { ...reconciled, chunk: null };
+    let chunk = encodeChunk(segment, offset, state.epoch, payloadLines);
+    let shouldDropOneTrailingLine = true;
+    while (chunk.body.length > maximumBodyBytes) {
+      if (payloadLines.length === 1) return { ...reconciled, chunk: null };
+
+      const retainedLineCount = shouldDropOneTrailingLine
+        ? payloadLines.length - 1
+        : Math.max(1, Math.floor(payloadLines.length / 2));
+      payloadLines.length = retainedLineCount;
+      chunk = encodeChunk(segment, offset, state.epoch, payloadLines);
+      shouldDropOneTrailingLine = false;
     }
-    return {
-      ...reconciled,
-      chunk: {
-        request,
-        body,
-        payload,
-        nextOffset: offset + payload.length,
-      },
-    };
+    return { ...reconciled, chunk };
   }
   return { ...reconciled, chunk: null };
 }
