@@ -105,8 +105,12 @@ class KeyboardViewController: UIInputViewController {
         let isSecure: Bool
         switch target {
         case .hostApp:
-            isSecure = textDocumentProxy.isSecureTextEntry
+            isSecure = textDocumentProxy.isSecureTextEntry ?? false
         case .emojiSearch:
+            guard let keyboardView else {
+                lastTraceInputWasSecure = true
+                return true
+            }
             isSecure = keyboardView.emojiSearchOverlay.searchField.isSecureTextEntry
         }
         lastTraceInputWasSecure = isSecure
@@ -218,7 +222,7 @@ class KeyboardViewController: UIInputViewController {
             contextBefore = textDocumentProxy.documentContextBeforeInput
             contextAfter = textDocumentProxy.documentContextAfterInput
         case .emojiSearch:
-            contextBefore = keyboardView.emojiSearchOverlay.searchField.text
+            contextBefore = keyboardView?.emojiSearchOverlay.searchField.text
             contextAfter = nil
         }
         let event = KeystrokeTraceKeyEvent(
