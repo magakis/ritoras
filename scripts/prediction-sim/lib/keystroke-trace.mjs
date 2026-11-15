@@ -548,6 +548,37 @@ export class KeystrokeTraceRecorder {
     };
   }
 
+  appendLineAlignedData(data) {
+    const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    if (bytes.length === 0 || bytes.at(-1) !== 0x0a) {
+      throw new TypeError('Trace data must contain complete LF-terminated lines');
+    }
+
+    let lineStart = 0;
+    for (let index = 0; index < bytes.length; index += 1) {
+      if (bytes[index] !== 0x0a) continue;
+      if (index === lineStart) {
+        throw new TypeError('Trace data must not contain empty lines');
+      }
+      const lineLength = index + 1 - lineStart;
+      if (lineLength > TRACE_SEGMENT_CAPACITY_BYTES) {
+        throw new RangeError(`Invalid trace segment line size: ${lineLength}`);
+      }
+      lineStart = index + 1;
+    }
+    if (lineStart !== bytes.length) {
+      throw new TypeError('Trace data must contain complete LF-terminated lines');
+    }
+
+    lineStart = 0;
+    for (let index = 0; index < bytes.length; index += 1) {
+      if (bytes[index] !== 0x0a) continue;
+      const lineEnd = index + 1;
+      this.segmentStore.append(bytes.subarray(lineStart, lineEnd));
+      lineStart = lineEnd;
+    }
+  }
+
   clear() {
     this.ring?.clear();
     this.segmentStore.removeAll();

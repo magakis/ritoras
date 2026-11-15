@@ -420,6 +420,7 @@ public enum KeystrokeTraceAppendResult: Equatable {
 public enum KeystrokeTraceCoreError: Error {
     case invalidRingCapacity(Int)
     case invalidTraceDirectory(URL)
+    case invalidLineAlignedData
     case segmentFileTooLarge(Int)
     case segmentFileCreationFailed(URL)
     case segmentFileSizeUnavailable(URL)
@@ -876,6 +877,39 @@ public final class KeystrokeTraceRecorder {
             eventsWritten: eventsWritten,
             remainingByteCount: ring.byteCount
         )
+    }
+
+    /// Appends already-encoded, LF-terminated records without re-encoding them.
+    ///
+    /// This uses the same bounded segment store as capture so received records
+    /// keep their original bytes and the same rotation limits.
+    public func appendLineAlignedData(_ data: Data) throws {
+        guard !data.isEmpty, data.last == 0x0A else {
+            throw KeystrokeTraceCoreError.invalidLineAlignedData
+        }
+
+        var lineStart = data.startIndex
+        for index in data.indices where data[index] == 0x0A {
+            guard index > lineStart else {
+                throw KeystrokeTraceCoreError.invalidLineAlignedData
+            }
+            let lineEnd = data.index(after: index)
+            let lineByteCount = data.distance(from: lineStart, to: lineEnd)
+            guard lineByteCount <= KeystrokeTraceSchema.segmentCapacityBytes else {
+                throw KeystrokeTraceCoreError.segmentFileTooLarge(lineByteCount)
+            }
+            lineStart = lineEnd
+        }
+        guard lineStart == data.endIndex else {
+            throw KeystrokeTraceCoreError.invalidLineAlignedData
+        }
+
+        lineStart = data.startIndex
+        for index in data.indices where data[index] == 0x0A {
+            let lineEnd = data.index(after: index)
+            _ = try segmentStore.append(Data(data[lineStart..<lineEnd]))
+            lineStart = lineEnd
+        }
     }
 
     private func encodeSegmentRollEvent(_ segmentRoll: KeystrokeTraceSegmentRoll) throws -> Data {

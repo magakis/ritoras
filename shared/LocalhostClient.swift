@@ -361,6 +361,34 @@ enum LocalhostClient {
         }
     }
 
+    /// Uploads one bounded trace chunk. Unlike log shipping, failures propagate
+    /// so the trace shipper can leave its durable cursor unchanged.
+    static func postKeystrokeTrace(
+        _ upload: KeystrokeTraceUploadRequest
+    ) async throws -> KeystrokeTraceUploadResponse {
+        let url = baseURL.appendingPathComponent(
+            String(KeystrokeTraceWireContract.route.dropFirst())
+        )
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let body = try KeystrokeTraceWireContract.encode(upload)
+        guard body.count <= KeystrokeTraceWireContract.maximumRequestBodyBytes else {
+            throw KeystrokeTraceUploadError.requestBodyTooLarge(body.count)
+        }
+        request.httpBody = body
+
+        let (data, response) = try await authorizedData(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw KeystrokeTraceUploadError.invalidResponse
+        }
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            throw KeystrokeTraceUploadError.httpStatus(httpResponse.statusCode)
+        }
+        return try JSONDecoder().decode(KeystrokeTraceUploadResponse.self, from: data)
+    }
+
     /// Requests the container app to stop the active dictation session via
     /// `POST /stop`. Returns `true` on any 2xx response, `false` on a
     /// non-2xx response or any transport error (server dead, timeout).

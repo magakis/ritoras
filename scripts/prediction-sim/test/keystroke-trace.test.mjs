@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -303,6 +304,49 @@ describe('keystroke trace core mirror', () => {
     assert.strictEqual(records.length, 1);
     assert.strictEqual(records[0].event.payload.keyValue, 'new');
     assert.strictEqual(recorder.onDiskByteCount, statSync(livePath).size);
+  });
+
+  it('appends raw line-aligned data without re-encoding and rotates bounded segments', (testContext) => {
+    const directory = temporaryTraceDirectory(testContext);
+    const recorder = new KeystrokeTraceRecorder(directory);
+    const payload = Buffer.alloc(Math.floor(TRACE_SEGMENT_CAPACITY_BYTES / 2), 0x78);
+    const firstLine = Buffer.concat([
+      Buffer.from('{ "raw" : "'),
+      payload,
+      Buffer.from('" }\n'),
+    ]);
+    const secondLine = Buffer.concat([
+      Buffer.from('{"raw":"'),
+      payload,
+      Buffer.from('"}\n'),
+    ]);
+
+    assert.throws(
+      () => recorder.appendLineAlignedData(Buffer.from('{"invalid":true}\n\n')),
+      TypeError
+    );
+    assert.throws(
+      () => recorder.appendLineAlignedData(Buffer.from('{"incomplete":true}')),
+      TypeError
+    );
+    const oversizedLine = Buffer.alloc(TRACE_SEGMENT_CAPACITY_BYTES + 1, 0x78);
+    oversizedLine[oversizedLine.length - 1] = 0x0a;
+    assert.throws(
+      () => recorder.appendLineAlignedData(oversizedLine),
+      RangeError
+    );
+    assert.strictEqual(recorder.onDiskByteCount, 0);
+
+    recorder.appendLineAlignedData(Buffer.concat([firstLine, secondLine]));
+
+    assert.deepStrictEqual(readFileSync(recorder.rotatedFilePath), firstLine);
+    assert.deepStrictEqual(readFileSync(recorder.liveFilePath), secondLine);
+    const liveBytes = statSync(recorder.liveFilePath).size;
+    const rotatedBytes = statSync(recorder.rotatedFilePath).size;
+    assert.ok(liveBytes <= TRACE_SEGMENT_CAPACITY_BYTES);
+    assert.ok(rotatedBytes <= TRACE_SEGMENT_CAPACITY_BYTES);
+    assert.strictEqual(recorder.onDiskByteCount, liveBytes + rotatedBytes);
+    assert.ok(recorder.onDiskByteCount <= TRACE_TOTAL_DISK_CAPACITY_BYTES);
   });
 
   it('rotates bounded disk segments and never exceeds the 4 MB total ceiling', (testContext) => {
