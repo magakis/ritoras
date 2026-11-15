@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// Ships complete trace lines from the keyboard's Documents directory without
@@ -20,6 +21,19 @@ final class KeyboardKeystrokeTraceShipper {
         let nextOffset: UInt64
     }
 
+    private struct UploadFailure: Sendable {
+        let kind: UploadErrorKind
+        let httpStatus: Int?
+    }
+
+    private enum UploadErrorKind: String, Sendable {
+        case connectionRefused = "connection-refused"
+        case timeout
+        case unauthorized = "401"
+        case notFound = "404"
+        case other
+    }
+
     private enum PayloadResult {
         case complete(Data, bodyByteCount: Int)
         case noCompleteLines
@@ -27,6 +41,8 @@ final class KeyboardKeystrokeTraceShipper {
     }
 
     private static let cadenceSeconds: TimeInterval = 2
+    // Ignore isolated misses; warn once after the cadence confirms persistence.
+    private static let persistentFailureThreshold = 3
     private static let cursorStoreKey = "ritoras_keystroke_trace_upload_state"
     private static let segmentNames = [
         KeystrokeTraceSchema.rotatedFileName,
@@ -41,6 +57,24 @@ final class KeyboardKeystrokeTraceShipper {
     private var isRunning = false
     private var requestInFlight = false
     private var epochResetInProgress = false
+    private var uploadAttemptCount: UInt64 = 0
+    private var lastAttemptAt: Date?
+    private var lastUploadErrorKind: String?
+    private var lastUploadHTTPStatus: Int?
+    private var consecutiveUploadFailures = 0
+    private var didLogPersistentUploadFailure = false
+    private var didLogEpochWipe = false
+
+    struct DiagnosticSnapshot {
+        let timerRunning: Bool
+        let uploadAttemptCount: UInt64
+        let requestInFlight: Bool
+        let cursorEpoch: UInt64
+        let cursorOffsets: [String: UInt64]
+        let lastUploadErrorKind: String?
+        let lastUploadHTTPStatus: Int?
+        let lastAttemptAt: Date?
+    }
 
     init(
         directoryURL: URL?,
@@ -88,6 +122,21 @@ final class KeyboardKeystrokeTraceShipper {
         }
     }
 
+    func diagnosticSnapshot() -> DiagnosticSnapshot {
+        queue.sync {
+            DiagnosticSnapshot(
+                timerRunning: isRunning && timer != nil,
+                uploadAttemptCount: uploadAttemptCount,
+                requestInFlight: requestInFlight,
+                cursorEpoch: state.epoch,
+                cursorOffsets: state.offsets,
+                lastUploadErrorKind: lastUploadErrorKind,
+                lastUploadHTTPStatus: lastUploadHTTPStatus,
+                lastAttemptAt: lastAttemptAt
+            )
+        }
+    }
+
     private static func loadCursorStore() -> CursorStore {
         guard let data = UserDefaults.standard.data(forKey: cursorStoreKey) else {
             return CursorStore()
@@ -118,6 +167,8 @@ final class KeyboardKeystrokeTraceShipper {
             guard let attempt = try nextUploadAttempt(from: segments) else { return }
 
             requestInFlight = true
+            uploadAttemptCount &+= 1
+            lastAttemptAt = Date()
             Task { [weak self] in
                 do {
                     let response = try await LocalhostClient.postKeystrokeTrace(attempt.request)
@@ -125,18 +176,20 @@ final class KeyboardKeystrokeTraceShipper {
                         self?.completeUpload(attempt, response: response)
                     }
                 } catch {
+                    let failure = Self.classifyUploadFailure(error)
                     self?.queue.async { [weak self] in
-                        self?.completeFailedUpload()
+                        self?.completeFailedUpload(failure)
                     }
                 }
             }
         } catch {
-            // Keep every cursor unchanged; the next trigger or cadence retries.
+            recordUploadFailure(UploadFailure(kind: .other, httpStatus: nil))
         }
     }
 
-    private func completeFailedUpload() {
+    private func completeFailedUpload(_ failure: UploadFailure) {
         requestInFlight = false
+        recordUploadFailure(failure)
     }
 
     private func completeUpload(
@@ -144,6 +197,19 @@ final class KeyboardKeystrokeTraceShipper {
         response: KeystrokeTraceUploadResponse
     ) {
         guard response.epoch == state.epoch else {
+            lastUploadErrorKind = UploadErrorKind.other.rawValue
+            lastUploadHTTPStatus = nil
+            if !didLogEpochWipe {
+                didLogEpochWipe = true
+                FileLogger.shared.warn(
+                    .network,
+                    "keystroke trace epoch mismatch; clearing local segments",
+                    payload: [
+                        "localEpoch": state.epoch,
+                        "serverEpoch": response.epoch
+                    ]
+                )
+            }
             epochResetInProgress = true
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -157,8 +223,11 @@ final class KeyboardKeystrokeTraceShipper {
 
         requestInFlight = false
         let currentOffset = state.offsets[attempt.request.segmentIdentity]
-        guard response.acknowledged,
-              currentOffset == nil || currentOffset == attempt.request.offset else {
+        guard response.acknowledged else {
+            recordUploadFailure(UploadFailure(kind: .other, httpStatus: nil))
+            return
+        }
+        guard currentOffset == nil || currentOffset == attempt.request.offset else {
             return
         }
 
@@ -168,8 +237,10 @@ final class KeyboardKeystrokeTraceShipper {
             try persistCursorStore()
         } catch {
             state.offsets[attempt.request.segmentIdentity] = previousOffset
+            recordUploadFailure(UploadFailure(kind: .other, httpStatus: nil))
             return
         }
+        consecutiveUploadFailures = 0
         shipOldestPendingChunk()
     }
 
@@ -190,6 +261,69 @@ final class KeyboardKeystrokeTraceShipper {
             return
         }
         shipOldestPendingChunk()
+    }
+
+    private func recordUploadFailure(_ failure: UploadFailure) {
+        lastUploadErrorKind = failure.kind.rawValue
+        lastUploadHTTPStatus = failure.httpStatus
+        consecutiveUploadFailures += 1
+
+        guard consecutiveUploadFailures >= Self.persistentFailureThreshold,
+              !didLogPersistentUploadFailure else {
+            return
+        }
+        didLogPersistentUploadFailure = true
+
+        var payload: [String: Any] = ["errorKind": failure.kind.rawValue]
+        if let httpStatus = failure.httpStatus {
+            payload["httpStatus"] = httpStatus
+        }
+        FileLogger.shared.warn(
+            .network,
+            "keystroke trace shipping persistently failing",
+            payload: payload
+        )
+    }
+
+    private static func classifyUploadFailure(_ error: Error) -> UploadFailure {
+        if let uploadError = error as? KeystrokeTraceUploadError {
+            switch uploadError {
+            case let .httpStatus(status):
+                let kind: UploadErrorKind
+                switch status {
+                case 401:
+                    kind = .unauthorized
+                case 404:
+                    kind = .notFound
+                default:
+                    kind = .other
+                }
+                return UploadFailure(kind: kind, httpStatus: status)
+            case .requestBodyTooLarge, .invalidResponse:
+                return UploadFailure(kind: .other, httpStatus: nil)
+            }
+        }
+
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain {
+            switch nsError.code {
+            case NSURLErrorTimedOut:
+                return UploadFailure(kind: .timeout, httpStatus: nil)
+            case NSURLErrorCannotConnectToHost:
+                return UploadFailure(kind: .connectionRefused, httpStatus: nil)
+            default:
+                break
+            }
+        }
+        if nsError.domain == NSPOSIXErrorDomain {
+            if nsError.code == Int(ETIMEDOUT) {
+                return UploadFailure(kind: .timeout, httpStatus: nil)
+            }
+            if nsError.code == Int(ECONNREFUSED) {
+                return UploadFailure(kind: .connectionRefused, httpStatus: nil)
+            }
+        }
+        return UploadFailure(kind: .other, httpStatus: nil)
     }
 
     private func existingSegments(in directoryURL: URL) throws -> [Segment] {

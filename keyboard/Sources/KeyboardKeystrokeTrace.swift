@@ -7,10 +7,26 @@ final class KeyboardKeystrokeTrace {
     }
 
     private static let enabledDefaultsKey = "ritoras_keystroke_trace_enabled"
+    private static let enabledAtDefaultsKey = "ritoras_keystroke_trace_enabled_at"
+    private static let toggleEpochDefaultsKey = "ritoras_keystroke_trace_toggle_epoch"
+
+    struct DiagnosticState {
+        let toggleRawValue: String
+        let enabledAt: Date?
+        let toggleEpoch: UInt64
+        let recorderEnabled: Bool
+        let recorderFailed: Bool
+        let recorderFailure: String?
+        let pendingRingBytes: Int
+        let directoryURL: URL?
+        let shipper: KeyboardKeystrokeTraceShipper.DiagnosticSnapshot
+    }
 
     private var recorder: KeystrokeTraceRecorder?
     private var idleFlushTimer: Timer?
     private var didLogFailure = false
+    private var lastFailureDescription: String?
+    private var lastFailurePendingRingBytes = 0
     private lazy var shipper = KeyboardKeystrokeTraceShipper(
         directoryURL: Self.documentsDirectoryURL
     ) { [weak self] in
@@ -73,12 +89,40 @@ final class KeyboardKeystrokeTrace {
         }
     }
 
-    func toggleEnabledPreference() {
+    @discardableResult
+    func toggleEnabledPreference() -> Bool {
         let shouldEnable = !isConfiguredEnabled
         if !shouldEnable, recorder?.isEnabled == true {
             flush(at: .idle)
         }
-        UserDefaults.standard.set(shouldEnable, forKey: Self.enabledDefaultsKey)
+        let defaults = UserDefaults.standard
+        let previousEpoch = (defaults.object(forKey: Self.toggleEpochDefaultsKey) as? NSNumber)?
+            .uint64Value ?? 0
+        defaults.set(previousEpoch &+ 1, forKey: Self.toggleEpochDefaultsKey)
+        defaults.set(shouldEnable, forKey: Self.enabledDefaultsKey)
+        if shouldEnable {
+            defaults.set(Date(), forKey: Self.enabledAtDefaultsKey)
+        }
+        return shouldEnable
+    }
+
+    func diagnosticState() -> DiagnosticState {
+        let defaults = UserDefaults.standard
+        let toggleRawValue = defaults.object(forKey: Self.enabledDefaultsKey) == nil
+            ? "unset (effective false)"
+            : String(defaults.bool(forKey: Self.enabledDefaultsKey))
+        return DiagnosticState(
+            toggleRawValue: toggleRawValue,
+            enabledAt: defaults.object(forKey: Self.enabledAtDefaultsKey) as? Date,
+            toggleEpoch: (defaults.object(forKey: Self.toggleEpochDefaultsKey) as? NSNumber)?
+                .uint64Value ?? 0,
+            recorderEnabled: recorder?.isEnabled == true,
+            recorderFailed: didLogFailure,
+            recorderFailure: lastFailureDescription,
+            pendingRingBytes: recorder?.unflushedByteCount ?? lastFailurePendingRingBytes,
+            directoryURL: Self.documentsDirectoryURL,
+            shipper: shipper.diagnosticSnapshot()
+        )
     }
 
     func startShipping() {
@@ -175,6 +219,8 @@ final class KeyboardKeystrokeTrace {
     private func stopAfterFailure(_ error: Error) {
         idleFlushTimer?.invalidate()
         idleFlushTimer = nil
+        lastFailurePendingRingBytes = recorder?.unflushedByteCount ?? 0
+        lastFailureDescription = String(describing: error)
         recorder = nil
 
         guard !didLogFailure else { return }

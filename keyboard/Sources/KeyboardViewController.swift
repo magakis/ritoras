@@ -848,7 +848,18 @@ class KeyboardViewController: UIInputViewController {
         }
         keyboardView.settingsTraceToggleRequested = { [weak self] in
             guard let self else { return }
-            self.keystrokeTrace.toggleEnabledPreference()
+            let shouldEnable = self.keystrokeTrace.toggleEnabledPreference()
+            if !shouldEnable {
+                let snapshot = KeyboardKeystrokeTraceDiagnostics.makeSnapshot(
+                    trace: self.keystrokeTrace,
+                    hasFullAccess: self.hasFullAccess
+                )
+                do {
+                    try KeyboardKeystrokeTraceDiagnostics.copyToClipboard(snapshot)
+                } catch {
+                    // Clipboard diagnostics are best-effort and must not interrupt the toggle.
+                }
+            }
             self.refreshKeystrokeTraceConfiguration()
         }
         keyboardView.settingsPanelDidCreate = { [weak self] panel in
