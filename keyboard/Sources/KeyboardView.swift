@@ -454,10 +454,25 @@ private class SuggestionBar: UIView {
     var suggestionTapped: ((Int) -> Void)?
     var suggestionLongPressed: ((Int) -> Void)?
     var settingsTapped: (() -> Void)?
+    var traceToggleRequested: (() -> Void)?
 
     private let stack = UIStackView()
     private var segments: [UIButton] = []
     private let settingsButton = UIButton(type: .system)
+    private var settingsLongPressDidFire = false
+    private let traceEnabledIndicator: UIView = {
+        let indicator = UIView()
+        indicator.translatesAutoresizingMaskIntoConstraints = false
+        indicator.backgroundColor = .systemRed
+        indicator.layer.cornerRadius = 4
+        indicator.layer.borderWidth = 1
+        indicator.layer.borderColor = UIColor { traitCollection in
+            traitCollection.userInterfaceStyle == .dark ? .black : .white
+        }.cgColor
+        indicator.isUserInteractionEnabled = false
+        indicator.isHidden = true
+        return indicator
+    }()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -485,13 +500,32 @@ private class SuggestionBar: UIView {
         let settingsIcon = UIImage.SymbolConfiguration(pointSize: 17, weight: .regular)
         settingsButton.setImage(UIImage(systemName: "gearshape", withConfiguration: settingsIcon), for: .normal)
         settingsButton.accessibilityLabel = "Keyboard settings"
+        settingsButton.accessibilityHint = "Tap for settings. Long press to toggle keystroke tracing."
         settingsButton.tintColor = EmojiPanelView.modeKeyTextColor
         settingsButton.backgroundColor = UIColor { tc in
             tc.userInterfaceStyle == .dark
                 ? UIColor(white: 0.18, alpha: 1)
                 : UIColor(white: 0.92, alpha: 1)
         }
+        settingsButton.addTarget(self, action: #selector(settingsButtonTouchDown), for: .touchDown)
         settingsButton.addTarget(self, action: #selector(settingsButtonTapped), for: .touchUpInside)
+        let traceLongPress = UILongPressGestureRecognizer(
+            target: self,
+            action: #selector(settingsButtonLongPressed(_:))
+        )
+        traceLongPress.minimumPressDuration = 0.5
+        traceLongPress.allowableMovement = 10
+        traceLongPress.cancelsTouchesInView = false
+        traceLongPress.delaysTouchesBegan = false
+        traceLongPress.delaysTouchesEnded = false
+        settingsButton.addGestureRecognizer(traceLongPress)
+        settingsButton.addSubview(traceEnabledIndicator)
+        NSLayoutConstraint.activate([
+            traceEnabledIndicator.widthAnchor.constraint(equalToConstant: 8),
+            traceEnabledIndicator.heightAnchor.constraint(equalToConstant: 8),
+            traceEnabledIndicator.topAnchor.constraint(equalTo: settingsButton.topAnchor, constant: 4),
+            traceEnabledIndicator.trailingAnchor.constraint(equalTo: settingsButton.trailingAnchor, constant: -4),
+        ])
         addSubview(settingsButton)
 
         NSLayoutConstraint.activate([
@@ -542,7 +576,27 @@ private class SuggestionBar: UIView {
     }
 
     @objc private func settingsButtonTapped() {
+        guard !settingsLongPressDidFire else {
+            settingsLongPressDidFire = false
+            return
+        }
         settingsTapped?()
+    }
+
+    @objc private func settingsButtonTouchDown() {
+        settingsLongPressDidFire = false
+    }
+
+    @objc private func settingsButtonLongPressed(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began else { return }
+        settingsLongPressDidFire = true
+        HapticsManager.shared.tapSelection()
+        traceToggleRequested?()
+    }
+
+    func setKeystrokeTraceEnabled(_ enabled: Bool) {
+        traceEnabledIndicator.isHidden = !enabled
+        settingsButton.accessibilityValue = enabled ? "Keystroke tracing on" : nil
     }
 
     func update(with suggestions: [String]) {
@@ -575,6 +629,7 @@ class KeyboardView: UIView {
     var settingsPanelDidCreate: ((KeyboardSettingsPanel) -> Void)?
 
     var settingsTapped: (() -> Void)?
+    var settingsTraceToggleRequested: (() -> Void)?
 
     // Subviews
     private var _suggestionBar: SuggestionBar?
@@ -799,7 +854,14 @@ class KeyboardView: UIView {
             guard let self = self else { return }
             self.settingsTapped?()
         }
+        suggestionBar.traceToggleRequested = { [weak self] in
+            self?.settingsTraceToggleRequested?()
+        }
         addSubview(suggestionBar)
+    }
+
+    func setKeystrokeTraceEnabled(_ enabled: Bool) {
+        suggestionBar.setKeystrokeTraceEnabled(enabled)
     }
 
     private func setupLetterRegion() {

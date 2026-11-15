@@ -120,6 +120,7 @@ class KeyboardViewController: UIInputViewController {
     private func refreshKeystrokeTraceConfiguration() {
         let wasEnabled = keystrokeTrace.isEnabled
         keystrokeTrace.refreshConfiguration()
+        keyboardView?.setKeystrokeTraceEnabled(keystrokeTrace.isEnabled)
         guard !wasEnabled, keystrokeTrace.isEnabled else { return }
 
         traceRecordedPredictionStackLoaded = false
@@ -510,6 +511,7 @@ class KeyboardViewController: UIInputViewController {
         }
 
         setupKeyboardView()
+        keystrokeTrace.startShipping()
         keyboardServicesSuggestionCoordinator.onCandidates = { [weak self] endpoint,
                                                                 candidates,
                                                                 revision,
@@ -590,6 +592,7 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        keystrokeTrace.shipPending()
         keyboardView.updateFullAccess(hasFullAccess)
         registerStateChangedObserver()
         refreshKeyboardServicesPinSnapshot()
@@ -761,6 +764,7 @@ class KeyboardViewController: UIInputViewController {
         FileLogger.shared.info(.lifecycle, "KeyboardViewController deinit",
             payload: ["launchId": KeyboardViewController.processLaunchId,
                       "buildId": Self.buildGeneration])
+        keystrokeTrace.stopShipping()
         KeyboardLogShipper.shared.stop()
         FileLogger.broadcast = nil
         cancelOutstandingAsyncWork()
@@ -841,6 +845,11 @@ class KeyboardViewController: UIInputViewController {
 
         keyboardView.settingsTapped = { [weak self] in
             self?.presentKeyboardSettingsPanel()
+        }
+        keyboardView.settingsTraceToggleRequested = { [weak self] in
+            guard let self else { return }
+            self.keystrokeTrace.toggleEnabledPreference()
+            self.refreshKeystrokeTraceConfiguration()
         }
         keyboardView.settingsPanelDidCreate = { [weak self] panel in
             panel.onDismiss = { [weak self] in

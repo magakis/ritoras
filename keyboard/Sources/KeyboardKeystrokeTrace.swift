@@ -2,30 +2,46 @@ import Foundation
 
 final class KeyboardKeystrokeTrace {
     private enum CaptureError: Error {
-        case appGroupContainerUnavailable
+        case documentsDirectoryUnavailable
         case eventExceedsRingCapacity(encodedByteCount: Int, capacity: Int)
     }
+
+    private static let enabledDefaultsKey = "ritoras_keystroke_trace_enabled"
 
     private var recorder: KeystrokeTraceRecorder?
     private var idleFlushTimer: Timer?
     private var didLogFailure = false
+    private lazy var shipper = KeyboardKeystrokeTraceShipper(
+        directoryURL: Self.documentsDirectoryURL
+    ) { [weak self] in
+        guard let self else { return false }
+        do {
+            try self.clearLocalTraceData()
+            return true
+        } catch {
+            return false
+        }
+    }
 
     deinit {
         idleFlushTimer?.invalidate()
+        shipper.stop()
     }
 
     var isEnabled: Bool {
         recorder?.isEnabled == true
     }
 
+    private var isConfiguredEnabled: Bool {
+        UserDefaults.standard.bool(forKey: Self.enabledDefaultsKey)
+    }
+
     func refreshConfiguration() {
-        if SharedConfig.keystrokeTraceEnabled() {
+        if isConfiguredEnabled {
             do {
                 if recorder == nil {
-                    guard let directoryURL = FileManager.default.containerURL(
-                        forSecurityApplicationGroupIdentifier: SharedConfig.Defaults.appGroupId
-                    ) else {
-                        throw CaptureError.appGroupContainerUnavailable
+                    guard let directoryURL = Self.documentsDirectoryURL else {
+                        throw CaptureError.documentsDirectoryUnavailable
                     }
 
                     let newRecorder = try KeystrokeTraceRecorder(directoryURL: directoryURL)
@@ -57,6 +73,26 @@ final class KeyboardKeystrokeTrace {
         }
     }
 
+    func toggleEnabledPreference() {
+        let shouldEnable = !isConfiguredEnabled
+        if !shouldEnable, recorder?.isEnabled == true {
+            flush(at: .idle)
+        }
+        UserDefaults.standard.set(shouldEnable, forKey: Self.enabledDefaultsKey)
+    }
+
+    func startShipping() {
+        shipper.start()
+    }
+
+    func stopShipping() {
+        shipper.stop()
+    }
+
+    func shipPending() {
+        shipper.shipPending()
+    }
+
     func append(
         _ event: KeystrokeTraceEvent,
         flushAt boundary: KeystrokeTraceFlushBoundary? = nil
@@ -74,6 +110,7 @@ final class KeyboardKeystrokeTrace {
                     guard let currentRecorder = self.recorder,
                           currentRecorder.isEnabled else { return }
                     try currentRecorder.flush(at: .highWaterMark)
+                    shipper.shipPending()
                 }
             case let .eventExceedsRingCapacity(encodedByteCount, capacity):
                 throw CaptureError.eventExceedsRingCapacity(
@@ -96,8 +133,33 @@ final class KeyboardKeystrokeTrace {
 
         do {
             try recorder.flush(at: boundary)
+            shipper.shipPending()
         } catch {
             stopAfterFailure(error)
+        }
+    }
+
+    private static var documentsDirectoryURL: URL? {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+    }
+
+    private func clearLocalTraceData() throws {
+        if let recorder {
+            try recorder.clear()
+            return
+        }
+        guard let directoryURL = Self.documentsDirectoryURL else {
+            throw CaptureError.documentsDirectoryUnavailable
+        }
+        let fileManager = FileManager.default
+        for name in [
+            KeystrokeTraceSchema.liveFileName,
+            KeystrokeTraceSchema.rotatedFileName
+        ] {
+            let url = directoryURL.appendingPathComponent(name)
+            if fileManager.fileExists(atPath: url.path) {
+                try fileManager.removeItem(at: url)
+            }
         }
     }
 
