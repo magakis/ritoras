@@ -27,7 +27,15 @@ enum AutocorrectApplicationGuard {
     ) -> Bool {
         guard isHostApp else { return false }
         guard wordOrigin == .typing else { return false }
-        guard liveContext.hasSuffix(snapshot.typedWord + snapshot.triggerChar) else { return false }
+        let expectedSuffix = snapshot.typedWord + snapshot.triggerChar
+        guard hasByteExactSuffix(expectedSuffix, in: liveContext) else { return false }
         return true
+    }
+
+    private static func hasByteExactSuffix(_ expectedSuffix: String, in liveContext: String) -> Bool {
+        let expectedBytes = expectedSuffix.utf8
+        let liveBytes = liveContext.utf8
+        guard liveBytes.count >= expectedBytes.count else { return false }
+        return liveBytes.suffix(expectedBytes.count).elementsEqual(expectedBytes)
     }
 }

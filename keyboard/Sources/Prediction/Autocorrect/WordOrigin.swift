@@ -5,7 +5,7 @@ import Foundation
 enum WordOrigin: Equatable {
     /// Chars entered one-by-one; re-evaluatable on separator press.
     case typing
-    /// User explicitly tapped a suggestion in the bar — LOCKED.
+    /// User explicitly tapped a suggestion; locked through that insertion.
     case suggestionTap
     /// Autocorrect was just applied on this word — LOCKED.
     case autocorrectApplied

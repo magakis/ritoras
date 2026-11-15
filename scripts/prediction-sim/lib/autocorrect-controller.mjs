@@ -1,6 +1,8 @@
 // Pure-logic JS port of keyboard/Sources/Prediction/Autocorrect/AutocorrectController.swift.
 // Kept in sync per AGENTS.md -> Test policy.
 
+import { canonicalize } from './text-normalization.mjs';
+
 /** Matches SharedConfig.Defaults.autocorrectMinConfidenceScore (0.7). */
 export const DEFAULT_CONFIG = {
   minWordLength: 2,
@@ -10,6 +12,67 @@ export const DEFAULT_CONFIG = {
 
 /** Mirrors WordOrigin: only `.typing` is re-evaluable on separator press. */
 export const ORIGIN_TYPING = 'typing';
+export const ORIGIN_SUGGESTION_TAP = 'suggestionTap';
+export const WORD_LEARNING_COMMIT_THRESHOLD = 3;
+const MAX_TRACKED_WORDS = 512;
+
+/** Minimal mirror of WordOriginTracker for suggestion-tap input sequences. */
+export class WordOriginTracker {
+  current = ORIGIN_TYPING;
+
+  markSuggestionTap() {
+    this.current = ORIGIN_SUGGESTION_TAP;
+  }
+
+  resetToTyping() {
+    this.current = ORIGIN_TYPING;
+  }
+}
+
+/** Tracks repeated commits; Swift persists the same counts in UserDefaults. */
+export class AutocorrectWordLearningTracker {
+  #commitCounts = new Map();
+
+  constructor(threshold = WORD_LEARNING_COMMIT_THRESHOLD) {
+    this.threshold = threshold;
+  }
+
+  recordCommit(word, lastAutoCorrectionTypedWord = null) {
+    const key = canonicalize(word.toLowerCase().trim());
+    if (!key) return false;
+
+    if (lastAutoCorrectionTypedWord !== null) {
+      const correctedAwayKey = canonicalize(lastAutoCorrectionTypedWord.toLowerCase().trim());
+      if (key === correctedAwayKey) return false;
+    }
+
+    const nextCount = (this.#commitCounts.get(key) ?? 0) + 1;
+    if (nextCount >= this.threshold) {
+      this.#commitCounts.delete(key);
+      return true;
+    }
+    if (!this.#commitCounts.has(key) && this.#commitCounts.size >= MAX_TRACKED_WORDS) {
+      const [oldestKey] = this.#commitCounts.keys();
+      this.#commitCounts.delete(oldestKey);
+    }
+    this.#commitCounts.set(key, nextCount);
+    return false;
+  }
+}
+
+/** A process-local UITextChecker word cannot make an unlisted token trusted. */
+export function isMisspelledForAutocorrect({
+  typedWord,
+  systemSpellCheckerReportsMisspelled,
+  isBuiltInWord,
+}) {
+  const firstCharacter = Array.from(typedWord)[0];
+  const isCapitalized = firstCharacter !== undefined
+    && firstCharacter === firstCharacter.toUpperCase()
+    && firstCharacter !== firstCharacter.toLowerCase();
+
+  return systemSpellCheckerReportsMisspelled || (!isCapitalized && !isBuiltInWord);
+}
 
 /**
  * Mirrors AutocorrectController.Decision:
@@ -21,8 +84,8 @@ export const ORIGIN_TYPING = 'typing';
  * @param {string} opts.origin - 'typing' | 'suggestionTap' | 'autocorrectApplied'.
  * @param {{text:string,score:number,source:string}|null} opts.topCorrection - Best
  *   correction candidate from the prediction engine, or null.
- * @param {boolean} opts.isLearned - Whether the user has explicitly learned this word.
- * @param {boolean} opts.isMisspelled - Whether the typed word is not in the system dictionary.
+ * @param {boolean} opts.isLearned - Whether the word is in the user's learned-word store.
+ * @param {boolean} opts.isMisspelled - Whether the autocorrect dictionary policy treats the token as unknown.
  * @param {string} [opts.language='english'] - Active keyboard language ('english'|'greek').
  *   Defaults to English, preserving existing call sites. Only the case-preservation
  *   step is language-sensitive.
@@ -58,7 +121,7 @@ export function evaluate({
   // gate in topCorrection already established the contraction is favored.
   const isAmbiguousContraction = topCorrection?.source === 'ambiguousContraction';
 
-  // User has explicitly accepted this word before.
+  // The user has explicitly or repeatedly accepted this word before.
   if (!isContraction && isLearned) return { decision: 'leaveAsIs' };
 
   // Only correct genuinely misspelled words. This prevents "me" → "message",

@@ -192,6 +192,10 @@ final class SymSpellProvider: SuggestionProvider {
         return results
     }
 
+    func containsBuiltInWord(_ word: String) -> Bool {
+        trie.contains(word: ApostropheNormalizer.canonicalize(word.lowercased()))
+    }
+
     deinit {
         FileLogger.shared.info(.prediction, "SymSpellProvider deinit")
     }

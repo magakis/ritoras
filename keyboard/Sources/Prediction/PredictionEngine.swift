@@ -165,6 +165,13 @@ final class PredictionEngine {
 
     // MARK: - Autocorrect Support
 
+    /// Returns whether the user's token is in the bundled dictionary, without
+    /// treating UITextChecker's process-local learned lexicon as authoritative.
+    func isBuiltInWord(_ word: String) -> Bool? {
+        let provider = snapshotProviders().compactMap { $0 as? SymSpellProvider }.first
+        return provider?.containsBuiltInWord(word)
+    }
+
     /// Returns the highest-scoring suggestion for `lookupWord` (excluding the
     /// typed word itself), or nil if no provider offers a correction. Used by
     /// AutocorrectController to make confidence-gated replacement decisions on

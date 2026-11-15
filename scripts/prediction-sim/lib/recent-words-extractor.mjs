@@ -40,7 +40,7 @@ function isWhitespace(ch) {
  *
  * @param {string|null|undefined} context - The full string before the cursor.
  * @param {number} maxCount - Maximum number of committed words to return (default 4).
- * @returns {Array<{word: string, lookupWord: string, offsetFromCursorEnd: number}>}
+ * @returns {Array<{word: string, wordBody: string, lookupWord: string, offsetFromCursorEnd: number}>}
  *   Most recent word first. `offsetFromCursorEnd` is the char distance from the
  *   cursor to the END of the word's body (after trailing punctuation).
  */
@@ -91,6 +91,7 @@ export function extract(context, maxCount = 4) {
 
     results.push({
       word,
+      wordBody: stripped,
       lookupWord,
       offsetFromCursorEnd: context.length - bodyEnd,
     });

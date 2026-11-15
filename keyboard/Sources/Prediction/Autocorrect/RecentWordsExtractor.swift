@@ -13,6 +13,9 @@ enum RecentWordsExtractor {
         /// The token as it appears in the document (trailing punctuation
         /// preserved, for display).
         let word: String
+        /// The exact token body as it appears in the document, before
+        /// apostrophe canonicalization and without trailing punctuation.
+        let wordBody: String
         /// The token with trailing punctuation stripped and apostrophes
         /// canonicalized (for dictionary lookups).
         let lookupWord: String
@@ -97,6 +100,7 @@ enum RecentWordsExtractor {
 
             results.append(RecentWord(
                 word: word,
+                wordBody: stripped,
                 lookupWord: lookupWord,
                 offsetFromCursorEnd: context[bodyEnd..<context.endIndex].utf16.count
             ))

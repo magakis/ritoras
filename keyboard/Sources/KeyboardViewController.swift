@@ -12,6 +12,7 @@ private enum BackspacePhase {
 private struct RetroactiveCandidateSnapshot {
     let typedWord: String
     let lookupWord: String
+    let wordBody: String
     let offsetFromCursorEnd: Int
     let isLearned: Bool
     let isMisspelled: Bool
@@ -273,6 +274,7 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Autocorrect-on-space
 
     private var wordOrigin = WordOriginTracker()
+    private let autocorrectWordLearningTracker = AutocorrectWordLearningTracker()
     /// Tracks the most recent autocorrect for potential revert-on-backspace (Phase 4).
     private var lastAutoCorrection: (typed: String, replacement: String)?
 
@@ -2266,6 +2268,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             }
             insertTargeted(text)
             if shouldAutoCorrect {
+                recordRepeatedWordForTrigger(triggerChar: text)
                 applyAutocorrectForTrigger(triggerChar: text)
                 recordRecentWordForTrigger(triggerChar: text)
             }
@@ -2334,6 +2337,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             refreshKeystrokeTraceConfiguration()
             applyFinalSigmaToCommittedWord()
             insertTargeted(" ")
+            recordRepeatedWordForTrigger(triggerChar: " ")
             applyAutocorrectForTrigger(triggerChar: " ")
             recordRecentWordForTrigger(triggerChar: " ")
             recomputeAutoCap()
@@ -2348,6 +2352,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             } else {
                 applyFinalSigmaToCommittedWord()
                 insertTargeted("\n")
+                recordRepeatedWordForTrigger(triggerChar: "\n")
                 applyAutocorrectForTrigger(triggerChar: "\n")
                 recordRecentWordForTrigger(triggerChar: "\n")
                 recomputeAutoCap()
@@ -2436,14 +2441,15 @@ extension KeyboardViewController: KeyboardViewDelegate {
         for _ in 0..<deleteCount {
             deleteTargetedBackward()
         }
+        wordOrigin.markSuggestionTap()
         insertTargeted(insertText + " ")
+        wordOrigin.resetToTyping()
         captureKeyTrace(
             action: .suggestionTap,
             keyValue: insertText,
             deleteCount: deleteCount,
             liveContextSuffix: context
         )
-        wordOrigin.markSuggestionTap()    // Lock persists until the next separator handler clears it
         lastAutoCorrection = nil          // Suggestion tap invalidates any pending revert
         lastSigmaConvertedWord = nil      // Suggestion tap rewrites the word region
         // Refresh is async; the token guard rejects any result whose captured state no longer matches.
@@ -2812,19 +2818,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         // --- Main-thread spell-check (UITextChecker is a UIKit API) ---
         let computeStart = Date()
-        let isMisspelled: Bool = {
-            let checker = UITextChecker()
-            let nsString = typedWord as NSString
-            let range = NSRange(location: 0, length: nsString.length)
-            let misspelledRange = checker.rangeOfMisspelledWord(
-                in: typedWord,
-                range: range,
-                startingAt: 0,
-                wrap: false,
-                language: languageAtDispatch.appleSpellTag
-            )
-            return misspelledRange.location != NSNotFound
-        }()
+        let isMisspelled = isWordMisspelled(typedWord, engine: engine)
         FileLogger.shared.debug(.keyboard, "autocorrect snapshot",
             payload: ["uitextcheckerMs": Int(Date().timeIntervalSince(computeStart) * 1000)])
 
@@ -2848,7 +2842,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
         // the NEXT trigger.
         let retroactiveCandidates = resolveRetroactiveCandidates(
             candidates: recentWordBuffer.candidates,
-            liveContext: contextAfterInsert
+            liveContext: contextAfterInsert,
+            engine: engine
         )
         let shouldCaptureAutocorrectDecisions = keystrokeTrace.isEnabled
 
@@ -2871,13 +2866,36 @@ extension KeyboardViewController: KeyboardViewDelegate {
         )
     }
 
+    /// Learns an unlisted word only after repeated user commits, before the
+    /// current trigger snapshot checks the learned-word gate.
+    private func recordRepeatedWordForTrigger(triggerChar: String) {
+        guard inputTarget == .hostApp,
+              wordOrigin.current == .typing else { return }
+        let context = textDocumentProxy.documentContextBeforeInput ?? ""
+        guard context.hasSuffix(triggerChar) else { return }
+        let typedWord = CurrentWordExtractor.extract(
+            from: String(context.dropLast())
+        ).lookupWord
+        guard !typedWord.isEmpty else { return }
+
+        // A spelling autocorrect just removed is not evidence that the user accepted it.
+        if let lastAutoCorrection,
+           lastAutoCorrection.typed.lowercased() == typedWord.lowercased() {
+            return
+        }
+
+        guard let engine = predictionEngine,
+              let isBuiltInWord = engine.isBuiltInWord(typedWord),
+              !isBuiltInWord,
+              !LearnedWordsStore.shared.contains(typedWord) else { return }
+        if autocorrectWordLearningTracker.recordCommit(of: typedWord) {
+            LearnedWordsStore.shared.add(typedWord)
+        }
+    }
+
     /// Appends the just-committed word (the token before `triggerChar`) to the
-    /// retroactive-autocorrect ring. Runs on main right after the inline
-    /// trigger snapshot: the document ends with `typedWord + triggerChar`, so
-    /// the typed word is the extracted current word and the commit context is
-    /// the last ~50 characters of that same context. The origin is whatever
-    /// `wordOrigin` held at commit time; non-`.typing` records are never
-    /// re-scanned by the candidates filter.
+    /// retroactive-autocorrect ring. The origin is whatever `wordOrigin` held
+    /// at commit time; non-`.typing` records are never re-scanned.
     private func recordRecentWordForTrigger(triggerChar: String) {
         guard inputTarget == .hostApp else { return }
         let context = textDocumentProxy.documentContextBeforeInput ?? ""
@@ -2906,7 +2924,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
     /// extractor walks back at most 3 committed words).
     private func resolveRetroactiveCandidates(
         candidates: [RecentWordRecord],
-        liveContext: String
+        liveContext: String,
+        engine: PredictionEngine
     ) -> [RetroactiveCandidateSnapshot] {
         guard !candidates.isEmpty else { return [] }
         let recentWords = RecentWordsExtractor.extract(from: liveContext, maxCount: 3)
@@ -2928,9 +2947,10 @@ extension KeyboardViewController: KeyboardViewDelegate {
             resolved.append(RetroactiveCandidateSnapshot(
                 typedWord: candidate.typedWord,
                 lookupWord: live.lookupWord,
+                wordBody: live.wordBody,
                 offsetFromCursorEnd: live.offsetFromCursorEnd,
                 isLearned: LearnedWordsStore.shared.contains(live.lookupWord),
-                isMisspelled: isWordMisspelled(live.lookupWord),
+                isMisspelled: isWordMisspelled(live.lookupWord, engine: engine),
                 origin: candidate.origin,
                 commitContextSuffix: candidate.commitContextSuffix
             ))
@@ -2940,7 +2960,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
     /// Main-thread spell-check (UITextChecker is a UIKit API). Mirrors the
     /// inline snapshot's spell-check block.
-    private func isWordMisspelled(_ word: String) -> Bool {
+    private func isWordMisspelled(_ word: String, engine: PredictionEngine) -> Bool {
         let checker = UITextChecker()
         let nsString = word as NSString
         let range = NSRange(location: 0, length: nsString.length)
@@ -2951,7 +2971,12 @@ extension KeyboardViewController: KeyboardViewDelegate {
             wrap: false,
             language: settingsCache.language.appleSpellTag
         )
-        return misspelledRange.location != NSNotFound
+        let isBuiltInWord = engine.isBuiltInWord(word) ?? true
+        return AutocorrectController.isMisspelledForAutocorrect(
+            typedWord: word,
+            systemSpellCheckerReportsMisspelled: misspelledRange.location != NSNotFound,
+            isBuiltInWord: isBuiltInWord
+        )
     }
 
     /// Schedules the deferred autocorrect compute on the background processing
@@ -3079,9 +3104,10 @@ extension KeyboardViewController: KeyboardViewDelegate {
                     guard case .correct(_, let correction) = retroactiveDecision else { continue }
 
                     let plan = RetroactiveApplyPlan.plan(
-                        typedWord: entry.lookupWord,
+                        typedWord: entry.wordBody,
                         correction: correction,
-                        offsetFromCursorEnd: entry.offsetFromCursorEnd
+                        offsetFromCursorEnd: entry.offsetFromCursorEnd,
+                        contextAnchor: entry.commitContextSuffix
                     )
                     pendingCorrection = (plan, entry.lookupWord)
                     break
@@ -3337,7 +3363,9 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
         // Content-hash guard: the live context must still match dispatch.
         let liveToken = keyboardContextToken(keyboardView)
-        guard shouldApplyLookupResult(capturedToken: capturedToken, liveToken: liveToken) else {
+        let liveContext = textDocumentProxy.documentContextBeforeInput ?? ""
+        guard shouldApplyLookupResult(capturedToken: capturedToken, liveToken: liveToken),
+              let livePlan = RetroactiveApplyPlan.revalidated(plan, in: liveContext) else {
             captureTraceSkip(.deferredApplyContextTokenChanged)
             return
         }
@@ -3345,14 +3373,14 @@ extension KeyboardViewController: KeyboardViewDelegate {
         let traceApplyEnabled = keystrokeTrace.isEnabled
         let traceApplyIsSecure = traceApplyEnabled && traceInputIsSecure
         let beforeText = traceApplyEnabled && !traceApplyIsSecure
-            ? textDocumentProxy.documentContextBeforeInput ?? ""
+            ? liveContext
             : nil
-        textDocumentProxy.adjustTextPosition(byCharacterOffset: plan.backMove)
-        for _ in 0..<plan.deleteCount {
+        textDocumentProxy.adjustTextPosition(byCharacterOffset: livePlan.backMove)
+        for _ in 0..<livePlan.deleteCount {
             textDocumentProxy.deleteBackward()
         }
-        textDocumentProxy.insertText(plan.insert)
-        textDocumentProxy.adjustTextPosition(byCharacterOffset: plan.forwardMove)
+        textDocumentProxy.insertText(livePlan.insert)
+        textDocumentProxy.adjustTextPosition(byCharacterOffset: livePlan.forwardMove)
 
         // Re-read the context to verify the correction landed; no retry.
         let verifyContext = textDocumentProxy.documentContextBeforeInput ?? ""

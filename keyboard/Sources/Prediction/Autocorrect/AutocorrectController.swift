@@ -27,6 +27,18 @@ enum AutocorrectController {
         )
     }
 
+    /// UITextChecker may accept tokens learned by the host system. Capitalized
+    /// words absent from the bundled dictionary still use it as their misspelling
+    /// gate, protecting proper nouns from first-use corrections.
+    static func isMisspelledForAutocorrect(
+        typedWord: String,
+        systemSpellCheckerReportsMisspelled: Bool,
+        isBuiltInWord: Bool
+    ) -> Bool {
+        let isCapitalized = typedWord.first?.isUppercase == true
+        return systemSpellCheckerReportsMisspelled || (!isCapitalized && !isBuiltInWord)
+    }
+
     // MARK: - Evaluation
 
     /// Evaluates whether the typed word should be auto-corrected.
@@ -35,8 +47,8 @@ enum AutocorrectController {
     ///   - typedWord: The word the user actually typed.
     ///   - origin: The origin of the current word (`.typing`, `.suggestionTap`, or `.autocorrectApplied`).
     ///   - topCorrection: The highest-scoring suggestion from the prediction engine, or `nil`.
-    ///   - isLearned: Whether the user has explicitly learned this word.
-    ///   - isMisspelled: Whether the typed word is not in the system dictionary.
+    ///   - isLearned: Whether the word is in the user's learned-word store.
+    ///   - isMisspelled: Whether the autocorrect dictionary policy treats the token as unknown.
     ///   - language: The active keyboard language (defaults to English, preserving
     ///               existing call sites). Only the case-preservation step is
     ///               language-sensitive.
@@ -72,7 +84,7 @@ enum AutocorrectController {
         // the contraction is strongly favored by context.
         let isAmbiguousContraction = topCorrection?.source == .ambiguousContraction
 
-        // User has explicitly accepted this word before.
+        // The user has explicitly or repeatedly accepted this word before.
         if !isContraction, isLearned { return .leaveAsIs }
 
         // Only correct genuinely misspelled words. This prevents "me" → "message",
@@ -140,5 +152,43 @@ enum AutocorrectController {
             return "I" + result.dropFirst()
         }
         return result
+    }
+}
+
+/// Counts committed non-dictionary words before adding them to the user's
+/// learned-word store. Counts persist across keyboard extension lifetimes.
+struct AutocorrectWordLearningTracker {
+    private static let storageKey = "autocorrectCommittedWordCounts"
+    private static let maxTrackedWords = 512
+
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    /// Returns true once this word reaches the configured commit threshold.
+    func recordCommit(of word: String) -> Bool {
+        let key = ApostropheNormalizer.canonicalize(
+            word.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        guard !key.isEmpty else { return false }
+
+        var counts = defaults.dictionary(forKey: Self.storageKey) as? [String: Int] ?? [:]
+        let nextCount = counts[key, default: 0] + 1
+        guard nextCount >= SharedConfig.Defaults.autocorrectWordLearningCommitThreshold else {
+            if counts[key] == nil,
+               counts.count >= Self.maxTrackedWords,
+               let evictedKey = counts.keys.first {
+                counts.removeValue(forKey: evictedKey)
+            }
+            counts[key] = nextCount
+            defaults.set(counts, forKey: Self.storageKey)
+            return false
+        }
+
+        counts.removeValue(forKey: key)
+        defaults.set(counts, forKey: Self.storageKey)
+        return true
     }
 }

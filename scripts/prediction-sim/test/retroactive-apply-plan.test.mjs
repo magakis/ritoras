@@ -1,6 +1,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { plan } from '../lib/retroactive-apply-plan.mjs';
+import {
+  applyVerified,
+  plan,
+  revalidatedPlan,
+} from '../lib/retroactive-apply-plan.mjs';
 
 describe('RetroactiveApplyPlan.plan (JS port)', () => {
 
@@ -43,6 +47,8 @@ describe('RetroactiveApplyPlan.plan (JS port)', () => {
         deleteCount: 3,
         insert: 'the',
         forwardMove: 3,
+        expectedText: 'teh',
+        contextAnchor: '',
       });
     });
 
@@ -52,6 +58,8 @@ describe('RetroactiveApplyPlan.plan (JS port)', () => {
         deleteCount: 7,
         insert: 'receive',
         forwardMove: 5,
+        expectedText: 'recieve',
+        contextAnchor: '',
       });
     });
 
@@ -61,6 +69,8 @@ describe('RetroactiveApplyPlan.plan (JS port)', () => {
         deleteCount: 4,
         insert: "don't",
         forwardMove: 1,
+        expectedText: 'dont',
+        contextAnchor: '',
       });
     });
 
@@ -70,6 +80,8 @@ describe('RetroactiveApplyPlan.plan (JS port)', () => {
         deleteCount: 3,
         insert: 'with',
         forwardMove: 2,
+        expectedText: 'wit',
+        contextAnchor: '',
       });
     });
 
@@ -79,6 +91,48 @@ describe('RetroactiveApplyPlan.plan (JS port)', () => {
         deleteCount: 10,
         insert: 'mice',
         forwardMove: 4,
+        expectedText: 'misspeling',
+        contextAnchor: '',
+      });
+    });
+  });
+
+  describe('live apply verification', () => {
+    it('re-resolves a shifted word location from its live context anchor', () => {
+      const p = plan('teh', 'the', 1, 'hello teh ');
+      const liveContext = 'hello teh extra ';
+      const resolved = revalidatedPlan(p, liveContext);
+
+      assert.ok(resolved);
+      assert.strictEqual(resolved.backMove, -7);
+      assert.strictEqual(resolved.deleteCount, 3);
+      assert.strictEqual(resolved.forwardMove, 7);
+      assert.deepStrictEqual(applyVerified(liveContext, liveContext.length, p), {
+        doc: 'hello the extra ',
+        cursor: 'hello the extra '.length,
+        applied: true,
+      });
+    });
+
+    it('aborts without mutation when the live text no longer matches the recorded bytes', () => {
+      const p = plan('teh', 'the', 1, 'hello teh ');
+      const doc = 'hello the extra ';
+      const result = applyVerified(doc, doc.length, p);
+
+      assert.deepStrictEqual(result, {
+        doc,
+        cursor: doc.length,
+        applied: false,
+      });
+    });
+
+    it('rejects canonically equivalent but byte-different word bodies', () => {
+      const p = plan('café', 'cafe', 1, 'café ');
+      const doc = 'cafe\u0301 ';
+      assert.deepStrictEqual(applyVerified(doc, doc.length, p), {
+        doc,
+        cursor: doc.length,
+        applied: false,
       });
     });
   });

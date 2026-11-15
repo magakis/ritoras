@@ -613,6 +613,9 @@ struct SharedConfig {
         /// UITextChecker has a ~25-char practical cap.
         static let autocorrectMaxWordLength: Int = 25
 
+        /// Commits required before an unlisted typed word is learned automatically.
+        static let autocorrectWordLearningCommitThreshold: Int = 3
+
         /// Minimum score (0.0–1.0) a suggestion must reach to be auto-applied.
         /// Apple guesses = 0.85, Apple completions = 0.6, SymSpell varies.
         /// 0.7 trusts Apple guesses + high-frequency SymSpell hits, ignores completions.
