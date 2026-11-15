@@ -545,8 +545,8 @@ final class LogStore {
 
     // MARK: - Query: Recent
 
-    /// Returns recent log lines matching the given filters, ordered by
-    /// row ID descending (newest first).
+    /// Returns matching log lines ordered by row ID descending by default,
+    /// or ascending when requested.
     func recent(limit: Int, beforeId: Int64? = nil,
                 levels: Set<LogLevel>? = nil,
                 components: Set<LogComponent>? = nil,
@@ -554,18 +554,21 @@ final class LogStore {
                 untilNs: Int64? = nil,
                 afterId: Int64? = nil,
                 search: String? = nil,
+                ascending: Bool = false,
                 cancellation: LogQueryHandle? = nil) -> [LogLine] {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
             guard cancellation?.canRunQuery ?? true else { return [] }
             return _recent(limit: limit, beforeId: beforeId, levels: levels,
                            components: components, sinceNs: sinceNs, untilNs: untilNs,
-                           afterId: afterId, search: search, cancellation: cancellation)
+                           afterId: afterId, search: search, ascending: ascending,
+                           cancellation: cancellation)
         } else {
             return queue.sync {
                 guard cancellation?.canRunQuery ?? true else { return [] }
                 return self._recent(limit: limit, beforeId: beforeId, levels: levels,
                                     components: components, sinceNs: sinceNs, untilNs: untilNs,
-                                    afterId: afterId, search: search, cancellation: cancellation)
+                                    afterId: afterId, search: search, ascending: ascending,
+                                    cancellation: cancellation)
             }
         }
     }
@@ -577,6 +580,7 @@ final class LogStore {
                          untilNs: Int64? = nil,
                          afterId: Int64? = nil,
                          search: String? = nil,
+                         ascending: Bool = false,
                          cancellation: LogQueryHandle? = nil) -> [LogLine] {
         ensureOpen()
         guard let db = db else { return [] }
@@ -624,7 +628,7 @@ final class LogStore {
             params.append(.text(sanitized))
         }
 
-        sql += " ORDER BY id DESC LIMIT ?"
+        sql += ascending ? " ORDER BY id ASC LIMIT ?" : " ORDER BY id DESC LIMIT ?"
         params.append(.int(Int32(limit)))
 
         return executeLogLineQuery(db: db, sql: sql, params: params, cancellation: cancellation)

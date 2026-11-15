@@ -89,9 +89,62 @@ private enum LevelFilter: String, CaseIterable {
 
 private enum TimeRangeFilter: String, CaseIterable {
     case fiveMin = "5m"
+    case fifteenMin = "15m"
     case oneHour = "1h"
     case all = "All"
     case custom = "Custom"
+}
+
+private enum DebugLogPageDirection {
+    case older
+    case newer
+}
+
+private struct DebugLogWindowResult {
+    let rowIDs: [Int64]
+    let evictedRowIDs: Set<Int64>
+    let newestCursor: Int64?
+    let oldestCursor: Int64?
+    let loadedCount: Int
+    let matchingTotalCount: Int
+}
+
+private enum DebugLogWindowPolicy {
+    static let maximumResidentRows = 200
+
+    static func merging(
+        loadedIDs: [Int64],
+        pageIDs: [Int64],
+        direction: DebugLogPageDirection,
+        matchingTotalCount: Int
+    ) -> DebugLogWindowResult {
+        var seenIDs = Set<Int64>()
+        let mergedIDs = (loadedIDs + pageIDs)
+            .filter { seenIDs.insert($0).inserted }
+            .sorted(by: >)
+        let residentIDs: [Int64]
+        if mergedIDs.count > maximumResidentRows {
+            switch direction {
+            case .older:
+                residentIDs = Array(mergedIDs.suffix(maximumResidentRows))
+            case .newer:
+                residentIDs = Array(mergedIDs.prefix(maximumResidentRows))
+            }
+        } else {
+            residentIDs = mergedIDs
+        }
+
+        let residentIDSet = Set(residentIDs)
+        let evictedRowIDs = Set(mergedIDs.filter { !residentIDSet.contains($0) })
+        return DebugLogWindowResult(
+            rowIDs: residentIDs,
+            evictedRowIDs: evictedRowIDs,
+            newestCursor: residentIDs.first,
+            oldestCursor: residentIDs.last,
+            loadedCount: residentIDs.count,
+            matchingTotalCount: matchingTotalCount
+        )
+    }
 }
 
 private struct CustomDateRange: Equatable {
@@ -296,8 +349,11 @@ struct DebugLogView: View {
     @State private var expandedReportID: Int? = nil
     @State private var editMode: EditMode = .inactive
     @State private var expandedKeys: Set<String> = []
+    @State private var newestLoadedId: Int64? = nil
     @State private var oldestLoadedId: Int64? = nil
     @State private var newestSeenId: Int64? = nil
+    @State private var hasNewerRows = false
+    @State private var hasOlderRows = false
     @State private var totalCount: Int = 0
     @State private var isLoadingMore = false
     @State private var showDeleteConfirmation = false
@@ -306,7 +362,8 @@ struct DebugLogView: View {
     @State private var deleteFeedbackText: String = ""
     @State private var deleteFeedbackIsError = false
     @State private var missedUpdates = false
-    @State private var cachedShareText: String = ""
+    @State private var shareSheetText: String?
+    @State private var isShareSheetPresented = false
     @State private var refreshGeneration = 0
     @State private var isLoading = false
     @State private var isViewVisible = false
@@ -396,6 +453,13 @@ struct DebugLogView: View {
                 ActivityShareSheet(items: [url])
             }
         }
+        .sheet(isPresented: $isShareSheetPresented, onDismiss: {
+            shareSheetText = nil
+        }) {
+            if let shareSheetText {
+                ActivityShareSheet(items: [shareSheetText])
+            }
+        }
         .onChange(of: searchText) { _, _ in refresh() }
         .onChange(of: selectedFilter) { _, _ in refresh() }
         .onChange(of: selectedComponents) { _, _ in refresh() }
@@ -414,15 +478,11 @@ struct DebugLogView: View {
         .onChange(of: customDateRange) { _, _ in
             if timeRange == .custom { refresh() }
         }
-        .onChange(of: scrubPII) { _, _ in
-            updateShareText()
-        }
         .onChange(of: expandedKeys) { _, newKeys in
             if newKeys.isEmpty { refreshGuard() }
         }
         .onChange(of: selectedIDs) { _, newIDs in
             if newIDs.isEmpty { refreshGuard() }
-            updateShareText()
         }
         .onChange(of: expandedReportID) { _, newValue in
             if newValue == nil { refreshGuard() }
@@ -631,7 +691,15 @@ struct DebugLogView: View {
                 }
             } else {
                 logLinesList
-                if lines.count < totalCount {
+                if !lines.isEmpty {
+                    Text("Loaded \(lines.count) in the window · \(totalCount) matching logs total")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                }
+                if hasOlderRows {
                     ProgressView()
                         .frame(maxWidth: .infinity)
                         .listRowSeparator(.hidden)
@@ -771,6 +839,9 @@ struct DebugLogView: View {
                 }
             }
             logLineRow(line)
+                .onAppear {
+                    if idx == 0 { loadNewer() }
+                }
         }
     }
 
@@ -832,7 +903,7 @@ struct DebugLogView: View {
     }
 
     private var shareButton: some View {
-        ShareLink(item: cachedShareText) {
+        Button(action: presentLogShareSheet) {
             Image(systemName: "square.and.arrow.up")
         }
     }
@@ -893,10 +964,12 @@ struct DebugLogView: View {
         crashReports = []
         selectedIDs = []
         expandedKeys = []
+        newestLoadedId = nil
         newestSeenId = nil
         oldestLoadedId = nil
+        hasNewerRows = false
+        hasOlderRows = false
         totalCount = 0
-        cachedShareText = ""
         isLoading = false
         isLoadingMore = false
     }
@@ -926,7 +999,6 @@ struct DebugLogView: View {
         let components = componentsForQuery(componentSelection)
         let bounds = timeRangeToBounds()
         let search = searchText.isEmpty ? nil : searchText
-        let piiScrub = scrubPII
 
         let handle = beginQuery()
         refreshGeneration += 1
@@ -976,9 +1048,6 @@ struct DebugLogView: View {
             let newDiagnostics = diagnosticsQuery.value
             let newCrashReports = MetricKitSubscriber.loadReports()
 
-            let rawText = newLines.map(\.raw).joined(separator: "\n")
-            let newShareText = piiScrub ? LogScrubber.scrub(rawText) : rawText
-
             DispatchQueue.main.async {
                 guard activeQueryHandle === handle,
                       !handle.isCancelled,
@@ -991,21 +1060,62 @@ struct DebugLogView: View {
                     return
                 }
                 activeQueryHandle = nil
-                lines = newLines
-                newestSeenId = newLines.first?.rowId
-                oldestLoadedId = newLines.last?.rowId
-                totalCount = newCount
+                let window = applyLogPage(
+                    newLines,
+                    direction: .newer,
+                    replacingCurrentWindow: true,
+                    matchingTotalCount: newCount
+                )
+                newestSeenId = window.newestCursor
+                hasNewerRows = false
+                hasOlderRows = newCount > window.loadedCount
                 diagnostics = newDiagnostics
                 crashReports = newCrashReports
-                cachedShareText = newShareText
                 isLoading = false
             }
         }
     }
 
-    private func updateShareText() {
+    private func presentLogShareSheet() {
         let rawText = selectedOrFilteredLines.map(\.raw).joined(separator: "\n")
-        cachedShareText = scrubPII ? LogScrubber.scrub(rawText) : rawText
+        shareSheetText = scrubPII ? LogScrubber.scrub(rawText) : rawText
+        isShareSheetPresented = true
+    }
+
+    private func applyLogPage(
+        _ page: [LogLine],
+        direction: DebugLogPageDirection,
+        replacingCurrentWindow: Bool = false,
+        matchingTotalCount: Int? = nil
+    ) -> DebugLogWindowResult {
+        let loadedLines = replacingCurrentWindow ? [] : lines
+        let result = DebugLogWindowPolicy.merging(
+            loadedIDs: loadedLines.compactMap(\.rowId),
+            pageIDs: page.compactMap(\.rowId),
+            direction: direction,
+            matchingTotalCount: matchingTotalCount ?? totalCount
+        )
+        let residentIDSet = Set(result.rowIDs)
+        let evictedLines = lines.filter {
+            guard let rowId = $0.rowId else { return false }
+            return !residentIDSet.contains(rowId)
+        }
+        for line in evictedLines {
+            selectedIDs.remove(line.id)
+            expandedKeys.remove(line.raw)
+        }
+
+        var linesByRowID: [Int64: LogLine] = [:]
+        for line in loadedLines + page {
+            if let rowId = line.rowId {
+                linesByRowID[rowId] = line
+            }
+        }
+        lines = result.rowIDs.compactMap { linesByRowID[$0] }
+        newestLoadedId = result.newestCursor
+        oldestLoadedId = result.oldestCursor
+        totalCount = result.matchingTotalCount
+        return result
     }
 
     @MainActor
@@ -1347,6 +1457,7 @@ struct DebugLogView: View {
     // MARK: - Pagination
 
     private func loadMore() {
+        guard hasOlderRows else { return }
         let componentSelection = selectedComponents
         guard !componentSelection.isEmpty else {
             clearFilteredLogResults()
@@ -1363,7 +1474,6 @@ struct DebugLogView: View {
         let components = componentsForQuery(componentSelection)
         let bounds = timeRangeToBounds()
         let search = searchText.isEmpty ? nil : searchText
-        let piiScrub = scrubPII
         let gen = refreshGeneration
         let handle = beginQuery()
 
@@ -1392,6 +1502,7 @@ struct DebugLogView: View {
                     guard activeQueryHandle === handle else { return }
                     activeQueryHandle = nil
                     isLoadingMore = false
+                    hasOlderRows = false
                 }
                 return
             }
@@ -1409,11 +1520,82 @@ struct DebugLogView: View {
                 }
                 activeQueryHandle = nil
                 isLoadingMore = false
-                lines.append(contentsOf: more)
-                oldestLoadedId = more.last?.rowId
+                let window = applyLogPage(more, direction: .older)
+                hasOlderRows = more.count == pageSize
+                hasNewerRows = hasNewerRows || !window.evictedRowIDs.isEmpty
+            }
+        }
+    }
 
-                let rawText = lines.map(\.raw).joined(separator: "\n")
-                cachedShareText = piiScrub ? LogScrubber.scrub(rawText) : rawText
+    private func loadNewer() {
+        guard hasNewerRows else { return }
+        guard !isLoadingMore, !isLoading else { return }
+        guard let after = newestLoadedId else { return }
+
+        let componentSelection = selectedComponents
+        guard !componentSelection.isEmpty else {
+            clearFilteredLogResults()
+            return
+        }
+        isLoadingMore = true
+        let levels = levelFilterToSet()
+        let components = componentsForQuery(componentSelection)
+        let bounds = timeRangeToBounds()
+        let search = searchText.isEmpty ? nil : searchText
+        let gen = refreshGeneration
+        let handle = beginQuery()
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { handle.finish() }
+
+            let pageQuery = measureDebugLogQuery(
+                action: "load_newer_page",
+                includesFootprintDelta: true
+            ) {
+                LogStore.shared.recent(
+                    limit: pageSize,
+                    levels: levels,
+                    components: components,
+                    sinceNs: bounds.sinceNs,
+                    untilNs: bounds.untilNs,
+                    afterId: after,
+                    search: search,
+                    ascending: true,
+                    cancellation: handle)
+            }
+            let more = pageQuery.value
+            logDebugLogQueryPerformance(pageQuery.performance)
+            guard !handle.isCancelled else { return }
+
+            guard !more.isEmpty else {
+                DispatchQueue.main.async {
+                    guard activeQueryHandle === handle else { return }
+                    activeQueryHandle = nil
+                    isLoadingMore = false
+                    hasNewerRows = false
+                }
+                return
+            }
+
+            DispatchQueue.main.async {
+                guard activeQueryHandle === handle,
+                      !handle.isCancelled,
+                      isViewVisible,
+                      gen == refreshGeneration else {
+                    if activeQueryHandle === handle {
+                        activeQueryHandle = nil
+                        isLoadingMore = false
+                    }
+                    return
+                }
+                activeQueryHandle = nil
+                isLoadingMore = false
+                let window = applyLogPage(more, direction: .newer)
+                if let newestId = more.last?.rowId {
+                    newestSeenId = max(newestSeenId ?? newestId, newestId)
+                }
+                hasNewerRows = more.count == pageSize
+                hasOlderRows = hasOlderRows || !window.evictedRowIDs.isEmpty
             }
         }
     }
@@ -1429,7 +1611,6 @@ struct DebugLogView: View {
         let components = componentsForQuery(componentSelection)
         let bounds = timeRangeToBounds()
         let search = searchText.isEmpty ? nil : searchText
-        let piiScrub = scrubPII
 
         let handle = beginQuery()
         refreshGeneration += 1
@@ -1450,6 +1631,7 @@ struct DebugLogView: View {
                     untilNs: bounds.untilNs,
                     afterId: newest,
                     search: search,
+                    ascending: true,
                     cancellation: handle)
             }
             let newer = recentQuery.value
@@ -1488,14 +1670,16 @@ struct DebugLogView: View {
 
                 guard !newer.isEmpty else { return }
 
-                lines.insert(contentsOf: newer, at: 0)
-                newestSeenId = newer.first?.rowId
-                if let newCount = newCount {
-                    totalCount = newCount
+                let window = applyLogPage(
+                    newer,
+                    direction: .newer,
+                    matchingTotalCount: newCount
+                )
+                if let newestId = newer.last?.rowId {
+                    newestSeenId = max(newestSeenId ?? newestId, newestId)
                 }
-
-                let rawText = lines.map(\.raw).joined(separator: "\n")
-                cachedShareText = piiScrub ? LogScrubber.scrub(rawText) : rawText
+                hasNewerRows = hasNewerRows || newer.count == pageSize
+                hasOlderRows = hasOlderRows || !window.evictedRowIDs.isEmpty
             }
         }
     }
@@ -1517,10 +1701,12 @@ struct DebugLogView: View {
         cancelActiveQuery()
         refreshGeneration += 1
         lines = []
+        newestLoadedId = nil
         newestSeenId = nil
         oldestLoadedId = nil
+        hasNewerRows = false
+        hasOlderRows = false
         totalCount = 0
-        cachedShareText = ""
         isLoading = false
         isLoadingMore = false
     }
@@ -1529,6 +1715,8 @@ struct DebugLogView: View {
         switch timeRange {
         case .fiveMin:
             return (Int64((Date().timeIntervalSince1970 - 300) * 1_000_000_000), nil)
+        case .fifteenMin:
+            return (Int64((Date().timeIntervalSince1970 - 900) * 1_000_000_000), nil)
         case .oneHour:
             return (Int64((Date().timeIntervalSince1970 - 3600) * 1_000_000_000), nil)
         case .all:
