@@ -11,6 +11,8 @@ final class KeyboardLogShipper {
     private let queue = DispatchQueue(label: "com.ritoras.log-shipper")
     private var buffer: [LogShipmentEntry] = []
     private let maxBuffer = 100
+    // Reserve 4 KiB for HTTP framing under the server's 64 KiB request cap.
+    private let maximumRequestBodyBytes = 60 * 1024
     private var timer: DispatchSourceTimer?
 
     func start() {
@@ -50,7 +52,49 @@ final class KeyboardLogShipper {
         guard !buffer.isEmpty else { return }
         let batch = buffer
         buffer.removeAll()
+        let chunks = makeChunks(from: batch)
+        guard !chunks.isEmpty else { return }
         // Ship asynchronously — don't block the queue
-        Task { await LocalhostClient.postLogs(batch) }
+        Task {
+            for chunk in chunks {
+                await LocalhostClient.postLogs(chunk)
+            }
+        }
+    }
+
+    private func makeChunks(from entries: [LogShipmentEntry]) -> [[LogShipmentEntry]] {
+        var chunks: [[LogShipmentEntry]] = []
+        var currentChunk: [LogShipmentEntry] = []
+
+        for entry in entries {
+            let candidate = currentChunk + [entry]
+            if let bodyByteCount = requestBodyByteCount(for: candidate),
+               bodyByteCount <= maximumRequestBodyBytes {
+                currentChunk = candidate
+                continue
+            }
+
+            if !currentChunk.isEmpty {
+                chunks.append(currentChunk)
+                currentChunk.removeAll(keepingCapacity: true)
+            }
+
+            // Drop entries we cannot size below budget rather than risk an oversized request.
+            if let bodyByteCount = requestBodyByteCount(for: [entry]),
+               bodyByteCount <= maximumRequestBodyBytes {
+                currentChunk.append(entry)
+            }
+        }
+
+        if !currentChunk.isEmpty {
+            chunks.append(currentChunk)
+        }
+        return chunks
+    }
+
+    private func requestBodyByteCount(for entries: [LogShipmentEntry]) -> Int? {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return try? encoder.encode(["entries": entries]).count
     }
 }

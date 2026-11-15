@@ -480,11 +480,6 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        loadDeliveryState()
-        FileLogger.shared.debug(.lifecycle, "boot baseline",
-            payload: ["launchId": KeyboardViewController.processLaunchId,
-                      "footprint": MemoryMonitor.currentFootprint()])
-
         // Wire FileLogger broadcast to ship logs to container app via localhost.
         // Set before any log calls so we capture everything from the start.
         FileLogger.broadcast = { level, component, message, payload in
@@ -492,6 +487,11 @@ class KeyboardViewController: UIInputViewController {
             KeyboardLogShipper.shared.append(entry)
         }
         KeyboardLogShipper.shared.start()
+
+        loadDeliveryState()
+        FileLogger.shared.debug(.lifecycle, "boot baseline",
+            payload: ["launchId": KeyboardViewController.processLaunchId,
+                      "footprint": MemoryMonitor.currentFootprint()])
 
         // Log the resolved app-group identifier via FileLogger (post-resolution, safe to use FileLogger now).
         FileLogger.shared.debug(.keyboard, "AppGroupResolver outcome", payload: [

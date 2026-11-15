@@ -158,7 +158,12 @@ final class FileLogger {
 
     private func writeLog(_ level: LogLevel, _ component: LogComponent,
                           _ message: String, payload: [String: Any]?, durable: Bool) {
-        if level == .debug, !verboseLoggingEnabled { return }
+        if level == .debug, !verboseLoggingEnabled {
+            if Self.isKeyboardExtension {
+                Self.broadcast?(level, component, message, payload)
+            }
+            return
+        }
         let ts = dateFormatter.string(from: Date())
 
         var dict: [String: Any] = [
