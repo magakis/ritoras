@@ -42,14 +42,8 @@ enum AudioSession {
     /// `AVAudioRecorder` / start the engine. Activating the session before the
     /// recorder is configured can trigger
     /// `AVAudioSessionErrorCodeCannotStartRecording` (OSStatus 561145187).
-    ///
-    /// - Note: 16 kHz can engage a lower-gain hardware capture path. It is only
-    /// requested when the experimental capture-attenuation setting is enabled;
-    /// the preference is applied before activation and may take effect on the
-    /// next activation if the session is already active.
     static func configure() throws {
         let mode: AVAudioSession.Mode = SharedConfig.audioMeasurementModeEnabled() ? .measurement : .default
-        let captureAttenuationEnabled = SharedConfig.audioCaptureAttenuationEnabled()
         try Self.queue.sync {
             Self.generation &+= 1
             Self.waitForTeardownIfNeeded()
@@ -59,7 +53,6 @@ enum AudioSession {
             ])
             try Self.activateWithRetry {
                 try session.setCategory(.record, mode: mode)
-                try session.setPreferredSampleRate(captureAttenuationEnabled ? 16_000 : 0)
                 try session.setActive(true, options: .notifyOthersOnDeactivation)
             }
             FileLogger.shared.info(.audio, "session configured", payload: [

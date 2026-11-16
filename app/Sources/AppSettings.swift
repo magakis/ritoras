@@ -82,7 +82,6 @@ class AppSettings: ObservableObject {
     @Published var serverVocabularySuggestionsEnabled: Bool = SharedConfig.Defaults.serverVocabularySuggestionsEnabledDefault
     @Published var serverPredictionSuggestionsEnabled: Bool = SharedConfig.Defaults.serverPredictionSuggestionsEnabledDefault
     @Published var audioMeasurementModeEnabled: Bool = SharedConfig.Defaults.audioMeasurementModeEnabledDefault
-    @Published var audioCaptureAttenuationEnabled: Bool = SharedConfig.Defaults.audioCaptureAttenuationEnabledDefault
 
     @Published var chunkSplitterMode: VADMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
     @Published var chunkSplitterVADSource: VADSource = .dsp
@@ -136,7 +135,6 @@ class AppSettings: ObservableObject {
         serverVocabularySuggestionsEnabled = SharedConfig.serverVocabularySuggestionsEnabled()
         serverPredictionSuggestionsEnabled = SharedConfig.serverPredictionSuggestionsEnabled()
         audioMeasurementModeEnabled = SharedConfig.audioMeasurementModeEnabled()
-        audioCaptureAttenuationEnabled = SharedConfig.audioCaptureAttenuationEnabled()
         chunkSplitterMode = SharedConfig.streamVadMode()
         chunkSplitterVADSource = SharedConfig.vadSource()
         trimTrailingSilenceOnStopEnabled = SharedConfig.trimTrailingSilenceOnStopEnabled()
@@ -233,9 +231,6 @@ class AppSettings: ObservableObject {
         }.store(in: &cancellables)
         $audioMeasurementModeEnabled.dropFirst().sink { [weak self] value in
             self?.saveAudioMeasurementModeEnabled(value)
-        }.store(in: &cancellables)
-        $audioCaptureAttenuationEnabled.dropFirst().sink { [weak self] value in
-            self?.saveAudioCaptureAttenuationEnabled(value)
         }.store(in: &cancellables)
         $chunkSplitterMode.dropFirst().sink { [weak self] newValue in
             FileLogger.shared.info(.settings, "saving chunk splitter mode",
@@ -434,7 +429,6 @@ class AppSettings: ObservableObject {
         appGroupDefaults?.set(serverVocabularySuggestionsEnabled, forKey: SharedConfig.Defaults.serverVocabularySuggestionsEnabledKey)
         appGroupDefaults?.set(serverPredictionSuggestionsEnabled, forKey: SharedConfig.Defaults.serverPredictionSuggestionsEnabledKey)
         saveAudioMeasurementModeEnabled(audioMeasurementModeEnabled)
-        saveAudioCaptureAttenuationEnabled(audioCaptureAttenuationEnabled)
         appGroupDefaults?.set(chunkSplitterMode.rawValue, forKey: SharedConfig.Defaults.streamVadModeKey)
         appGroupDefaults?.set(chunkSplitterVADSource.rawValue, forKey: SharedConfig.Defaults.vadSourceKey)
         appGroupDefaults?.set(
@@ -565,11 +559,6 @@ class AppSettings: ObservableObject {
 
     private func saveAudioMeasurementModeEnabled(_ enabled: Bool) {
         appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.audioMeasurementModeEnabledKey)
-        postSettingsChanged()
-    }
-
-    private func saveAudioCaptureAttenuationEnabled(_ enabled: Bool) {
-        appGroupDefaults?.set(enabled, forKey: SharedConfig.Defaults.audioCaptureAttenuationEnabledKey)
         postSettingsChanged()
     }
 
@@ -721,7 +710,6 @@ class AppSettings: ObservableObject {
         serverVocabularySuggestionsEnabled = SharedConfig.Defaults.serverVocabularySuggestionsEnabledDefault
         serverPredictionSuggestionsEnabled = SharedConfig.Defaults.serverPredictionSuggestionsEnabledDefault
         audioMeasurementModeEnabled = SharedConfig.Defaults.audioMeasurementModeEnabledDefault
-        audioCaptureAttenuationEnabled = SharedConfig.Defaults.audioCaptureAttenuationEnabledDefault
         chunkSplitterMode = VADMode(rawValue: SharedConfig.Defaults.streamVadModeDefault) ?? .adaptive
         chunkSplitterVADSource = VADSource(rawValue: SharedConfig.Defaults.vadSourceDefault) ?? .dsp
         trimTrailingSilenceOnStopEnabled =

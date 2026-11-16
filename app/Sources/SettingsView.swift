@@ -271,11 +271,10 @@ struct SettingsView: View {
     private var audioSection: some View {
         Section {
             Toggle("Measurement Mode", isOn: $settings.audioMeasurementModeEnabled)
-            Toggle("Capture Attenuation (Experimental)", isOn: $settings.audioCaptureAttenuationEnabled)
         } header: {
             Text("Audio")
         } footer: {
-            Text("Measurement Mode minimizes iOS microphone processing and automatic gain control for cleaner Standard-mode capture. Experimental attenuation requests a 16 kHz hardware capture path, which may reduce input level; it takes effect when the audio session next activates.")
+            Text("Measurement Mode minimizes iOS microphone processing and automatic gain control for cleaner Standard-mode capture.")
         }
     }
 

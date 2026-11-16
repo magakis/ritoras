@@ -342,8 +342,6 @@ struct SharedConfig {
 
         static let audioMeasurementModeEnabledKey = "audioMeasurementModeEnabled"
         static let audioMeasurementModeEnabledDefault = true
-        static let audioCaptureAttenuationEnabledKey = "audioCaptureAttenuationEnabled"
-        static let audioCaptureAttenuationEnabledDefault = false
         static let streamVadTelemetryEnabledKey = "streamVadTelemetryEnabled"
         static let streamVadTelemetryEnabledDefault = false
         static let fullRecordingUploadEnabledKey = "fullRecordingUploadEnabled"
@@ -1609,14 +1607,6 @@ struct SharedConfig {
         }
         return (defaults.object(forKey: Defaults.audioMeasurementModeEnabledKey) as? Bool)
             ?? Defaults.audioMeasurementModeEnabledDefault
-    }
-
-    static func audioCaptureAttenuationEnabled() -> Bool {
-        guard let defaults = UserDefaults(suiteName: Defaults.appGroupId) else {
-            return Defaults.audioCaptureAttenuationEnabledDefault
-        }
-        return (defaults.object(forKey: Defaults.audioCaptureAttenuationEnabledKey) as? Bool)
-            ?? Defaults.audioCaptureAttenuationEnabledDefault
     }
 
     /// Reads the chunk splitter telemetry kill switch from the App Group.
