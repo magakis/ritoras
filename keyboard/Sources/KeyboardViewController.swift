@@ -862,6 +862,10 @@ class KeyboardViewController: UIInputViewController {
             panel.onLLMCleanupPreferencesChange = { preferences in
                 SharedConfig.setLLMCleanupPreferences(preferences)
             }
+            panel.onTraceExport = { [weak self, weak panel] in
+                guard let self, let panel else { return }
+                self.beginTraceExport(on: panel)
+            }
         }
     }
 
@@ -942,6 +946,52 @@ class KeyboardViewController: UIInputViewController {
             vadSilenceFilteringEnabled: SharedConfig.vadSilenceFilteringEnabled(),
             cleanupPreferences: SharedConfig.llmCleanupPreferences()
         )
+    }
+
+    private func beginTraceExport(on panel: KeyboardSettingsPanel) {
+        panel.setTraceExportInProgress(true)
+        KeyboardKeystrokeTraceExporter.prepareLastFiveMinutes { [weak self, weak panel] result in
+            guard let self, let panel else { return }
+            panel.setTraceExportInProgress(false)
+
+            switch result {
+            case .failure:
+                panel.showTraceExportFeedback("Could not read the trace. Try again.")
+            case let .success(export):
+                guard export.recordCount > 0 else {
+                    panel.showTraceExportFeedback("No trace records were found in the last five minutes.")
+                    return
+                }
+
+                let pasteboard = UIPasteboard.general
+                let previousChangeCount = pasteboard.changeCount
+                pasteboard.string = export.contents
+                guard pasteboard.changeCount != previousChangeCount else {
+                    panel.showTraceExportFeedback("The clipboard did not confirm the copy. Try again.")
+                    return
+                }
+
+                panel.showTraceExportFeedback(traceExportSuccessMessage(for: export))
+            }
+        }
+    }
+
+    private func traceExportSuccessMessage(for export: KeystrokeTraceWindowExport) -> String {
+        let recordLabel = export.recordCount == 1 ? "record" : "records"
+        guard !export.hasFullWindowCoverage,
+              let oldestRetainedTimestamp = export.oldestRetainedTimestamp else {
+            return "Copied \(export.recordCount) trace \(recordLabel) from the last five minutes."
+        }
+
+        let timestampFormatter = ISO8601DateFormatter()
+        timestampFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let oldestTimestamp = timestampFormatter.string(from: oldestRetainedTimestamp)
+        let capturedAtTimestamp = timestampFormatter.string(from: export.capturedAt)
+        let coveredSeconds = Int(export.coverageDuration.rounded(.down))
+        let duration = coveredSeconds >= 60
+            ? "\(coveredSeconds / 60) min \(coveredSeconds % 60) sec"
+            : "\(coveredSeconds) sec"
+        return "Copied \(export.recordCount) trace \(recordLabel). Coverage: \(duration), from \(oldestTimestamp) to \(capturedAtTimestamp) (less than five minutes)."
     }
 
     // MARK: - Dictation via Container App

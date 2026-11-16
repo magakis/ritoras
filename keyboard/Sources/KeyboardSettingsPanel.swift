@@ -7,10 +7,13 @@ final class KeyboardSettingsPanel: UIView {
     var onTrimTrailingSilenceOnStopChange: ((Bool) -> Void)?
     var onVADSilenceFilteringChange: ((Bool) -> Void)?
     var onLLMCleanupPreferencesChange: ((LLMCleanupPreferences) -> Void)?
+    var onTraceExport: (() -> Void)?
 
     private let backdrop = UIView()
     private let card = UIView()
     private let scrollView = UIScrollView()
+    private let traceExportButton = UIButton(type: .system)
+    private let traceExportStatusLabel = UILabel()
     private let stylingControl = UIButton(type: .system)
     private let structureControl = UIButton(type: .system)
     private let contextControl = UIButton(type: .system)
@@ -155,6 +158,19 @@ final class KeyboardSettingsPanel: UIView {
         contentStack.addArrangedSubview(makeCleanupRow(title: "Structure", control: structureControl))
         contentStack.addArrangedSubview(makeCleanupRow(title: "Context", control: contextControl))
 
+        traceExportButton.setTitle("Export trace", for: .normal)
+        traceExportButton.contentHorizontalAlignment = .leading
+        traceExportButton.accessibilityLabel = "Export trace"
+        traceExportButton.accessibilityHint = "Copies the last five minutes of keyboard trace records to the clipboard."
+        traceExportButton.addTarget(self, action: #selector(traceExportTapped), for: .touchUpInside)
+        contentStack.addArrangedSubview(traceExportButton)
+
+        traceExportStatusLabel.font = .systemFont(ofSize: 12)
+        traceExportStatusLabel.textColor = .secondaryLabel
+        traceExportStatusLabel.numberOfLines = 0
+        traceExportStatusLabel.isHidden = true
+        contentStack.addArrangedSubview(traceExportStatusLabel)
+
         let panelStack = UIStackView(arrangedSubviews: [header, scrollView])
         panelStack.axis = .vertical
         panelStack.alignment = .fill
@@ -216,6 +232,31 @@ final class KeyboardSettingsPanel: UIView {
         alpha = 0
         UIView.animate(withDuration: 0.12, delay: 0, options: .beginFromCurrentState) {
             self.alpha = 1
+        }
+    }
+
+    func setTraceExportInProgress(_ isExporting: Bool) {
+        traceExportButton.isEnabled = !isExporting
+        traceExportButton.setTitle(isExporting ? "Exporting…" : "Export trace", for: .normal)
+        traceExportButton.accessibilityValue = isExporting ? "Export in progress" : nil
+
+        guard isExporting else { return }
+        showTraceExportFeedback("Reading recent trace records…", announce: false)
+        UIAccessibility.post(
+            notification: .announcement,
+            argument: "Reading recent trace records"
+        )
+    }
+
+    func showTraceExportFeedback(_ message: String) {
+        showTraceExportFeedback(message, announce: true)
+    }
+
+    private func showTraceExportFeedback(_ message: String, announce: Bool) {
+        traceExportStatusLabel.text = message
+        traceExportStatusLabel.isHidden = false
+        if announce {
+            UIAccessibility.post(notification: .announcement, argument: message)
         }
     }
 
@@ -366,6 +407,10 @@ final class KeyboardSettingsPanel: UIView {
 
     @objc private func vadSilenceFilteringChanged() {
         onVADSilenceFilteringChange?(vadSilenceFilteringSwitch.isOn)
+    }
+
+    @objc private func traceExportTapped() {
+        onTraceExport?()
     }
 
     @objc private func closeTapped() {
