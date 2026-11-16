@@ -418,8 +418,9 @@ struct RawLogFileView: View {
             }
 
             Text(
-                "Tracing is off by default. Long-press the keyboard’s settings key to toggle it. " +
-                    "Traces arrive while this app is open."
+                "Keystroke tracing is always on at full depth. Tap Export trace in the keyboard’s " +
+                    "settings panel to copy up to the last ~5 minutes. Traces arrive here while " +
+                    "this app is open."
             )
             .font(.caption)
             .foregroundColor(.secondary)
