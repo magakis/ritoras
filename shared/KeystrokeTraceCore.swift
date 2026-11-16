@@ -405,9 +405,8 @@ public struct KeystrokeTraceSegmentRoll: Equatable {
     public let totalBytesAfterRoll: Int
 }
 
-/// Result of the cheap gated append operation.
+/// Result of the bounded append operation.
 public enum KeystrokeTraceAppendResult: Equatable {
-    case disabled
     case appended(
         encodedByteCount: Int,
         evictedByteCount: Int,
@@ -472,15 +471,6 @@ private final class KeystrokeTraceByteRing {
         return evictedByteCount
     }
 
-    func firstLineData() -> Data? {
-        guard let lineLength = firstLineLength() else { return nil }
-        var line = Data(capacity: lineLength)
-        for offset in 0..<lineLength {
-            line.append(byte(at: offset))
-        }
-        return line
-    }
-
     func discardFirstLine() -> Int {
         guard let lineLength = firstLineLength() else { return 0 }
         for offset in 0..<lineLength {
@@ -489,6 +479,16 @@ private final class KeystrokeTraceByteRing {
         readIndex = (readIndex + lineLength) % capacity
         byteCount -= lineLength
         return lineLength
+    }
+
+    func drain() -> Data? {
+        guard byteCount > 0 else { return nil }
+        var data = Data(capacity: byteCount)
+        for offset in 0..<byteCount {
+            data.append(byte(at: offset))
+        }
+        clear()
+        return data
     }
 
     func clear() {
@@ -725,20 +725,23 @@ private final class KeystrokeTraceSegmentStore {
     }
 }
 
-/// Stateful recorder with a preallocated ring and no per-event retained objects.
+/// Stateful recorder with a bounded ring and no per-event retained objects.
 ///
-/// The ring is allocated when enabled, accepted records retain only encoded bytes, and disk
-/// copies are made only at explicit flush boundaries. Serialize calls on one owner so the
-/// `isEnabled` gate remains lock-free.
-public final class KeystrokeTraceRecorder {
-    /// Lock-free capture gate; check before constructing per-event payloads.
-    public private(set) var isEnabled = false
+/// Ring access is locked only while copying or appending bytes. Flushes hand a
+/// bounded batch to the caller before doing segment I/O, so a capture append
+/// never waits for a disk write. The caller serializes segment-store operations.
+public final class KeystrokeTraceRecorder: @unchecked Sendable {
 
     private let ringCapacityBytes: Int
     private let segmentStore: KeystrokeTraceSegmentStore
     private let encoder: JSONEncoder
     private let dateFormatter: ISO8601DateFormatter
+    private let flushEncoder: JSONEncoder
+    private let flushDateFormatter: ISO8601DateFormatter
+    private let ringLock = NSLock()
     private var ring: KeystrokeTraceByteRing?
+    private var pendingFlushBatch: Data?
+    private var pendingFlushOffset = 0
 
     /// Called once after each successful segment roll; the core never logs.
     public var onSegmentRoll: ((KeystrokeTraceSegmentRoll) -> Void)? {
@@ -748,12 +751,17 @@ public final class KeystrokeTraceRecorder {
 
     /// Number of bytes currently buffered but not yet written to disk.
     public var unflushedByteCount: Int {
-        ring?.byteCount ?? 0
+        ringLock.lock()
+        defer { ringLock.unlock() }
+        let pendingBatchByteCount = (pendingFlushBatch?.count ?? 0) - pendingFlushOffset
+        return (ring?.byteCount ?? 0) + pendingBatchByteCount
     }
 
     /// Indicates that the keyboard may request a high-water flush.
     public var shouldFlushAtHighWaterMark: Bool {
-        ring?.shouldFlushAtHighWaterMark ?? false
+        ringLock.lock()
+        defer { ringLock.unlock() }
+        return ring?.shouldFlushAtHighWaterMark ?? false
     }
 
     /// URL of the active trace segment.
@@ -786,49 +794,55 @@ public final class KeystrokeTraceRecorder {
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         dateFormatter = ISO8601DateFormatter()
         dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        flushEncoder = JSONEncoder()
+        flushEncoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        flushDateFormatter = ISO8601DateFormatter()
+        flushDateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     }
 
-    /// Enables capture and preallocates the ring; disabling drops pending data without writing.
-    public func setEnabled(_ enabled: Bool) throws {
-        if enabled {
-            if ring == nil {
-                ring = KeystrokeTraceByteRing(capacity: ringCapacityBytes)
-            }
-            isEnabled = true
-            return
+    /// Preallocates the bounded ring before the keyboard accepts user input.
+    public func prepareForCapture() {
+        ringLock.lock()
+        defer { ringLock.unlock() }
+        if ring == nil {
+            ring = KeystrokeTraceByteRing(capacity: ringCapacityBytes)
         }
-
-        guard isEnabled else { return }
-        isEnabled = false
-        ring?.clear()
-        ring = nil
     }
 
-    /// Encodes one event when enabled; callers should check `isEnabled` before constructing it.
+    /// Encodes one event and appends only its bytes to the in-memory ring.
     @discardableResult
     public func append(
         _ event: KeystrokeTraceEvent,
         timestamp: Date? = nil
     ) throws -> KeystrokeTraceAppendResult {
-        guard isEnabled, let ring else { return .disabled }
         let record = KeystrokeTraceRecord(
             timestamp: dateFormatter.string(from: timestamp ?? Date()),
             event: event
         )
         let encodedRecord = try encoder.encode(record)
         let encodedByteCount = encodedRecord.count + 1
-        guard encodedByteCount <= ring.capacity else {
+        guard encodedByteCount <= ringCapacityBytes else {
             return .eventExceedsRingCapacity(
                 encodedByteCount: encodedByteCount,
-                capacity: ring.capacity
+                capacity: ringCapacityBytes
             )
         }
 
-        let evictedByteCount = ring.append(encodedRecord)
+        ringLock.lock()
+        defer { ringLock.unlock() }
+        let activeRing: KeystrokeTraceByteRing
+        if let ring {
+            activeRing = ring
+        } else {
+            let newRing = KeystrokeTraceByteRing(capacity: ringCapacityBytes)
+            ring = newRing
+            activeRing = newRing
+        }
+        let evictedByteCount = activeRing.append(encodedRecord)
         return .appended(
             encodedByteCount: encodedByteCount,
             evictedByteCount: evictedByteCount,
-            shouldFlushAtHighWaterMark: ring.shouldFlushAtHighWaterMark
+            shouldFlushAtHighWaterMark: activeRing.shouldFlushAtHighWaterMark
         )
     }
 
@@ -837,29 +851,51 @@ public final class KeystrokeTraceRecorder {
     public func flush(
         at boundary: KeystrokeTraceFlushBoundary
     ) throws -> KeystrokeTraceFlushResult {
-        guard let ring else {
+        ringLock.lock()
+        if pendingFlushBatch == nil {
+            pendingFlushBatch = ring?.drain()
+            pendingFlushOffset = 0
+        }
+        let batch = pendingFlushBatch
+        var byteOffset = pendingFlushOffset
+        ringLock.unlock()
+
+        guard let batch else {
             return KeystrokeTraceFlushResult(
                 boundary: boundary,
                 bytesWritten: 0,
                 eventsWritten: 0,
-                remainingByteCount: 0
+                remainingByteCount: unflushedByteCount
             )
         }
 
         var bytesWritten = 0
         var eventsWritten = 0
         var pendingSegmentRolls: [KeystrokeTraceSegmentRoll] = []
-        while true {
-            while let line = ring.firstLineData() {
-                if let segmentRoll = try segmentStore.append(line) {
-                    pendingSegmentRolls.append(segmentRoll)
-                }
-                let lineByteCount = ring.discardFirstLine()
-                bytesWritten += lineByteCount
-                eventsWritten += 1
+        while byteOffset < batch.endIndex {
+            guard let lineFeedIndex = batch[byteOffset..<batch.endIndex].firstIndex(of: 0x0A),
+                  lineFeedIndex > byteOffset else {
+                throw KeystrokeTraceCoreError.invalidLineAlignedData
             }
+            let lineEndIndex = batch.index(after: lineFeedIndex)
+            let line = Data(batch[byteOffset..<lineEndIndex])
+            if let segmentRoll = try segmentStore.append(line) {
+                pendingSegmentRolls.append(segmentRoll)
+            }
+            byteOffset = lineEndIndex
+            ringLock.lock()
+            pendingFlushOffset = byteOffset
+            ringLock.unlock()
+            bytesWritten += line.count
+            eventsWritten += 1
+        }
 
-            guard !pendingSegmentRolls.isEmpty else { break }
+        ringLock.lock()
+        pendingFlushBatch = nil
+        pendingFlushOffset = 0
+        ringLock.unlock()
+
+        while !pendingSegmentRolls.isEmpty {
             let completedSegmentRolls = pendingSegmentRolls
             pendingSegmentRolls.removeAll(keepingCapacity: true)
             for segmentRoll in completedSegmentRolls {
@@ -871,11 +907,12 @@ public final class KeystrokeTraceRecorder {
                 eventsWritten += 1
             }
         }
+
         return KeystrokeTraceFlushResult(
             boundary: boundary,
             bytesWritten: bytesWritten,
             eventsWritten: eventsWritten,
-            remainingByteCount: ring.byteCount
+            remainingByteCount: unflushedByteCount
         )
     }
 
@@ -917,19 +954,23 @@ public final class KeystrokeTraceRecorder {
             "discardedBytes=\(segmentRoll.discardedBytes);" +
             "totalBytesAfterRoll=\(segmentRoll.totalBytesAfterRoll)"
         let record = KeystrokeTraceRecord(
-            timestamp: dateFormatter.string(from: Date()),
+            timestamp: flushDateFormatter.string(from: Date()),
             event: .state(
                 KeystrokeTraceStateEvent(action: .segmentRolled, detail: detail)
             )
         )
-        var line = try encoder.encode(record)
+        var line = try flushEncoder.encode(record)
         line.append(0x0A)
         return line
     }
 
-    /// Removes both segments and zeroes pending memory without changing enablement.
+    /// Removes both segments and zeroes pending memory.
     public func clear() throws {
+        ringLock.lock()
         ring?.clear()
+        pendingFlushBatch = nil
+        pendingFlushOffset = 0
+        ringLock.unlock()
         try segmentStore.removeAll()
     }
 }

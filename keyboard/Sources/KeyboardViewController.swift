@@ -118,22 +118,19 @@ class KeyboardViewController: UIInputViewController {
         return isSecure
     }
 
-    private func refreshKeystrokeTraceConfiguration() {
-        let wasEnabled = keystrokeTrace.isEnabled
-        keystrokeTrace.refreshConfiguration()
-        keyboardView?.setKeystrokeTraceEnabled(keystrokeTrace.isEnabled)
-        guard !wasEnabled, keystrokeTrace.isEnabled else { return }
-
-        traceRecordedPredictionStackLoaded = false
-        traceRecordedTrigramLoaded = false
+    private func startKeystrokeTraceCapture() {
+        if keystrokeTrace.startCapture() {
+            traceRecordedPredictionStackLoaded = false
+            traceRecordedTrigramLoaded = false
+        }
         recordPredictionStackLoadedForTraceIfNeeded()
         recordTrigramLoadedForTraceIfNeeded()
     }
 
     private func recordPredictionStackLoadedForTraceIfNeeded() {
         guard !traceRecordedPredictionStackLoaded,
-              SharedPredictionStack.shared.isReady else { return }
-        guard keystrokeTrace.isEnabled else { return }
+              SharedPredictionStack.shared.isReady,
+              keystrokeTrace.isCapturing else { return }
         guard !traceInputIsSecure else {
             appendTraceRedactionMarker()
             return
@@ -147,8 +144,8 @@ class KeyboardViewController: UIInputViewController {
 
     private func recordTrigramLoadedForTraceIfNeeded() {
         guard !traceRecordedTrigramLoaded,
-              SharedPredictionStack.shared.isTrigramReady else { return }
-        guard keystrokeTrace.isEnabled else { return }
+              SharedPredictionStack.shared.isTrigramReady,
+              keystrokeTrace.isCapturing else { return }
         guard !traceInputIsSecure else {
             appendTraceRedactionMarker()
             return
@@ -166,7 +163,6 @@ class KeyboardViewController: UIInputViewController {
         model: String? = nil,
         detail: String? = nil
     ) {
-        guard keystrokeTrace.isEnabled else { return }
         guard !traceInputIsSecure else {
             appendTraceRedactionMarker()
             return
@@ -184,7 +180,6 @@ class KeyboardViewController: UIInputViewController {
         _ reasonCode: KeystrokeTraceReasonCode,
         secureInputAvailable: Bool = true
     ) {
-        guard keystrokeTrace.isEnabled else { return }
         let isSecure = secureInputAvailable ? traceInputIsSecure : lastTraceInputWasSecure
         if isSecure {
             appendTraceRedactionMarker()
@@ -210,7 +205,6 @@ class KeyboardViewController: UIInputViewController {
         contextTarget: InputTarget? = nil,
         flushAt boundary: KeystrokeTraceFlushBoundary? = nil
     ) {
-        guard keystrokeTrace.isEnabled else { return }
         let captureTarget = contextTarget ?? inputTarget
         guard !isTraceInputSecure(for: captureTarget) else {
             appendTraceRedactionMarker(flushAt: boundary)
@@ -258,7 +252,7 @@ class KeyboardViewController: UIInputViewController {
 
     private var keyboardView: KeyboardView!
 
-    private let keystrokeTrace = KeyboardKeystrokeTrace()
+    private let keystrokeTrace = KeyboardKeystrokeTrace.shared
     private var traceRecordedPredictionStackLoaded = false
     private var traceRecordedTrigramLoaded = false
     private var lastTraceInputWasSecure = false
@@ -652,7 +646,7 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        refreshKeystrokeTraceConfiguration()
+        startKeystrokeTraceCapture()
         installOrUpdateHeightConstraint()
         view.setNeedsLayout()
         view.layoutIfNeeded()
@@ -744,7 +738,7 @@ class KeyboardViewController: UIInputViewController {
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        keystrokeTrace.flush(at: .idle)
+        keystrokeTrace.stopCapture()
         shedPredictionEngine()
         FileLogger.shared.info(.keyboard, "viewWillDisappear")
 
@@ -766,6 +760,7 @@ class KeyboardViewController: UIInputViewController {
         FileLogger.shared.info(.lifecycle, "KeyboardViewController deinit",
             payload: ["launchId": KeyboardViewController.processLaunchId,
                       "buildId": Self.buildGeneration])
+        keystrokeTrace.stopCapture()
         keystrokeTrace.stopShipping()
         KeyboardLogShipper.shared.stop()
         FileLogger.broadcast = nil
@@ -847,22 +842,6 @@ class KeyboardViewController: UIInputViewController {
 
         keyboardView.settingsTapped = { [weak self] in
             self?.presentKeyboardSettingsPanel()
-        }
-        keyboardView.settingsTraceToggleRequested = { [weak self] in
-            guard let self else { return }
-            let shouldEnable = self.keystrokeTrace.toggleEnabledPreference()
-            if !shouldEnable {
-                let snapshot = KeyboardKeystrokeTraceDiagnostics.makeSnapshot(
-                    trace: self.keystrokeTrace,
-                    hasFullAccess: self.hasFullAccess
-                )
-                do {
-                    try KeyboardKeystrokeTraceDiagnostics.copyToClipboard(snapshot)
-                } catch {
-                    // Clipboard diagnostics are best-effort and must not interrupt the toggle.
-                }
-            }
-            self.refreshKeystrokeTraceConfiguration()
         }
         keyboardView.settingsPanelDidCreate = { [weak self] panel in
             panel.onDismiss = { [weak self] in
@@ -2255,9 +2234,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
         case .insertText(let s):
             let isTriggerPunct = SharedConfig.Defaults.autocorrectTriggerPunctuation.contains(s)
             let shouldAutoCorrect = isTriggerPunct && uiMode != .emoji
-            if isTriggerPunct {
-                refreshKeystrokeTraceConfiguration()
-            }
             let text = applyShift(to: s)
             if shouldAutoCorrect {
                 // Final-sigma conversion runs BEFORE the commit trigger lands,
@@ -2334,7 +2310,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
             captureKeyTrace(action: .shift, keyValue: "shift-lock")
 
         case .space:
-            refreshKeystrokeTraceConfiguration()
             applyFinalSigmaToCommittedWord()
             insertTargeted(" ")
             recordRepeatedWordForTrigger(triggerChar: " ")
@@ -2346,7 +2321,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
             captureKeyTrace(action: .trigger, keyValue: " ", flushAt: .triggerKey)
 
         case .return:
-            refreshKeystrokeTraceConfiguration()
             if inputTarget == .emojiSearch {
                 keyboardView.emojiPanelView.onSearchReturn?()
             } else {
@@ -2587,10 +2561,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
         return state
     }
 
-    var keyboardViewKeystrokeTraceEnabled: Bool {
-        keystrokeTrace.isEnabled
-    }
-
     func keyboardViewTraceShouldRedact(_ view: KeyboardView) -> Bool {
         traceInputIsSecure
     }
@@ -2613,7 +2583,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
     }
 
     func keyboardView(_ view: KeyboardView, didCaptureTrace event: KeystrokeTraceEvent) {
-        guard keystrokeTrace.isEnabled else { return }
         guard !traceInputIsSecure else {
             appendTraceRedactionMarker()
             return
@@ -2845,8 +2814,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
             liveContext: contextAfterInsert,
             engine: engine
         )
-        let shouldCaptureAutocorrectDecisions = keystrokeTrace.isEnabled
-
         scheduleDeferredKeystrokeWork(
             typedWord: typedWord,
             currentWord: currentWord,
@@ -2861,8 +2828,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             engine: engine,
             capturedEpoch: capturedEpoch,
             capturedToken: capturedToken,
-            capturedDocId: capturedDocId,
-            captureDecisions: shouldCaptureAutocorrectDecisions
+            capturedDocId: capturedDocId
         )
     }
 
@@ -2999,7 +2965,6 @@ extension KeyboardViewController: KeyboardViewDelegate {
         capturedEpoch: UInt64,
         capturedToken: UInt64,
         capturedDocId: UUID,
-        captureDecisions: Bool,
         coalescing: TimeInterval = 0.016
     ) {
         deferredKeystrokeWorkItem?.cancel()
@@ -3033,17 +2998,15 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 language: languageAtDispatch,
                 config: config
             )
-            let decisionSkipReason = captureDecisions
-                ? autocorrectSkipReason(
-                    decision: decision,
-                    typedWord: typedWord,
-                    origin: originAtDispatch,
-                    topCorrection: top,
-                    isLearned: isLearned,
-                    isMisspelled: isMisspelled,
-                    config: config
-                )
-                : nil
+            let decisionSkipReason = autocorrectSkipReason(
+                decision: decision,
+                typedWord: typedWord,
+                origin: originAtDispatch,
+                topCorrection: top,
+                isLearned: isLearned,
+                isMisspelled: isMisspelled,
+                config: config
+            )
             FileLogger.shared.debug(.keyboard, "autocorrect compute",
                 payload: ["ms": Int(Date().timeIntervalSince(computeStart) * 1000)])
 
@@ -3069,8 +3032,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             if !retroactiveCandidates.isEmpty {
                 let retroactiveStart = Date()
                 var evaluatedTypedWords: [String] = []
-                var retroactiveSkipReasons: [KeystrokeTraceReasonCode]? =
-                    captureDecisions ? [] : nil
+                var retroactiveSkipReasons: [KeystrokeTraceReasonCode] = []
                 var pendingCorrection: (plan: RetroactiveApplyPlan.Plan, typedWord: String)?
                 for entry in retroactiveCandidates {
                     guard pendingCorrection == nil else { break }
@@ -3089,17 +3051,16 @@ extension KeyboardViewController: KeyboardViewDelegate {
                         language: languageAtDispatch,
                         config: config
                     )
-                    if captureDecisions,
-                       let reason = autocorrectSkipReason(
-                           decision: retroactiveDecision,
-                           typedWord: entry.lookupWord,
-                           origin: entry.origin,
-                           topCorrection: retroactiveTop,
-                           isLearned: entry.isLearned,
-                           isMisspelled: entry.isMisspelled,
-                           config: config
-                       ) {
-                        retroactiveSkipReasons?.append(reason)
+                    if let reason = autocorrectSkipReason(
+                        decision: retroactiveDecision,
+                        typedWord: entry.lookupWord,
+                        origin: entry.origin,
+                        topCorrection: retroactiveTop,
+                        isLearned: entry.isLearned,
+                        isMisspelled: entry.isMisspelled,
+                        config: config
+                    ) {
+                        retroactiveSkipReasons.append(reason)
                     }
                     guard case .correct(_, let correction) = retroactiveDecision else { continue }
 
@@ -3113,9 +3074,9 @@ extension KeyboardViewController: KeyboardViewDelegate {
                     break
                 }
 
-                if let reasons = retroactiveSkipReasons, !reasons.isEmpty {
+                if !retroactiveSkipReasons.isEmpty {
                     DispatchQueue.main.async { [weak self] in
-                        for reason in reasons {
+                        for reason in retroactiveSkipReasons {
                             self?.captureTraceSkip(reason)
                         }
                     }
@@ -3286,20 +3247,17 @@ extension KeyboardViewController: KeyboardViewDelegate {
             let appliedText = correction + triggerChar
             insertTargeted(appliedText)
             lastAutoCorrection = (typed: typedWord, replacement: correction)
-            let traceApplyEnabled = keystrokeTrace.isEnabled
-            if traceApplyEnabled {
-                if traceInputIsSecure {
-                    appendTraceRedactionMarker()
-                } else {
-                    let afterText = textDocumentProxy.documentContextBeforeInput ?? ""
-                    keystrokeTrace.append(.decision(.apply(
-                        reasonCode: .autocorrectApplied,
-                        beforeText: liveContext,
-                        afterText: afterText,
-                        deleteCount: deleteCount,
-                        insertCount: appliedText.count
-                    )))
-                }
+            if traceInputIsSecure {
+                appendTraceRedactionMarker()
+            } else {
+                let afterText = textDocumentProxy.documentContextBeforeInput ?? ""
+                keystrokeTrace.append(.decision(.apply(
+                    reasonCode: .autocorrectApplied,
+                    beforeText: liveContext,
+                    afterText: afterText,
+                    deleteCount: deleteCount,
+                    insertCount: appliedText.count
+                )))
             }
         case .leaveAsIs:
             lastAutoCorrection = nil
@@ -3370,9 +3328,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
             return
         }
 
-        let traceApplyEnabled = keystrokeTrace.isEnabled
-        let traceApplyIsSecure = traceApplyEnabled && traceInputIsSecure
-        let beforeText = traceApplyEnabled && !traceApplyIsSecure
+        let traceApplyIsSecure = traceInputIsSecure
+        let beforeText = !traceApplyIsSecure
             ? liveContext
             : nil
         textDocumentProxy.adjustTextPosition(byCharacterOffset: livePlan.backMove)
@@ -3385,18 +3342,16 @@ extension KeyboardViewController: KeyboardViewDelegate {
         // Re-read the context to verify the correction landed; no retry.
         let verifyContext = textDocumentProxy.documentContextBeforeInput ?? ""
         let verified = verifyContext.contains(plan.insert)
-        if traceApplyEnabled {
-            if traceApplyIsSecure {
-                appendTraceRedactionMarker()
-            } else {
-                keystrokeTrace.append(.decision(.apply(
-                    reasonCode: .autocorrectApplied,
-                    beforeText: beforeText ?? "",
-                    afterText: verifyContext,
-                    deleteCount: plan.deleteCount,
-                    insertCount: plan.insert.count
-                )))
-            }
+        if traceApplyIsSecure {
+            appendTraceRedactionMarker()
+        } else {
+            keystrokeTrace.append(.decision(.apply(
+                reasonCode: .autocorrectApplied,
+                beforeText: beforeText ?? "",
+                afterText: verifyContext,
+                deleteCount: plan.deleteCount,
+                insertCount: plan.insert.count
+            )))
         }
         if verified {
             FileLogger.shared.debug(.keyboard, "retroactive autocorrect",

@@ -222,7 +222,7 @@ describe('keystroke trace core mirror', () => {
     }
   });
 
-  it('accounts for encoded UTF-8 bytes through append and flush', (testContext) => {
+  it('captures immediately without an enable gate and flushes encoded UTF-8 bytes', (testContext) => {
     const directory = temporaryTraceDirectory(testContext);
     const recorder = new KeystrokeTraceRecorder(directory, { ringCapacityBytes: 512 });
     const event = makeKeyEvent({
@@ -234,9 +234,6 @@ describe('keystroke trace core mirror', () => {
     const timestamp = '2026-11-14T12:00:00.000Z';
     const expectedLine = encodeTraceRecord(event, timestamp);
 
-    assert.strictEqual(recorder.isEnabled, false);
-    assert.deepStrictEqual(recorder.append(event, timestamp), { status: 'disabled' });
-    recorder.setEnabled(true);
     const appendResult = recorder.append(event, timestamp);
 
     assert.strictEqual(appendResult.status, 'appended');
@@ -250,7 +247,7 @@ describe('keystroke trace core mirror', () => {
     assert.strictEqual(recorder.onDiskByteCount, expectedLine.length);
   });
 
-  it('drops buffered keys after Delete All without recreating either segment', (testContext) => {
+  it('clears buffered keys after Delete All without recreating either segment', (testContext) => {
     const directory = temporaryTraceDirectory(testContext);
     const livePath = path.join(directory, 'ritoras-trace.log');
     const rotatedPath = path.join(directory, 'ritoras-trace.log.1');
@@ -259,7 +256,6 @@ describe('keystroke trace core mirror', () => {
     writeFileSync(livePath, fullLiveSegment);
     writeFileSync(rotatedPath, '{"old":true}\n');
     const recorder = new KeystrokeTraceRecorder(directory);
-    recorder.setEnabled(true);
     const typedEvent = makeKeyEvent({
       action: 'insert',
       keyValue: 'x',
@@ -268,26 +264,24 @@ describe('keystroke trace core mirror', () => {
     });
     recorder.append(typedEvent, '2026-11-14T12:00:00.000Z');
 
-    // The app turns tracing off and removes both shared files while the keyboard is warm.
+    // The app removes both shared files while the keyboard is warm.
     unlinkSync(livePath);
     unlinkSync(rotatedPath);
-    assert.doesNotThrow(() => recorder.setEnabled(false));
+    assert.doesNotThrow(() => recorder.clear());
 
-    assert.strictEqual(recorder.isEnabled, false);
     assert.strictEqual(recorder.unflushedByteCount, 0);
     assert.strictEqual(existsSync(livePath), false);
     assert.strictEqual(existsSync(rotatedPath), false);
     assert.deepStrictEqual(readdirSync(directory), []);
   });
 
-  it('treats a deleted live segment as empty before the next enabled flush', (testContext) => {
+  it('treats a deleted live segment as empty before the next capture flush', (testContext) => {
     const directory = temporaryTraceDirectory(testContext);
     const livePath = path.join(directory, 'ritoras-trace.log');
     const fullLiveSegment = Buffer.alloc(TRACE_SEGMENT_CAPACITY_BYTES, 0x78);
     fullLiveSegment[fullLiveSegment.length - 1] = 0x0a;
     writeFileSync(livePath, fullLiveSegment);
     const recorder = new KeystrokeTraceRecorder(directory);
-    recorder.setEnabled(true);
     const newEvent = makeKeyEvent({
       action: 'insert',
       keyValue: 'new',
@@ -357,7 +351,6 @@ describe('keystroke trace core mirror', () => {
     recorder.onSegmentRoll = () => {
       rollCount += 1;
     };
-    recorder.setEnabled(true);
 
     for (let index = 0; index < 30; index += 1) {
       const event = makeMetaEvent({
@@ -418,7 +411,6 @@ describe('keystroke trace core mirror', () => {
     recorder.onSegmentRoll = () => {
       rollCount += 1;
     };
-    recorder.setEnabled(true);
     recorder.append(makeMetaEvent({ action: 'sessionStarted', sessionID: 'recovered' }));
     recorder.flush('idle');
 

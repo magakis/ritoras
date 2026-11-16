@@ -439,7 +439,6 @@ export class KeystrokeTraceRecorder {
     this.ringCapacityBytes = ringCapacityBytes;
     this.segmentStore = new TraceSegmentStore(directoryPath);
     this.ring = null;
-    this.isEnabled = false;
   }
 
   get unflushedByteCount() {
@@ -466,20 +465,8 @@ export class KeystrokeTraceRecorder {
     this.segmentStore.onSegmentRoll = callback;
   }
 
-  setEnabled(enabled) {
-    if (enabled) {
-      if (this.ring === null) this.ring = new TraceByteRing(this.ringCapacityBytes);
-      this.isEnabled = true;
-      return;
-    }
-    if (!this.isEnabled) return;
-    this.isEnabled = false;
-    this.ring?.clear();
-    this.ring = null;
-  }
-
   append(event, timestamp) {
-    if (!this.isEnabled || this.ring === null) return { status: 'disabled' };
+    if (this.ring === null) this.ring = new TraceByteRing(this.ringCapacityBytes);
 
     const line = encodeTraceRecord(event, timestamp ?? new Date().toISOString());
     if (line.length > this.ring.capacityBytes) {

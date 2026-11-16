@@ -61,7 +61,6 @@ struct SuggestionInputSnapshot: Sendable {
 // MARK: - Delegate
 
 protocol KeyboardViewDelegate: AnyObject {
-    var keyboardViewKeystrokeTraceEnabled: Bool { get }
     func keyboardView(_ view: KeyboardView, didPerform action: KeyAction)
     func keyboardView(_ view: KeyboardView, didTapSuggestion text: String)
     func keyboardView(_ view: KeyboardView, didLongPressSuggestion text: String)
@@ -87,7 +86,6 @@ protocol KeyboardViewDelegate: AnyObject {
 }
 
 extension KeyboardViewDelegate {
-    var keyboardViewKeystrokeTraceEnabled: Bool { false }
     func keyboardViewBackspaceDidBegin(_ view: KeyboardView) {}
     func keyboardViewBackspaceDidEnd(_ view: KeyboardView) {}
     func keyboardView(_ view: KeyboardView, didLongPressSuggestion text: String) {}
@@ -454,25 +452,10 @@ private class SuggestionBar: UIView {
     var suggestionTapped: ((Int) -> Void)?
     var suggestionLongPressed: ((Int) -> Void)?
     var settingsTapped: (() -> Void)?
-    var traceToggleRequested: (() -> Void)?
 
     private let stack = UIStackView()
     private var segments: [UIButton] = []
     private let settingsButton = UIButton(type: .system)
-    private var settingsLongPressDidFire = false
-    private let traceEnabledIndicator: UIView = {
-        let indicator = UIView()
-        indicator.translatesAutoresizingMaskIntoConstraints = false
-        indicator.backgroundColor = .systemRed
-        indicator.layer.cornerRadius = 4
-        indicator.layer.borderWidth = 1
-        indicator.layer.borderColor = UIColor { traitCollection in
-            traitCollection.userInterfaceStyle == .dark ? .black : .white
-        }.cgColor
-        indicator.isUserInteractionEnabled = false
-        indicator.isHidden = true
-        return indicator
-    }()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -500,32 +483,14 @@ private class SuggestionBar: UIView {
         let settingsIcon = UIImage.SymbolConfiguration(pointSize: 17, weight: .regular)
         settingsButton.setImage(UIImage(systemName: "gearshape", withConfiguration: settingsIcon), for: .normal)
         settingsButton.accessibilityLabel = "Keyboard settings"
-        settingsButton.accessibilityHint = "Tap for settings. Long press to toggle keystroke tracing."
+        settingsButton.accessibilityHint = "Tap to open keyboard settings."
         settingsButton.tintColor = EmojiPanelView.modeKeyTextColor
         settingsButton.backgroundColor = UIColor { tc in
             tc.userInterfaceStyle == .dark
                 ? UIColor(white: 0.18, alpha: 1)
                 : UIColor(white: 0.92, alpha: 1)
         }
-        settingsButton.addTarget(self, action: #selector(settingsButtonTouchDown), for: .touchDown)
         settingsButton.addTarget(self, action: #selector(settingsButtonTapped), for: .touchUpInside)
-        let traceLongPress = UILongPressGestureRecognizer(
-            target: self,
-            action: #selector(settingsButtonLongPressed(_:))
-        )
-        traceLongPress.minimumPressDuration = 0.5
-        traceLongPress.allowableMovement = 10
-        traceLongPress.cancelsTouchesInView = false
-        traceLongPress.delaysTouchesBegan = false
-        traceLongPress.delaysTouchesEnded = false
-        settingsButton.addGestureRecognizer(traceLongPress)
-        settingsButton.addSubview(traceEnabledIndicator)
-        NSLayoutConstraint.activate([
-            traceEnabledIndicator.widthAnchor.constraint(equalToConstant: 8),
-            traceEnabledIndicator.heightAnchor.constraint(equalToConstant: 8),
-            traceEnabledIndicator.topAnchor.constraint(equalTo: settingsButton.topAnchor, constant: 4),
-            traceEnabledIndicator.trailingAnchor.constraint(equalTo: settingsButton.trailingAnchor, constant: -4),
-        ])
         addSubview(settingsButton)
 
         NSLayoutConstraint.activate([
@@ -576,27 +541,7 @@ private class SuggestionBar: UIView {
     }
 
     @objc private func settingsButtonTapped() {
-        guard !settingsLongPressDidFire else {
-            settingsLongPressDidFire = false
-            return
-        }
         settingsTapped?()
-    }
-
-    @objc private func settingsButtonTouchDown() {
-        settingsLongPressDidFire = false
-    }
-
-    @objc private func settingsButtonLongPressed(_ gesture: UILongPressGestureRecognizer) {
-        guard gesture.state == .began else { return }
-        settingsLongPressDidFire = true
-        HapticsManager.shared.tapSelection()
-        traceToggleRequested?()
-    }
-
-    func setKeystrokeTraceEnabled(_ enabled: Bool) {
-        traceEnabledIndicator.isHidden = !enabled
-        settingsButton.accessibilityValue = enabled ? "Keystroke tracing on" : nil
     }
 
     func update(with suggestions: [String]) {
@@ -629,7 +574,6 @@ class KeyboardView: UIView {
     var settingsPanelDidCreate: ((KeyboardSettingsPanel) -> Void)?
 
     var settingsTapped: (() -> Void)?
-    var settingsTraceToggleRequested: (() -> Void)?
 
     // Subviews
     private var _suggestionBar: SuggestionBar?
@@ -854,14 +798,7 @@ class KeyboardView: UIView {
             guard let self = self else { return }
             self.settingsTapped?()
         }
-        suggestionBar.traceToggleRequested = { [weak self] in
-            self?.settingsTraceToggleRequested?()
-        }
         addSubview(suggestionBar)
-    }
-
-    func setKeystrokeTraceEnabled(_ enabled: Bool) {
-        suggestionBar.setKeystrokeTraceEnabled(enabled)
     }
 
     private func setupLetterRegion() {
@@ -1608,10 +1545,9 @@ class KeyboardView: UIView {
 
     func refreshSuggestions() {
         let token = delegate?.keyboardContextToken(self) ?? 0
-        let traceCandidatesEnabled =
-            delegate?.keyboardViewKeystrokeTraceEnabled == true
-                && delegate?.keyboardViewTraceShouldRedact(self) != true
-        let traceDocumentContext = traceCandidatesEnabled
+        let canCaptureSuggestionDetails =
+            delegate != nil && delegate?.keyboardViewTraceShouldRedact(self) != true
+        let traceDocumentContext = canCaptureSuggestionDetails
             ? delegate?.keyboardViewTraceDocumentContext(self)
             : nil
         // Cancel any lookup before issuing a replacement; keep only one engine result set active.
@@ -1624,24 +1560,21 @@ class KeyboardView: UIView {
         guard let snapshot = delegate?.keyboardViewSuggestionSnapshot(self),
               let engine = delegate?.keyboardViewPredictionEngine(self) else {
             // Wrong target or engine not ready — clear synchronously, no hop needed.
-            if delegate?.keyboardViewKeystrokeTraceEnabled == true {
-                if delegate?.keyboardViewTraceShouldRedact(self) == true {
-                    delegate?.keyboardView(
-                        self,
-                        didCaptureTrace: .key(
-                            KeystrokeTraceKeyEvent(action: .redacted, epoch: capturedEpoch)
-                        )
+            if delegate?.keyboardViewTraceShouldRedact(self) == true {
+                delegate?.keyboardView(
+                    self,
+                    didCaptureTrace: .key(
+                        KeystrokeTraceKeyEvent(action: .redacted, epoch: capturedEpoch)
                     )
-                } else if let traceSnapshot =
-                            delegate?.keyboardViewTraceSuggestionSnapshot(self) {
-                    captureSuggestionTrace(
-                        snapshot: traceSnapshot,
-                        candidates: nil,
-                        displayedCandidates: nil,
-                        epoch: capturedEpoch,
-                        contextToken: token
-                    )
-                }
+                )
+            } else if let traceSnapshot = delegate?.keyboardViewTraceSuggestionSnapshot(self) {
+                captureSuggestionTrace(
+                    snapshot: traceSnapshot,
+                    candidates: nil,
+                    displayedCandidates: nil,
+                    epoch: capturedEpoch,
+                    contextToken: token
+                )
             }
             localSuggestions = []
             localSuggestionsAreBounded = true
@@ -1662,7 +1595,7 @@ class KeyboardView: UIView {
             : suggestionCache.displayed
 
         var traceCandidates: [Suggestion]?
-        let captureCandidates: (([Suggestion]) -> Void)? = traceCandidatesEnabled
+        let captureCandidates: (([Suggestion]) -> Void)? = canCaptureSuggestionDetails
             ? { candidates in
                 traceCandidates = Array(
                     candidates.sorted { $0.score > $1.score }.prefix(10)
@@ -1794,7 +1727,6 @@ class KeyboardView: UIView {
         contextToken: UInt64,
         documentContext capturedDocumentContext: String? = nil
     ) {
-        guard delegate?.keyboardViewKeystrokeTraceEnabled == true else { return }
         guard delegate?.keyboardViewTraceShouldRedact(self) != true else {
             delegate?.keyboardView(
                 self,
