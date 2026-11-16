@@ -750,17 +750,25 @@ final class LogStore {
     }
 
     /// Returns every log line in the inclusive timestamp range, oldest first.
-    func exportRange(sinceNs: Int64, untilNs: Int64) throws -> [LogLine] {
+    func exportRange(sinceNs: Int64,
+                     untilNs: Int64,
+                     cancellation: LogQueryHandle? = nil) throws -> [LogLine] {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
-            return try _exportRange(sinceNs: sinceNs, untilNs: untilNs)
+            guard cancellation?.canRunQuery ?? true else { throw LogStoreError.cancelled }
+            return try _exportRange(sinceNs: sinceNs, untilNs: untilNs,
+                                    cancellation: cancellation)
         } else {
             return try queue.sync {
-                try self._exportRange(sinceNs: sinceNs, untilNs: untilNs)
+                guard cancellation?.canRunQuery ?? true else { throw LogStoreError.cancelled }
+                return try self._exportRange(sinceNs: sinceNs, untilNs: untilNs,
+                                             cancellation: cancellation)
             }
         }
     }
 
-    private func _exportRange(sinceNs: Int64, untilNs: Int64) throws -> [LogLine] {
+    private func _exportRange(sinceNs: Int64,
+                              untilNs: Int64,
+                              cancellation: LogQueryHandle?) throws -> [LogLine] {
         ensureOpen()
         guard let db = db else {
             throw LogStoreError.openFailed("SQLite database connection is unavailable")
@@ -784,17 +792,26 @@ final class LogStore {
         try bindExportRange(sinceNs: sinceNs, untilNs: untilNs,
                             to: preparedStatement, db: db)
 
-        var results: [LogLine] = []
-        while true {
-            let stepCode = sqlite3_step(preparedStatement)
-            if stepCode == SQLITE_ROW {
-                results.append(logLine(from: preparedStatement))
-            } else if stepCode == SQLITE_DONE {
-                return results
-            } else {
-                throw exportQueryError("range export step", db: db, code: stepCode)
+        let queryResult = withCancellationProgressHandler(
+            db: db,
+            cancellation: cancellation
+        ) {
+            var results: [LogLine] = []
+            while true {
+                let stepCode = sqlite3_step(preparedStatement)
+                if stepCode == SQLITE_ROW {
+                    results.append(logLine(from: preparedStatement))
+                } else if stepCode == SQLITE_DONE {
+                    return Result<[LogLine], Error>.success(results)
+                } else {
+                    return .failure(exportQueryError("range export step", db: db, code: stepCode))
+                }
             }
         }
+        guard let queryResult, cancellation?.isCancelled != true else {
+            throw LogStoreError.cancelled
+        }
+        return try queryResult.get()
     }
 
     // MARK: - Query: Count
@@ -893,19 +910,32 @@ final class LogStore {
     }
 
     /// Returns the entry count and summed raw-line UTF-8 bytes for an inclusive range.
-    func rangeCountAndRawBytes(sinceNs: Int64,
-                               untilNs: Int64) throws -> (count: Int, estimatedBytes: Int64) {
+    func rangeCountAndRawBytes(
+        sinceNs: Int64,
+        untilNs: Int64,
+        cancellation: LogQueryHandle? = nil
+    ) throws -> (count: Int, estimatedBytes: Int64) {
         if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
-            return try _rangeCountAndRawBytes(sinceNs: sinceNs, untilNs: untilNs)
+            guard cancellation?.canRunQuery ?? true else { throw LogStoreError.cancelled }
+            return try _rangeCountAndRawBytes(sinceNs: sinceNs, untilNs: untilNs,
+                                              cancellation: cancellation)
         } else {
             return try queue.sync {
-                try self._rangeCountAndRawBytes(sinceNs: sinceNs, untilNs: untilNs)
+                guard cancellation?.canRunQuery ?? true else { throw LogStoreError.cancelled }
+                return try self._rangeCountAndRawBytes(
+                    sinceNs: sinceNs,
+                    untilNs: untilNs,
+                    cancellation: cancellation
+                )
             }
         }
     }
 
-    private func _rangeCountAndRawBytes(sinceNs: Int64,
-                                        untilNs: Int64) throws -> (count: Int, estimatedBytes: Int64) {
+    private func _rangeCountAndRawBytes(
+        sinceNs: Int64,
+        untilNs: Int64,
+        cancellation: LogQueryHandle?
+    ) throws -> (count: Int, estimatedBytes: Int64) {
         ensureOpen()
         guard let db = db else {
             throw LogStoreError.openFailed("SQLite database connection is unavailable")
@@ -928,7 +958,15 @@ final class LogStore {
         try bindExportRange(sinceNs: sinceNs, untilNs: untilNs,
                             to: preparedStatement, db: db)
 
-        let rowCode = sqlite3_step(preparedStatement)
+        let rowCode = withCancellationProgressHandler(
+            db: db,
+            cancellation: cancellation
+        ) {
+            sqlite3_step(preparedStatement)
+        }
+        guard let rowCode, cancellation?.isCancelled != true else {
+            throw LogStoreError.cancelled
+        }
         guard rowCode == SQLITE_ROW else {
             throw exportQueryError("range count step", db: db, code: rowCode)
         }
@@ -936,7 +974,15 @@ final class LogStore {
             count: Int(sqlite3_column_int64(preparedStatement, 0)),
             estimatedBytes: sqlite3_column_int64(preparedStatement, 1)
         )
-        let completionCode = sqlite3_step(preparedStatement)
+        let completionCode = withCancellationProgressHandler(
+            db: db,
+            cancellation: cancellation
+        ) {
+            sqlite3_step(preparedStatement)
+        }
+        guard let completionCode, cancellation?.isCancelled != true else {
+            throw LogStoreError.cancelled
+        }
         guard completionCode == SQLITE_DONE else {
             throw exportQueryError("range count completion", db: db, code: completionCode)
         }

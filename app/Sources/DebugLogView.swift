@@ -1,3 +1,4 @@
+import CoreFoundation
 import SwiftUI
 import UIKit
 
@@ -16,53 +17,6 @@ private extension LogComponent {
         .lifecycle,
         .performance
     ]
-}
-
-private final class PendingLogExportCleanupRegistry: @unchecked Sendable {
-    private enum Lifecycle {
-        case creating
-        case shared
-        case cleanupReady
-    }
-
-    static let shared = PendingLogExportCleanupRegistry()
-
-    private let lock = NSLock()
-    private var entries: [URL: Lifecycle] = [:]
-
-    func register(_ url: URL) {
-        lock.lock()
-        defer { lock.unlock() }
-        entries[url] = .creating
-    }
-
-    func markShared(_ url: URL) {
-        lock.lock()
-        defer { lock.unlock() }
-        entries[url] = .shared
-    }
-
-    func markCleanupReady(_ url: URL) {
-        lock.lock()
-        defer { lock.unlock() }
-        entries[url] = .cleanupReady
-    }
-
-    func unregister(_ url: URL) {
-        lock.lock()
-        defer { lock.unlock() }
-        entries.removeValue(forKey: url)
-    }
-
-    func cleanupReadyURLs() -> [URL] {
-        lock.lock()
-        defer { lock.unlock() }
-        return entries.reduce(into: [URL]()) { urls, entry in
-            if case .cleanupReady = entry.value {
-                urls.append(entry.key)
-            }
-        }
-    }
 }
 
 // MARK: - Level Filter
@@ -171,23 +125,25 @@ private struct CustomLogExportRequest: Sendable {
 
 private struct LargeCustomLogExportConfirmation {
     let request: CustomLogExportRequest
-    let estimate: LocalhostLogExportEstimate
+    let estimate: CustomLogExportEstimate
+}
+
+private struct CustomLogExportEstimate: Sendable {
+    let count: Int
+    let estimatedBytes: Int64
+}
+
+private struct PreparedCustomLogExport: Sendable {
+    var text: String
+    let entryCount: Int
+    let byteCount: Int
+    let fetchDurationMilliseconds: Double
+    let footprintBeforeBytes: UInt64
 }
 
 private enum CustomLogExportThresholds {
     static let entryCount = 10_000
     static let estimatedBytes: Int64 = 5 * 1024 * 1024
-}
-
-private enum CustomLogExportError: LocalizedError {
-    case serverUnavailable
-
-    var errorDescription: String? {
-        switch self {
-        case .serverUnavailable:
-            return "The localhost log server could not be started. Reopen the app and try again."
-        }
-    }
 }
 
 // MARK: - Delete Action
@@ -329,7 +285,6 @@ private func daySeparatorView(for date: Date) -> some View {
 // MARK: - Debug Log View
 
 struct DebugLogView: View {
-    @EnvironmentObject private var dictationViewModel: DictationViewModel
     @State private var lines: [LogLine] = []
     @State private var diagnostics: [String] = []
     @State private var selectedIDs: Set<Int> = []
@@ -358,9 +313,9 @@ struct DebugLogView: View {
     @State private var isLoadingMore = false
     @State private var showDeleteConfirmation = false
     @State private var pendingDeleteAction: DeleteAction?
-    @State private var showDeleteFeedback = false
-    @State private var deleteFeedbackText: String = ""
-    @State private var deleteFeedbackIsError = false
+    @State private var showActionFeedback = false
+    @State private var actionFeedbackText: String = ""
+    @State private var actionFeedbackIsError = false
     @State private var missedUpdates = false
     @State private var shareSheetText: String?
     @State private var isShareSheetPresented = false
@@ -370,10 +325,10 @@ struct DebugLogView: View {
     @State private var activeQueryHandle: LogQueryHandle?
     @State private var activeDeleteHandle: LogQueryHandle?
     @State private var isExportingCustomRange = false
+    @State private var activeCustomExportHandle: LogQueryHandle?
+    @State private var activeCustomExportID: UUID?
     @State private var pendingLargeExport: LargeCustomLogExportConfirmation?
     @State private var showLargeExportConfirmation = false
-    @State private var rangeExportURL: URL?
-    @State private var isRangeExportSheetPresented = false
     @State private var showExportError = false
     @State private var exportErrorMessage = ""
     private let pageSize = 50
@@ -448,11 +403,6 @@ struct DebugLogView: View {
         } message: {
             Text(exportErrorMessage)
         }
-        .sheet(isPresented: $isRangeExportSheetPresented, onDismiss: cleanupRangeExportFile) {
-            if let url = rangeExportURL {
-                ActivityShareSheet(items: [url])
-            }
-        }
         .sheet(isPresented: $isShareSheetPresented, onDismiss: {
             shareSheetText = nil
         }) {
@@ -487,21 +437,25 @@ struct DebugLogView: View {
         .onChange(of: expandedReportID) { _, newValue in
             if newValue == nil { refreshGuard() }
         }
+        .onChange(of: showLargeExportConfirmation) { _, isPresented in
+            if !isPresented, pendingLargeExport != nil, !isExportingCustomRange {
+                cancelActiveCustomRangeExport()
+            }
+        }
         .onAppear {
             isViewVisible = true
-            drainPendingCustomLogExportFiles()
             refresh()
         }
         .onDisappear {
             isViewVisible = false
             cancelActiveQuery()
             cancelActiveDelete()
+            cancelActiveCustomRangeExport()
             clearLoadedLogState()
-            if !isRangeExportSheetPresented { cleanupRangeExportFile() }
         }
         .overlay(alignment: .bottom) {
-            if showDeleteFeedback {
-                deleteFeedbackOverlay
+            if showActionFeedback {
+                actionFeedbackOverlay
             }
         }
     }
@@ -587,15 +541,15 @@ struct DebugLogView: View {
                                     ProgressView()
                                         .controlSize(.small)
                                 } else {
-                                    Image(systemName: "square.and.arrow.up")
+                                    Image(systemName: "doc.on.doc")
                                 }
-                                Text(isExportingCustomRange ? "Exporting…" : "Export Range")
+                                Text(isExportingCustomRange ? "Copying…" : "Copy Range")
                             }
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
                         .font(.caption)
-                        .disabled(isExportingCustomRange || isRangeExportSheetPresented)
+                        .disabled(isExportingCustomRange || showLargeExportConfirmation)
                     }
                 }
                 .padding(.horizontal)
@@ -608,13 +562,11 @@ struct DebugLogView: View {
             titleVisibility: .visible
         ) {
             if let pendingLargeExport {
-                Button("Export \(pendingLargeExport.estimate.count) Entries") {
+                Button("Copy \(pendingLargeExport.estimate.count) Entries") {
                     confirmLargeCustomExport()
                 }
             }
-            Button("Cancel", role: .cancel) {
-                pendingLargeExport = nil
-            }
+            Button("Cancel", role: .cancel, action: cancelActiveCustomRangeExport)
         } message: {
             if let pendingLargeExport {
                 Text(
@@ -915,13 +867,13 @@ struct DebugLogView: View {
     }
 
     @ViewBuilder
-    private var deleteFeedbackOverlay: some View {
-        if showDeleteFeedback {
-            Text(deleteFeedbackText)
+    private var actionFeedbackOverlay: some View {
+        if showActionFeedback {
+            Text(actionFeedbackText)
                 .font(.system(.subheadline, design: .monospaced))
                 .padding(.horizontal, 20)
                 .padding(.vertical, 10)
-                .background(deleteFeedbackIsError ? Color.red.opacity(0.9) : Color.secondary.opacity(0.9))
+                .background(actionFeedbackIsError ? Color.red.opacity(0.9) : Color.secondary.opacity(0.9))
                 .foregroundColor(.white)
                 .clipShape(Capsule())
                 .padding(.bottom, 24)
@@ -989,6 +941,7 @@ struct DebugLogView: View {
     }
 
     private func refresh() {
+        cancelActiveCustomRangeExport()
         let componentSelection = selectedComponents
         guard !componentSelection.isEmpty else {
             clearFilteredLogResults()
@@ -1120,10 +1073,9 @@ struct DebugLogView: View {
 
     @MainActor
     private func beginCustomRangeExport() {
-        guard !isExportingCustomRange, !isRangeExportSheetPresented, timeRange == .custom else { return }
-        drainPendingCustomLogExportFiles()
-        if rangeExportURL != nil { cleanupRangeExportFile() }
-        guard rangeExportURL == nil else { return }
+        guard !isExportingCustomRange,
+              activeCustomExportHandle == nil,
+              timeRange == .custom else { return }
         let bounds = timeRangeToBounds()
         guard let sinceNs = bounds.sinceNs, let untilNs = bounds.untilNs else { return }
 
@@ -1133,155 +1085,175 @@ struct DebugLogView: View {
             generation: refreshGeneration,
             scrubPII: scrubPII
         )
+        let handle = makeDebugLogQueryHandle()
+        let exportID = UUID()
+        activeCustomExportHandle = handle
+        activeCustomExportID = exportID
         isExportingCustomRange = true
-        FileLogger.shared.info(.app, "Custom log export started")
-        Task { await countAndMaybeExportCustomRange(request) }
-    }
-
-    @MainActor
-    private func countAndMaybeExportCustomRange(_ request: CustomLogExportRequest) async {
-        defer { isExportingCustomRange = false }
-
-        do {
-            guard isCurrentCustomExport(request) else { return }
-            try await ensureLocalhostServerIsAvailable(for: request)
-            guard isCurrentCustomExport(request) else { return }
-
-            let estimate = try await LocalhostClient.countLogExport(
-                sinceNs: request.sinceNs,
-                untilNs: request.untilNs
-            )
-            guard isCurrentCustomExport(request) else { return }
-
-            if estimate.count > CustomLogExportThresholds.entryCount
-                || estimate.estimatedBytes > CustomLogExportThresholds.estimatedBytes {
-                pendingLargeExport = LargeCustomLogExportConfirmation(
-                    request: request,
-                    estimate: estimate
+        DispatchQueue.global(qos: .userInitiated).async {
+            let estimate: CustomLogExportEstimate
+            do {
+                let result = try LogStore.shared.rangeCountAndRawBytes(
+                    sinceNs: request.sinceNs,
+                    untilNs: request.untilNs,
+                    cancellation: handle
                 )
-                showLargeExportConfirmation = true
+                estimate = CustomLogExportEstimate(
+                    count: result.count,
+                    estimatedBytes: result.estimatedBytes
+                )
+            } catch {
+                DispatchQueue.main.async {
+                    guard isCurrentCustomExport(request, exportID: exportID, handle: handle) else {
+                        handle.finish()
+                        return
+                    }
+                    finishCustomRangeExport(handle, exportID: exportID)
+                    guard !handle.isCancelled else { return }
+                    showCustomExportError(error)
+                }
                 return
             }
 
-            try await fetchAndShareCustomRange(request)
-        } catch {
-            guard isCurrentCustomExport(request) else { return }
-            showCustomExportError(error)
+            DispatchQueue.main.async {
+                guard isCurrentCustomExport(request, exportID: exportID, handle: handle) else {
+                    handle.finish()
+                    return
+                }
+                if estimate.count > CustomLogExportThresholds.entryCount
+                    || estimate.estimatedBytes > CustomLogExportThresholds.estimatedBytes {
+                    pendingLargeExport = LargeCustomLogExportConfirmation(
+                        request: request,
+                        estimate: estimate
+                    )
+                    isExportingCustomRange = false
+                    showLargeExportConfirmation = true
+                    return
+                }
+                fetchAndCopyCustomRange(request, exportID: exportID, handle: handle)
+            }
         }
     }
 
     @MainActor
     private func confirmLargeCustomExport() {
-        guard let pending = pendingLargeExport else { return }
+        guard let pending = pendingLargeExport,
+              let handle = activeCustomExportHandle,
+              let exportID = activeCustomExportID,
+              isCurrentCustomExport(pending.request, exportID: exportID, handle: handle),
+              !isExportingCustomRange else { return }
         pendingLargeExport = nil
-        guard isCurrentCustomExport(pending.request), !isExportingCustomRange else { return }
-
         isExportingCustomRange = true
-        Task { await exportConfirmedLargeRange(pending.request) }
+        fetchAndCopyCustomRange(pending.request, exportID: exportID, handle: handle)
     }
 
     @MainActor
-    private func exportConfirmedLargeRange(_ request: CustomLogExportRequest) async {
-        defer { isExportingCustomRange = false }
-
-        do {
-            guard isCurrentCustomExport(request) else { return }
-            try await ensureLocalhostServerIsAvailable(for: request)
-            guard isCurrentCustomExport(request) else { return }
-            try await fetchAndShareCustomRange(request)
-        } catch {
-            guard isCurrentCustomExport(request) else { return }
-            showCustomExportError(error)
-        }
+    private func cancelActiveCustomRangeExport() {
+        let handle = activeCustomExportHandle
+        activeCustomExportHandle = nil
+        activeCustomExportID = nil
+        pendingLargeExport = nil
+        isExportingCustomRange = false
+        showLargeExportConfirmation = false
+        handle?.cancel()
+        handle?.finish()
     }
 
     @MainActor
-    private func ensureLocalhostServerIsAvailable(for request: CustomLogExportRequest) async throws {
-        let initiallyHealthy = await LocalhostClient.healthCheck()
-        guard isCurrentCustomExport(request) else { return }
-        guard !initiallyHealthy else { return }
+    private func fetchAndCopyCustomRange(_ request: CustomLogExportRequest,
+                                         exportID: UUID,
+                                         handle: LogQueryHandle) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            var prepared: PreparedCustomLogExport
+            do {
+                prepared = try Self.prepareCustomLogExport(request, handle: handle)
+            } catch {
+                DispatchQueue.main.async {
+                    guard isCurrentCustomExport(request, exportID: exportID, handle: handle) else {
+                        handle.finish()
+                        return
+                    }
+                    finishCustomRangeExport(handle, exportID: exportID)
+                    guard !handle.isCancelled else { return }
+                    showCustomExportError(error)
+                }
+                return
+            }
 
-        // Reuse the DictationViewModel-owned listener; a second server instance
-        // would compete for the same localhost port.
-        dictationViewModel.startLocalhostServer()
-        for attempt in 0..<5 {
-            let isHealthy = await LocalhostClient.healthCheck()
-            guard isCurrentCustomExport(request) else { return }
-            if isHealthy { return }
-            if attempt < 4 {
-                try await Task.sleep(nanoseconds: 200_000_000)
-                guard isCurrentCustomExport(request) else { return }
+            handle.finish()
+            DispatchQueue.main.async {
+                guard isCurrentCustomExport(request, exportID: exportID, handle: handle) else {
+                    prepared.text.removeAll(keepingCapacity: false)
+                    return
+                }
+                guard !handle.isCancelled else {
+                    prepared.text.removeAll(keepingCapacity: false)
+                    finishCustomRangeExport(handle, exportID: exportID)
+                    return
+                }
+                copyAndDiscardCustomLogExport(&prepared)
+                finishCustomRangeExport(handle, exportID: exportID)
             }
         }
-        throw CustomLogExportError.serverUnavailable
     }
 
     @MainActor
-    private func fetchAndShareCustomRange(_ request: CustomLogExportRequest) async throws {
-        guard isCurrentCustomExport(request) else { return }
+    private func isCurrentCustomExport(_ request: CustomLogExportRequest,
+                                      exportID: UUID,
+                                      handle: LogQueryHandle) -> Bool {
+        isViewVisible
+            && request.generation == refreshGeneration
+            && activeCustomExportID == exportID
+            && activeCustomExportHandle === handle
+            && !handle.isCancelled
+    }
 
-        let response = try await LocalhostClient.exportLogs(
-            sinceNs: request.sinceNs,
-            untilNs: request.untilNs
+    nonisolated private static func prepareCustomLogExport(
+        _ request: CustomLogExportRequest,
+        handle: LogQueryHandle
+    ) throws -> PreparedCustomLogExport {
+        let footprintBeforeBytes = MemoryMonitor.currentFootprint()
+        // Only the final text escapes; row and formatting intermediates drain here.
+        let result = try autoreleasepool {
+            let fetchStartedAt = DispatchTime.now().uptimeNanoseconds
+            let entries = try LogStore.shared.exportRange(
+                sinceNs: request.sinceNs,
+                untilNs: request.untilNs,
+                cancellation: handle
+            )
+            let fetchEndedAt = DispatchTime.now().uptimeNanoseconds
+            guard !handle.isCancelled else { throw LogStoreError.cancelled }
+
+            let dateFormatter = ISO8601DateFormatter()
+            dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let rawText = entries
+                .map { formatCustomLogExportEntry($0, dateFormatter: dateFormatter) }
+                .joined(separator: "\n")
+            let text = request.scrubPII ? LogScrubber.scrub(rawText) : rawText
+            return (
+                text: text,
+                entryCount: entries.count,
+                byteCount: text.utf8.count,
+                fetchDurationMilliseconds: Double(fetchEndedAt - fetchStartedAt) / 1_000_000
+            )
+        }
+
+        return PreparedCustomLogExport(
+            text: result.text,
+            entryCount: result.entryCount,
+            byteCount: result.byteCount,
+            fetchDurationMilliseconds: result.fetchDurationMilliseconds,
+            footprintBeforeBytes: footprintBeforeBytes
         )
-        guard isCurrentCustomExport(request) else { return }
-
-        let entries = response.entries
-        let shouldScrubPII = request.scrubPII
-        let url = try await Task.detached(priority: .userInitiated) {
-            try Self.writeCustomLogExport(entries: entries, scrubPII: shouldScrubPII)
-        }.value
-
-        guard isCurrentCustomExport(request) else {
-            PendingLogExportCleanupRegistry.shared.markCleanupReady(url)
-            rangeExportURL = url
-            cleanupRangeExportFile()
-            return
-        }
-
-        rangeExportURL = url
-        PendingLogExportCleanupRegistry.shared.markShared(url)
-        isRangeExportSheetPresented = true
-        FileLogger.shared.info(.app, "Custom log export completed",
-                               payload: ["count": response.count])
     }
 
-    @MainActor
-    private func isCurrentCustomExport(_ request: CustomLogExportRequest) -> Bool {
-        isViewVisible && request.generation == refreshGeneration
-    }
-
-    @MainActor
-    private func showCustomExportError(_ error: Error) {
-        FileLogger.shared.error(.app, "Custom log export failed",
-                                payload: ["error": error.localizedDescription])
-        exportErrorMessage = error.localizedDescription
-        showExportError = true
-    }
-
-    nonisolated private static func writeCustomLogExport(entries: [LocalhostLogExportEntry],
-                                                         scrubPII: Bool) throws -> URL {
-        let text = entries.map(Self.formatCustomLogExportEntry).joined(separator: "\n")
-        let shareText = scrubPII ? LogScrubber.scrub(text) : text
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd-HHmmss-SSS"
-        let filename = "ritoras-log-export-\(formatter.string(from: Date()))-\(UUID().uuidString).txt"
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
-        // Keep creation ineligible for drains until writing and handoff finish.
-        PendingLogExportCleanupRegistry.shared.register(url)
-        do {
-            try shareText.write(to: url, atomically: true, encoding: .utf8)
-        } catch {
-            PendingLogExportCleanupRegistry.shared.markCleanupReady(url)
-            throw error
-        }
-        return url
-    }
-
-    nonisolated private static func formatCustomLogExportEntry(_ entry: LocalhostLogExportEntry) -> String {
-        let timestamp = entry.timestamp ?? "—"
-        let level = entry.level.map { "[\($0.uppercased())]" } ?? "[—]"
-        let component = entry.component.map { "[\($0)]" } ?? "[—]"
+    nonisolated private static func formatCustomLogExportEntry(
+        _ entry: LogLine,
+        dateFormatter: ISO8601DateFormatter
+    ) -> String {
+        let timestamp = entry.timestamp.map { dateFormatter.string(from: $0) } ?? "—"
+        let level = entry.level.map { "[\($0.rawValue.uppercased())]" } ?? "[—]"
+        let component = entry.component.map { "[\($0.rawValue)]" } ?? "[—]"
         let message: String
         if let structuredMessage = entry.message, !structuredMessage.isEmpty {
             message = structuredMessage
@@ -1293,52 +1265,81 @@ struct DebugLogView: View {
         if let payload = entry.payload {
             for key in payload.keys.sorted() {
                 if let value = payload[key] {
-                    lines.append("  \(key): \(value.readableText)")
+                    lines.append("  \(key): \(readableExportValue(value))")
                 }
             }
         }
         return lines.joined(separator: "\n")
     }
 
-    @MainActor
-    private func cleanupRangeExportFile() {
-        guard let url = rangeExportURL else { return }
-        PendingLogExportCleanupRegistry.shared.markCleanupReady(url)
-        guard removeCustomLogExportFile(at: url, alertOnFailure: true) else { return }
-        rangeExportURL = nil
+    nonisolated private static func readableExportValue(_ value: Any) -> String {
+        if let object = value as? [String: Any] {
+            let fields = object.keys.sorted().compactMap { key in
+                object[key].map { "\(key): \(readableExportValue($0))" }
+            }
+            return "{\(fields.joined(separator: ", "))}"
+        }
+        if let array = value as? [Any] {
+            return "[\(array.map(readableExportValue).joined(separator: ", "))]"
+        }
+        if value is NSNull {
+            return "null"
+        }
+        if let string = value as? String {
+            return string
+        }
+        if let number = value as? NSNumber {
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return number.boolValue ? "true" : "false"
+            }
+            return number.stringValue
+        }
+        return String(describing: value)
     }
 
     @MainActor
-    private func drainPendingCustomLogExportFiles() {
-        for url in PendingLogExportCleanupRegistry.shared.cleanupReadyURLs() {
-            _ = removeCustomLogExportFile(at: url, alertOnFailure: false)
-        }
+    private func copyAndDiscardCustomLogExport(_ prepared: inout PreparedCustomLogExport) {
+        UIPasteboard.general.string = prepared.text
+        prepared.text.removeAll(keepingCapacity: false)
+
+        let footprintAfterBytes = MemoryMonitor.currentFootprint()
+        FileLogger.shared.info(.performance, "Debug log range export", payload: [
+            "action": "range_export",
+            "duration_ms": prepared.fetchDurationMilliseconds,
+            "entry_count": prepared.entryCount,
+            "byte_count": prepared.byteCount,
+            "phys_footprint_before_bytes": Double(prepared.footprintBeforeBytes),
+            "phys_footprint_after_bytes": Double(footprintAfterBytes),
+            "phys_footprint_delta_bytes": Double(footprintAfterBytes)
+                - Double(prepared.footprintBeforeBytes)
+        ])
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        showActionFeedback(text: "Copied \(prepared.entryCount) entries to clipboard")
     }
 
     @MainActor
-    private func removeCustomLogExportFile(at url: URL, alertOnFailure: Bool) -> Bool {
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            PendingLogExportCleanupRegistry.shared.unregister(url)
-            return true
-        }
-        do {
-            try FileManager.default.removeItem(at: url)
-            PendingLogExportCleanupRegistry.shared.unregister(url)
-            return true
-        } catch {
-            PendingLogExportCleanupRegistry.shared.markCleanupReady(url)
-            FileLogger.shared.warn(.app, "Custom log export file cleanup failed",
-                                   payload: ["error": error.localizedDescription])
-            if alertOnFailure { showCustomExportError(error) }
-            return false
-        }
+    private func finishCustomRangeExport(_ handle: LogQueryHandle, exportID: UUID) {
+        handle.finish()
+        guard activeCustomExportHandle === handle,
+              activeCustomExportID == exportID else { return }
+        activeCustomExportHandle = nil
+        activeCustomExportID = nil
+        isExportingCustomRange = false
+    }
+
+    @MainActor
+    private func showCustomExportError(_ error: Error) {
+        FileLogger.shared.error(.app, "Custom log export failed",
+                                payload: ["error": error.localizedDescription])
+        exportErrorMessage = error.localizedDescription
+        showExportError = true
     }
 
     private func executeDelete(_ action: DeleteAction) {
         if case .crashReports = action {
             MetricKitSubscriber.clear()
             crashReports = []
-            showDeleteFeedback(text: "Cleared crash reports", isError: false)
+            showActionFeedback(text: "Cleared crash reports", isError: false)
             return
         }
 
@@ -1347,7 +1348,7 @@ struct DebugLogView: View {
             crashReports = []
         }
         if case .visible = action, selectedComponents.isEmpty {
-            showDeleteFeedback(text: "Deleted 0 logs", isError: false)
+            showActionFeedback(text: "Deleted 0 logs", isError: false)
             refresh()
             return
         }
@@ -1412,7 +1413,7 @@ struct DebugLogView: View {
                 DispatchQueue.main.async {
                     guard activeDeleteHandle === handle else { return }
                     activeDeleteHandle = nil
-                    showDeleteFeedback(text: feedbackText)
+                    showActionFeedback(text: feedbackText)
                     refresh()
                 }
             } catch {
@@ -1421,7 +1422,7 @@ struct DebugLogView: View {
                     guard activeDeleteHandle === handle else { return }
                     activeDeleteHandle = nil
                     guard !handle.isCancelled else { return }
-                    showDeleteFeedback(
+                    showActionFeedback(
                         text: "Delete failed — database may be corrupted; recovering…",
                         isError: true
                     )
@@ -1431,12 +1432,12 @@ struct DebugLogView: View {
         }
     }
 
-    private func showDeleteFeedback(text: String, isError: Bool = false) {
-        deleteFeedbackText = text
-        deleteFeedbackIsError = isError
-        withAnimation { showDeleteFeedback = true }
+    private func showActionFeedback(text: String, isError: Bool = false) {
+        actionFeedbackText = text
+        actionFeedbackIsError = isError
+        withAnimation { showActionFeedback = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-            withAnimation { showDeleteFeedback = false }
+            withAnimation { showActionFeedback = false }
         }
     }
 
@@ -1601,6 +1602,7 @@ struct DebugLogView: View {
     }
 
     private func incrementalRefresh() {
+        cancelActiveCustomRangeExport()
         let componentSelection = selectedComponents
         guard !componentSelection.isEmpty else {
             clearFilteredLogResults()
