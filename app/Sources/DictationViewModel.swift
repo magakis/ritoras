@@ -268,6 +268,11 @@ final class DictationViewModel: ObservableObject {
 
     @Published var phase: DictationPhase = .recording {
         didSet {
+            if case .done = oldValue, case .error = phase {
+                FileLogger.shared.debug(.transcription, "preserving .done from racing error publish")
+                phase = oldValue
+                return
+            }
             if isTerminalResult(oldValue), phase == .cancelled {
                 phase = oldValue
                 return
@@ -344,6 +349,7 @@ final class DictationViewModel: ObservableObject {
     private(set) var activeID: UUID?
     private var activeDictationMode: SharedConfig.DictationMode?
     private var unifiedStopRequestedSessionID: UUID?
+    private var stopInFlightSessionID: UUID?
     private var earlyCancelledSessionID: UUID?
     private var cancellationInProgressID: UUID?
     private var cancellationTasks: [UUID: Task<Void, Never>] = [:]
@@ -1769,7 +1775,22 @@ final class DictationViewModel: ObservableObject {
     }
 
     func stop() async {
+        guard !isTerminalResult(phase), phase != .cancelled else {
+            FileLogger.shared.debug(.transcription, "stop ignored for terminal dictation")
+            return
+        }
+        guard let id = activeID else { return }
+        guard stopInFlightSessionID != id else {
+            FileLogger.shared.debug(.transcription, "stop ignored while already in flight")
+            return
+        }
         guard let mode = activeDictationMode else { return }
+        stopInFlightSessionID = id
+        defer {
+            if stopInFlightSessionID == id {
+                stopInFlightSessionID = nil
+            }
+        }
         chunkSplitterState = nil
         lastChunkSplitterPublishTime = nil
         lastPublishedChunkSplitterState = nil
@@ -3569,7 +3590,7 @@ final class DictationViewModel: ObservableObject {
     /// terminal-result path.
     private func handleStreamTerminalFailure(jobId: UUID, error: String) {
         guard let failure = preserveStreamFailure(jobId: jobId, error: error) else { return }
-        deliverStreamTerminalFailure(error: error, payload: failure.payload)
+        deliverStreamTerminalFailure(error: failure.error, payload: failure.payload)
     }
 
     /// Uses the saved-audio retry path only after END was sent and the final-frame
@@ -3577,7 +3598,7 @@ final class DictationViewModel: ObservableObject {
     private func recoverFromStreamTerminalFailure(jobId: UUID, error: String) async {
         guard let failure = preserveStreamFailure(jobId: jobId, error: error) else { return }
         guard failure.classification == "terminal", failure.wavExists else {
-            deliverStreamTerminalFailure(error: error, payload: failure.payload)
+            deliverStreamTerminalFailure(error: failure.error, payload: failure.payload)
             return
         }
 
@@ -3628,14 +3649,14 @@ final class DictationViewModel: ObservableObject {
                 "streamError": error,
                 "fallbackError": fallbackError.localizedDescription
             ])
-            deliverStreamTerminalFailure(error: error, payload: failure.payload)
+            deliverStreamTerminalFailure(error: failure.error, payload: failure.payload)
         }
     }
 
     private func preserveStreamFailure(
         jobId: UUID,
         error: String
-    ) -> (classification: String, wavExists: Bool, payload: [String: Any])? {
+    ) -> (classification: String, wavExists: Bool, error: String, payload: [String: Any])? {
         guard activeID == jobId else { return nil }
         let classification = error.contains("send failed") ? "send" : "terminal"
 
@@ -3661,6 +3682,7 @@ final class DictationViewModel: ObservableObject {
         let duration = recordingStartTime.map { Date().timeIntervalSince($0) } ?? 0
         let savedServer = streamClient == nil ? nil : selectedServer
 
+        var recordSaved = false
         if wavExists, let url = wavURL {
             FailedJobStore.shared.append(FailedJobRecord(
                 jobId: jobId,
@@ -3671,15 +3693,27 @@ final class DictationViewModel: ObservableObject {
                 retryCount: 0,
                 lastRetriedAt: nil,
                 server: savedServer))
+            recordSaved = FailedJobStore.shared.list().contains {
+                $0.jobId == jobId && $0.audioFilePath == url.path
+            }
+        }
+
+        let preservationClaim = " — recording preserved for retry"
+        let reportedError: String
+        if !recordSaved, error.hasSuffix(preservationClaim) {
+            reportedError = String(error.dropLast(preservationClaim.count))
+                + " — recording could not be preserved"
+        } else {
+            reportedError = error
         }
 
         var failurePayload: [String: Any] = [
             "jobId": jobId.uuidString,
             "server": selectedServer ?? "none",
             "classification": classification,
-            "reason": String(error.prefix(120)),
+            "reason": String(reportedError.prefix(120)),
             "savedServer": savedServer ?? "none",
-            "recordSaved": wavExists,
+            "recordSaved": recordSaved,
             "wavPath": wavURL?.path ?? "none",
             "wavExists": wavExists
         ]
@@ -3692,10 +3726,14 @@ final class DictationViewModel: ObservableObject {
             failurePayload["wavSizeError"] = String(wavSizeError.prefix(160))
         }
 
-        return (classification, wavExists, failurePayload)
+        return (classification, wavExists, reportedError, failurePayload)
     }
 
     private func deliverStreamTerminalFailure(error: String, payload: [String: Any]) {
+        if case .done = phase {
+            FileLogger.shared.debug(.transcription, "stream failure ignored after completed result")
+            return
+        }
         FileLogger.shared.error(.transcription, "Stream failure classified", payload: payload)
         phase = .error(error)
     }
