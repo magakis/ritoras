@@ -73,6 +73,22 @@ function resolveSwiftc() {
 // File resolution
 // ---------------------------------------------------------------------------
 
+function warnMissing(files) {
+  // Tracked files deleted from the worktree have no syntax to parse, and
+  // swiftc -parse hard-errors on the missing input file, aborting the whole
+  // sweep. Warn and skip, mirroring the missing-path behavior of explicit
+  // positional paths in resolvePositionalFiles().
+  const existing = [];
+  for (const file of files) {
+    if (existsSync(file)) {
+      existing.push(file);
+    } else {
+      console.error(`⚠ tracked file missing from worktree, skipped: ${file}`);
+    }
+  }
+  return existing;
+}
+
 function resolveChangedFiles() {
   // --changed mode: parse only .swift files modified vs HEAD. If HEAD doesn't
   // exist (empty repo, first commit), fall back to --cached. If there are no
@@ -85,11 +101,11 @@ function resolveChangedFiles() {
     // HEAD doesn't exist (empty repo / first commit)
     raw = execFileSync('git', ['diff', '--name-only', '-z', '--cached', '--', '*.swift'], { encoding: 'utf8' });
   }
-  const files = raw.split('\0').filter(Boolean);
+  const files = warnMissing(raw.split('\0').filter(Boolean));
   if (files.length > 0) return files;
-  // No changes — fall back to all tracked .swift files
+  // No parseable changes — fall back to all tracked .swift files
   raw = execFileSync('git', ['ls-files', '-z', '*.swift'], { encoding: 'utf8' });
-  return raw.split('\0').filter(Boolean);
+  return warnMissing(raw.split('\0').filter(Boolean));
 }
 
 function resolvePositionalFiles(args) {
@@ -140,7 +156,7 @@ function resolveFiles(argv) {
 
   // Default: all git-tracked .swift files
   const raw = execFileSync('git', ['ls-files', '-z', '*.swift'], { encoding: 'utf8' });
-  return raw.split('\0').filter(Boolean);
+  return warnMissing(raw.split('\0').filter(Boolean));
 }
 
 // ---------------------------------------------------------------------------
