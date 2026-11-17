@@ -14,7 +14,7 @@ import { SymSpell } from '../lib/symspell.mjs';
 import { SymSpellProvider } from '../lib/symspell-provider.mjs';
 import { expansion } from '../lib/contractions.mjs';
 import { topCorrection } from '../lib/top-correction.mjs';
-import { fusionIsActive } from '../lib/fusion-is-active.mjs';
+import { selectConfidenceThreshold } from '../lib/autocorrect-controller.mjs';
 import { bigramKenlmScorer } from '../lib/bigram-kenlm-proxy.mjs';
 import { loadDictionary } from '../lib/load-dictionary.mjs';
 
@@ -74,7 +74,7 @@ function buildPool(typedWord, symspellProvider) {
   return symspellProvider.suggest(typedWord);
 }
 
-function runOne(typedWord, previousWord, pool, blendWeight, absoluteLogProbFloor,
+function runOne(typedWord, previousWord, previousWord2, pool, blendWeight, absoluteLogProbFloor,
                 fusedThreshold, unfusedThreshold) {
   // Apple-like guard: skip well-known dictionary words (≥2000 count) but
   // always process contractions.
@@ -90,7 +90,7 @@ function runOne(typedWord, previousWord, pool, blendWeight, absoluteLogProbFloor
     pool,
     currentWord: typedWord,
     previousWord,
-    previousWord2: null,
+    previousWord2,
     kenlmScorer: bigramKenlmScorer,
     trigramReady: true,
     blendWeight,
@@ -99,8 +99,12 @@ function runOne(typedWord, previousWord, pool, blendWeight, absoluteLogProbFloor
 
   if (!result) return null;
 
-  const active = fusionIsActive({ previousWord, trigramReady: true });
-  const threshold = active ? fusedThreshold : unfusedThreshold;
+  const threshold = selectConfidenceThreshold({
+    previousWord,
+    trigramReady: true,
+    fusedThreshold,
+    unfusedThreshold,
+  });
 
   if (result.score < threshold) return null;
   return result.text;
@@ -154,7 +158,7 @@ function main() {
   // Run typo corpus
   let tp = 0, fpTypo = 0;
   for (const { entry, pool } of typoPools) {
-    const correction = runOne(entry.typedWord, entry.previousWord, pool,
+    const correction = runOne(entry.typedWord, entry.previousWord, entry.previousWord2 ?? null, pool,
       opts.blendWeight, opts.floor, opts.fusedThreshold, opts.unfusedThreshold);
     if (correction === null) continue;
     if (correction.toLowerCase() === entry.intendedWord.toLowerCase()) {
@@ -167,7 +171,7 @@ function main() {
   // Run legit corpus
   let fpLegit = 0;
   for (const { entry, pool } of legitPools) {
-    const correction = runOne(entry.word, entry.previousWord, pool,
+    const correction = runOne(entry.word, entry.previousWord, entry.previousWord2 ?? null, pool,
       opts.blendWeight, opts.floor, opts.fusedThreshold, opts.unfusedThreshold);
     if (correction !== null) fpLegit++;
   }

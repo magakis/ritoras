@@ -6,6 +6,26 @@ import { CANONICAL_APOSTROPHE } from '../lib/text-normalization.mjs';
 
 describe('SymSpellProvider', () => {
   describe('suggest() — scoring with QwertyGeometry', () => {
+    it('matches Swift: frequency picks the top correction, QwertyGeometry scores it', () => {
+      const speller = new SymSpell(2, 7);
+      speller.createDictionaryEntry('with', 10000);
+      speller.createDictionaryEntry('wish', 5000);
+      const dictionary = new Map([
+        ['with', { count: 10000 }],
+        ['wish', { count: 5000 }],
+      ]);
+      const provider = new SymSpellProvider(speller, dictionary);
+
+      const results = provider.suggest('wiyh');
+      const withResult = results.find(s => s.text === 'with');
+
+      assert.ok(withResult, 'highest-frequency equal-distance correction is returned');
+      assert.strictEqual(results.some(s => s.text === 'wish'), false,
+        'Swift .top lookup returns only the frequency-ranked correction');
+      assert.ok(Math.abs(withResult.score - Math.exp(-0.5)) < 0.001,
+        `QwertyGeometry score ${withResult.score} ≈ exp(-0.5)`);
+    });
+
     it('"bith" returns "both" scored ≈ 0.607, ranked above "bath"', () => {
       const speller = new SymSpell(2, 7);
       speller.createDictionaryEntry('both', 5000);

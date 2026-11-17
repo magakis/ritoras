@@ -2,12 +2,14 @@
 // Kept in sync per AGENTS.md -> Test policy.
 
 import { canonicalize } from './text-normalization.mjs';
+import { fusionIsActive } from './fusion-is-active.mjs';
 
-/** Matches SharedConfig.Defaults.autocorrectMinConfidenceScore (0.7). */
+/** Matches the two Swift autocorrect thresholds in SharedConfig.Defaults. */
 export const DEFAULT_CONFIG = {
   minWordLength: 2,
   maxWordLength: 25,
   minConfidenceScore: 0.7,
+  minConfidenceScoreFused: 0.65,
 };
 
 /** Mirrors WordOrigin: only `.typing` is re-evaluable on separator press. */
@@ -15,6 +17,21 @@ export const ORIGIN_TYPING = 'typing';
 export const ORIGIN_SUGGESTION_TAP = 'suggestionTap';
 export const WORD_LEARNING_COMMIT_THRESHOLD = 3;
 const MAX_TRACKED_WORDS = 512;
+
+/**
+ * Mirrors KeyboardViewController's confidence-threshold selection:
+ * 0.65 when KenLM fusion is active, otherwise 0.70.
+ */
+export function selectConfidenceThreshold({
+  previousWord,
+  trigramReady,
+  fusedThreshold = DEFAULT_CONFIG.minConfidenceScoreFused,
+  unfusedThreshold = DEFAULT_CONFIG.minConfidenceScore,
+}) {
+  return fusionIsActive({ previousWord, trigramReady })
+    ? fusedThreshold
+    : unfusedThreshold;
+}
 
 /** Minimal mirror of WordOriginTracker for suggestion-tap input sequences. */
 export class WordOriginTracker {
@@ -89,6 +106,9 @@ export function isMisspelledForAutocorrect({
  * @param {string} [opts.language='english'] - Active keyboard language ('english'|'greek').
  *   Defaults to English, preserving existing call sites. Only the case-preservation
  *   step is language-sensitive.
+ * @param {string|null} [opts.previousWord] - Context used to determine whether
+ *   KenLM fusion is active.
+ * @param {boolean} [opts.trigramReady=false] - Whether the KenLM provider is ready.
  * @param {object} [opts.config] - Tunable thresholds (defaults from SharedConfig.Defaults).
  * @returns {{decision:string, typedWord?:string, correction?:string}}
  */
@@ -99,6 +119,8 @@ export function evaluate({
   isLearned,
   isMisspelled,
   language = 'english',
+  previousWord = null,
+  trigramReady = false,
   config = DEFAULT_CONFIG,
 }) {
   // LOCKED origins — never re-correct.
@@ -140,7 +162,13 @@ export function evaluate({
   }
 
   // Confidence threshold (skipped for deterministic contractions).
-  if (!isContraction && candidate.score < config.minConfidenceScore) {
+  const minConfidenceScore = selectConfidenceThreshold({
+    previousWord,
+    trigramReady,
+    fusedThreshold: config.minConfidenceScoreFused,
+    unfusedThreshold: config.minConfidenceScore,
+  });
+  if (!isContraction && candidate.score < minConfidenceScore) {
     return { decision: 'leaveAsIs' };
   }
 

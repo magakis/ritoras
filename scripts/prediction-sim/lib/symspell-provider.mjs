@@ -30,7 +30,13 @@ export const DEFAULTS = {
  * In the JS harness, the Trie is not available, so the isRealWord branch
  * returns only the verbatim + contraction entries (no prefix completions).
  * When the word is NOT a real word, SymSpell candidates are scored using
- * QwertyGeometry.
+ * QwertyGeometry. As in Swift, SymSpell lookup selects the `.top` candidate
+ * by edit distance and then dictionary frequency; frequency does not replace
+ * the Qwerty score assigned to that candidate.
+ *
+ * UITextChecker guesses/completions are not available in Node. When Apple alone
+ * supplies a candidate, omitting it can only lower that candidate's mirrored
+ * score or remove it, biasing this harness toward missed corrections.
  *
  * @param {import('./symspell.mjs').SymSpell} symSpell - A SymSpell instance
  * @param {Map<string, {count: number}>} [dictionary] - Full dictionary map for

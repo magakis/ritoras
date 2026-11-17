@@ -14,7 +14,8 @@ Pure-logic components only:
 - `Trie` (prefix completion)
 - `Contractions` (apostrophe-less → contraction fast-path table)
 - `AutocorrectController` (threshold-gated decision logic)
-- `PredictionEngine` fusion (Apple boost + KenLM min-max normalization + two-tier threshold + absolute-floor gate)
+- `PredictionEngine` fusion (Apple boost + KenLM min-max normalization + two-tier
+  threshold + conditional sub-floor margin rescue)
 - duration-scaled transcription timeout budgets and retry eligibility
 - streaming transcription timeouts (WebSocket connect, liveness silence, final/drain)
 - Chunk splitter telemetry digest reduction (bounded summaries from retained JSONL recordings)
@@ -50,10 +51,20 @@ Requires Node ≥18 (uses the built-in `node:test` runner — no dependencies).
 
 The real `trigram_en_v1.klm` is a C-bridge binary that cannot run in Node. The
 fusion tests use a **bigram-count proxy** (zero dependencies): bigram log-probabilities
-derived from a public corpus, used as a stand-in for KenLM's trigram scores. This
-gives directional test coverage (does the fusion formula behave correctly given a
-score function?) but NOT exact numerical fidelity to production KenLM. Final
-tuning of α and the thresholds is confirmed on-device via `ritoras-ios-debugging`.
+derived from a public corpus, used as a stand-in for KenLM's trigram scores.
+It is calibrated for OOV-context floor behavior: the device trace establishes
+that the incident winner fell below the `-8.0` floor, but not its exact score.
+The default OOV penalty is 4.5 log10 decades; the explicit sensitivity range is
+4.4–5.5. Even the low end pushes the proxy's weakest add-one-smoothed OOV score
+below `-8.0`. In-vocabulary contexts keep the original add-one scale; only the
+OOV path adds a unigram-rank prior and the downward calibration. This is
+conservative and biases toward missed corrections, not extra corrections.
+
+`previousWord2` is passed through the sweep and is checked for OOV membership.
+The proxy still does not model live KenLM backoff or in-vocabulary trigram
+effects, so it cannot reproduce every device candidate score. Its scores are
+for relative policy-sensitivity sweeps, not claims of exact `.klm` values.
+Final tuning is confirmed on-device via `ritoras-ios-debugging`.
 
 ## Keeping the port in sync
 

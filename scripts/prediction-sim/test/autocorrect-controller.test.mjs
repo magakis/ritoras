@@ -8,9 +8,45 @@ import {
   evaluate,
   isMisspelledForAutocorrect,
   preserveCase,
+  selectConfidenceThreshold,
 } from '../lib/autocorrect-controller.mjs';
 
 const APOSTROPHE = '\u{2019}';
+
+describe('autocorrect confidence threshold selection', () => {
+  it('uses Swift thresholds: 0.65 with active fusion and 0.70 otherwise', () => {
+    assert.strictEqual(
+      selectConfidenceThreshold({ previousWord: 'so', trigramReady: true }),
+      0.65,
+    );
+    assert.strictEqual(
+      selectConfidenceThreshold({ previousWord: null, trigramReady: true }),
+      0.70,
+    );
+    assert.strictEqual(
+      selectConfidenceThreshold({ previousWord: 'so', trigramReady: false }),
+      0.70,
+    );
+    assert.strictEqual(DEFAULT_CONFIG.minConfidenceScoreFused, 0.65);
+    assert.strictEqual(DEFAULT_CONFIG.minConfidenceScore, 0.70);
+  });
+
+  it('applies the selected threshold to evaluate()', () => {
+    const evaluateAtScore = (previousWord, trigramReady) => evaluate({
+      typedWord: 'wiyh',
+      origin: 'typing',
+      topCorrection: { text: 'with', score: 0.65, source: 'symspell' },
+      isLearned: false,
+      isMisspelled: true,
+      previousWord,
+      trigramReady,
+    });
+
+    assert.strictEqual(evaluateAtScore('so', true).decision, 'correct');
+    assert.strictEqual(evaluateAtScore(null, true).decision, 'leaveAsIs');
+    assert.strictEqual(evaluateAtScore('so', false).decision, 'leaveAsIs');
+  });
+});
 
 describe('AutocorrectController.evaluate', () => {
   describe('.ambiguousContraction branch', () => {

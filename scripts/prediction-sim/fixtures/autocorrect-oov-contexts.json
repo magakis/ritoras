@@ -1,0 +1,73 @@
+{
+  "calibration": {
+    "floorLog10": -8.0,
+    "anchorPenaltyLog10": 4.5,
+    "sensitivityRangeLog10": [4.4, 5.5],
+    "anchorRationale": "The device trace proves the incident winner was below -8.0 but does not record its exact raw score. The low sensitivity endpoint moves the weakest 1/V add-one OOV score (about -3.70) below the floor."
+  },
+  "cases": [
+    {
+      "id": "tier-0-wiyh-eur50-so",
+      "tier": 0,
+      "contextClass": "currency",
+      "typedWord": "wiyh",
+      "intendedWord": "with",
+      "previousWords": ["€50", "so"],
+      "appleGuesses": ["with", "wish"],
+      "deviceObservedScores": {
+        "with": 1.0,
+        "wish": 0.6277,
+        "wiyh": 0.5
+      },
+      "expectedContextOov": true,
+      "expectedRejectingGate": "kenlm-floor"
+    },
+    {
+      "id": "number-before-so",
+      "tier": 1,
+      "contextClass": "number",
+      "typedWord": "wiyh",
+      "intendedWord": "with",
+      "previousWords": ["2026", "so"],
+      "expectedContextOov": true
+    },
+    {
+      "id": "symbol-before-so",
+      "tier": 1,
+      "contextClass": "symbol",
+      "typedWord": "wiyh",
+      "intendedWord": "with",
+      "previousWords": ["§", "so"],
+      "expectedContextOov": true
+    },
+    {
+      "id": "curly-apostrophe-with-oov-number",
+      "tier": 1,
+      "contextClass": "curly-apostrophe-and-number",
+      "typedWord": "wiyh",
+      "intendedWord": "with",
+      "previousWords": ["It’s", "€50"],
+      "expectedKenlmPreviousWord2": "it's",
+      "expectedContextOov": true
+    },
+    {
+      "id": "curly-apostrophe-in-vocabulary",
+      "tier": 1,
+      "contextClass": "curly-apostrophe",
+      "typedWord": "wiyh",
+      "intendedWord": "with",
+      "previousWords": ["It’s", "so"],
+      "expectedKenlmPreviousWord2": "it's",
+      "expectedContextOov": false
+    },
+    {
+      "id": "in-vocabulary-control",
+      "tier": 1,
+      "contextClass": "in-vocabulary",
+      "typedWord": "wiyh",
+      "intendedWord": "with",
+      "previousWords": ["I", "so"],
+      "expectedContextOov": false
+    }
+  ]
+}
