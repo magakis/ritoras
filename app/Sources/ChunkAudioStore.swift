@@ -7,13 +7,15 @@ final class ChunkAudioStore: @unchecked Sendable {
     private let sessionDirectory: URL
     private let lock = NSLock()
 
-    init(sessionID: UUID) {
+    init(sessionID: UUID, preservingSessionIDs: Set<UUID> = []) {
         let rootDirectory = fileManager.temporaryDirectory
             .appendingPathComponent(Self.rootDirectoryName, isDirectory: true)
         sessionDirectory = rootDirectory
             .appendingPathComponent(sessionID.uuidString, isDirectory: true)
 
-        sweepStaleDirectories(in: rootDirectory)
+        sweepStaleDirectories(
+            in: rootDirectory,
+            preservingSessionIDs: preservingSessionIDs)
 
         do {
             try fileManager.createDirectory(
@@ -111,7 +113,10 @@ final class ChunkAudioStore: @unchecked Sendable {
         }
     }
 
-    private func sweepStaleDirectories(in rootDirectory: URL) {
+    private func sweepStaleDirectories(
+        in rootDirectory: URL,
+        preservingSessionIDs: Set<UUID>
+    ) {
         do {
             try fileManager.createDirectory(
                 at: rootDirectory,
@@ -120,10 +125,12 @@ final class ChunkAudioStore: @unchecked Sendable {
                 at: rootDirectory,
                 includingPropertiesForKeys: [.isDirectoryKey],
                 options: [.skipsHiddenFiles])
+            let preservedDirectoryNames = Set(preservingSessionIDs.map(\.uuidString))
 
             for entry in entries {
                 guard let values = try? entry.resourceValues(forKeys: [.isDirectoryKey]),
-                      values.isDirectory == true else {
+                      values.isDirectory == true,
+                      !preservedDirectoryNames.contains(entry.lastPathComponent) else {
                     continue
                 }
 

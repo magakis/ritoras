@@ -266,6 +266,11 @@ final class DictationViewModel: ObservableObject {
         case timedOut
     }
 
+    private struct StopCompletionWaiter {
+        let continuation: CheckedContinuation<Bool, Never>
+        var timeoutTask: Task<Void, Never>?
+    }
+
     @Published var phase: DictationPhase = .recording {
         didSet {
             if case .done = oldValue, case .error = phase {
@@ -350,6 +355,13 @@ final class DictationViewModel: ObservableObject {
     private var activeDictationMode: SharedConfig.DictationMode?
     private var unifiedStopRequestedSessionID: UUID?
     private var stopInFlightSessionID: UUID?
+    private var stopFinalizationReadySessionIDs: Set<UUID> = []
+    private var stopFinalizationReadyWaiters: [UUID: [CheckedContinuation<Bool, Never>]] = [:]
+    private var stopCompletionWaiters: [UUID: [UUID: StopCompletionWaiter]] = [:]
+    private var replacementFinalizingSessionIDs: Set<UUID> = []
+    private var replacementFinalizationDeadlines: [UUID: Date] = [:]
+    private var replacementAudioURLs: [UUID: URL] = [:]
+    private var replacementFailureMessages: [UUID: String] = [:]
     private var earlyCancelledSessionID: UUID?
     private var cancellationInProgressID: UUID?
     private var cancellationTasks: [UUID: Task<Void, Never>] = [:]
@@ -398,6 +410,9 @@ final class DictationViewModel: ObservableObject {
     private var streamConnectTask: Task<Void, Never>?
     private var chunkConsumerTask: Task<StreamChunkConsumerOutcome, Never>?
     private var receiveTask: Task<String, Error>?
+    // A replacement may need a new receiver while the prior session still awaits its final.
+    private var streamReceiveTaskSessionID: UUID?
+    private var streamReceiveTasksBySessionID: [UUID: Task<String, Error>] = [:]
     private var transcriptionTask: Task<Void, Never>?
 
     /// Diagnostic only: true once the streaming server has returned ≥1 partial
@@ -413,6 +428,11 @@ final class DictationViewModel: ObservableObject {
     private var backgroundSubmissionWaitIDs: Set<UUID> = []
     private var reconcilingBackgroundUploadIDs: Set<UUID> = []
     private var backgroundUploadObserver: NSObjectProtocol?
+
+    /// The stream client can wait up to 120 seconds for its own final-frame
+    /// timeout; this replacement budget lets healthy loopback sessions finish
+    /// comfortably while bounding how long a stalled server blocks a new start.
+    private static let replacementFinalizeBudget: TimeInterval = 45
 
     init() {
         backgroundUploadObserver = NotificationCenter.default.addObserver(
@@ -620,6 +640,16 @@ final class DictationViewModel: ObservableObject {
     }
 
     private func setPinnedServer(_ server: String?, for jobId: UUID) {
+        if replacementFinalizingSessionIDs.contains(jobId), activeID != jobId {
+            if var pending = FailedJobStore.shared.listPending().first(where: { $0.jobId == jobId }) {
+                pending.resolvedServer = server
+                _ = FailedJobStore.shared.updatePending(pending)
+            }
+            if let server {
+                FailedJobStore.shared.updateServer(jobId: jobId, server: server)
+            }
+            return
+        }
         SharedConfig.setSelectedServer(server)
         if var pending = FailedJobStore.shared.listPending().first(where: { $0.jobId == jobId }) {
             pending.resolvedServer = server
@@ -711,6 +741,34 @@ final class DictationViewModel: ObservableObject {
             SharedConfig.clearPendingDictationCancel(matching: activeID)
         }
         return true
+    }
+
+    private func publishFinalizingSessionTerminalSnapshot(
+        id: UUID,
+        status: DictationPayload.Status,
+        text: String? = nil,
+        errorMessage: String? = nil
+    ) {
+        // The new session owns `phase`; detached results must publish with their captured ID.
+        snapshotRevision &+= 1
+        let payload = DictationPayload(
+            id: id,
+            status: status,
+            text: text,
+            errorMessage: errorMessage,
+            returnToIdleDeadline: nil,
+            server: nil,
+            timestamp: Date(),
+            revision: snapshotRevision)
+        lastPayloadHolder.set(payload)
+        SharedConfig.setSnapshotFile(payload)
+        SharedConfig.setDictationSnapshot(payload)
+        SharedConfig.clearPendingDictationCancel(matching: id)
+        DarwinNotifier.post(SharedConfig.Defaults.darwinStateChangedNotificationName)
+    }
+
+    private func isDetachedReplacementFinalization(_ id: UUID) -> Bool {
+        replacementFinalizingSessionIDs.contains(id) && activeID != id
     }
 
     func reconcileOnActivation() {
@@ -1124,16 +1182,230 @@ final class DictationViewModel: ObservableObject {
         }
     }
 
-    private func performStart(id: UUID) async {
-        let mode = SharedConfig.dictationMode()
-        if let priorID = activeID {
-            FileLogger.shared.info(.transcription, "start: awaiting prior session teardown")
-            await cancel(expectedID: priorID)
+    private func waitForStopFinalizationReady(_ id: UUID) async -> Bool {
+        if stopFinalizationReadySessionIDs.contains(id) {
+            return true
+        }
+        guard activeID == id,
+              (isActivePhase(phase) || stopInFlightSessionID == id),
+              activeDictationMode != nil || stopInFlightSessionID == id else {
+            return false
         }
 
-        clearChunkReviews()
-        serverSelectionTask?.cancel()
+        return await withCheckedContinuation { continuation in
+            if stopFinalizationReadySessionIDs.contains(id) {
+                continuation.resume(returning: true)
+            } else if activeID != id
+                        || (!isActivePhase(phase) && stopInFlightSessionID != id) {
+                continuation.resume(returning: false)
+            } else {
+                stopFinalizationReadyWaiters[id, default: []].append(continuation)
+            }
+        }
+    }
+
+    private func waitForStopCompletion(
+        _ id: UUID,
+        timeout: TimeInterval? = nil
+    ) async -> Bool {
+        guard stopInFlightSessionID == id else { return true }
+
+        return await withCheckedContinuation { continuation in
+            let waiterID = UUID()
+            stopCompletionWaiters[id, default: [:]][waiterID] = StopCompletionWaiter(
+                continuation: continuation,
+                timeoutTask: nil)
+            guard let timeout else { return }
+
+            let timeoutTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                } catch {
+                    return
+                }
+                guard let self else { return }
+                self.resolveStopCompletionWaiter(
+                    sessionID: id,
+                    waiterID: waiterID,
+                    completed: false)
+            }
+            if var waiter = stopCompletionWaiters[id]?[waiterID] {
+                waiter.timeoutTask = timeoutTask
+                stopCompletionWaiters[id]?[waiterID] = waiter
+            }
+        }
+    }
+
+    private func resolveStopCompletionWaiter(
+        sessionID: UUID,
+        waiterID: UUID,
+        completed: Bool
+    ) {
+        guard var waiters = stopCompletionWaiters[sessionID],
+              let waiter = waiters.removeValue(forKey: waiterID) else { return }
+        stopCompletionWaiters[sessionID] = waiters.isEmpty ? nil : waiters
+        waiter.timeoutTask?.cancel()
+        waiter.continuation.resume(returning: completed)
+    }
+
+    private func markStopFinalizationReady(_ id: UUID) {
+        guard stopFinalizationReadySessionIDs.insert(id).inserted else { return }
+        let waiters = stopFinalizationReadyWaiters.removeValue(forKey: id) ?? []
+        for waiter in waiters {
+            waiter.resume(returning: true)
+        }
+    }
+
+    private func finishStopSession(_ id: UUID) {
+        if stopInFlightSessionID == id {
+            stopInFlightSessionID = nil
+        }
+        stopFinalizationReadySessionIDs.remove(id)
+        replacementFinalizingSessionIDs.remove(id)
+        replacementFinalizationDeadlines[id] = nil
+        replacementAudioURLs[id] = nil
+        replacementFailureMessages[id] = nil
+        streamReceiveTasksBySessionID[id] = nil
+        if streamReceiveTaskSessionID == id {
+            receiveTask = nil
+            streamReceiveTaskSessionID = nil
+        }
+
+        let readyWaiters = stopFinalizationReadyWaiters.removeValue(forKey: id) ?? []
+        for waiter in readyWaiters {
+            waiter.resume(returning: false)
+        }
+        let completionWaiters = stopCompletionWaiters.removeValue(forKey: id) ?? [:]
+        for waiter in completionWaiters.values {
+            waiter.timeoutTask?.cancel()
+            waiter.continuation.resume(returning: true)
+        }
+    }
+
+    private func preserveReplacementFinalizationAudio(
+        for id: UUID,
+        recordingStartTime: Date?,
+        selectedServer: String?
+    ) -> Bool {
+        let audioURL = replacementAudioURLs[id] ?? RecordingStore.shared.streamWavURL(for: id)
+        let audioExists = audioURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        var recordSaved = false
+
+        if audioExists, let audioURL {
+            FailedJobStore.shared.append(FailedJobRecord(
+                jobId: id,
+                audioFilePath: audioURL.path,
+                errorMessage: "Replacement dictation began before final transcription completed.",
+                recordedDurationSeconds: recordingStartTime.map {
+                    Date().timeIntervalSince($0)
+                } ?? 0,
+                createdAt: Date(),
+                retryCount: 0,
+                lastRetriedAt: nil,
+                server: selectedServer))
+            recordSaved = FailedJobStore.shared.list().contains {
+                $0.jobId == id && $0.audioFilePath == audioURL.path
+            }
+        }
+
+        replacementFailureMessages[id] = recordSaved
+            ? "Previous dictation did not finalize before replacement; recording preserved for retry."
+            : "Previous dictation did not finalize before replacement; recording could not be preserved."
+        FileLogger.shared.warn(.transcription, "Replacement dictation finalization budget expired", payload: [
+            "jobId": id.uuidString,
+            "recordSaved": recordSaved,
+            "audioExists": audioExists
+        ])
+        return recordSaved
+    }
+
+    private func removeDeliveredFailedJobRecord(for id: UUID) {
+        guard FailedJobStore.shared.list().contains(where: { $0.jobId == id }) else { return }
+        guard FailedJobStore.shared.removePersisted(jobId: id) else {
+            FileLogger.shared.error(.transcription, "Delivered failed-job record cleanup failed", payload: [
+                "jobId": id.uuidString
+            ])
+            return
+        }
+        FileLogger.shared.info(.transcription, "Delivered failed-job record cleanup complete", payload: [
+            "jobId": id.uuidString
+        ])
+    }
+
+    private func replacementFinalizationTimeRemaining(for id: UUID) -> TimeInterval {
+        guard let deadline = replacementFinalizationDeadlines[id] else {
+            return Self.replacementFinalizeBudget
+        }
+        return max(deadline.timeIntervalSinceNow, 0)
+    }
+
+    private func finalizePriorSessionForReplacement(_ id: UUID) async {
+        let sessionRecordingStartTime = recordingStartTime
+        let sessionSelectedServer = selectedServer
+        replacementFinalizingSessionIDs.insert(id)
+        replacementFinalizationDeadlines[id] = Date().addingTimeInterval(
+            Self.replacementFinalizeBudget)
+        if stopInFlightSessionID == id {
+            FileLogger.shared.debug(.transcription, "replacement joining prior stop", payload: [
+                "jobId": id.uuidString
+            ])
+        } else {
+            FileLogger.shared.info(.transcription, "replacement finalizing prior dictation", payload: [
+                "jobId": id.uuidString
+            ])
+            Task { @MainActor [weak self] in
+                await self?.stop()
+            }
+        }
+
+        guard await waitForStopFinalizationReady(id) else {
+            if stopInFlightSessionID != id {
+                replacementFinalizingSessionIDs.remove(id)
+            }
+            return
+        }
+        let completed = await waitForStopCompletion(
+            id,
+            timeout: replacementFinalizationTimeRemaining(for: id))
+        if !completed {
+            _ = preserveReplacementFinalizationAudio(
+                for: id,
+                recordingStartTime: sessionRecordingStartTime,
+                selectedServer: sessionSelectedServer)
+        }
+    }
+
+    private func performStart(id: UUID) async {
+        let mode = SharedConfig.dictationMode()
+        var priorSessionIDToPreserve: UUID?
+        if let priorID = activeID,
+           isActivePhase(phase) || stopInFlightSessionID == priorID {
+            priorSessionIDToPreserve = priorID
+            await finalizePriorSessionForReplacement(priorID)
+        } else {
+            clearChunkReviews()
+        }
+
+        let priorSessionStillFinalizing = activeID.map {
+            replacementFinalizingSessionIDs.contains($0)
+        } ?? false
+        chunkReviews.removeAll()
+        if !priorSessionStillFinalizing {
+            serverSelectionTask?.cancel()
+        }
         serverSelectionTask = nil
+        if priorSessionStillFinalizing {
+            streamConnectTask = nil
+            chunkConsumerTask = nil
+            receiveTask = nil
+            streamReceiveTaskSessionID = nil
+            transcriptionTask = nil
+            streamClient = nil
+            streamRecorder = nil
+            unifiedStreamClient = nil
+            unifiedStreamAudioPipeline = nil
+            unifiedStreamEventTask = nil
+        }
         streamConnectGraceSessionID = nil
         SharedConfig.clearPendingDictationCancel(exceptSessionID: id)
         activeID = id
@@ -1145,7 +1417,11 @@ final class DictationViewModel: ObservableObject {
         returnToIdleDeadline = nil
         fallbackNotice = nil
         currentResultUsedSavedAudioFallback = false
-        chunkAudioStore = ChunkAudioStore(sessionID: id)
+        let sessionsToPreserve = replacementFinalizingSessionIDs.union(
+            priorSessionIDToPreserve.map { [$0] } ?? [])
+        chunkAudioStore = ChunkAudioStore(
+            sessionID: id,
+            preservingSessionIDs: sessionsToPreserve)
         livePartial = ""
         chunkSplitterState = nil
         chunkDispatchCount = 0
@@ -1786,9 +2062,10 @@ final class DictationViewModel: ObservableObject {
         }
         guard let mode = activeDictationMode else { return }
         stopInFlightSessionID = id
+        var stopCompletionDelegated = false
         defer {
-            if stopInFlightSessionID == id {
-                stopInFlightSessionID = nil
+            if !stopCompletionDelegated {
+                finishStopSession(id)
             }
         }
         chunkSplitterState = nil
@@ -1839,6 +2116,7 @@ final class DictationViewModel: ObservableObject {
                 return
             }
 
+            replacementAudioURLs[id] = audioURL
             guard let url = audioURL else {
                 endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id)
                 UIApplication.shared.isIdleTimerDisabled = false
@@ -1873,6 +2151,7 @@ final class DictationViewModel: ObservableObject {
             // Foreground upload (Scenario A) — runs immediately while the app is in
             // the foreground and updates the UI directly. A background task keeps
             // the app alive briefly if the user switches away mid-flight.
+            let sessionServerSelectionTask = serverSelectionTask
             transcriptionTask = Task { [weak self] in
                 guard let self = self else {
                     if backgroundTaskID != .invalid {
@@ -1881,6 +2160,7 @@ final class DictationViewModel: ObservableObject {
                     return
                 }
 
+                defer { self.finishStopSession(id) }
                 defer {
                     self.endStopBackgroundTask(
                         &backgroundTaskID,
@@ -1898,9 +2178,11 @@ final class DictationViewModel: ObservableObject {
                     // during recording, so this is ~0s on the happy path. If no server was
                     // found, pass nil below so routeTranscription performs a fresh probe and
                     // fast connection failures are retried instead of aborting before upload.
-                    let selection = await serverSelectionTask?.value
+                    let selection = await sessionServerSelectionTask?.value
                     let chosenServer = selection?.server
-                    serverSelectionTask = nil
+                    if self.activeID == id {
+                        self.serverSelectionTask = nil
+                    }
 
                     FileLogger.shared.info(.transcription, "upload start", payload: [
                         "id": id.uuidString,
@@ -1927,14 +2209,22 @@ final class DictationViewModel: ObservableObject {
 
                     let text = try await transcribeWithAutoRetry(
                         audioURL: url, jobId: id, config: config,
-                        correlationId: activeID, initialServer: chosenServer,
+                        correlationId: id, initialServer: chosenServer,
                         backgroundSubmitter: BackgroundTranscriptionUploader.shared,
                         language: SharedConfig.keyboardLanguage().dictationLanguageField,
                         cleanupPreferences: SharedConfig.llmCleanupPreferences(),
                         recordingDurationSeconds: recordedDurationSeconds)
                     FileLogger.shared.debug(.network, "async transcription succeeded",
                                             payload: ["textLength": text.count])
-                    guard self.canContinueSession(id) else { self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
+                    let isCurrentSession = self.canContinueSession(id)
+                    let isDetachedReplacement = self.isDetachedReplacementFinalization(id)
+                    guard isCurrentSession || isDetachedReplacement else {
+                        self.endStopBackgroundTask(
+                            &backgroundTaskID,
+                            name: "WhisperTranscription",
+                            dictationID: id)
+                        return
+                    }
 
                     let uploadElapsed = Date().timeIntervalSince(uploadT0) * 1000
                     FileLogger.shared.info(.transcription, "upload complete", payload: [
@@ -1947,19 +2237,50 @@ final class DictationViewModel: ObservableObject {
                         pending.state = .ready
                         pending.terminalAt = Date()
                         guard FailedJobStore.shared.updatePending(pending) else {
+                            if isDetachedReplacement {
+                                TranscriptionHistory.shared.add(text: text, id: id)
+                                self.removeDeliveredFailedJobRecord(for: id)
+                                self.publishFinalizingSessionTerminalSnapshot(
+                                    id: id,
+                                    status: .completed,
+                                    text: text)
+                                return
+                            }
                             throw WhisperError.jobFailed("Could not finalize transcription recovery state")
                         }
                     }
-                    TranscriptionHistory.shared.add(text: text)
-                    guard FailedJobStore.shared.removePending(jobId: id, deleteAudio: true) else {
-                        throw WhisperError.jobFailed("Could not finalize transcription recovery state")
+                    TranscriptionHistory.shared.add(text: text, id: id)
+                    if isDetachedReplacement {
+                        self.removeDeliveredFailedJobRecord(for: id)
                     }
-                    RecordingStore.shared.delete(jobId: id)
-                    FileLogger.shared.debug(.audio, "audio deleted on success",
-                                            payload: ["jobId": id.uuidString])
+                    if !self.replacementFinalizingSessionIDs.contains(id) {
+                        guard FailedJobStore.shared.removePending(jobId: id, deleteAudio: true) else {
+                            throw WhisperError.jobFailed("Could not finalize transcription recovery state")
+                        }
+                        RecordingStore.shared.delete(jobId: id)
+                    }
+                    if !self.replacementFinalizingSessionIDs.contains(id) {
+                        FileLogger.shared.debug(.audio, "audio deleted on success",
+                                                payload: ["jobId": id.uuidString])
+                    }
+                    if isDetachedReplacement {
+                        self.publishFinalizingSessionTerminalSnapshot(
+                            id: id,
+                            status: .completed,
+                            text: text)
+                        return
+                    }
                     chunkSplitterTelemetryWriter?.recordOutcome("success")
                     phase = .done(text)
                 } catch let waitError as BackgroundUploadWaitError {
+                    if self.isDetachedReplacementFinalization(id) {
+                        self.publishFinalizingSessionTerminalSnapshot(
+                            id: id,
+                            status: .error,
+                            errorMessage: self.replacementFailureMessages[id]
+                                ?? waitError.localizedDescription)
+                        return
+                    }
                     guard self.canContinueSession(id) else {
                         self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id)
                         return
@@ -1968,6 +2289,14 @@ final class DictationViewModel: ObservableObject {
                     // offering a retry here could create a concurrent duplicate POST.
                     phase = .error(waitError.localizedDescription)
                 } catch WhisperError.cancelled {
+                    if self.isDetachedReplacementFinalization(id) {
+                        self.publishFinalizingSessionTerminalSnapshot(
+                            id: id,
+                            status: .error,
+                            errorMessage: self.replacementFailureMessages[id]
+                                ?? "Previous dictation transcription was cancelled.")
+                        return
+                    }
                     guard self.canContinueSession(id) else { self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
                     // User cancelled — do not record as failure.
                     FileLogger.shared.debug(.app, "transcription cancelled",
@@ -1975,6 +2304,14 @@ final class DictationViewModel: ObservableObject {
                     chunkSplitterTelemetryWriter?.recordOutcome("cancelled")
                     phase = .cancelled
                 } catch {
+                    if self.isDetachedReplacementFinalization(id) {
+                        self.publishFinalizingSessionTerminalSnapshot(
+                            id: id,
+                            status: .error,
+                            errorMessage: self.replacementFailureMessages[id]
+                                ?? error.localizedDescription)
+                        return
+                    }
                     guard self.canContinueSession(id) else { self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id); return }
                     let message = error.localizedDescription
                     let failedElapsed = Date().timeIntervalSince(uploadT0) * 1000
@@ -2035,6 +2372,8 @@ final class DictationViewModel: ObservableObject {
                     self.endStopBackgroundTask(&backgroundTaskID, name: "WhisperTranscription", dictationID: id)
                 }
             }
+            stopCompletionDelegated = true
+            markStopFinalizationReady(id)
 
         case .stream:
             FileLogger.shared.info(.transcription, "stop mode: stream")
@@ -2052,7 +2391,9 @@ final class DictationViewModel: ObservableObject {
                 httpStatus: nil,
                 errorDomain: nil)
             let sessionRecorder = streamRecorder
-            let clientAttachedAtStop = streamClient != nil
+            let sessionReceiveTask = streamReceiveTasksBySessionID[id] ?? receiveTask
+            let sessionClient = streamClient
+            let clientAttachedAtStop = sessionClient != nil
             var connectGraceEntered = false
             var connectGraceElapsedMs: Double?
             FileLogger.shared.info(.network, "Stream: stop entered", payload: [
@@ -2096,8 +2437,11 @@ final class DictationViewModel: ObservableObject {
             }
 
             // Signal recording done and drain queue
+            let stopBudgetSeconds = replacementFinalizingSessionIDs.contains(id)
+                ? replacementFinalizationTimeRemaining(for: id)
+                : SharedConfig.Defaults.streamFinalTimeout
             let stopSafetyDeadline = DispatchTime.now().uptimeNanoseconds &+
-                UInt64(SharedConfig.Defaults.streamFinalTimeout * 1_000_000_000)
+                UInt64(stopBudgetSeconds * 1_000_000_000)
             let recoveryQueue = chunkSendQueue
             // Before each read, cap recovery at two queued chunks, one consumer-in-flight
             // chunk, and one bounded AVAudioPCMBuffer/Float-array pair. This mirrors the
@@ -2115,10 +2459,10 @@ final class DictationViewModel: ObservableObject {
                         if case .available = outcome { return true }
                         if case .timedOut = outcome {
                             FileLogger.shared.warn(.network,
-                                                   "Stream: WAV recovery pacing budget exhausted; retaining recording",
-                                                   payload: ["jobId": id.uuidString,
-                                                             "queueDepth": recoveryQueue.depth,
-                                                             "budget_seconds": SharedConfig.Defaults.streamFinalTimeout])
+                                                    "Stream: WAV recovery pacing budget exhausted; retaining recording",
+                                                    payload: ["jobId": id.uuidString,
+                                                              "queueDepth": recoveryQueue.depth,
+                                                              "budget_seconds": stopBudgetSeconds])
                         }
                         return false
                     })
@@ -2274,7 +2618,7 @@ final class DictationViewModel: ObservableObject {
 
             if queueDrained && canStream {
                 var didSendEndSuccessfully = false
-                let client = streamClient
+                let client = sessionClient
                 do {
                     guard let client else {
                         throw WhisperError.networkError(URLError(.notConnectedToInternet))
@@ -2319,37 +2663,55 @@ final class DictationViewModel: ObservableObject {
                     guard canContinueSession(id) else { return }
                     FileLogger.shared.info(.network, "Stream: END sent, awaiting final from receive task",
                                            payload: ["jobId": id.uuidString,
-                                                     "server": selectedServer ?? "none"])
+                                                      "server": selectedServer ?? "none"])
+                    markStopFinalizationReady(id)
 
                     FileLogger.shared.info(.transcription, "upload start", payload: [
                         "id": id.uuidString
                     ])
 
-                    let receivedText = try await receiveTask?.value ?? ""
-
-                    guard canContinueSession(id) else { return }
+                    let finalMergeTelemetry = streamChunkSplitterTelemetry
+                    let finalChunkTexts = chunkFinalTexts
+                    let receivedText = try await sessionReceiveTask?.value ?? ""
                     let receivedRecordingToken = await client.finalRecordingToken
-                    guard canContinueSession(id) else { return }
-                    finalRecordingToken = receivedRecordingToken
-                    fullRecordingUploadTelemetry?.tokenPresent =
-                        receivedRecordingToken?.isEmpty == false
 
                     let mergeEnabled = SharedConfig.Defaults.chunkFinalMergeEnabled
                     let maxGapMs = min(max(SharedConfig.Defaults.chunkFinalMergeMaxGapMs, 500), 10_000)
                     let text: String
-                    if mergeEnabled, let streamChunkSplitterTelemetry {
+                    if mergeEnabled, let finalMergeTelemetry {
                         text = ChunkFinalMerger.merge(
                             receivedText,
-                            segments: streamChunkSplitterTelemetry.chunkFinalSegments(texts: chunkFinalTexts),
+                            segments: finalMergeTelemetry.chunkFinalSegments(texts: finalChunkTexts),
                             maxGapMs: Double(maxGapMs))
                     } else {
                         text = receivedText
                     }
 
-                    // A non-empty final from this session's receive task is valid by
-                    // construction: receiveTask is session-scoped and activeID guards
-                    // protect the session identity. Empty text remains a retryable
-                    // failure (audio preserved via handleStreamTerminalFailure).
+                    if isDetachedReplacementFinalization(id) {
+                        if text.isEmpty {
+                            publishFinalizingSessionTerminalSnapshot(
+                                id: id,
+                                status: .error,
+                                errorMessage: replacementFailureMessages[id]
+                                    ?? "Nothing was heard. Try again.")
+                        } else {
+                            TranscriptionHistory.shared.add(text: text, id: id)
+                            removeDeliveredFailedJobRecord(for: id)
+                            publishFinalizingSessionTerminalSnapshot(
+                                id: id,
+                                status: .completed,
+                                text: text)
+                        }
+                        await client.disconnect()
+                        return
+                    }
+                    guard canContinueSession(id) else { return }
+                    finalRecordingToken = receivedRecordingToken
+                    fullRecordingUploadTelemetry?.tokenPresent =
+                        receivedRecordingToken?.isEmpty == false
+
+                    // Detached replacement completion uses captured session inputs
+                    // above; the ordinary path still requires the active ID to match.
                     let transcriptionValid = !text.isEmpty
                     fullRecordingUploadTelemetry?.finalTextNonempty = transcriptionValid
                     if !transcriptionValid {
@@ -2380,7 +2742,7 @@ final class DictationViewModel: ObservableObject {
 
                         guard activeID == id else { return }
 
-                        TranscriptionHistory.shared.add(text: text)
+                        TranscriptionHistory.shared.add(text: text, id: id)
                         let fullRecordingUploadEnabled = SharedConfig.fullRecordingUploadEnabled()
                         fullRecordingUploadTelemetry?.uploadEnabled = fullRecordingUploadEnabled
                         let recordingToken = receivedRecordingToken
@@ -2409,59 +2771,81 @@ final class DictationViewModel: ObservableObject {
                             "decision": stagingGate
                         ])
 
-                        if fullRecordingUploadEnabled,
-                           recordingTokenPresent {
-                            if let recordingToken,
-                               let serverURL = selectedServer,
-                               !serverURL.isEmpty,
-                               let sourceURL = sourceWavURL {
-                                do {
-                                    let stagedURL = try FullRecordingDiagnosticsUploader.stage(
-                                        sourceURL: sourceURL,
-                                        sessionID: id)
-                                    fullRecordingUploadTelemetry?.stageOutcome = .staged
-                                    stagedDiagnosticsUpload = (
-                                        url: stagedURL,
-                                        serverURL: serverURL,
-                                        token: recordingToken)
-                                } catch {
+                        if !replacementFinalizingSessionIDs.contains(id) {
+                            if fullRecordingUploadEnabled,
+                               recordingTokenPresent {
+                                if let recordingToken,
+                                   let serverURL = selectedServer,
+                                   !serverURL.isEmpty,
+                                   let sourceURL = sourceWavURL {
+                                    do {
+                                        let stagedURL = try FullRecordingDiagnosticsUploader.stage(
+                                            sourceURL: sourceURL,
+                                            sessionID: id)
+                                        fullRecordingUploadTelemetry?.stageOutcome = .staged
+                                        stagedDiagnosticsUpload = (
+                                            url: stagedURL,
+                                            serverURL: serverURL,
+                                            token: recordingToken)
+                                    } catch {
+                                        RecordingStore.shared.deleteStreamWav(for: id)
+                                        fullRecordingUploadTelemetry?.stageOutcome = .stagingFailed
+                                        fullRecordingUploadTelemetry?.errorDomain =
+                                            (error as NSError).domain
+                                        FileLogger.shared.warn(.network,
+                                            "Full recording upload staging failed",
+                                            payload: ["jobId": id.uuidString,
+                                                      "errorDomain": (error as NSError).domain])
+                                    }
+                                } else {
                                     RecordingStore.shared.deleteStreamWav(for: id)
-                                    fullRecordingUploadTelemetry?.stageOutcome = .stagingFailed
-                                    fullRecordingUploadTelemetry?.errorDomain =
-                                        (error as NSError).domain
+                                    fullRecordingUploadTelemetry?.stageOutcome = .sourceUnavailable
                                     FileLogger.shared.warn(.network,
-                                        "Full recording upload staging failed",
-                                        payload: ["jobId": id.uuidString,
-                                                  "errorDomain": (error as NSError).domain])
+                                        "Full recording upload staging unavailable",
+                                        payload: ["jobId": id.uuidString])
                                 }
                             } else {
+                                fullRecordingUploadTelemetry?.stageOutcome = fullRecordingUploadEnabled
+                                    ? .missingToken
+                                    : .uploadDisabled
                                 RecordingStore.shared.deleteStreamWav(for: id)
-                                fullRecordingUploadTelemetry?.stageOutcome = .sourceUnavailable
-                                FileLogger.shared.warn(.network,
-                                    "Full recording upload staging unavailable",
-                                    payload: ["jobId": id.uuidString])
+                                FileLogger.shared.info(.audio, "stream wav deleted on success",
+                                                       payload: ["jobId": id.uuidString])
                             }
-                        } else {
-                            fullRecordingUploadTelemetry?.stageOutcome = fullRecordingUploadEnabled
-                                ? .missingToken
-                                : .uploadDisabled
-                            RecordingStore.shared.deleteStreamWav(for: id)
-                            FileLogger.shared.info(.audio, "stream wav deleted on success",
-                                                   payload: ["jobId": id.uuidString])
                         }
                         chunkSplitterTelemetryWriter?.recordOutcome("success")
                         phase = .done(text)
                     }
                 } catch WhisperError.cancelled {
+                    if isDetachedReplacementFinalization(id) {
+                        publishFinalizingSessionTerminalSnapshot(
+                            id: id,
+                            status: .error,
+                            errorMessage: replacementFailureMessages[id]
+                                ?? "Previous dictation transcription was cancelled.")
+                        await client?.disconnect()
+                        return
+                    }
                     guard canContinueSession(id) else { return }
                     // User cancelled — do not record as failure.
                     fullRecordingUploadTelemetry?.stageOutcome = .cancelled
                     chunkSplitterTelemetryWriter?.recordOutcome("cancelled")
-                    RecordingStore.shared.deleteStreamWav(for: id)
+                    if !replacementFinalizingSessionIDs.contains(id) {
+                        RecordingStore.shared.deleteStreamWav(for: id)
+                    }
                     FileLogger.shared.debug(.app, "transcription cancelled, wav deleted",
                                             payload: ["jobId": id.uuidString])
                     phase = .cancelled
                 } catch {
+                    if isDetachedReplacementFinalization(id) {
+                        publishFinalizingSessionTerminalSnapshot(
+                            id: id,
+                            status: .error,
+                            errorMessage: replacementFailureMessages[id]
+                                ?? "Previous dictation could not be finalized.")
+                        await client?.disconnect()
+                        return
+                    }
                     guard canContinueSession(id) else { return }
                     let errorMessage = error.localizedDescription
                     let transportUnavailable: Bool
@@ -2497,10 +2881,14 @@ final class DictationViewModel: ObservableObject {
                 handleStreamTerminalFailure(jobId: id, error: message)
             }
 
-            receiveTask?.cancel()
-            receiveTask = nil
+            sessionReceiveTask?.cancel()
+            streamReceiveTasksBySessionID[id] = nil
+            if streamReceiveTaskSessionID == id {
+                receiveTask = nil
+                streamReceiveTaskSessionID = nil
+            }
 
-            await streamClient?.disconnect()
+            await sessionClient?.disconnect()
             if let stagedDiagnosticsUpload {
                 let uploadLease = FullRecordingDiagnosticsUploadLease.begin(sessionID: id)
                 let uploadTelemetryWriter = fullRecordingUploadTelemetryWriter
@@ -2621,13 +3009,15 @@ final class DictationViewModel: ObservableObject {
             }
             guard await canContinueUnifiedSessionAfterAwait(id) else { return }
 
+            markStopFinalizationReady(id)
             do {
                 _ = try await client.awaitFinal(timeout: Self.unifiedFinalWaitTimeout)
                 finalReceived = true
             } catch {
                 stopFailure = stopFailure ?? error
             }
-            guard await canContinueUnifiedSessionAfterAwait(id) else { return }
+            guard await canContinueUnifiedSessionAfterAwait(id)
+                    || isDetachedReplacementFinalization(id) else { return }
         } else {
             stopFailure = stopFailure ?? UnifiedStreamClientError.notConnected
         }
@@ -2635,7 +3025,8 @@ final class DictationViewModel: ObservableObject {
         let snapshot: UnifiedStreamTranscriptSnapshot
         if let client {
             snapshot = await client.transcriptSnapshot()
-            guard await canContinueUnifiedSessionAfterAwait(id) else { return }
+            guard await canContinueUnifiedSessionAfterAwait(id)
+                    || isDetachedReplacementFinalization(id) else { return }
         } else {
             let receivedText = livePartial
             snapshot = UnifiedStreamTranscriptSnapshot(
@@ -2643,14 +3034,49 @@ final class DictationViewModel: ObservableObject {
                 terminalAggregate: nil,
                 degradedAggregate: receivedText.isEmpty ? nil : receivedText)
         }
-        livePartial = snapshot.displayText
+        if !isDetachedReplacementFinalization(id) {
+            livePartial = snapshot.displayText
+        }
+
+        if isDetachedReplacementFinalization(id) {
+            if stopFailure == nil,
+               finalReceived,
+               let finalText = snapshot.terminalAggregate,
+               !finalText.isEmpty {
+                TranscriptionHistory.shared.add(text: finalText, id: id)
+                removeDeliveredFailedJobRecord(for: id)
+                publishFinalizingSessionTerminalSnapshot(
+                    id: id,
+                    status: .completed,
+                    text: finalText)
+            } else {
+                let degradedText = snapshot.degradedAggregate ?? snapshot.displayText
+                if !degradedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    TranscriptionHistory.shared.add(text: degradedText, id: id)
+                    publishFinalizingSessionTerminalSnapshot(
+                        id: id,
+                        status: .completed,
+                        text: degradedText)
+                } else {
+                    publishFinalizingSessionTerminalSnapshot(
+                        id: id,
+                        status: .error,
+                        errorMessage: replacementFailureMessages[id]
+                            ?? "Unified stream could not produce a transcript.")
+                }
+            }
+            await client?.disconnect()
+            return
+        }
 
         if stopFailure == nil,
            finalReceived,
            let finalText = snapshot.terminalAggregate,
            !finalText.isEmpty {
-            TranscriptionHistory.shared.add(text: finalText)
-            RecordingStore.shared.deleteStreamWav(for: id)
+            TranscriptionHistory.shared.add(text: finalText, id: id)
+            if !replacementFinalizingSessionIDs.contains(id) {
+                RecordingStore.shared.deleteStreamWav(for: id)
+            }
             fallbackNotice = nil
             FileLogger.shared.info(.transcription, "Unified stream aggregate final received", payload: [
                 "jobId": id.uuidString,
@@ -2665,7 +3091,7 @@ final class DictationViewModel: ObservableObject {
             _ = preserveStreamFailure(jobId: id, error: failureMessage)
 
             if !degradedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                TranscriptionHistory.shared.add(text: degradedText)
+                TranscriptionHistory.shared.add(text: degradedText, id: id)
                 fallbackNotice = "Unified stream could not finalize. Showing received text; "
                     + "the full recording is retained for manual recovery."
                 FileLogger.shared.warn(.transcription, "Unified stream returned a degraded transcript", payload: [
@@ -3337,8 +3763,12 @@ final class DictationViewModel: ObservableObject {
     }
 
     private func startStreamReceive(client: WhisperStreamClient, sessionID: UUID) {
-        receiveTask?.cancel()
-        receiveTask = Task { [weak self] in
+        if let previousSessionID = streamReceiveTaskSessionID,
+           !replacementFinalizingSessionIDs.contains(previousSessionID) {
+            streamReceiveTasksBySessionID[previousSessionID]?.cancel()
+            streamReceiveTasksBySessionID[previousSessionID] = nil
+        }
+        let sessionTask = Task { [weak self] in
             guard let self else { throw WhisperError.networkError(URLError(.cancelled)) }
             return try await client.receiveMessages(onPartial: { [weak self] partial in
                 FileLogger.shared.debug(.transcription, "livePartial updated",
@@ -3384,6 +3814,9 @@ final class DictationViewModel: ObservableObject {
                 }
             })
         }
+        receiveTask = sessionTask
+        streamReceiveTaskSessionID = sessionID
+        streamReceiveTasksBySessionID[sessionID] = sessionTask
     }
 
     private func reconnectStreamTransport(

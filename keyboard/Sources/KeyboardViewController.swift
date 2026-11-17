@@ -325,6 +325,14 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Snapshot Polling & Darwin Notifications
 
     private var snapshotPollTimer: DispatchSourceTimer?
+    /// Single-flight task for timer-driven snapshot refreshes and the adoption
+    /// path's initial refresh. LocalhostClient bounds a no-response probe to 2s.
+    private var snapshotPollRefreshTask: Task<Void, Never>?
+    /// Preserve adoption's immediate refresh without queuing ordinary timer ticks.
+    private var snapshotPollRefreshPending = false
+    private var adoptionProbeContinuation: CheckedContinuation<LocalhostStateProbe?, Never>?
+    private var adoptionProbeTask: Task<Void, Never>?
+    private var adoptionProbeTimeoutTask: Task<Void, Never>?
     private var darwinStateChangedToken: DarwinObserverToken?
 
     /// Miss-streak thresholds for the snapshot fallback tiers. Internal
@@ -350,6 +358,13 @@ class KeyboardViewController: UIInputViewController {
         static let sessionLostMisses = 6
     }
 
+    private enum AdoptionThresholds {
+        /// Keep the no-session fallback responsive while allowing loopback IPC
+        /// more time than its normal millisecond-scale response.
+        static let probeTimeoutNanoseconds: UInt64 = 350_000_000
+        static let activePayloadFreshnessSeconds: TimeInterval = 60
+    }
+
     /// Tracks consecutive app-group reads with no fresh revision for this
     /// session. A steady recording normally keeps one revision; matching
     /// localhost /state evidence resets this streak before /jobs can start.
@@ -358,8 +373,8 @@ class KeyboardViewController: UIInputViewController {
     /// unreachable while the keyboard believed a recording was active. Only
     /// these outcomes count as session-loss evidence.
     private var consecutiveSessionEvidenceMiss: Int = 0
-    /// Stored Task for refreshFromSharedState, cancelled on teardown and
-    /// superseded on each new spawn to prevent interleaved concurrent executions.
+    /// Stored task for appearance/Darwin refresh scheduling or pending-session
+    /// reconciliation, cancelled on teardown and superseded by newer events.
     private var appearRefreshTask: Task<Void, Never>?
 
     /// The `documentIdentifier` of the text field that started the current
@@ -597,10 +612,7 @@ class KeyboardViewController: UIInputViewController {
 
         // App-group snapshot polling (primary transport).
         consecutiveSessionEvidenceMiss = 0
-        appearRefreshTask?.cancel()
-        appearRefreshTask = Task { @MainActor [weak self] in
-            await self?.refreshFromSharedState()
-        }
+        scheduleSnapshotRefreshReplacingAppearTask()
         if pendingRequestId != nil { startSnapshotPolling() }
 
         // T_wake — diagnostic anchor for the paste-delay timeline: wake event with
@@ -922,7 +934,11 @@ class KeyboardViewController: UIInputViewController {
                 state = .error("Full Access required. Settings \u{2192} General \u{2192} Keyboard \u{2192} Ritoras \u{2192} Allow Full Access.")
                 return
             }
-            openContainerAppForDictation()
+            if pendingRequestId == nil {
+                probeActiveSessionOrOpenContainerApp()
+            } else {
+                openContainerAppForDictation()
+            }
         case .recording:
             FileLogger.shared.info(.keyboard, "Mic: .recording -> POST /stop")
             requestStop()
@@ -996,16 +1012,84 @@ class KeyboardViewController: UIInputViewController {
 
     // MARK: - Dictation via Container App
 
+    private func probeActiveSessionOrOpenContainerApp() {
+        // Lock the tap path before probing so another tap cannot open a second
+        // dictation URL or stop a session twice.
+        state = .openingApp
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let probe = await self.probeStateForAdoption()
+            guard self.state == .openingApp, self.pendingRequestId == nil else { return }
+
+            guard let payload = self.freshActiveSession(from: probe) else {
+                FileLogger.shared.debug(.keyboard, "Mic: no fresh active session; opening new dictation")
+                self.openContainerAppForDictation()
+                return
+            }
+
+            self.adoptActiveSession(payload)
+        }
+    }
+
+    private func probeStateForAdoption() async -> LocalhostStateProbe? {
+        await withCheckedContinuation { continuation in
+            adoptionProbeContinuation = continuation
+            adoptionProbeTask = Task { @MainActor [weak self] in
+                let probe = await LocalhostClient.probeState()
+                self?.finishAdoptionProbe(with: probe)
+            }
+            adoptionProbeTimeoutTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: AdoptionThresholds.probeTimeoutNanoseconds)
+                } catch {
+                    return
+                }
+                self?.finishAdoptionProbe(with: nil)
+            }
+        }
+    }
+
+    private func finishAdoptionProbe(with probe: LocalhostStateProbe?) {
+        guard let continuation = adoptionProbeContinuation else { return }
+        adoptionProbeContinuation = nil
+        adoptionProbeTimeoutTask?.cancel()
+        adoptionProbeTimeoutTask = nil
+        if case nil = probe {
+            adoptionProbeTask?.cancel()
+        }
+        adoptionProbeTask = nil
+        continuation.resume(returning: probe)
+    }
+
+    private func freshActiveSession(from probe: LocalhostStateProbe?) -> DictationPayload? {
+        guard let probe,
+              case let .payload(payload) = probe else { return nil }
+        guard payload.status == .recording || payload.status == .transcribing else { return nil }
+        let age = abs(Date().timeIntervalSince(payload.timestamp))
+        guard age <= AdoptionThresholds.activePayloadFreshnessSeconds else { return nil }
+        return payload
+    }
+
+    private func adoptActiveSession(_ payload: DictationPayload) {
+        guard state == .openingApp, pendingRequestId == nil else { return }
+
+        resetDictationTrackingForNewRequest()
+        locallyCancelledSessionID = nil
+        pendingRequestId = payload.id
+        pendingRequestStart = Date().timeIntervalSince1970
+        dictationTargetDocId = safeDocumentIdentifier()
+        updateRecordingInProgressUI(phase: payload.status.rawValue)
+
+        FileLogger.shared.info(.keyboard, "Mic: adopted active dictation",
+                               payload: ["id": String(payload.id.uuidString.prefix(8)),
+                                         "status": payload.status.rawValue])
+        startSnapshotPolling()
+        startSnapshotRefreshIfNeeded(afterCurrentRefresh: true)
+        requestStop()
+    }
+
     private func openContainerAppForDictation() {
-        // Clear any stale data from previous sessions
-        serverPollTimer?.invalidate()
-        serverPollTimer = nil
-        serverPollUnresponsiveCount = 0
-        serverPollWorkItem?.cancel()
-        serverPollWorkItem = nil
-        lastSeenSnapshotRevision = 0
-        consecutiveSnapshotMisses = 0
-        consecutiveSessionEvidenceMiss = 0
+        resetDictationTrackingForNewRequest()
 
         let id = UUID()
         locallyCancelledSessionID = nil
@@ -1052,6 +1136,17 @@ class KeyboardViewController: UIInputViewController {
             dictationTargetDocId = nil
             state = .error("Couldn't open Ritoras app. Make sure it's installed.")
         }
+    }
+
+    private func resetDictationTrackingForNewRequest() {
+        serverPollTimer?.invalidate()
+        serverPollTimer = nil
+        serverPollUnresponsiveCount = 0
+        serverPollWorkItem?.cancel()
+        serverPollWorkItem = nil
+        lastSeenSnapshotRevision = 0
+        consecutiveSnapshotMisses = 0
+        consecutiveSessionEvidenceMiss = 0
     }
 
     /// Opens a URL by traversing the responder chain to find UIApplication.
@@ -1132,11 +1227,16 @@ class KeyboardViewController: UIInputViewController {
         guard darwinStateChangedToken == nil else { return }
         darwinStateChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinStateChangedNotificationName) { [weak self] in
             DispatchQueue.main.async { [weak self] in
-                self?.appearRefreshTask?.cancel()
-                self?.appearRefreshTask = Task { @MainActor [weak self] in
-                    await self?.refreshFromSharedState()
-                }
+                self?.scheduleSnapshotRefreshReplacingAppearTask()
             }
+        }
+    }
+
+    private func scheduleSnapshotRefreshReplacingAppearTask() {
+        appearRefreshTask?.cancel()
+        appearRefreshTask = Task { @MainActor [weak self] in
+            guard !Task.isCancelled else { return }
+            self?.startSnapshotRefreshIfNeeded(afterCurrentRefresh: true)
         }
     }
 
@@ -1413,15 +1513,37 @@ class KeyboardViewController: UIInputViewController {
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
         timer.schedule(deadline: .now() + initialDelay, repeating: 0.5)
         timer.setEventHandler { [weak self] in
-            Task { @MainActor [weak self] in await self?.refreshFromSharedState() }
+            Task { @MainActor [weak self] in
+                self?.startSnapshotRefreshIfNeeded()
+            }
         }
         timer.resume()
         snapshotPollTimer = timer
     }
 
+    private func startSnapshotRefreshIfNeeded(afterCurrentRefresh: Bool = false) {
+        guard snapshotPollRefreshTask == nil else {
+            snapshotPollRefreshPending = snapshotPollRefreshPending || afterCurrentRefresh
+            return
+        }
+        snapshotPollRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.snapshotPollRefreshTask = nil
+                if self.snapshotPollRefreshPending {
+                    self.snapshotPollRefreshPending = false
+                    self.startSnapshotRefreshIfNeeded()
+                }
+            }
+            await self.refreshFromSharedState()
+        }
+    }
+
     private func stopSnapshotPolling() {
         snapshotPollTimer?.cancel()
         snapshotPollTimer = nil
+        snapshotPollRefreshPending = false
+        snapshotPollRefreshTask?.cancel()
     }
 
     /// Shared terminal handler for both app-group and localhost result paths.
@@ -1660,10 +1782,7 @@ class KeyboardViewController: UIInputViewController {
         if darwinStateChangedToken == nil {
             darwinStateChangedToken = DarwinNotifier.observe(SharedConfig.Defaults.darwinStateChangedNotificationName) { [weak self] in
                 DispatchQueue.main.async { [weak self] in
-                    self?.appearRefreshTask?.cancel()
-                    self?.appearRefreshTask = Task { @MainActor [weak self] in
-                        await self?.refreshFromSharedState()
-                    }
+                    self?.scheduleSnapshotRefreshReplacingAppearTask()
                 }
             }
         }
