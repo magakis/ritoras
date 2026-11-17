@@ -177,7 +177,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func captureTraceSkip(
-        _ reasonCode: KeystrokeTraceReasonCode,
+        _ skip: KeystrokeTraceDecisionSkip,
         secureInputAvailable: Bool = true
     ) {
         let isSecure = secureInputAvailable ? traceInputIsSecure : lastTraceInputWasSecure
@@ -185,7 +185,33 @@ class KeyboardViewController: UIInputViewController {
             appendTraceRedactionMarker()
             return
         }
-        keystrokeTrace.append(.decision(.skip(reasonCode: reasonCode)))
+        keystrokeTrace.append(.decision(.skip(skip)))
+    }
+
+    private func captureTraceSkip(
+        _ reasonCode: KeystrokeTraceReasonCode,
+        secureInputAvailable: Bool = true,
+        candidate: String? = nil,
+        fusedScore: Double? = nil,
+        rawLMLogProb: Double? = nil,
+        typedLiteralRawLMLogProb: Double? = nil,
+        typedLiteralLogProbMargin: Double? = nil,
+        absoluteLogProbFloor: Double? = nil,
+        checkedWord: String? = nil
+    ) {
+        captureTraceSkip(
+            KeystrokeTraceDecisionSkip(
+                reasonCode: reasonCode,
+                candidate: candidate,
+                fusedScore: fusedScore,
+                rawLMLogProb: rawLMLogProb,
+                typedLiteralRawLMLogProb: typedLiteralRawLMLogProb,
+                typedLiteralLogProbMargin: typedLiteralLogProbMargin,
+                absoluteLogProbFloor: absoluteLogProbFloor,
+                checkedWord: checkedWord
+            ),
+            secureInputAvailable: secureInputAvailable
+        )
     }
 
     private func appendTraceRedactionMarker(
@@ -2929,8 +2955,11 @@ extension KeyboardViewController: KeyboardViewDelegate {
             captureTraceSkip(.autocorrectCurrentWordLookupWordMismatch)
             return
         }
-        guard !extracted.lookupWord.isEmpty else {
-            captureTraceSkip(.autocorrectExtractionFailed)
+        if let inputOutcome = PredictionEngine.emptyInputOutcome(
+            currentWord: extracted.currentWord,
+            lookupWord: extracted.lookupWord
+        ), case .emptyInput = inputOutcome {
+            captureTraceSkip(.autocorrectEmptyInput)
             return
         }
         guard let engine = predictionEngine, isPredictionEngineReady else {
@@ -3070,13 +3099,19 @@ extension KeyboardViewController: KeyboardViewDelegate {
             guard let live = recentWords.first(where: {
                 $0.lookupWord == candidate.typedWord || $0.word == candidate.typedWord
             }) else {
-                captureTraceSkip(.deferredApplyLiveContextMismatch)
+                captureTraceSkip(
+                    .deferredApplyLiveContextMismatch,
+                    checkedWord: candidate.typedWord
+                )
                 continue
             }
             // The committed context (~50 chars before the word) must still be
             // present, proving the word's region has not been edited.
             guard liveContext.contains(candidate.commitContextSuffix) else {
-                captureTraceSkip(.deferredApplyLiveContextMismatch)
+                captureTraceSkip(
+                    .deferredApplyLiveContextMismatch,
+                    checkedWord: candidate.typedWord
+                )
                 continue
             }
             resolved.append(RetroactiveCandidateSnapshot(
@@ -3142,7 +3177,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
 
             // --- Off-main compute (engine lookup + scoring are pure) ---
             let computeStart = Date()
-            let top = engine.topCorrection(
+            let topCorrectionOutcome = engine.topCorrectionOutcome(
                 forCurrentWord: currentWord,
                 lookupWord: typedWord,
                 previousWord: previousWord,
@@ -3161,7 +3196,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             let decision = AutocorrectController.evaluate(
                 typedWord: typedWord,
                 origin: originAtDispatch,
-                topCorrection: top,
+                topCorrection: topCorrectionOutcome.suggestion,
                 isLearned: isLearned,
                 isMisspelled: isMisspelled,
                 language: languageAtDispatch,
@@ -3171,7 +3206,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 decision: decision,
                 typedWord: typedWord,
                 origin: originAtDispatch,
-                topCorrection: top,
+                outcome: topCorrectionOutcome,
                 isLearned: isLearned,
                 isMisspelled: isMisspelled,
                 config: config
@@ -3201,20 +3236,20 @@ extension KeyboardViewController: KeyboardViewDelegate {
             if !retroactiveCandidates.isEmpty {
                 let retroactiveStart = Date()
                 var evaluatedTypedWords: [String] = []
-                var retroactiveSkipReasons: [KeystrokeTraceReasonCode] = []
+                var retroactiveSkips: [KeystrokeTraceDecisionSkip] = []
                 var pendingCorrection: (plan: RetroactiveApplyPlan.Plan, typedWord: String)?
                 for entry in retroactiveCandidates {
                     guard pendingCorrection == nil else { break }
                     evaluatedTypedWords.append(entry.typedWord)
 
-                    let retroactiveTop = engine.topCorrection(
+                    let retroactiveOutcome = engine.topCorrectionOutcome(
                         forCurrentWord: entry.lookupWord,
                         lookupWord: entry.lookupWord
                     )
                     let retroactiveDecision = AutocorrectController.evaluate(
                         typedWord: entry.lookupWord,
                         origin: entry.origin,
-                        topCorrection: retroactiveTop,
+                        topCorrection: retroactiveOutcome.suggestion,
                         isLearned: entry.isLearned,
                         isMisspelled: entry.isMisspelled,
                         language: languageAtDispatch,
@@ -3224,12 +3259,13 @@ extension KeyboardViewController: KeyboardViewDelegate {
                         decision: retroactiveDecision,
                         typedWord: entry.lookupWord,
                         origin: entry.origin,
-                        topCorrection: retroactiveTop,
+                        outcome: retroactiveOutcome,
                         isLearned: entry.isLearned,
                         isMisspelled: entry.isMisspelled,
-                        config: config
+                        config: config,
+                        includeCheckedWord: true
                     ) {
-                        retroactiveSkipReasons.append(reason)
+                        retroactiveSkips.append(reason)
                     }
                     guard case .correct(_, let correction) = retroactiveDecision else { continue }
 
@@ -3243,10 +3279,10 @@ extension KeyboardViewController: KeyboardViewDelegate {
                     break
                 }
 
-                if !retroactiveSkipReasons.isEmpty {
+                if !retroactiveSkips.isEmpty {
                     DispatchQueue.main.async { [weak self] in
-                        for reason in retroactiveSkipReasons {
-                            self?.captureTraceSkip(reason)
+                        for skip in retroactiveSkips {
+                            self?.captureTraceSkip(skip)
                         }
                     }
                 }
@@ -3286,39 +3322,68 @@ extension KeyboardViewController: KeyboardViewDelegate {
         decision: AutocorrectController.Decision,
         typedWord: String,
         origin: WordOrigin,
-        topCorrection: Suggestion?,
+        outcome: PredictionEngine.TopCorrectionOutcome,
         isLearned: Bool,
         isMisspelled: Bool,
-        config: AutocorrectController.Config
-    ) -> KeystrokeTraceReasonCode? {
+        config: AutocorrectController.Config,
+        includeCheckedWord: Bool = false
+    ) -> KeystrokeTraceDecisionSkip? {
         guard case .leaveAsIs = decision else { return nil }
-        guard origin == .typing else { return .autocorrectOriginNotTyping }
-        guard typedWord.count >= config.minWordLength,
-              typedWord.count <= config.maxWordLength else {
-            return .autocorrectLengthOutOfBounds
+
+        let candidateForTrace = outcome.candidateForTrace
+        func makeSkip(_ reasonCode: KeystrokeTraceReasonCode) -> KeystrokeTraceDecisionSkip {
+            let needsCheckedWord = includeCheckedWord
+                || reasonCode == .autocorrectLearnedWord
+                || reasonCode == .autocorrectSpellcheckPass
+            return KeystrokeTraceDecisionSkip(
+                reasonCode: reasonCode,
+                candidate: candidateForTrace?.text,
+                fusedScore: candidateForTrace?.score,
+                rawLMLogProb: outcome.rawLMLogProb,
+                typedLiteralRawLMLogProb: outcome.typedLiteralRawLMLogProb,
+                typedLiteralLogProbMargin: outcome.typedLiteralLogProbMargin,
+                absoluteLogProbFloor: outcome.absoluteLogProbFloor,
+                checkedWord: needsCheckedWord ? typedWord : nil
+            )
         }
 
-        let isContraction = topCorrection?.source == .contraction
-        let isAmbiguousContraction = topCorrection?.source == .ambiguousContraction
+        guard origin == .typing else { return makeSkip(.autocorrectOriginNotTyping) }
+        guard typedWord.count >= config.minWordLength,
+              typedWord.count <= config.maxWordLength else {
+            return makeSkip(.autocorrectLengthOutOfBounds)
+        }
+
+        let candidate = outcome.suggestion
+        let isContraction = candidate?.source == .contraction
+        let isAmbiguousContraction = candidate?.source == .ambiguousContraction
         if !isContraction, isLearned {
-            return .autocorrectLearnedWord
+            return makeSkip(.autocorrectLearnedWord)
         }
         if !isContraction, !isAmbiguousContraction, !isMisspelled {
-            return .autocorrectSpellcheckPass
+            return makeSkip(.autocorrectSpellcheckPass)
         }
-        guard let candidate = topCorrection else {
-            return .autocorrectScoreBelowThreshold
-        }
-        guard candidate.text.lowercased() != typedWord.lowercased() else {
-            return .autocorrectSameWord
-        }
-        if !isContraction, candidate.score < config.minConfidenceScore {
-            return .autocorrectScoreBelowThreshold
-        }
-        guard let typedFirst = typedWord.lowercased().first,
-              let candidateFirst = candidate.text.lowercased().first,
-              typedFirst == candidateFirst else {
-            return .autocorrectFirstLetterMismatch
+
+        switch outcome {
+        case .emptyInput:
+            return makeSkip(.autocorrectEmptyInput)
+        case .poolEmptyAfterFilters:
+            return makeSkip(.autocorrectPoolEmptyAfterFilters)
+        case .languageModelFloor:
+            return makeSkip(.autocorrectLanguageModelFloor)
+        case .contractionMargin:
+            return makeSkip(.autocorrectContractionMargin)
+        case let .candidate(candidate, _):
+            guard candidate.text.lowercased() != typedWord.lowercased() else {
+                return makeSkip(.autocorrectSameWord)
+            }
+            if !isContraction, candidate.score < config.minConfidenceScore {
+                return makeSkip(.autocorrectScoreBelowThreshold)
+            }
+            guard let typedFirst = typedWord.lowercased().first,
+                  let candidateFirst = candidate.text.lowercased().first,
+                  typedFirst == candidateFirst else {
+                return makeSkip(.autocorrectFirstLetterMismatch)
+            }
         }
         return nil
     }
@@ -3337,7 +3402,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         capturedEpoch: UInt64,
         capturedToken: UInt64,
         capturedDocId: UUID,
-        decisionSkipReason: KeystrokeTraceReasonCode?
+        decisionSkipReason: KeystrokeTraceDecisionSkip?
     ) {
         // Liveness gate: if the keyboard is no longer in a window,
         // the textDocumentProxy is dead — reading it in the guards below
@@ -3393,7 +3458,12 @@ extension KeyboardViewController: KeyboardViewDelegate {
             } else {
                 reasonCode = .deferredApplyLiveContextMismatch
             }
-            captureTraceSkip(reasonCode)
+            captureTraceSkip(
+                reasonCode,
+                checkedWord: reasonCode == .deferredApplyLiveContextMismatch
+                    ? typedWord
+                    : nil
+            )
             return
         }
 
@@ -3456,7 +3526,8 @@ extension KeyboardViewController: KeyboardViewDelegate {
         if self.view.window == nil {
             captureTraceSkip(
                 .deferredApplyKeyboardNotLive,
-                secureInputAvailable: false
+                secureInputAvailable: false,
+                checkedWord: typedWord
             )
             return
         }
@@ -3466,14 +3537,17 @@ extension KeyboardViewController: KeyboardViewDelegate {
         // mutation pattern would fight the re-anchoring host. Pause until stable.
         guard !identityMonitor.isDefensive else {
             FileLogger.shared.debug(.keyboard, "retroactive correction suppressed — defensive mode")
-            captureTraceSkip(.deferredApplyDocumentIdentityChanged)
+            captureTraceSkip(
+                .deferredApplyDocumentIdentityChanged,
+                checkedWord: typedWord
+            )
             return
         }
 
         // Supersession guard (monotonic epoch): if the inline apply or any other
         // mutation ran first, the epoch moved and this stale plan is dropped.
         guard keystrokeEpoch == capturedEpoch else {
-            captureTraceSkip(.deferredApplyEpochChanged)
+            captureTraceSkip(.deferredApplyEpochChanged, checkedWord: typedWord)
             return
         }
 
@@ -3484,7 +3558,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 liveDocumentId == nil || liveDocumentId == Self.noFieldDocumentId
                     ? .deferredApplyHostTargetGone
                     : .deferredApplyDocumentIdentityChanged
-            captureTraceSkip(reasonCode)
+            captureTraceSkip(reasonCode, checkedWord: typedWord)
             return
         }
 
@@ -3493,7 +3567,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         let liveContext = textDocumentProxy.documentContextBeforeInput ?? ""
         guard shouldApplyLookupResult(capturedToken: capturedToken, liveToken: liveToken),
               let livePlan = RetroactiveApplyPlan.revalidated(plan, in: liveContext) else {
-            captureTraceSkip(.deferredApplyContextTokenChanged)
+            captureTraceSkip(.deferredApplyContextTokenChanged, checkedWord: typedWord)
             return
         }
 

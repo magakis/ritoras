@@ -630,13 +630,15 @@ struct SharedConfig {
         /// fusedThreshold ∈ {0.60, 0.65, 0.70} and confirmed 0.65 is directionally optimal.
         static let autocorrectMinConfidenceScoreFused: Double = 0.65
 
-        /// Absolute KenLM log10-probability floor for the autocorrect path. Candidates
-        /// below this are rejected even if min-max normalization inflated their score.
-        /// -8.0 ≈ probability 1e-8. Tuned by the prediction-sim parameter sweep (Phase 5).
-        /// The sweep tested floor ∈ {-6.0, -8.0, -10.0, off} and confirmed -8.0
-        /// provides the best trade-off between blocking implausible candidates and
-        /// allowing valid context-driven corrections.
+        /// Absolute KenLM log10-probability floor for the autocorrect path. Winners
+        /// below it need a typed-literal margin rescue; winners at or above it pass.
+        /// -8.0 ≈ probability 1e-8. Retained as the baseline floor in the Phase 3 sweep.
         static let kenlmAutocorrectAbsoluteLogProbFloor: Double = -8.0
+
+        /// Minimum raw KenLM advantage a sub-floor winner must have over the typed
+        /// literal to be rescued. Swept as a conditional floor policy; 2.0 was selected
+        /// as the most conservative point tied on measured outcomes.
+        static let typedLiteralLogProbMargin: Double = 2.0
 
         /// Minimum KenLM log10-probability advantage the contraction form must hold
         /// over the typed literal before an ambiguous contraction ("its" → "it's")

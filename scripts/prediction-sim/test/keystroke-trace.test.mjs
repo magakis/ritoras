@@ -15,6 +15,7 @@ import { describe, it } from 'node:test';
 import {
   KeystrokeTraceRecorder,
   TRACE_CONTEXT_WINDOW_CHARACTERS,
+  TRACE_DECISION_TEXT_CHARACTERS,
   TRACE_REASON_CODES,
   TRACE_RING_CAPACITY_BYTES,
   TRACE_SCHEMA_VERSION,
@@ -70,10 +71,14 @@ describe('keystroke trace core mirror', () => {
       'autocorrect-origin-not-typing',
       'autocorrect-extraction-failed',
       'autocorrect-current-word-lookup-word-mismatch',
+      'autocorrect-empty-input',
       'autocorrect-engine-not-ready',
       'autocorrect-spellcheck-pass',
       'autocorrect-learned-word',
       'autocorrect-first-letter-mismatch',
+      'autocorrect-pool-empty-after-filters',
+      'autocorrect-language-model-floor',
+      'autocorrect-contraction-margin',
       'autocorrect-score-below-threshold',
       'autocorrect-same-word',
       'autocorrect-length-out-of-bounds',
@@ -191,7 +196,14 @@ describe('keystroke trace core mirror', () => {
       }),
       makeDecisionEvent({
         outcome: 'skip',
-        reasonCode: 'autocorrect-score-below-threshold',
+        reasonCode: 'autocorrect-language-model-floor',
+        candidate: 'with',
+        fusedScore: 1.0004,
+        rawLMLogProb: -8.0006,
+        typedLiteralRawLMLogProb: -10.0004,
+        typedLiteralLogProbMargin: 2.0004,
+        absoluteLogProbFloor: -8.0004,
+        checkedWord: 'wiyh',
       }),
       makeStateEvent({
         action: 'epochBump',
@@ -220,6 +232,30 @@ describe('keystroke trace core mirror', () => {
       assert.strictEqual(decoded.schemaVersion, TRACE_SCHEMA_VERSION);
       assert.deepStrictEqual(decoded.event, event);
     }
+  });
+
+  it('bounds skip words and rounds numeric operands before recording them', () => {
+    const candidate = 'x'.repeat(TRACE_DECISION_TEXT_CHARACTERS + 1);
+    const checkedWord = 'y'.repeat(TRACE_DECISION_TEXT_CHARACTERS + 1);
+    const event = makeDecisionEvent({
+      outcome: 'skip',
+      reasonCode: 'autocorrect-score-below-threshold',
+      candidate,
+      fusedScore: 0.65456,
+      rawLMLogProb: -8.12356,
+      typedLiteralRawLMLogProb: -10.98765,
+      typedLiteralLogProbMargin: 2.00056,
+      absoluteLogProbFloor: -8.00056,
+      checkedWord,
+    });
+
+    assert.strictEqual(event.payload.candidate.length, TRACE_DECISION_TEXT_CHARACTERS);
+    assert.strictEqual(event.payload.checkedWord.length, TRACE_DECISION_TEXT_CHARACTERS);
+    assert.strictEqual(event.payload.fusedScore, 0.655);
+    assert.strictEqual(event.payload.rawLMLogProb, -8.124);
+    assert.strictEqual(event.payload.typedLiteralRawLMLogProb, -10.988);
+    assert.strictEqual(event.payload.typedLiteralLogProbMargin, 2.001);
+    assert.strictEqual(event.payload.absoluteLogProbFloor, -8.001);
   });
 
   it('captures immediately without an enable gate and flushes encoded UTF-8 bytes', (testContext) => {

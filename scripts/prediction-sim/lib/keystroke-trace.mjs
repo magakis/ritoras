@@ -5,6 +5,7 @@ import path from 'node:path';
 
 export const TRACE_SCHEMA_VERSION = 1;
 export const TRACE_CONTEXT_WINDOW_CHARACTERS = 128;
+export const TRACE_DECISION_TEXT_CHARACTERS = 64;
 export const TRACE_RING_CAPACITY_BYTES = 256 * 1024;
 export const TRACE_SEGMENT_CAPACITY_BYTES = 2 * 1024 * 1024;
 export const TRACE_TOTAL_DISK_CAPACITY_BYTES = 4 * 1024 * 1024;
@@ -18,10 +19,14 @@ export const TRACE_REASON_CODES = Object.freeze([
   'autocorrect-origin-not-typing',
   'autocorrect-extraction-failed',
   'autocorrect-current-word-lookup-word-mismatch',
+  'autocorrect-empty-input',
   'autocorrect-engine-not-ready',
   'autocorrect-spellcheck-pass',
   'autocorrect-learned-word',
   'autocorrect-first-letter-mismatch',
+  'autocorrect-pool-empty-after-filters',
+  'autocorrect-language-model-floor',
+  'autocorrect-contraction-margin',
   'autocorrect-score-below-threshold',
   'autocorrect-same-word',
   'autocorrect-length-out-of-bounds',
@@ -64,6 +69,11 @@ function omitUndefinedFields(value) {
   return Object.fromEntries(
     Object.entries(value).filter(([, fieldValue]) => fieldValue !== undefined)
   );
+}
+
+function roundTraceNumber(value) {
+  const roundedMagnitude = Math.round(Math.abs(value) * 1_000);
+  return Math.sign(value) * roundedMagnitude / 1_000;
 }
 
 function stableStringify(value) {
@@ -165,6 +175,24 @@ export function makeDecisionEvent(decision) {
   if (!TRACE_REASON_CODE_SET.has(decision.reasonCode)) {
     throw new TypeError(`Unknown trace reason code: ${decision.reasonCode}`);
   }
+  for (const field of ['candidate', 'checkedWord']) {
+    if (decision[field] !== undefined && decision[field] !== null
+        && typeof decision[field] !== 'string') {
+      throw new TypeError(`A trace decision ${field} must be a string`);
+    }
+  }
+  for (const field of [
+    'fusedScore',
+    'rawLMLogProb',
+    'typedLiteralRawLMLogProb',
+    'typedLiteralLogProbMargin',
+    'absoluteLogProbFloor',
+  ]) {
+    if (decision[field] !== undefined && decision[field] !== null
+        && (typeof decision[field] !== 'number' || !Number.isFinite(decision[field]))) {
+      throw new TypeError(`A trace decision ${field} must be a finite number`);
+    }
+  }
   if (decision.outcome === 'apply') {
     for (const field of ['beforeText', 'afterText']) {
       if (typeof decision[field] !== 'string') {
@@ -190,10 +218,31 @@ export function makeDecisionEvent(decision) {
   }
   return {
     type: 'decision',
-    payload: {
+    payload: omitUndefinedFields({
       outcome: 'skip',
       reasonCode: decision.reasonCode,
-    },
+      candidate: decision.candidate == null
+        ? undefined
+        : boundedPrefix(decision.candidate, TRACE_DECISION_TEXT_CHARACTERS),
+      fusedScore: decision.fusedScore == null
+        ? undefined
+        : roundTraceNumber(decision.fusedScore),
+      rawLMLogProb: decision.rawLMLogProb == null
+        ? undefined
+        : roundTraceNumber(decision.rawLMLogProb),
+      typedLiteralRawLMLogProb: decision.typedLiteralRawLMLogProb == null
+        ? undefined
+        : roundTraceNumber(decision.typedLiteralRawLMLogProb),
+      typedLiteralLogProbMargin: decision.typedLiteralLogProbMargin == null
+        ? undefined
+        : roundTraceNumber(decision.typedLiteralLogProbMargin),
+      absoluteLogProbFloor: decision.absoluteLogProbFloor == null
+        ? undefined
+        : roundTraceNumber(decision.absoluteLogProbFloor),
+      checkedWord: decision.checkedWord == null
+        ? undefined
+        : boundedPrefix(decision.checkedWord, TRACE_DECISION_TEXT_CHARACTERS),
+    }),
   };
 }
 

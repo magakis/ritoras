@@ -120,6 +120,17 @@ describe('offline keystroke trace viewer', () => {
         deleteCount: 5,
         insertCount: 5,
       }),
+      makeDecisionEvent({
+        outcome: 'skip',
+        reasonCode: 'autocorrect-language-model-floor',
+        candidate: 'with',
+        fusedScore: 1,
+        rawLMLogProb: -9.125,
+        typedLiteralRawLMLogProb: -10,
+        typedLiteralLogProbMargin: 2,
+        absoluteLogProbFloor: -8,
+        checkedWord: 'wiyh',
+      }),
     ]);
 
     const analysis = analyzeTraceFiles([tracePath]);
@@ -130,6 +141,14 @@ describe('offline keystroke trace viewer', () => {
     assert.match(timeline, /tap after: " yesterday"/);
     assert.match(timeline, /beforeText: "I saw thier yesterday"/);
     assert.match(timeline, /afterText: "I saw their yesterday"/);
+    assert.match(
+      timeline,
+      /skip: reason=autocorrect-language-model-floor candidate="with" fusedScore=1 rawLMLogProb=-9\.125/
+    );
+    assert.match(
+      timeline,
+      /typedLiteralRawLMLogProb=-10 typedLiteralLogProbMargin=2 absoluteLogProbFloor=-8 checkedWord="wiyh"/
+    );
   });
 
   it('summarizes autocorrect outcomes, skip reasons, and consecutive suggestion stability', (testContext) => {

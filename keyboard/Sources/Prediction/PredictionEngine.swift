@@ -8,6 +8,63 @@ import os
 /// top-N results.
 final class PredictionEngine {
 
+    enum TopCorrectionOutcome {
+        case emptyInput
+        case poolEmptyAfterFilters
+        case languageModelFloor(
+            candidate: Suggestion,
+            rawLMLogProb: Double,
+            typedLiteralRawLMLogProb: Double,
+            typedLiteralLogProbMargin: Double,
+            absoluteLogProbFloor: Double
+        )
+        case contractionMargin(candidate: Suggestion, rawLMLogProb: Double?)
+        case candidate(candidate: Suggestion, rawLMLogProb: Double?)
+
+        var suggestion: Suggestion? {
+            guard case let .candidate(candidate, _) = self else { return nil }
+            return candidate
+        }
+
+        var candidateForTrace: Suggestion? {
+            switch self {
+            case .emptyInput, .poolEmptyAfterFilters:
+                return nil
+            case let .languageModelFloor(candidate, _, _, _, _),
+                 let .contractionMargin(candidate, _),
+                 let .candidate(candidate, _):
+                return candidate
+            }
+        }
+
+        var rawLMLogProb: Double? {
+            switch self {
+            case .emptyInput, .poolEmptyAfterFilters:
+                return nil
+            case let .languageModelFloor(_, rawLMLogProb, _, _, _):
+                return rawLMLogProb
+            case let .contractionMargin(_, rawLMLogProb),
+                 let .candidate(_, rawLMLogProb):
+                return rawLMLogProb
+            }
+        }
+
+        var typedLiteralRawLMLogProb: Double? {
+            guard case let .languageModelFloor(_, _, value, _, _) = self else { return nil }
+            return value
+        }
+
+        var typedLiteralLogProbMargin: Double? {
+            guard case let .languageModelFloor(_, _, _, value, _) = self else { return nil }
+            return value
+        }
+
+        var absoluteLogProbFloor: Double? {
+            guard case let .languageModelFloor(_, _, _, _, value) = self else { return nil }
+            return value
+        }
+    }
+
     // MARK: - Default Top-3 Fallback
 
     /// Hardcoded suggestions shown on a fresh text field (no current word,
@@ -165,6 +222,15 @@ final class PredictionEngine {
 
     // MARK: - Autocorrect Support
 
+    /// Classifies empty inputs before the prediction engine is available.
+    static func emptyInputOutcome(
+        currentWord: String,
+        lookupWord: String
+    ) -> TopCorrectionOutcome? {
+        guard currentWord.isEmpty || lookupWord.isEmpty else { return nil }
+        return .emptyInput
+    }
+
     /// Returns whether the user's token is in the bundled dictionary, without
     /// treating UITextChecker's process-local learned lexicon as authoritative.
     func isBuiltInWord(_ word: String) -> Bool? {
@@ -173,9 +239,8 @@ final class PredictionEngine {
     }
 
     /// Returns the highest-scoring suggestion for `lookupWord` (excluding the
-    /// typed word itself), or nil if no provider offers a correction. Used by
-    /// AutocorrectController to make confidence-gated replacement decisions on
-    /// separator press.
+    /// typed word itself), or nil when no candidate passes the selection gates.
+    /// Used by AutocorrectController for confidence-gated separator decisions.
     ///
     /// Unlike `suggestions(...)`, this returns the full `Suggestion` (with score)
     /// rather than just the text, so callers can apply a confidence threshold.
@@ -186,7 +251,29 @@ final class PredictionEngine {
         previousWord: String? = nil,
         previousWord2: String? = nil
     ) -> Suggestion? {
-        guard !currentWord.isEmpty, !lookupWord.isEmpty else { return nil }
+        topCorrectionOutcome(
+            forCurrentWord: currentWord,
+            lookupWord: lookupWord,
+            previousWord: previousWord,
+            previousWord2: previousWord2
+        ).suggestion
+    }
+
+    /// Returns the top-correction candidate and classifies the first gate that
+    /// rejects it, retaining the winning candidate's trace operands when useful.
+    func topCorrectionOutcome(
+        forCurrentWord currentWord: String,
+        lookupWord: String,
+        previousWord: String? = nil,
+        previousWord2: String? = nil
+    ) -> TopCorrectionOutcome {
+        if let emptyInput = Self.emptyInputOutcome(
+            currentWord: currentWord,
+            lookupWord: lookupWord
+        ) {
+            return emptyInput
+        }
+
         let pool = fusedPool(
             forCurrentWord: currentWord,
             lookupWord: lookupWord,
@@ -198,21 +285,39 @@ final class PredictionEngine {
             $0.source != .trigram && $0.text.lowercased() != lowerTyped
         }
         guard let winner = candidates.max(by: { $0.score < $1.score }) else {
-            return nil
+            return .poolEmptyAfterFilters
         }
+        var rawLMLogProb: Double?
 
-        // Absolute KenLM floor: reject if the winner is contextually implausible even
-        // after min-max normalization inflated its relative score. Only applies when
-        // fusion is active (trigram ready); otherwise there's no KenLM score to check.
+        // Keep the absolute floor for ordinary winners. Only a sub-floor winner
+        // gets a lazy typed-literal comparison, matching the swept rescue policy.
         if fusionIsActive(previousWord: previousWord),
-           let trigramProvider = snapshotProviders().compactMap({ $0 as? TrigramProvider }).first(where: { $0.isReady }) {
+           let trigramProvider = snapshotProviders()
+            .compactMap({ $0 as? TrigramProvider })
+            .first(where: { $0.isReady }) {
             let logProb = trigramProvider.rawLogProb(
                 for: winner.text,
                 previousWord: previousWord,
                 previousWord2: previousWord2
             ) ?? -10.0
-            if logProb < SharedConfig.Defaults.kenlmAutocorrectAbsoluteLogProbFloor {
-                return nil
+            rawLMLogProb = logProb
+            let absoluteLogProbFloor = SharedConfig.Defaults.kenlmAutocorrectAbsoluteLogProbFloor
+            if logProb < absoluteLogProbFloor {
+                let typedLiteralLogProb = trigramProvider.rawLogProb(
+                    for: currentWord,
+                    previousWord: previousWord,
+                    previousWord2: previousWord2
+                ) ?? -10.0
+                let typedLiteralLogProbMargin = SharedConfig.Defaults.typedLiteralLogProbMargin
+                if logProb - typedLiteralLogProb < typedLiteralLogProbMargin {
+                    return .languageModelFloor(
+                        candidate: winner,
+                        rawLMLogProb: logProb,
+                        typedLiteralRawLMLogProb: typedLiteralLogProb,
+                        typedLiteralLogProbMargin: typedLiteralLogProbMargin,
+                        absoluteLogProbFloor: absoluteLogProbFloor
+                    )
+                }
             }
         }
 
@@ -223,24 +328,31 @@ final class PredictionEngine {
         // token is a valid word with its own meaning.
         if winner.source == .ambiguousContraction {
             guard fusionIsActive(previousWord: previousWord),
-                  let trigramProvider = snapshotProviders().compactMap({ $0 as? TrigramProvider }).first(where: { $0.isReady }) else {
-                return nil
+                  let trigramProvider = snapshotProviders()
+                    .compactMap({ $0 as? TrigramProvider })
+                    .first(where: { $0.isReady }) else {
+                return .contractionMargin(candidate: winner, rawLMLogProb: nil)
             }
             let contractionLogProb = trigramProvider.rawLogProb(
                 for: winner.text,
                 previousWord: previousWord,
                 previousWord2: previousWord2
             ) ?? -10.0
+            rawLMLogProb = contractionLogProb
             let typedLiteralLogProb = trigramProvider.rawLogProb(
                 for: currentWord,
                 previousWord: previousWord,
                 previousWord2: previousWord2
             ) ?? -10.0
-            if contractionLogProb - typedLiteralLogProb < SharedConfig.Defaults.ambiguousContractionLogProbMargin {
-                return nil
+            if contractionLogProb - typedLiteralLogProb
+                < SharedConfig.Defaults.ambiguousContractionLogProbMargin {
+                return .contractionMargin(
+                    candidate: winner,
+                    rawLMLogProb: contractionLogProb
+                )
             }
         }
-        return winner
+        return .candidate(candidate: winner, rawLMLogProb: rawLMLogProb)
     }
 
     // MARK: - Fusion Pool

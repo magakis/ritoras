@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { topCorrection } from '../lib/top-correction.mjs';
+import { topCorrection, topCorrectionOutcome } from '../lib/top-correction.mjs';
 import { fusionIsActive } from '../lib/fusion-is-active.mjs';
 import { fusedPool } from '../lib/fused-pool.mjs';
 
@@ -67,6 +67,7 @@ describe('topCorrection', () => {
       kenlmScorer: mockBigramScorer,
       trigramReady: true,
       blendWeight: 0.5,
+      floorPolicy: 'absolute',
       absoluteLogProbFloor: -8.0,
     });
 
@@ -94,6 +95,7 @@ describe('topCorrection', () => {
       kenlmScorer: highScorer,
       trigramReady: true,
       blendWeight: 0.5,
+      floorPolicy: 'absolute',
       absoluteLogProbFloor: -8.0,
     });
 
@@ -229,6 +231,7 @@ describe('topCorrection', () => {
       kenlmScorer: lowScorer,
       trigramReady: true,
       blendWeight: 0.5,
+      floorPolicy: 'absolute',
       // Very permissive floor so it passes
       absoluteLogProbFloor: -10.0,
     });
@@ -243,6 +246,7 @@ describe('topCorrection', () => {
       kenlmScorer: lowScorer,
       trigramReady: true,
       blendWeight: 0.5,
+      floorPolicy: 'absolute',
       absoluteLogProbFloor: -8.0,  // strict floor — -8.5 < -8.0 → rejected
     });
 
@@ -338,6 +342,7 @@ describe('topCorrection', () => {
         previousWord2: null,
         kenlmScorer: mockBigramScorer,
         trigramReady: false,
+        floorPolicy: 'absolute',
         absoluteLogProbFloor: -8.0,
       });
 
@@ -365,5 +370,158 @@ describe('topCorrection', () => {
 
       assert.strictEqual(result, null, 'ambiguous contraction requires a ready trigram');
     });
+  });
+});
+
+describe('topCorrection floor-policy modes', () => {
+  function options(overrides = {}) {
+    return {
+      pool: [
+        { text: 'typed', score: 1.0, source: 'symspell' },
+        { text: 'winner', score: 0.8, source: 'symspell' },
+      ],
+      currentWord: 'typed',
+      previousWord: 'known',
+      previousWord2: 'known',
+      kenlmScorer: () => -9.0,
+      trigramReady: true,
+      ...overrides,
+    };
+  }
+
+  it('defaults to a 2.0 sub-floor rescue while preserving the old absolute policy', () => {
+    const exactMarginScorer = candidate => ({
+      winner: -9.0,
+      typed: -11.0,
+    }[candidate] ?? -10.0);
+    const selectedPolicy = topCorrection(options({ kenlmScorer: exactMarginScorer }));
+    assert.strictEqual(selectedPolicy.text, 'winner');
+    assert.strictEqual(topCorrection(options({
+      floorPolicy: 'absolute',
+      kenlmScorer: exactMarginScorer,
+    })), null);
+
+    const aboveFloorScorer = candidate => ({
+      winner: -7.0,
+      typed: -6.0,
+    }[candidate] ?? -10.0);
+    assert.strictEqual(
+      topCorrection(options({ kenlmScorer: aboveFloorScorer })).text,
+      'winner',
+    );
+  });
+
+  it('scores the typed literal only when the winner is below the absolute floor', () => {
+    const literalScoreCalls = [];
+    const scorer = candidate => {
+      if (candidate === 'typed') {
+        literalScoreCalls.push(candidate);
+        return -11.0;
+      }
+      return candidate === 'winner' ? -7.0 : -10.0;
+    };
+    const shared = {
+      pool: [
+        { text: 'typed', score: 1.0, source: 'symspell' },
+        { text: 'winner', score: 0.8, source: 'symspell' },
+      ],
+      currentWord: 'typed',
+      previousWord: 'known',
+      previousWord2: null,
+      kenlmScorer: scorer,
+      trigramReady: true,
+    };
+
+    assert.strictEqual(topCorrectionOutcome(shared).cause, 'candidate');
+    assert.strictEqual(literalScoreCalls.length, 1, 'typed literal was scored only in fusion');
+
+    literalScoreCalls.length = 0;
+    const subFloorOutcome = topCorrectionOutcome({
+      ...shared,
+      kenlmScorer: candidate => {
+        if (candidate === 'typed') {
+          literalScoreCalls.push(candidate);
+          return -11.0;
+        }
+        return candidate === 'winner' ? -9.0 : -10.0;
+      },
+    });
+    assert.strictEqual(subFloorOutcome.cause, 'candidate');
+    assert.strictEqual(literalScoreCalls.length, 2, 'gate scores the literal after the floor fails');
+  });
+
+  it('allows the opt-in floor-off endpoint to bypass only the absolute floor', () => {
+    const result = topCorrection(options({ floorPolicy: 'off' }));
+    assert.strictEqual(result.text, 'winner');
+  });
+
+  it('relaxes the floor only when built-in membership finds an OOV context token', () => {
+    const isBuiltInWord = word => word === 'known';
+    const shared = {
+      floorPolicy: 'oovAware',
+      oovRelaxedLogProbFloor: -10.0,
+      isBuiltInWord,
+    };
+
+    assert.strictEqual(topCorrection(options({
+      ...shared,
+      previousWord2: 'known',
+    })), null);
+    const relaxed = topCorrection(options({
+      ...shared,
+      previousWord2: '€50',
+    }));
+    assert.strictEqual(relaxed.text, 'winner');
+  });
+
+  it('scales the floor relaxation by the fraction of OOV context tokens', () => {
+    const shared = {
+      floorPolicy: 'contextAdjusted',
+      contextFloorRelaxationLog10: 4.0,
+      isBuiltInWord: word => word === 'known',
+      kenlmScorer: () => -9.5,
+    };
+
+    assert.strictEqual(topCorrection(options({
+      ...shared,
+      previousWord2: 'known',
+    })), null);
+    const adjusted = topCorrection(options({
+      ...shared,
+      previousWord2: '€50',
+    }));
+    assert.strictEqual(adjusted.text, 'winner');
+  });
+
+  it('lets a sufficient winner-over-typed-literal margin augment the absolute floor', () => {
+    const scorer = candidate => ({
+      winner: -9.0,
+      typed: -11.0,
+    }[candidate] ?? -10.0);
+    const shared = {
+      floorPolicy: 'typedLiteralMargin',
+      typedLiteralLogProbMargin: 1.0,
+      kenlmScorer: scorer,
+    };
+
+    const accepted = topCorrection(options(shared));
+    assert.strictEqual(accepted.text, 'winner');
+
+    const rejected = topCorrection(options({
+      ...shared,
+      kenlmScorer: candidate => (candidate === 'typed' ? -9.5 : -9.0),
+    }));
+    assert.strictEqual(rejected, null);
+  });
+
+  it('requires built-in membership rather than silently inferring OOV from KenLM', () => {
+    assert.throws(() => topCorrection(options({
+      floorPolicy: 'oovAware',
+      oovRelaxedLogProbFloor: -10.0,
+    })), /requires isBuiltInWord/);
+    assert.throws(() => topCorrection(options({
+      floorPolicy: 'contextAdjusted',
+      contextFloorRelaxationLog10: 4.0,
+    })), /requires isBuiltInWord/);
   });
 });

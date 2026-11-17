@@ -6,6 +6,8 @@ public enum KeystrokeTraceSchema {
     public static let currentVersion = 1
     /// Maximum context retained before and after the caret.
     public static let contextWindowCharacters = 128
+    /// Maximum characters retained for a word in a decision skip payload.
+    public static let decisionTextCharacters = 64
     /// Maximum preallocated in-memory byte ring.
     public static let ringCapacityBytes = 256 * 1024
     /// Maximum size of either on-disk segment.
@@ -19,7 +21,7 @@ public enum KeystrokeTraceSchema {
 }
 
 /// Stable reason codes shared by autocorrect guards, deferred applies, and host callbacks.
-public enum KeystrokeTraceReasonCode: String, CaseIterable, Codable, Equatable {
+public enum KeystrokeTraceReasonCode: String, CaseIterable, Codable, Equatable, Sendable {
     /// Autocorrect was disabled in settings.
     case autocorrectSettingDisabled = "autocorrect-setting-disabled"
     /// The current text-input traits do not permit autocorrect.
@@ -30,6 +32,8 @@ public enum KeystrokeTraceReasonCode: String, CaseIterable, Codable, Equatable {
     case autocorrectExtractionFailed = "autocorrect-extraction-failed"
     /// The extracted current word differs from the lookup word.
     case autocorrectCurrentWordLookupWordMismatch = "autocorrect-current-word-lookup-word-mismatch"
+    /// The extracted input contains no word to score.
+    case autocorrectEmptyInput = "autocorrect-empty-input"
     /// The prediction engine was not ready to make a correction.
     case autocorrectEngineNotReady = "autocorrect-engine-not-ready"
     /// The system spellchecker accepted the current word.
@@ -38,7 +42,13 @@ public enum KeystrokeTraceReasonCode: String, CaseIterable, Codable, Equatable {
     case autocorrectLearnedWord = "autocorrect-learned-word"
     /// The proposed correction does not preserve the first letter.
     case autocorrectFirstLetterMismatch = "autocorrect-first-letter-mismatch"
-    /// The proposed correction score did not meet the configured threshold.
+    /// No correction survived literal-word and trigram exclusions.
+    case autocorrectPoolEmptyAfterFilters = "autocorrect-pool-empty-after-filters"
+    /// The winner was below the language-model floor and failed the literal-margin rescue.
+    case autocorrectLanguageModelFloor = "autocorrect-language-model-floor"
+    /// The ambiguous contraction did not clear its language-model margin gate.
+    case autocorrectContractionMargin = "autocorrect-contraction-margin"
+    /// The proposed correction score did not meet the configured confidence threshold.
     case autocorrectScoreBelowThreshold = "autocorrect-score-below-threshold"
     /// The proposed correction is identical to the current word.
     case autocorrectSameWord = "autocorrect-same-word"
@@ -171,6 +181,49 @@ public struct KeystrokeTraceSuggestionEvent: Codable, Equatable {
     }
 }
 
+/// Bounded operands attached to a skipped decision when the guard computed them.
+public struct KeystrokeTraceDecisionSkip: Codable, Equatable, Sendable {
+    public let reasonCode: KeystrokeTraceReasonCode
+    public let candidate: String?
+    public let fusedScore: Double?
+    public let rawLMLogProb: Double?
+    public let typedLiteralRawLMLogProb: Double?
+    public let typedLiteralLogProbMargin: Double?
+    public let absoluteLogProbFloor: Double?
+    public let checkedWord: String?
+
+    /// Creates a skip payload with short text operands and rounded scores.
+    public init(
+        reasonCode: KeystrokeTraceReasonCode,
+        candidate: String? = nil,
+        fusedScore: Double? = nil,
+        rawLMLogProb: Double? = nil,
+        typedLiteralRawLMLogProb: Double? = nil,
+        typedLiteralLogProbMargin: Double? = nil,
+        absoluteLogProbFloor: Double? = nil,
+        checkedWord: String? = nil
+    ) {
+        self.reasonCode = reasonCode
+        self.candidate = candidate.map {
+            String($0.prefix(KeystrokeTraceSchema.decisionTextCharacters))
+        }
+        self.fusedScore = fusedScore.map { ($0 * 1_000).rounded() / 1_000 }
+        self.rawLMLogProb = rawLMLogProb.map { ($0 * 1_000).rounded() / 1_000 }
+        self.typedLiteralRawLMLogProb = typedLiteralRawLMLogProb.map {
+            ($0 * 1_000).rounded() / 1_000
+        }
+        self.typedLiteralLogProbMargin = typedLiteralLogProbMargin.map {
+            ($0 * 1_000).rounded() / 1_000
+        }
+        self.absoluteLogProbFloor = absoluteLogProbFloor.map {
+            ($0 * 1_000).rounded() / 1_000
+        }
+        self.checkedWord = checkedWord.map {
+            String($0.prefix(KeystrokeTraceSchema.decisionTextCharacters))
+        }
+    }
+}
+
 /// Apply decisions require complete before/after text and edit counts; skips carry their guard.
 public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
     case apply(
@@ -180,7 +233,7 @@ public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
         deleteCount: Int,
         insertCount: Int
     )
-    case skip(reasonCode: KeystrokeTraceReasonCode)
+    case skip(KeystrokeTraceDecisionSkip)
 
     private enum CodingKeys: String, CodingKey {
         case outcome
@@ -189,6 +242,13 @@ public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
         case afterText
         case deleteCount
         case insertCount
+        case candidate
+        case fusedScore
+        case rawLMLogProb
+        case typedLiteralRawLMLogProb
+        case typedLiteralLogProbMargin
+        case absoluteLogProbFloor
+        case checkedWord
     }
 
     private enum Outcome: String, Codable {
@@ -214,7 +274,28 @@ public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
                 insertCount: try container.decode(Int.self, forKey: .insertCount)
             )
         case .skip:
-            self = .skip(reasonCode: reasonCode)
+            self = .skip(KeystrokeTraceDecisionSkip(
+                reasonCode: reasonCode,
+                candidate: try container.decodeIfPresent(String.self, forKey: .candidate),
+                fusedScore: try container.decodeIfPresent(Double.self, forKey: .fusedScore),
+                rawLMLogProb: try container.decodeIfPresent(
+                    Double.self,
+                    forKey: .rawLMLogProb
+                ),
+                typedLiteralRawLMLogProb: try container.decodeIfPresent(
+                    Double.self,
+                    forKey: .typedLiteralRawLMLogProb
+                ),
+                typedLiteralLogProbMargin: try container.decodeIfPresent(
+                    Double.self,
+                    forKey: .typedLiteralLogProbMargin
+                ),
+                absoluteLogProbFloor: try container.decodeIfPresent(
+                    Double.self,
+                    forKey: .absoluteLogProbFloor
+                ),
+                checkedWord: try container.decodeIfPresent(String.self, forKey: .checkedWord)
+            ))
         }
     }
 
@@ -229,9 +310,22 @@ public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
             try container.encode(afterText, forKey: .afterText)
             try container.encode(deleteCount, forKey: .deleteCount)
             try container.encode(insertCount, forKey: .insertCount)
-        case let .skip(reasonCode):
+        case let .skip(skip):
             try container.encode(Outcome.skip, forKey: .outcome)
-            try container.encode(reasonCode, forKey: .reasonCode)
+            try container.encode(skip.reasonCode, forKey: .reasonCode)
+            try container.encodeIfPresent(skip.candidate, forKey: .candidate)
+            try container.encodeIfPresent(skip.fusedScore, forKey: .fusedScore)
+            try container.encodeIfPresent(skip.rawLMLogProb, forKey: .rawLMLogProb)
+            try container.encodeIfPresent(
+                skip.typedLiteralRawLMLogProb,
+                forKey: .typedLiteralRawLMLogProb
+            )
+            try container.encodeIfPresent(
+                skip.typedLiteralLogProbMargin,
+                forKey: .typedLiteralLogProbMargin
+            )
+            try container.encodeIfPresent(skip.absoluteLogProbFloor, forKey: .absoluteLogProbFloor)
+            try container.encodeIfPresent(skip.checkedWord, forKey: .checkedWord)
         }
     }
 }

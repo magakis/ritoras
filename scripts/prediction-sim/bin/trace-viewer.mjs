@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   completeTraceLines,
+  TRACE_DECISION_TEXT_CHARACTERS,
   TRACE_LIVE_FILE_NAME,
   TRACE_REASON_CODES,
   TRACE_ROTATED_FILE_NAME,
@@ -59,6 +60,19 @@ function requireUnsignedInteger(value, fieldName) {
   requireInteger(value, fieldName);
   if (value < 0) {
     throw new TypeError(`${fieldName} must be non-negative`);
+  }
+}
+
+function requireFiniteNumber(value, fieldName) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new TypeError(`${fieldName} must be a finite number`);
+  }
+}
+
+function requireBoundedText(value, fieldName) {
+  requireString(value, fieldName);
+  if (Array.from(graphemeSegmenter.segment(value)).length > TRACE_DECISION_TEXT_CHARACTERS) {
+    throw new TypeError(`${fieldName} exceeds the decision text limit`);
   }
 }
 
@@ -138,6 +152,14 @@ function validateEvent(event) {
         requireString(payload.afterText, 'payload.afterText');
         requireInteger(payload.deleteCount, 'payload.deleteCount');
         requireInteger(payload.insertCount, 'payload.insertCount');
+      } else {
+        requireOptional(payload, 'candidate', requireBoundedText);
+        requireOptional(payload, 'fusedScore', requireFiniteNumber);
+        requireOptional(payload, 'rawLMLogProb', requireFiniteNumber);
+        requireOptional(payload, 'typedLiteralRawLMLogProb', requireFiniteNumber);
+        requireOptional(payload, 'typedLiteralLogProbMargin', requireFiniteNumber);
+        requireOptional(payload, 'absoluteLogProbFloor', requireFiniteNumber);
+        requireOptional(payload, 'checkedWord', requireBoundedText);
       }
       return;
 
@@ -559,7 +581,28 @@ export function formatTimeline(records) {
     }
 
     if (event.type === 'decision') {
-      lines.push(`  skip: reason=${event.payload.reasonCode}`);
+      const payload = event.payload;
+      const details = [`reason=${payload.reasonCode}`];
+      if (payload.candidate != null) {
+        details.push(`candidate=${JSON.stringify(payload.candidate)}`);
+      }
+      if (payload.fusedScore != null) details.push(`fusedScore=${payload.fusedScore}`);
+      if (payload.rawLMLogProb != null) {
+        details.push(`rawLMLogProb=${payload.rawLMLogProb}`);
+      }
+      if (payload.typedLiteralRawLMLogProb != null) {
+        details.push(`typedLiteralRawLMLogProb=${payload.typedLiteralRawLMLogProb}`);
+      }
+      if (payload.typedLiteralLogProbMargin != null) {
+        details.push(`typedLiteralLogProbMargin=${payload.typedLiteralLogProbMargin}`);
+      }
+      if (payload.absoluteLogProbFloor != null) {
+        details.push(`absoluteLogProbFloor=${payload.absoluteLogProbFloor}`);
+      }
+      if (payload.checkedWord != null) {
+        details.push(`checkedWord=${JSON.stringify(payload.checkedWord)}`);
+      }
+      lines.push(`  skip: ${details.join(' ')}`);
       continue;
     }
 
