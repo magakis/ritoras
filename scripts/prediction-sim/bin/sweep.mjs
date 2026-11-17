@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
-// Phase 5: Parameter sweep over the autocorrect threshold space.
-// Builds the SymSpell index once, pre-computes all suggestion pools,
-// then runs every parameter combination against the typo + legit corpora.
+// Measures the pre-registered autocorrect floor-policy candidates at the
+// device-mirrored operating point and selects only across robust qualifiers.
 
 import { readFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
@@ -11,42 +10,41 @@ import { SymSpell } from '../lib/symspell.mjs';
 import { SymSpellProvider } from '../lib/symspell-provider.mjs';
 import { expansion } from '../lib/contractions.mjs';
 import { topCorrection } from '../lib/top-correction.mjs';
-import { fusionIsActive } from '../lib/fusion-is-active.mjs';
-import { bigramKenlmScorer } from '../lib/bigram-kenlm-proxy.mjs';
+import { DEFAULT_CONFIG, selectConfidenceThreshold } from '../lib/autocorrect-controller.mjs';
+import { createBigramKenlmScorer } from '../lib/bigram-kenlm-proxy.mjs';
+import { SYMSPELL_MIN_WORD_FREQ } from '../lib/sym-spell-blob.mjs';
+import {
+  CALIBRATION_SENSITIVITY_VALUES,
+  createOovContextStratum,
+  FLOOR_POLICY_CANDIDATES,
+  selectFloorPolicyWinner,
+} from '../lib/floor-policy-sweep.mjs';
 import { loadDictionary } from '../lib/load-dictionary.mjs';
+import { canonicalize } from '../lib/text-normalization.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const CURRENT_FLOOR = -8.0;
+const BASELINE_ID = 'absolute-floor-baseline';
+const SWEEP_CONFIG = Object.freeze({
+  blendWeight: 0.5,
+  fusedThreshold: DEFAULT_CONFIG.minConfidenceScoreFused,
+  unfusedThreshold: DEFAULT_CONFIG.minConfidenceScore,
+});
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+let _symspellDict = null;
+let _builtInWords = null;
 
 function loadJSON(relativePath) {
   return JSON.parse(readFileSync(resolve(__dirname, '..', relativePath), 'utf8'));
 }
 
-/** Build a full suggestion pool for `typedWord` using the SymSpellProvider
- *  with QwertyGeometry-aware scoring. Matches the Swift SymSpellProvider
- *  behavior: verbatim (1.0) + contraction (0.9) + top SymSpell correction. */
-function buildPool(typedWord, symspellProvider) {
-  return symspellProvider.suggest(typedWord);
+function isBuiltInWord(word) {
+  return _builtInWords.has(canonicalize(word.toLowerCase()));
 }
 
-/** SymSpell dictionary reference for in-dictionary checks.
- *  Populated once in main(). */
-let _symspellDict = null;
-
-/** Run the autocorrect pipeline for one entry. Returns the correction text
- *  if one fires (score >= threshold), or null if no correction applies.
- *
- *  Simulates Apple UITextChecker: when the typed word is a valid dictionary
- *  word (distance 0 found by SymSpell) with non-trivial frequency, the system
- *  does NOT auto-correct it unless the word is a contraction fast-path entry.
- */
-function runOne(typedWord, previousWord, pool, blendWeight, absoluteLogProbFloor,
-                fusedThreshold, unfusedThreshold) {
-  // Apple-like guard: skip well-known dictionary words (≥2000 count) but
-  // always process contractions.
+/** Run the winner-selection and confidence gates for one corpus entry. */
+function runOne(typedWord, previousWord, previousWord2, pool, policy, kenlmScorer) {
+  // Mirror the existing UITextChecker/dictionary protection for valid words.
   const lower = typedWord.toLowerCase();
   if (_symspellDict && !expansion(lower)) {
     const exactEntry = _symspellDict.get(lower);
@@ -59,219 +57,404 @@ function runOne(typedWord, previousWord, pool, blendWeight, absoluteLogProbFloor
     pool,
     currentWord: typedWord,
     previousWord,
-    previousWord2: null,
-    kenlmScorer: bigramKenlmScorer,
+    previousWord2,
+    kenlmScorer,
     trigramReady: true,
-    blendWeight,
-    absoluteLogProbFloor,
+    blendWeight: SWEEP_CONFIG.blendWeight,
+    absoluteLogProbFloor: CURRENT_FLOOR,
+    floorPolicy: policy.floorPolicy,
+    isBuiltInWord,
+    ...policy.parameters,
   });
-
   if (!result) return null;
 
-  // Determine which threshold applies.
-  const active = fusionIsActive({ previousWord, trigramReady: true });
-  const threshold = active ? fusedThreshold : unfusedThreshold;
-
-  if (result.score < threshold) return null;
-  return result.text;
+  const threshold = selectConfidenceThreshold({
+    previousWord,
+    trigramReady: true,
+    fusedThreshold: SWEEP_CONFIG.fusedThreshold,
+    unfusedThreshold: SWEEP_CONFIG.unfusedThreshold,
+  });
+  return result.score >= threshold ? result.text : null;
 }
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
+function runTypoCorpus(typoPools, policy, kenlmScorer) {
+  return typoPools.map(({ entry, pool }) => runOne(
+    entry.typedWord,
+    entry.previousWord,
+    entry.previousWord2 ?? null,
+    pool,
+    policy,
+    kenlmScorer,
+  ));
+}
+
+function runLegitCorpus(legitPools, policy, kenlmScorer) {
+  return legitPools.map(({ entry, pool }) => runOne(
+    entry.word,
+    entry.previousWord,
+    entry.previousWord2 ?? null,
+    pool,
+    policy,
+    kenlmScorer,
+  ));
+}
+
+function runOovStratum(oovStratum, policy, kenlmScorer) {
+  return oovStratum.map(({ entry, pool }) => runOne(
+    entry.typedWord,
+    entry.previousWord,
+    entry.previousWord2,
+    pool,
+    policy,
+    kenlmScorer,
+  ));
+}
+
+function fixturePool(testCase) {
+  return [
+    { text: testCase.typedWord, score: 1.0, source: 'symspell' },
+    { text: testCase.intendedWord, score: Math.exp(-0.5), source: 'symspell' },
+    ...(testCase.appleGuesses ?? []).map(text => ({
+      text,
+      score: 0.85,
+      source: 'apple',
+    })),
+  ];
+}
+
+function runTier0Fixtures(tier0Fixtures, policy, kenlmScorer) {
+  return tier0Fixtures.map(testCase => {
+    const previousWord = testCase.previousWords.at(-1) ?? null;
+    const previousWord2 = testCase.previousWords.at(-2) ?? null;
+    const correction = runOne(
+      testCase.typedWord,
+      previousWord,
+      previousWord2,
+      fixturePool(testCase),
+      policy,
+      kenlmScorer,
+    );
+    return correction?.toLowerCase() === testCase.intendedWord.toLowerCase();
+  });
+}
+
+function countTypoOutcomes(typoCorpus, corrections) {
+  let correct = 0;
+  let incorrect = 0;
+  for (const [index, entry] of typoCorpus.entries()) {
+    const correction = corrections[index];
+    if (correction === null) continue;
+    if (correction.toLowerCase() === entry.intendedWord.toLowerCase()) {
+      correct++;
+    } else {
+      incorrect++;
+    }
+  }
+  return { correct, incorrect };
+}
+
+function countChangedOutcomes(candidateOutcomes, baselineOutcomes) {
+  return candidateOutcomes.reduce(
+    (changed, outcome, index) => changed + Number(!sameOutcome(outcome, baselineOutcomes[index])),
+    0,
+  );
+}
+
+function sameOutcome(left, right) {
+  if (left === null || right === null) return left === right;
+  return left.toLowerCase() === right.toLowerCase();
+}
+
+function measurePolicy({
+  policy,
+  typoCorpus,
+  typoPools,
+  legitPools,
+  oovStratum,
+  tier0Fixtures,
+  kenlmScorer,
+}) {
+  const typoCorrections = runTypoCorpus(typoPools, policy, kenlmScorer);
+  const legitCorrections = runLegitCorpus(legitPools, policy, kenlmScorer);
+  const oovCorrections = runOovStratum(oovStratum, policy, kenlmScorer);
+  const tier0Results = runTier0Fixtures(tier0Fixtures, policy, kenlmScorer);
+  const { correct, incorrect } = countTypoOutcomes(typoCorpus, typoCorrections);
+  const falsePositives = legitCorrections.filter(correction => correction !== null).length;
+  const precisionDenominator = correct + incorrect;
+
+  return {
+    typoCorrections,
+    legitCorrections,
+    precision: precisionDenominator > 0 ? correct / precisionDenominator : 1.0,
+    recall: correct / typoCorpus.length,
+    fpr: falsePositives / legitPools.length,
+    oovCorrect: oovCorrections.filter((correction, index) => (
+      correction?.toLowerCase() === oovStratum[index].entry.intendedWord.toLowerCase()
+    )).length,
+    oovTotal: oovStratum.length,
+    tier0Correct: tier0Results.filter(Boolean).length,
+    tier0Total: tier0Results.length,
+  };
+}
+
+function createPolicyResults({
+  typoCorpus,
+  typoPools,
+  legitPools,
+  oovStratum,
+  tier0Fixtures,
+}) {
+  const results = FLOOR_POLICY_CANDIDATES.map(candidate => ({
+    id: candidate.id,
+    label: candidate.label,
+    shape: candidate.shape,
+    floorPolicy: candidate.floorPolicy,
+    parameters: candidate.parameters,
+    calibrationRuns: [],
+  }));
+  const resultById = new Map(results.map(result => [result.id, result]));
+  const baselinePolicy = FLOOR_POLICY_CANDIDATES.find(candidate => candidate.id === BASELINE_ID);
+
+  for (const penalty of CALIBRATION_SENSITIVITY_VALUES) {
+    const kenlmScorer = createBigramKenlmScorer(penalty);
+    const baselineMeasurement = measurePolicy({
+      policy: baselinePolicy,
+      typoCorpus,
+      typoPools,
+      legitPools,
+      oovStratum,
+      tier0Fixtures,
+      kenlmScorer,
+    });
+
+    for (const policy of FLOOR_POLICY_CANDIDATES) {
+      const measurement = policy.id === BASELINE_ID
+        ? baselineMeasurement
+        : measurePolicy({
+          policy,
+          typoCorpus,
+          typoPools,
+          legitPools,
+          oovStratum,
+          tier0Fixtures,
+          kenlmScorer,
+        });
+      resultById.get(policy.id).calibrationRuns.push({
+        penalty,
+        precision: measurement.precision,
+        recall: measurement.recall,
+        fpr: measurement.fpr,
+        oovCorrect: measurement.oovCorrect,
+        oovTotal: measurement.oovTotal,
+        tier0Correct: measurement.tier0Correct,
+        tier0Total: measurement.tier0Total,
+        corpusOutcomeDelta: countChangedOutcomes(
+          measurement.typoCorrections.concat(measurement.legitCorrections),
+          baselineMeasurement.typoCorrections.concat(baselineMeasurement.legitCorrections),
+        ),
+      });
+    }
+  }
+  return results;
+}
+
+function percentage(value) {
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function printTieBreakSteps(steps) {
+  if (steps.length === 0) return;
+
+  console.log('Tie-break steps:');
+  for (const step of steps) {
+    if (step.rule === 'higher-oov-recall') {
+      console.log(
+        `  Higher OOV recall retained ${step.selectedIds.join(', ')}; `
+        + `excluded ${step.excludedIds.join(', ')}.`,
+      );
+    } else if (step.rule === 'retain-rejection-guard') {
+      console.log(
+        `  Rejection-guard preference retained ${step.selectedIds.join(', ')}; `
+        + `excluded ${step.excludedIds.join(', ')}.`,
+      );
+    } else if (step.rule === 'largest-typed-literal-margin') {
+      console.log(
+        `  Largest qualifying typed-literal margin (${step.margin.toFixed(1)}) `
+        + `selected ${step.selectedIds.join(', ')}; `
+        + `excluded ${step.excludedIds.join(', ')}.`,
+      );
+    }
+  }
+}
+
+function printSweepReport(selection) {
+  console.log('\n=== Per-policy calibration results ===');
+  console.log('`delta` counts changed outcomes across the 401 typo + 299 legit corpus entries.');
+  console.log('OOV recall is measured on the generated OOV-context typo stratum.');
+
+  for (const report of selection.reports) {
+    const passingCount = report.calibrationRuns.filter(run => {
+      const baselineRun = selection.baseline.calibrationRuns.find(
+        baselineResult => baselineResult.penalty === run.penalty,
+      );
+      return run.precision >= baselineRun.precision
+        && run.fpr <= baselineRun.fpr
+        && run.tier0Total > 0
+        && run.tier0Correct === run.tier0Total;
+    }).length;
+    const robustness = report.robust ? 'ROBUST' : 'NOT ROBUST';
+    const isQualifier = selection.qualifiers.some(qualifier => qualifier.id === report.id);
+    const qualification = isQualifier ? 'MIN-DELTA QUALIFIER' : 'NOT MIN-DELTA QUALIFIER';
+    console.log(
+      `\n${report.label} [${report.id}] — ${robustness}, ${qualification} `
+      + `(${passingCount}/${CALIBRATION_SENSITIVITY_VALUES.length} points)`,
+    );
+    console.log(`  Mean corpus outcome delta: ${report.meanCorpusOutcomeDelta.toFixed(2)}`);
+    console.log(`  Mean OOV-stratum recall:    ${percentage(report.oovRecall)}`);
+    for (const run of report.calibrationRuns) {
+      const baselineRun = selection.baseline.calibrationRuns.find(
+        baselineResult => baselineResult.penalty === run.penalty,
+      );
+      const tier0 = `${run.tier0Correct}/${run.tier0Total}`;
+      console.log(
+        `  ${run.penalty.toFixed(1)}: precision=${percentage(run.precision)} `
+        + `(baseline ${percentage(baselineRun.precision)}), recall=${percentage(run.recall)}`,
+      );
+      console.log(
+        `       legitFPR=${percentage(run.fpr)} (baseline ${percentage(baselineRun.fpr)}), `
+        + `OOVrecall=${percentage(run.oovTotal > 0 ? run.oovCorrect / run.oovTotal : 0)}, `
+        + `Tier0=${tier0}, delta=${run.corpusOutcomeDelta}`,
+      );
+    }
+    if (report.failuresByPenalty.length > 0) {
+      const failures = report.failuresByPenalty.map(({ penalty, failures }) => (
+        `${penalty.toFixed(1)}: ${failures.join(', ')}`
+      ));
+      console.log(`  Qualification failures: ${failures.join('; ')}`);
+    }
+  }
+
+  console.log('\n=== Pre-registered selection ===');
+  if (selection.qualifiers.length === 0) {
+    console.log('Qualifiers: none.');
+    console.log(
+      'NO QUALIFIER — no policy meets baseline precision/FPR, Tier-0, '
+      + 'and full-range robustness requirements.',
+    );
+    console.log('No winner selected; do not weaken the selection rule.');
+    return;
+  }
+
+  console.log('Qualifiers (robust policies at minimum mean outcome delta):');
+  for (const qualifier of selection.qualifiers) {
+    console.log(
+      `  ${qualifier.id}: mean delta=${qualifier.meanCorpusOutcomeDelta.toFixed(2)}, `
+      + `mean OOV recall=${percentage(qualifier.oovRecall)}`,
+    );
+  }
+  printTieBreakSteps(selection.tieBreakSteps);
+  const winner = selection.winner;
+  console.log(`Winner: ${winner.label} [${winner.id}]`);
+  console.log(`  Shape: ${winner.shape}`);
+  console.log(`  Parameters: ${JSON.stringify(winner.parameters)}`);
+  console.log(`  Mean corpus outcome delta: ${winner.meanCorpusOutcomeDelta.toFixed(2)}`);
+  console.log(`  Mean OOV-stratum recall: ${percentage(winner.oovRecall)}`);
+  console.log(
+    `  Calibration range: ${CALIBRATION_SENSITIVITY_VALUES[0].toFixed(1)}–`
+    + `${CALIBRATION_SENSITIVITY_VALUES.at(-1).toFixed(1)} `
+    + `(${winner.calibrationRuns.length} points)`,
+  );
+  for (const run of winner.calibrationRuns) {
+    console.log(
+      `  ${run.penalty.toFixed(1)}: precision=${percentage(run.precision)}, `
+      + `recall=${percentage(run.recall)}, legitFPR=${percentage(run.fpr)}`,
+    );
+    console.log(
+      `       OOVrecall=${percentage(run.oovTotal > 0 ? run.oovCorrect / run.oovTotal : 0)}, `
+      + `Tier0=${run.tier0Correct}/${run.tier0Total}, delta=${run.corpusOutcomeDelta}`,
+    );
+  }
+}
 
 function main() {
-  console.log('=== Phase 5: Parameter Sweep ===\n');
+  console.log('=== Autocorrect floor-policy sweep ===\n');
 
-  // ---- Load corpora ----
   const typoCorpus = loadJSON('fixtures/typo-corpus.json');
   const legitCorpus = loadJSON('fixtures/legit-words.json');
-  console.log(`Loaded ${typoCorpus.length} typos, ${legitCorpus.length} legit words.\n`);
+  const oovFixture = loadJSON('fixtures/autocorrect-oov-contexts.json');
+  const tier0Fixtures = oovFixture.cases.filter(testCase => testCase.tier === 0);
+  if (tier0Fixtures.length === 0) {
+    throw new Error('The OOV fixture set must include at least one Tier-0 incident case');
+  }
 
-  // ---- Build SymSpell index ----
-  console.log('Building SymSpell index from frequency dictionary...');
   const symspell = new SymSpell(2, 7);
   const dictEntries = loadDictionary();
   for (const { word, count } of dictEntries) {
     symspell.createDictionaryEntry(word, count);
   }
-  console.log(`  Indexed ${dictEntries.length} entries.\n`);
-
-  // Build the in-dictionary lookup for the Apple-like guard.
-  _symspellDict = new Map(dictEntries.map(e => [e.word, { count: e.count }]));
-
-  // Create the SymSpellProvider with QwertyGeometry-aware scoring.
+  _symspellDict = new Map(dictEntries.map(entry => [entry.word, { count: entry.count }]));
+  _builtInWords = new Set(
+    dictEntries
+      .filter(entry => entry.count >= SYMSPELL_MIN_WORD_FREQ)
+      .map(entry => canonicalize(entry.word.toLowerCase())),
+  );
   const symspellProvider = new SymSpellProvider(symspell, _symspellDict);
 
-  // ---- Pre-compute pools ----
-  // Pools don't depend on sweep parameters, so build once.
-  console.log('Pre-computing suggestion pools...');
-  const typoPools = typoCorpus.map((e, i) => {
-    const pool = buildPool(e.typedWord, symspellProvider);
-    return { entry: e, pool };
+  const typoPools = typoCorpus.map(entry => ({
+    entry,
+    pool: symspellProvider.suggest(entry.typedWord),
+  }));
+  const legitPools = legitCorpus.map(entry => ({
+    entry,
+    pool: symspellProvider.suggest(entry.word),
+  }));
+  const oovStratum = createOovContextStratum(
+    typoPools,
+    isBuiltInWord,
+    oovFixture.cases,
+  );
+  if (oovStratum.length === 0) {
+    throw new Error('No generated contexts were OOV under built-in dictionary membership');
+  }
+
+  console.log(`Corpora: ${typoCorpus.length} typos, ${legitCorpus.length} legit words.`);
+  const oovContextClassCount = new Set(oovStratum.map(entry => entry.contextClass)).size;
+  console.log(
+    `OOV stratum: ${oovStratum.length} generated typo/context pairs `
+    + `(${oovContextClassCount} context classes).`,
+  );
+  console.log(`Tier-0 incident fixtures: ${tier0Fixtures.length}.`);
+  console.log(
+    `Operating point: blend=${SWEEP_CONFIG.blendWeight.toFixed(1)}, `
+    + `fused=${SWEEP_CONFIG.fusedThreshold.toFixed(2)}, `
+    + `unfused=${SWEEP_CONFIG.unfusedThreshold.toFixed(2)}, `
+    + `floor=${CURRENT_FLOOR.toFixed(1)}.`,
+  );
+  console.log(
+    `OOV policy signal: context tokens absent from the Trie word list `
+    + `(frequency ≥ ${SYMSPELL_MIN_WORD_FREQ}), after apostrophe canonicalization.`,
+  );
+  console.log('Margin policy signal: raw KenLM scores for the winner and typed literal.');
+  console.log('No KenLM bridge or vocabulary/backoff API is used by any candidate.');
+  console.log(`Calibration penalties: ${CALIBRATION_SENSITIVITY_VALUES.join(', ')}.`);
+  console.log(
+    `Candidates: ${FLOOR_POLICY_CANDIDATES.length} parameterizations across `
+    + 'five pre-registered policy shapes.\n',
+  );
+
+  const policyResults = createPolicyResults({
+    typoCorpus,
+    typoPools,
+    legitPools,
+    oovStratum,
+    tier0Fixtures,
   });
-  const legitPools = legitCorpus.map((e, i) => {
-    const pool = buildPool(e.word, symspellProvider);
-    return { entry: e, pool };
+  const selection = selectFloorPolicyWinner({
+    policyResults,
+    baselineId: BASELINE_ID,
+    calibrationValues: CALIBRATION_SENSITIVITY_VALUES,
   });
-  console.log(`  Pre-computed ${typoPools.length} typo pools + ${legitPools.length} legit pools.\n`);
-
-  // ---- Sweep parameter space ----
-  const blendValues = [0.3, 0.4, 0.5, 0.6];
-  const fusedThresholdValues = [0.60, 0.65, 0.70];
-  const unfusedThresholdValues = [0.65, 0.70, 0.75];
-  const floorValues = [-6.0, -8.0, -10.0, -Infinity];
-
-  const totalCombos = blendValues.length * fusedThresholdValues.length
-    * unfusedThresholdValues.length * floorValues.length;
-
-  console.log(`Sweeping ${totalCombos} parameter combinations...\n`);
-
-  /** @type {Array<{blend:number, fusedThresh:number, unfusedThresh:number, floor:number, precision:number, recall:number, fpr:number}>} */
-  const results = [];
-
-  let combo = 0;
-  const startTime = Date.now();
-
-  for (const blend of blendValues) {
-    for (const fusedThresh of fusedThresholdValues) {
-      for (const unfusedThresh of unfusedThresholdValues) {
-        for (const floor of floorValues) {
-          const floorLabel = !Number.isFinite(floor) ? 'off' : floor.toFixed(1);
-
-          // -- Run typo corpus --
-          let tp = 0;   // correction fires and matches intendedWord
-          let fpTypo = 0; // correction fires but wrong word
-          for (const { entry, pool } of typoPools) {
-            const correction = runOne(
-              entry.typedWord, entry.previousWord, pool,
-              blend, floor, fusedThresh, unfusedThresh
-            );
-            if (correction === null) continue; // no correction fired
-            if (correction.toLowerCase() === entry.intendedWord.toLowerCase()) {
-              tp++;
-            } else {
-              fpTypo++;
-            }
-          }
-
-          // -- Run legit corpus --
-          let fpLegit = 0;
-          for (const { entry, pool } of legitPools) {
-            const correction = runOne(
-              entry.word, entry.previousWord, pool,
-              blend, floor, fusedThresh, unfusedThresh
-            );
-            if (correction !== null) fpLegit++;
-          }
-
-          // -- Compute metrics --
-          const totalTypo = typoCorpus.length;
-          const totalLegit = legitCorpus.length;
-          const recall = tp / totalTypo;
-          const precisionDenom = tp + fpTypo;
-          const precision = precisionDenom > 0 ? tp / precisionDenom : 1.0;
-          const fpr = fpLegit / totalLegit;
-
-          results.push({
-            blend,
-            fusedThresh,
-            unfusedThresh,
-            floor,
-            floorLabel,
-            precision,
-            recall,
-            fpr,
-          });
-
-          combo++;
-          if (combo % 36 === 0 || combo === totalCombos) {
-            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-            process.stderr.write(`  ${combo}/${totalCombos} combos (${elapsed}s)\r`);
-          }
-        }
-      }
-    }
-  }
-
-  const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
-  console.log(`\n  ${totalCombos}/${totalCombos} combos done in ${totalTime}s.\n`);
-
-  // ---- Rank results ----
-  // Constraint: precision >= 0.95 AND fpr <= 0.05
-  // Best = max recall among those that satisfy the constraint.
-  const feasible = results.filter(r => r.precision >= 0.95 && r.fpr <= 0.05);
-  feasible.sort((a, b) => b.recall - a.recall);
-
-  if (feasible.length === 0) {
-    console.log('⚠️  NO feasible operating point found within constraints (precision ≥ 0.95, FPR ≤ 0.05).\n');
-    console.log('Showing top-5 by recall (any precision/FPR):\n');
-    const byRecall = [...results].sort((a, b) => b.recall - a.recall).slice(0, 5);
-    printTable(byRecall);
-    console.log('\nKeeping current defaults.\n');
-    process.exit(0);
-  }
-
-  // Print header for feasible results
-  const topK = feasible.slice(0, 10);
-  console.log(`Feasible operating points (precision ≥ 0.95, FPR ≤ 0.05): ${feasible.length} found.`);
-  console.log(`Top ${topK.length} (sorted by recall):\n`);
-  printTable(topK);
-
-  // Best operating point
-  const best = feasible[0];
-  console.log('\n=== RECOMMENDED OPERATING POINT ===');
-  console.log(`  blendWeight (α):               ${best.blend.toFixed(1)}`);
-  console.log(`  fusedThreshold:                ${best.fusedThresh.toFixed(2)}`);
-  console.log(`  unfusedThreshold:              ${best.unfusedThresh.toFixed(2)}`);
-  console.log(`  absoluteLogProbFloor:          ${best.floorLabel}`);
-  console.log(`  ---`);
-  console.log(`  Precision:                     ${(best.precision * 100).toFixed(1)}%`);
-  console.log(`  Recall:                        ${(best.recall * 100).toFixed(1)}%`);
-  console.log(`  False-positive rate (legit):   ${(best.fpr * 100).toFixed(1)}%`);
-
-  // Check if the best is at or near the defaults
-  const defaults = { blend: 0.5, fusedThresh: 0.65, unfusedThresh: 0.70, floor: -8.0 };
-  const isDefault = best.blend === defaults.blend
-    && best.fusedThresh === defaults.fusedThresh
-    && best.unfusedThresh === defaults.unfusedThresh
-    && best.floor === defaults.floor;
-
-  if (isDefault) {
-    console.log('\nThe sweep validated the current defaults as optimal (or very near).');
-  } else {
-    // Find the default combo in the results for comparison
-    const defaultResult = results.find(r =>
-      r.blend === defaults.blend
-      && r.fusedThresh === defaults.fusedThresh
-      && r.unfusedThresh === defaults.unfusedThresh
-      && r.floor === defaults.floor
-    );
-    if (defaultResult) {
-      console.log('\nComparison with current defaults:');
-      console.log(`  Defaults:  precision=${(defaultResult.precision * 100).toFixed(1)}%, recall=${(defaultResult.recall * 100).toFixed(1)}%, fpr=${(defaultResult.fpr * 100).toFixed(1)}%`);
-      console.log(`  Best:      precision=${(best.precision * 100).toFixed(1)}%, recall=${(best.recall * 100).toFixed(1)}%, fpr=${(best.fpr * 100).toFixed(1)}%`);
-    }
-  }
-}
-
-function printTable(rows) {
-  const header = `${'α'.padStart(5)} | ${'fusedThr'.padStart(9)} | ${'unfusedThr'.padStart(10)} | ${'floor'.padStart(6)} | ${'precision'.padStart(9)} | ${'recall'.padStart(6)} | ${'fpr'.padStart(5)}`;
-  const sep = '-'.repeat(header.length);
-  console.log(header);
-  console.log(sep);
-  for (const r of rows) {
-    const floorLabel = !Number.isFinite(r.floor) ? 'off' : r.floor.toFixed(1);
-    const line =
-      `${r.blend.toFixed(1).padStart(5)} | ` +
-      `${r.fusedThresh.toFixed(2).padStart(9)} | ` +
-      `${r.unfusedThresh.toFixed(2).padStart(10)} | ` +
-      `${floorLabel.padStart(6)} | ` +
-      `${(r.precision * 100).toFixed(1).padStart(8)}% | ` +
-      `${(r.recall * 100).toFixed(1).padStart(5)}% | ` +
-      `${(r.fpr * 100).toFixed(1).padStart(4)}%`;
-    console.log(line);
-  }
+  printSweepReport(selection);
 }
 
 main();
