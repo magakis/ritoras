@@ -167,11 +167,14 @@ actor WhisperStreamClient {
     /// Opens the WebSocket connection and verifies reachability via a PING/PONG handshake.
     /// Concurrent callers share the in-flight handshake.
     ///
+    /// - Parameter timeout: Maximum time to wait for the connection handshake.
     /// - Throws: `WhisperError.timeout` if the connection does not complete within
-    ///   `streamWsConnectTimeout`.
+    ///   `timeout`.
     /// - Throws: `WhisperError.networkError` if the transport reports a connection failure.
     /// - Throws: `WhisperStreamTransportError.superseded` if another lifecycle action wins.
-    func connect() async throws {
+    func connect(
+        timeout: TimeInterval = SharedConfig.Defaults.streamWsConnectTimeout
+    ) async throws {
         if let connectionAttempt {
             guard let currentTask = task else {
                 throw WhisperStreamTransportError.superseded
@@ -197,7 +200,10 @@ actor WhisperStreamClient {
         let attemptID = UUID()
         let attempt = Task { [weak self] in
             guard let self else { throw WhisperStreamTransportError.superseded }
-            try await self.completeConnectionHandshake(using: newTask, generation: generation)
+            try await self.completeConnectionHandshake(
+                using: newTask,
+                generation: generation,
+                timeout: timeout)
         }
         connectionAttemptID = attemptID
         connectionAttempt = attempt
@@ -254,10 +260,10 @@ actor WhisperStreamClient {
 
     private func completeConnectionHandshake(
         using newTask: URLSessionWebSocketTask,
-        generation: UInt64
+        generation: UInt64,
+        timeout: TimeInterval
     ) async throws {
-        let handshakeDeadline = Date().addingTimeInterval(
-            SharedConfig.Defaults.streamWsConnectTimeout)
+        let handshakeDeadline = Date().addingTimeInterval(timeout)
         let shouldSendConfig = StreamFormatNegotiation.shouldSendConfig(
             aacEnabled: aacEnabled,
             sessionLegacyPinned: sessionLegacyPinned,
@@ -322,7 +328,7 @@ actor WhisperStreamClient {
                 }
                 FileLogger.shared.debug(.network, "Connection timed out",
                                        payload: ["id": self.dictationID,
-                                                 "timeout": SharedConfig.Defaults.streamWsConnectTimeout])
+                                                 "timeout": timeout])
                 throw WhisperError.timeout
             }
 

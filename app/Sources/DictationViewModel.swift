@@ -314,6 +314,7 @@ final class DictationViewModel: ObservableObject {
     }
     @Published private(set) var livePartial: String = ""
     @Published private(set) var activeModeLabel: String = ""
+    @Published private(set) var streamConnectionNotice: String?
     @Published private(set) var chunkSplitterState: ChunkSplitterFrameState?
     @Published private(set) var chunkDispatchCount = 0
     @Published private(set) var chunkReviews: [ChunkReviewRecord] = []
@@ -387,6 +388,8 @@ final class DictationViewModel: ObservableObject {
     private var unifiedStreamEventTask: Task<Void, Never>?
     private static let unifiedConnectTimeout: TimeInterval = 20
     private static let unifiedFinalWaitTimeout: TimeInterval = 30
+    /// Bounds initial candidate attempts; reconnects keep the client's 32s default.
+    private static let streamConnectAttemptTimeout: TimeInterval = 3
     /// Server profile parakeet-unified.json has right_context_s = 1.04 s;
     /// parakeet_unified_engine.py settles at max(final_tail_padding_s 1.0,
     /// refine_margin_s 1.5) = 1.5 s.
@@ -403,6 +406,8 @@ final class DictationViewModel: ObservableObject {
     private var selectedServer: String?
     private var serverSelectionTask: Task<ServerSelectionResult, Never>?
     private var streamConnectGraceSessionID: UUID?
+    /// Lets stop skip its connect grace after every candidate is definitively exhausted.
+    private var streamConnectWalkFinishedSessionID: UUID?
 
     // MARK: - Stream Chunk Queue
 
@@ -1155,7 +1160,7 @@ final class DictationViewModel: ObservableObject {
         guard !Task.isCancelled,
               canContinueSession(sessionID),
               streamRecorder === recorder else { return false }
-        return phase == .recording
+        return phase == .connecting || phase == .recording
             || (phase == .transcribing && streamConnectGraceSessionID == sessionID)
     }
 
@@ -1438,6 +1443,8 @@ final class DictationViewModel: ObservableObject {
         chunkResultsReceived.removeAll()
         chunkSplitterTelemetryWriter = nil
         selectedServer = nil
+        streamConnectionNotice = nil
+        streamConnectWalkFinishedSessionID = nil
         phase = .connecting
         if await shouldAbortStartingSession(id) { return }
         FileLogger.shared.info(.transcription, "dictation connecting", payload: [
@@ -1669,7 +1676,7 @@ final class DictationViewModel: ObservableObject {
                 }
                 FileLogger.shared.info(.audio, "Stream: recorder started")
                 recordingStartTime = Date()
-                phase = .recording
+                streamConnectionNotice = "Connecting to a streaming server…"
 
                 streamConnectTask = Task { [weak self] in
                     await self?.runStreamConnectLoop(
@@ -1901,6 +1908,9 @@ final class DictationViewModel: ObservableObject {
         guard !orderedServers.isEmpty else {
             FileLogger.shared.warn(.network, "Stream: no configured servers",
                                    payload: ["jobId": sessionID.uuidString, "server": "none"])
+            finishStreamConnectWalk(
+                sessionID: sessionID,
+                message: "No streaming servers configured. Stop to save audio or cancel.")
             return
         }
 
@@ -1910,6 +1920,7 @@ final class DictationViewModel: ObservableObject {
         while true {
             round += 1
             var attemptedCount = 0
+            var validCandidateCount = 0
             for server in orderedServers {
                 guard canAttemptStreamConnection(sessionID: sessionID, recorder: recorder) else { return }
                 guard await WhisperClient.serverCircuitAllowsConnection(server) else {
@@ -1948,9 +1959,10 @@ final class DictationViewModel: ObservableObject {
                                                       "error": "Invalid server URL"])
                     continue
                 }
+                validCandidateCount += 1
 
                 do {
-                    try await candidate.connect()
+                    try await candidate.connect(timeout: Self.streamConnectAttemptTimeout)
                     let elapsed = Date().timeIntervalSince(attemptStart) * 1000
                     FileLogger.shared.info(.network, "Stream: server connect succeeded",
                                            payload: ["jobId": sessionID.uuidString,
@@ -1969,6 +1981,9 @@ final class DictationViewModel: ObservableObject {
                         await candidate.disconnect()
                         return
                     }
+                    await WhisperClient.recordStreamConnectionOutcome(
+                        server: server,
+                        connected: true)
                     if probeResult?.trimmingCharacters(in: CharacterSet(charactersIn: "/")) != server {
                         Task.detached(priority: .utility) {
                             await WhisperClient.warmup(serverURL: server)
@@ -1992,8 +2007,45 @@ final class DictationViewModel: ObservableObject {
                                                       "error": String(error.localizedDescription.prefix(160)),
                                                       "attempt": attemptNumber,
                                                       "round": round])
+                    if !Task.isCancelled,
+                       isStreamConnectTransportFailure(error) {
+                        await WhisperClient.recordStreamConnectionOutcome(
+                            server: server,
+                            connected: false)
+                    }
+                    if activeID == sessionID, phase == .connecting {
+                        streamConnectionNotice = "Could not connect to a streaming server. Retrying…"
+                    }
                     await candidate.disconnect()
                 }
+            }
+
+            if attemptedCount == 0 {
+                finishStreamConnectWalk(
+                    sessionID: sessionID,
+                    message: "Couldn't connect. Stop to save audio or cancel.")
+                return
+            }
+            if validCandidateCount == 0 {
+                finishStreamConnectWalk(
+                    sessionID: sessionID,
+                    message: "No valid streaming server URL. Stop to save audio or cancel.")
+                return
+            }
+
+            var hasConnectableServer = false
+            for server in orderedServers {
+                if await WhisperClient.serverCircuitAllowsConnection(server) {
+                    hasConnectableServer = true
+                    break
+                }
+            }
+            guard !Task.isCancelled, activeID == sessionID else { return }
+            if !hasConnectableServer {
+                finishStreamConnectWalk(
+                    sessionID: sessionID,
+                    message: "Couldn't connect. Stop to save audio or cancel.")
+                return
             }
 
             FileLogger.shared.debug(.network, "Stream: connect round failed",
@@ -2005,6 +2057,22 @@ final class DictationViewModel: ObservableObject {
             try? await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
             if Task.isCancelled { return }
             retryDelay = min(retryDelay * 2.0, 8.0)
+        }
+    }
+
+    private func finishStreamConnectWalk(sessionID: UUID, message: String) {
+        guard activeID == sessionID else { return }
+        streamConnectionNotice = message
+        streamConnectWalkFinishedSessionID = sessionID
+    }
+
+    private func isStreamConnectTransportFailure(_ error: Error) -> Bool {
+        guard let error = error as? WhisperError else { return false }
+        switch error {
+        case .timeout, .networkError(_):
+            return true
+        default:
+            return false
         }
     }
 
@@ -2030,6 +2098,10 @@ final class DictationViewModel: ObservableObject {
         }
 
         streamClient = client
+        streamConnectionNotice = nil
+        if phase == .connecting {
+            phase = .recording
+        }
 
         startStreamReceive(client: client, sessionID: sessionID)
 
@@ -2518,6 +2590,7 @@ final class DictationViewModel: ObservableObject {
                     "timeout_sec": connectGraceTimeout
                 ])
                 while streamClient == nil
+                    && streamConnectWalkFinishedSessionID != id
                     && Date() < connectGraceDeadline
                     && DispatchTime.now().uptimeNanoseconds < stopSafetyDeadline {
                     try? await Task.sleep(nanoseconds: min(

@@ -394,8 +394,8 @@ enum LocalhostClient {
     /// Returns `true` on any 2xx response, `false` on a non-2xx response or
     /// any transport error (server dead, timeout).
     /// Unlike `postLogs`, errors are NOT swallowed — the keyboard caller
-    /// needs to know the server is unreachable so it can fall back to a
-    /// local reset.
+    /// needs to know the server is unreachable so it can retain the pending
+    /// session and surface an error instead of resetting locally.
     static func postStop(sessionID: UUID?) async -> Bool {
         guard let sessionID else {
             return await postCommand("/stop")

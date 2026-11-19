@@ -145,9 +145,19 @@ struct DictationView: View {
                 .font(.system(size: 48))
                 .foregroundColor(Color(.systemRed))
 
-            Text("Starting…")
+            Text(viewModel.streamConnectionNotice
+                 ?? (viewModel.activeModeLabel == "STREAM" ? "Connecting…" : "Starting…"))
                 .font(.title2)
                 .fontWeight(.medium)
+                .multilineTextAlignment(.center)
+
+            if viewModel.activeModeLabel == "STREAM",
+               viewModel.streamConnectionNotice != nil {
+                Button("Stop") {
+                    Task { await viewModel.stop(expectedID: requestId) }
+                }
+                .buttonStyle(.borderedProminent)
+            }
 
             Button("Cancel") {
                 Task {
@@ -432,7 +442,9 @@ struct DictationView: View {
     // MARK: - Timer
 
     private func startTimer() {
-        elapsed = 0
+        elapsed = viewModel.recordingStartTime.map {
+            Date().timeIntervalSince($0)
+        } ?? 0
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
             elapsed += 1
         }

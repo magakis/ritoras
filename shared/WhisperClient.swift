@@ -831,6 +831,15 @@ enum WhisperClient {
         await ServerProbeState.shared.canConnect(server: normalizedServerURL(server))
     }
 
+    static func recordStreamConnectionOutcome(server: String, connected: Bool) async {
+        let normalizedServer = normalizedServerURL(server)
+        let completion: ServerProbeCompletion = connected ? .response : .transportFailure
+        let transition = await ServerProbeState.shared.finishProbe(
+            server: normalizedServer,
+            completion: completion)
+        logBreakerTransition(transition, server: normalizedServer)
+    }
+
     private static func probeServerRound(
         servers: [String],
         probeOnlyServers: Set<String>? = nil,
