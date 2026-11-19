@@ -956,15 +956,7 @@ class KeyboardViewController: UIInputViewController {
     private func handleMicButtonTap() {
         switch state {
         case .idle:
-            guard hasFullAccess else {
-                state = .error("Full Access required. Settings \u{2192} General \u{2192} Keyboard \u{2192} Ritoras \u{2192} Allow Full Access.")
-                return
-            }
-            if pendingRequestId == nil {
-                probeActiveSessionOrOpenContainerApp()
-            } else {
-                openContainerAppForDictation()
-            }
+            probeActiveSessionOrOpenContainerApp()
         case .recording:
             FileLogger.shared.info(.keyboard, "Mic: .recording -> POST /stop")
             requestStop()
@@ -974,7 +966,7 @@ class KeyboardViewController: UIInputViewController {
             requestStop()
         case .error:
             cancelOutstandingAsyncWork()
-            state = .idle
+            probeActiveSessionOrOpenContainerApp()
         default:
             break   // ignore taps while openingApp/inserting
         }
@@ -1039,15 +1031,23 @@ class KeyboardViewController: UIInputViewController {
     // MARK: - Dictation via Container App
 
     private func probeActiveSessionOrOpenContainerApp() {
+        guard hasFullAccess else {
+            state = .error("Full Access required. Settings \u{2192} General \u{2192} Keyboard \u{2192} Ritoras \u{2192} Allow Full Access.")
+            return
+        }
+
         // Lock the tap path before probing so another tap cannot open a second
         // dictation URL or stop a session twice.
         state = .openingApp
         Task { @MainActor [weak self] in
             guard let self else { return }
             let probe = await self.probeStateForAdoption()
-            guard self.state == .openingApp, self.pendingRequestId == nil else { return }
+            guard self.state == .openingApp else { return }
 
             guard let payload = self.freshActiveSession(from: probe) else {
+                if let probe, case .noSession = probe {
+                    self.pendingRequestId = nil
+                }
                 FileLogger.shared.debug(.keyboard, "Mic: no fresh active session; opening new dictation")
                 self.openContainerAppForDictation()
                 return
@@ -1097,7 +1097,7 @@ class KeyboardViewController: UIInputViewController {
     }
 
     private func adoptActiveSession(_ payload: DictationPayload) {
-        guard state == .openingApp, pendingRequestId == nil else { return }
+        guard state == .openingApp else { return }
 
         resetDictationTrackingForNewRequest()
         locallyCancelledSessionID = nil
@@ -1986,11 +1986,11 @@ class KeyboardViewController: UIInputViewController {
             guard let self = self else { return }
             guard self.pendingRequestId == sessionID else { return }
             guard ok else {
-                // Only fall back if we're still actively dictating — a concurrent
-                // teardown (dismiss/cancel) may have already reset the state.
+                // A failed stop leaves the app's session status unknown. Keep
+                // tracking it so the next mic tap can probe and retry safely.
                 guard self.state == .recording || self.state == .waiting else { return }
-                FileLogger.shared.warn(.keyboard, "POST /stop failed — local fallback cancel")
-                self.requestFallbackCancel()
+                FileLogger.shared.warn(.keyboard, "POST /stop failed — session may still be active")
+                self.state = .error("Couldn't stop dictation. Tap the mic to check again.")
                 return
             }
             // App-group pipeline drives the terminal state; nothing to do here.
@@ -2020,14 +2020,6 @@ class KeyboardViewController: UIInputViewController {
                 return
             }
         }
-    }
-
-    /// Server unreachable (app not running / crashed). Reset locally;
-    /// the container app, if alive, cleans up via its own timeout.
-    private func requestFallbackCancel() {
-        FileLogger.shared.warn(.keyboard, "fallback cancel reached", payload: ["state": KeyboardState.shortTag(state)])
-        cancelDictation()
-        state = .error("Couldn't reach Ritoras app. Stopped locally.")
     }
 
     /// Reads `textDocumentProxy.documentIdentifier` without trapping.
