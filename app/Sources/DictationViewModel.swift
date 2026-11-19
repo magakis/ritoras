@@ -475,7 +475,10 @@ final class DictationViewModel: ObservableObject {
 
         let server = LocalhostServer(
             port: SharedConfig.Defaults.localhostServerPort,
-            onStop:   { [weak self] in await self?.stop() },
+            onStop:   { [weak self] sessionID in
+                guard let self else { return }
+                await self.stop(expectedID: sessionID)
+            },
             onCancel: { [weak self] sessionID in
                 guard let self else { return }
                 await self.cancel(expectedID: sessionID)
@@ -1354,7 +1357,7 @@ final class DictationViewModel: ObservableObject {
                 "jobId": id.uuidString
             ])
             Task { @MainActor [weak self] in
-                await self?.stop()
+                await self?.stop(expectedID: id)
             }
         }
 
@@ -2050,7 +2053,15 @@ final class DictationViewModel: ObservableObject {
                                          "sinceRecordingStartSec": sinceRecordingStartSec])
     }
 
-    func stop() async {
+    /// A nil ID is reserved for backward-compatible no-ID `POST /stop` requests.
+    func stop(expectedID: UUID?) async {
+        if let expectedID, activeID != expectedID {
+            FileLogger.shared.info(.transcription, "stop ignored for different dictation", payload: [
+                "requested": String(expectedID.uuidString.prefix(8)),
+                "active": activeID.map { String($0.uuidString.prefix(8)) } ?? "nil"
+            ])
+            return
+        }
         guard !isTerminalResult(phase), phase != .cancelled else {
             FileLogger.shared.debug(.transcription, "stop ignored for terminal dictation")
             return
@@ -4189,9 +4200,22 @@ final class DictationViewModel: ObservableObject {
         }
     }
 
-    func cancel(expectedID: UUID? = nil) async {
-        guard let id = activeID,
-              expectedID == nil || expectedID == id else { return }
+    func cancel(expectedID: UUID) async {
+        guard activeID == expectedID else {
+            FileLogger.shared.info(.transcription, "cancel ignored for different dictation", payload: [
+                "requested": String(expectedID.uuidString.prefix(8)),
+                "active": activeID.map { String($0.uuidString.prefix(8)) } ?? "nil"
+            ])
+            return
+        }
+        // Replacement owns the session's stop and recovery outcome.
+        guard !replacementFinalizingSessionIDs.contains(expectedID) else {
+            FileLogger.shared.info(.transcription, "cancel ignored during replacement finalization", payload: [
+                "jobId": String(expectedID.uuidString.prefix(8))
+            ])
+            return
+        }
+        let id = expectedID
 
         if let cancellationTask = cancellationTasks[id] {
             await cancellationTask.value
@@ -4208,7 +4232,21 @@ final class DictationViewModel: ObservableObject {
     }
 
     private func performCancellation(for id: UUID) async {
-        guard activeID == id, cancellationInProgressID != id else { return }
+        guard activeID == id else {
+            FileLogger.shared.info(.transcription, "cancel ignored after dictation changed", payload: [
+                "requested": String(id.uuidString.prefix(8)),
+                "active": activeID.map { String($0.uuidString.prefix(8)) } ?? "nil"
+            ])
+            return
+        }
+        // Recheck after task scheduling in case replacement claimed this session.
+        guard !replacementFinalizingSessionIDs.contains(id) else {
+            FileLogger.shared.info(.transcription, "cancel ignored during replacement finalization", payload: [
+                "jobId": String(id.uuidString.prefix(8))
+            ])
+            return
+        }
+        guard cancellationInProgressID != id else { return }
         let sessionMode = activeDictationMode
         let unifiedClient = unifiedStreamClient
         let unifiedAudioPipeline = unifiedStreamAudioPipeline

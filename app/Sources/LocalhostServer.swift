@@ -6,7 +6,7 @@ import Network
 /// Lightweight HTTP/1.1 server on a localhost port for health, log-shipping,
 /// and keystroke-trace endpoints.
 final class LocalhostServer {
-    private struct CancelRequest: Decodable {
+    private struct SessionCommandRequest: Decodable {
         let id: UUID
     }
 
@@ -19,7 +19,7 @@ final class LocalhostServer {
         set { listenerLock.lock(); defer { listenerLock.unlock() }; _listener = newValue }
     }
     private let queue = DispatchQueue(label: "com.ritoras.localhostserver", qos: .utility)
-    private let onStop: (() async -> Void)?
+    private let onStop: ((UUID?) async -> Void)?
     private let onCancel: ((UUID) async -> Void)?
     private let onState: (() -> DictationPayload?)?
 
@@ -64,7 +64,12 @@ final class LocalhostServer {
     private static let maxActiveConnections = 16
     private static let idleConnectionTimeout: TimeInterval = 30
 
-    init(port: UInt16, onStop: (() async -> Void)? = nil, onCancel: ((UUID) async -> Void)? = nil, onState: (() -> DictationPayload?)? = nil) {
+    init(
+        port: UInt16,
+        onStop: ((UUID?) async -> Void)? = nil,
+        onCancel: ((UUID) async -> Void)? = nil,
+        onState: (() -> DictationPayload?)? = nil
+    ) {
         self.port = port
         self.authorizationToken = SharedConfig.prepareLocalhostAuthorizationToken()
         self.onStop = onStop
@@ -430,7 +435,7 @@ final class LocalhostServer {
             } else if rawPath == KeystrokeTraceWireContract.route {
                 return handlePostTrace(bodyData: Data(data[headerEndOffset...]))
             } else if rawPath == "/stop" {
-                return handlePostStop()
+                return handlePostStop(bodyData: data[headerEndOffset...])
             } else if rawPath == "/cancel" {
                 return handlePostCancel(bodyData: data[headerEndOffset...])
             } else {
@@ -656,15 +661,33 @@ final class LocalhostServer {
 
     // MARK: - POST /stop and POST /cancel
 
-    /// Handles `POST /stop`: asks the container app to stop the active
-    /// dictation session. Fire-and-forget — returns 202 immediately; the
-    /// keyboard learns the outcome via the app-group snapshot pipeline.
-    private func handlePostStop() -> Data {
-        FileLogger.shared.info(.network, "POST /stop received", payload: ["id": onState?().map { String($0.id.uuidString.prefix(8)) } ?? "nil", "hasHandler": onStop != nil])
+    /// Handles `POST /stop`: resolves an optional session ID before scheduling
+    /// teardown. A body without an ID remains compatible with older keyboards.
+    private func handlePostStop(bodyData: Data) -> Data {
         guard let handler = onStop else {
             return Self.makeJSONResponse(status: 503, body: ["error": "no handler"])
         }
-        Task { await handler() }
+        let requestedID = (try? JSONDecoder().decode(
+            SessionCommandRequest.self,
+            from: bodyData
+        ))?.id
+        let currentPayload = onState?()
+        let activeSessionID = currentPayload.flatMap { payload -> UUID? in
+            switch payload.status {
+            case .recording, .transcribing:
+                return payload.id
+            case .completed, .error, .cancelled:
+                return nil
+            }
+        }
+        if let requestedID, requestedID != activeSessionID {
+            return stopMismatchResponse(requestedID: requestedID, activeID: activeSessionID)
+        }
+
+        FileLogger.shared.info(.network, "POST /stop received", payload: [
+            "id": (requestedID ?? activeSessionID).map { String($0.uuidString.prefix(8)) } ?? "nil"
+        ])
+        Task { await handler(requestedID) }
         return Self.makeJSONResponse(status: 202, body: ["status": "stopRequested"])
     }
 
@@ -676,7 +699,10 @@ final class LocalhostServer {
             return Self.makeJSONResponse(status: 503, body: ["error": "no handler"])
         }
 
-        let requestedID = (try? JSONDecoder().decode(CancelRequest.self, from: bodyData))?.id
+        let requestedID = (try? JSONDecoder().decode(
+            SessionCommandRequest.self,
+            from: bodyData
+        ))?.id
         let recordID = SharedConfig.pendingDictationCancel()?.id
         let currentPayload = onState?()
         let activeSessionID = currentPayload.flatMap { payload -> UUID? in
@@ -728,6 +754,14 @@ final class LocalhostServer {
             "active": activeID.map { String($0.uuidString.prefix(8)) } ?? "nil"
         ])
         return Self.makeJSONResponse(status: 409, body: ["error": "cancel session mismatch"])
+    }
+
+    private func stopMismatchResponse(requestedID: UUID, activeID: UUID?) -> Data {
+        FileLogger.shared.warn(.network, "POST /stop session mismatch", payload: [
+            "request": String(requestedID.uuidString.prefix(8)),
+            "active": activeID.map { String($0.uuidString.prefix(8)) } ?? "nil"
+        ])
+        return Self.makeJSONResponse(status: 409, body: ["error": "stop session mismatch"])
     }
 
     // MARK: - Response Helpers

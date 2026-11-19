@@ -1982,7 +1982,7 @@ class KeyboardViewController: UIInputViewController {
         stopRequestInFlight = true
         Task { @MainActor [weak self] in
             defer { self?.stopRequestInFlight = false }
-            let ok = await LocalhostClient.postStop()
+            let ok = await LocalhostClient.postStop(sessionID: sessionID)
             guard let self = self else { return }
             guard self.pendingRequestId == sessionID else { return }
             guard ok else {

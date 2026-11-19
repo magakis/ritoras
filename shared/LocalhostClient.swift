@@ -140,7 +140,7 @@ enum LocalhostLogExportError: LocalizedError {
 }
 
 enum LocalhostClient {
-    private struct CancelRequest: Encodable {
+    private struct SessionCommandRequest: Encodable {
         let id: UUID
     }
 
@@ -389,14 +389,24 @@ enum LocalhostClient {
         return try JSONDecoder().decode(KeystrokeTraceUploadResponse.self, from: data)
     }
 
-    /// Requests the container app to stop the active dictation session via
-    /// `POST /stop`. Returns `true` on any 2xx response, `false` on a
-    /// non-2xx response or any transport error (server dead, timeout).
+    /// Requests the container app to stop the specified dictation session via
+    /// `POST /stop`. A nil ID omits the body for older-client compatibility.
+    /// Returns `true` on any 2xx response, `false` on a non-2xx response or
+    /// any transport error (server dead, timeout).
     /// Unlike `postLogs`, errors are NOT swallowed — the keyboard caller
     /// needs to know the server is unreachable so it can fall back to a
     /// local reset.
-    static func postStop() async -> Bool {
-        await postCommand("/stop")
+    static func postStop(sessionID: UUID?) async -> Bool {
+        guard let sessionID else {
+            return await postCommand("/stop")
+        }
+        do {
+            let body = try JSONEncoder().encode(SessionCommandRequest(id: sessionID))
+            return await postCommand("/stop", body: body)
+        } catch {
+            FileLogger.shared.error(.network, "POST /stop body encoding failed")
+            return false
+        }
     }
 
     /// Requests cancellation of the specified dictation session via
@@ -404,7 +414,7 @@ enum LocalhostClient {
     /// non-2xx response or any transport error.
     static func postCancel(sessionID: UUID) async -> Bool {
         do {
-            let body = try JSONEncoder().encode(CancelRequest(id: sessionID))
+            let body = try JSONEncoder().encode(SessionCommandRequest(id: sessionID))
             return await postCommand("/cancel", body: body)
         } catch {
             FileLogger.shared.error(.network, "POST /cancel body encoding failed")

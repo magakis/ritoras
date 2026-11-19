@@ -91,7 +91,7 @@ struct DictationView: View {
             timer?.invalidate()
             switch viewModel.phase {
             case .recording where viewModel.activeID != nil, .connecting where viewModel.activeID != nil:
-                Task { await viewModel.cancel() }
+                Task { await viewModel.cancel(expectedID: requestId) }
             case .done, .error, .cancelled:
                 viewModel.clearChunkReviews()
             default:
@@ -151,7 +151,7 @@ struct DictationView: View {
 
             Button("Cancel") {
                 Task {
-                    await viewModel.cancel()
+                    await viewModel.cancel(expectedID: requestId)
                     dismiss()
                 }
             }
@@ -197,7 +197,7 @@ struct DictationView: View {
 
             Button(action: {
                 timer?.invalidate()
-                Task { await viewModel.stop() }
+                Task { await viewModel.stop(expectedID: requestId) }
             }) {
                 Image(systemName: "stop.circle.fill")
                     .font(.system(size: 80))
@@ -213,7 +213,7 @@ struct DictationView: View {
 
             Button("Cancel") {
                 Task {
-                    await viewModel.cancel()
+                    await viewModel.cancel(expectedID: requestId)
                     dismiss()
                 }
             }
