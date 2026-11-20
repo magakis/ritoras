@@ -88,6 +88,85 @@ enum RetroactiveApplyPlan {
         )
     }
 
+    /// Confirms the cursor-relative deletion target after the proxy moved the
+    /// caret. The captured context anchor is reduced to the text before its
+    /// committed word, then checked immediately before the live deletion window.
+    static func matchesApplyTarget(_ plan: Plan, in liveContext: String?) -> Bool {
+        guard let liveContext,
+              !liveContext.isEmpty,
+              plan.deleteCount > 0,
+              plan.deleteCount == plan.expectedText.count,
+              let expectedPrecedingContext = precedingContextAnchor(for: plan),
+              !expectedPrecedingContext.isEmpty,
+              let windowStart = liveContext.index(
+                liveContext.endIndex,
+                offsetBy: -plan.deleteCount,
+                limitedBy: liveContext.startIndex
+              ) else {
+            return false
+        }
+
+        let deletionWindow = liveContext[windowStart..<liveContext.endIndex]
+        guard deletionWindow.utf8.elementsEqual(plan.expectedText.utf8) else {
+            return false
+        }
+
+        return hasByteExactSuffix(String(liveContext[..<windowStart]), expectedPrecedingContext)
+    }
+
+    /// Returns the available text immediately before the caret for a bounded
+    /// mismatch trace; `nil` means the host context could not be read.
+    static func deletionWindow(in liveContext: String?, count: Int) -> String? {
+        guard let liveContext else { return nil }
+        guard count > 0 else { return "" }
+
+        let availableCount = min(count, liveContext.count)
+        let windowStart = liveContext.index(
+            liveContext.endIndex,
+            offsetBy: -availableCount
+        )
+        return String(liveContext[windowStart..<liveContext.endIndex])
+    }
+
+    private static func precedingContextAnchor(for plan: Plan) -> String? {
+        guard !plan.expectedText.isEmpty,
+              let anchoredWord = RecentWordsExtractor
+                .extract(from: plan.contextAnchor + " ", maxCount: 1)
+                .first,
+              anchoredWord.wordBody.utf8.elementsEqual(plan.expectedText.utf8),
+              anchoredWord.offsetFromCursorEnd > 0 else {
+            return nil
+        }
+
+        let anchorUTF16 = plan.contextAnchor.utf16
+        let wordEndOffset = anchorUTF16.count - (anchoredWord.offsetFromCursorEnd - 1)
+        let wordStartOffset = wordEndOffset - plan.expectedText.utf16.count
+        guard wordStartOffset >= 0,
+              wordEndOffset >= wordStartOffset,
+              wordEndOffset <= anchorUTF16.count,
+              let wordStart = String.Index(
+                anchorUTF16.index(anchorUTF16.startIndex, offsetBy: wordStartOffset),
+                within: plan.contextAnchor
+              ),
+              let wordEnd = String.Index(
+                anchorUTF16.index(anchorUTF16.startIndex, offsetBy: wordEndOffset),
+                within: plan.contextAnchor
+              ),
+              plan.contextAnchor[wordStart..<wordEnd].utf8.elementsEqual(
+                plan.expectedText.utf8
+              ) else {
+            return nil
+        }
+
+        return String(plan.contextAnchor[..<wordStart])
+    }
+
+    private static func hasByteExactSuffix(_ text: String, _ suffix: String) -> Bool {
+        guard text.count >= suffix.count else { return false }
+        let suffixStart = text.index(text.endIndex, offsetBy: -suffix.count)
+        return text[suffixStart...].utf8.elementsEqual(suffix.utf8)
+    }
+
     private static func uniqueByteRange(of needle: String, in haystack: String) -> Range<String.Index>? {
         let haystackBytes = Array(haystack.utf8)
         let needleBytes = Array(needle.utf8)

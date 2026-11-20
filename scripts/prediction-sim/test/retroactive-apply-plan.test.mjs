@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applyVerified,
+  matchesApplyTarget,
   plan,
   revalidatedPlan,
 } from '../lib/retroactive-apply-plan.mjs';
@@ -98,6 +99,49 @@ describe('RetroactiveApplyPlan.plan (JS port)', () => {
   });
 
   describe('live apply verification', () => {
+    it('requires an exact deletion window and its captured preceding anchor', () => {
+      const p = plan('teh', 'the', 1, 'hello teh ');
+
+      assert.strictEqual(matchesApplyTarget(p, 'hello teh'), true);
+      assert.strictEqual(matchesApplyTarget(p, 'hello the'), false);
+      assert.strictEqual(matchesApplyTarget(p, 'other teh'), false);
+      assert.strictEqual(matchesApplyTarget(plan('teh', 'the', 0, 'teh '), 'teh'), false);
+    });
+
+    it('rejects the wrong their instance even when its deletion window matches', () => {
+      const p = plan('their', 'there', 1, 'one their ');
+      const secondInstance = 'one their then their';
+      const secondCaretContext = secondInstance;
+
+      assert.strictEqual(matchesApplyTarget(p, secondCaretContext), false);
+      assert.deepStrictEqual(applyVerified(
+        secondInstance,
+        secondInstance.length,
+        p,
+        { cursorAdjustmentSucceeds: false }
+      ), {
+        doc: secondInstance,
+        cursor: secondInstance.length,
+        applied: false,
+        pendingCorrection: null,
+      });
+    });
+
+    it('rejects unreadable and empty context at the caret', () => {
+      const p = plan('teh', 'the', 1, 'hello teh ');
+
+      assert.strictEqual(matchesApplyTarget(p, null), false);
+      assert.strictEqual(matchesApplyTarget(p, ''), false);
+      assert.deepStrictEqual(applyVerified('hello teh ', 10, p, {
+        contextReadable: false,
+      }), {
+        doc: 'hello teh ',
+        cursor: 9,
+        applied: false,
+        pendingCorrection: null,
+      });
+    });
+
     it('re-resolves a shifted word location from its live context anchor', () => {
       const p = plan('teh', 'the', 1, 'hello teh ');
       const liveContext = 'hello teh extra ';
@@ -111,6 +155,7 @@ describe('RetroactiveApplyPlan.plan (JS port)', () => {
         doc: 'hello the extra ',
         cursor: 'hello the extra '.length,
         applied: true,
+        pendingCorrection: null,
       });
     });
 
@@ -123,6 +168,7 @@ describe('RetroactiveApplyPlan.plan (JS port)', () => {
         doc,
         cursor: doc.length,
         applied: false,
+        pendingCorrection: null,
       });
     });
 
@@ -133,6 +179,7 @@ describe('RetroactiveApplyPlan.plan (JS port)', () => {
         doc,
         cursor: doc.length,
         applied: false,
+        pendingCorrection: null,
       });
     });
   });

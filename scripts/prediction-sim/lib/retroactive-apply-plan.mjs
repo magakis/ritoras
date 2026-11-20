@@ -69,12 +69,63 @@ export function revalidatedPlan(p, liveContext) {
   };
 }
 
-/** Applies only after live-range resolution and byte verification succeed. */
-export function applyVerified(doc, cursor, p) {
-  const livePlan = revalidatedPlan(p, doc.slice(0, cursor));
-  if (!livePlan) return { doc, cursor, applied: false };
+/** Verifies the expected deletion window and its exact preceding context. */
+export function matchesApplyTarget(p, liveContextAtCaret) {
+  if (typeof liveContextAtCaret !== 'string' || liveContextAtCaret === '') return false;
+  if (p.deleteCount <= 0 || p.deleteCount !== p.expectedText.length) return false;
 
-  let nextCursor = cursor + livePlan.backMove;
+  const precedingAnchor = precedingContextAnchor(p);
+  if (precedingAnchor === null || precedingAnchor === '') return false;
+
+  const windowStart = liveContextAtCaret.length - p.deleteCount;
+  if (windowStart < 0
+      || !hasExactBytes(liveContextAtCaret.slice(windowStart), p.expectedText)) {
+    return false;
+  }
+
+  const textBeforeWindow = liveContextAtCaret.slice(0, windowStart);
+  return textBeforeWindow.length >= precedingAnchor.length
+    && hasExactBytes(textBeforeWindow.slice(-precedingAnchor.length), precedingAnchor);
+}
+
+/** Returns the captured context immediately before the committed word body. */
+function precedingContextAnchor(p) {
+  if (!p.contextAnchor || !p.expectedText) return null;
+
+  const anchoredWord = extract(`${p.contextAnchor} `, 1)[0];
+  if (!anchoredWord || !hasExactBytes(anchoredWord.wordBody, p.expectedText)) return null;
+
+  const wordEndOffset = anchoredWord.offsetFromCursorEnd - 1;
+  const wordEnd = p.contextAnchor.length - wordEndOffset;
+  const wordStart = wordEnd - p.expectedText.length;
+  if (wordEndOffset < 0
+      || wordStart < 0
+      || wordEnd < wordStart
+      || !hasExactBytes(p.contextAnchor.slice(wordStart, wordEnd), p.expectedText)) {
+    return null;
+  }
+
+  return p.contextAnchor.slice(0, wordStart);
+}
+
+/** Simulates one deferred apply, consuming the pending correction on every outcome. */
+export function applyVerified(
+  doc,
+  cursor,
+  p,
+  { cursorAdjustmentSucceeds = true, contextReadable = true } = {}
+) {
+  const livePlan = revalidatedPlan(p, doc.slice(0, cursor));
+  if (!livePlan) return { doc, cursor, applied: false, pendingCorrection: null };
+
+  let nextCursor = cursorAdjustmentSucceeds
+    ? cursor + livePlan.backMove
+    : cursor;
+  const liveContextAtCaret = contextReadable ? doc.slice(0, nextCursor) : null;
+  if (!matchesApplyTarget(livePlan, liveContextAtCaret)) {
+    return { doc, cursor: nextCursor, applied: false, pendingCorrection: null };
+  }
+
   const nextDoc = doc.slice(0, nextCursor - livePlan.deleteCount)
     + doc.slice(nextCursor);
   nextCursor -= livePlan.deleteCount;
@@ -82,7 +133,12 @@ export function applyVerified(doc, cursor, p) {
     + livePlan.insert
     + nextDoc.slice(nextCursor);
   nextCursor += livePlan.insert.length + livePlan.forwardMove;
-  return { doc: insertedDoc, cursor: nextCursor, applied: true };
+  return {
+    doc: insertedDoc,
+    cursor: nextCursor,
+    applied: true,
+    pendingCorrection: null,
+  };
 }
 
 function hasExactBytes(actual, expected) {
