@@ -17,6 +17,11 @@ export const ORIGIN_TYPING = 'typing';
 export const ORIGIN_SUGGESTION_TAP = 'suggestionTap';
 export const WORD_LEARNING_COMMIT_THRESHOLD = 3;
 const MAX_TRACKED_WORDS = 512;
+const NUMBER_OR_SYMBOL_RE = /[\p{N}\p{S}]/u;
+
+export function containsNumberOrSymbol(typedWord) {
+  return NUMBER_OR_SYMBOL_RE.test(typedWord);
+}
 
 /**
  * Mirrors KeyboardViewController's confidence-threshold selection:
@@ -130,6 +135,10 @@ export function evaluate({
   if (typedWord.length < config.minWordLength || typedWord.length > config.maxWordLength) {
     return { decision: 'leaveAsIs' };
   }
+
+  // Number- and symbol-containing tokens are user-entered literals, not
+  // autocorrect targets. Punctuation-only separators and letter tokens remain eligible.
+  if (containsNumberOrSymbol(typedWord)) return { decision: 'leaveAsIs' };
 
   // Contraction candidates are deterministic — they bypass the isLearned,
   // isMisspelled, and threshold gates because the contraction table represents

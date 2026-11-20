@@ -193,6 +193,76 @@ describe('AutocorrectController.evaluate', () => {
     });
   });
 
+  describe('number and symbol candidacy exemption', () => {
+    it('leaves tokens containing Unicode numbers or symbols unchanged', () => {
+      const cases = [
+        ['50€', '5'],
+        ['2026', '2027'],
+        ['2moro', '2more'],
+        ['b4', 'be'],
+        ['gr8', 'great'],
+        ['Ⅳabc', 'Ⅳbed'],
+        ['a²', 'abc'],
+        ['x+1', 'x-1'],
+        ['a^', 'at'],
+        ['a©', 'ab'],
+        ['€uro', '€ra'],
+      ];
+
+      for (const [typedWord, correction] of cases) {
+        const result = evaluate({
+          typedWord,
+          origin: 'typing',
+          topCorrection: { text: correction, score: 0.99, source: 'symspell' },
+          isLearned: false,
+          isMisspelled: true,
+        });
+        assert.strictEqual(result.decision, 'leaveAsIs', typedWord);
+      }
+    });
+
+    it('keeps letters, straight/curly apostrophes, and hyphens eligible', () => {
+      const cases = [
+        {
+          typedWord: 'wiyh',
+          correction: 'with',
+          source: 'symspell',
+          isMisspelled: true,
+        },
+        {
+          typedWord: "do'nt",
+          correction: "don't",
+          source: 'contraction',
+          isMisspelled: false,
+        },
+        {
+          typedWord: 'do’nt',
+          correction: 'don’t',
+          source: 'contraction',
+          isMisspelled: false,
+        },
+        {
+          typedWord: 'well-knwon',
+          correction: 'well-known',
+          source: 'symspell',
+          isMisspelled: true,
+        },
+      ];
+
+      for (const { typedWord, correction, source, isMisspelled } of cases) {
+        const result = evaluate({
+          typedWord,
+          origin: 'typing',
+          topCorrection: { text: correction, score: 0.99, source },
+          isLearned: false,
+          isMisspelled,
+        });
+        assert.strictEqual(result.decision, 'correct', typedWord);
+        assert.strictEqual(result.correction, correction, typedWord);
+      }
+    });
+  });
+
   describe('repeat-commit learning gate', () => {
     it('corrects a typed-once typo even when UITextChecker accepts an unlisted token', () => {
       const learner = new AutocorrectWordLearningTracker();

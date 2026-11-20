@@ -8,6 +8,7 @@ import {
   OOV_CONTEXT_CALIBRATION,
 } from '../lib/bigram-kenlm-proxy.mjs';
 import { normalizeForKenLM } from '../lib/kenlm-normalize.mjs';
+import { RecentWordBuffer } from '../lib/recent-word-buffer.mjs';
 import { topCorrection, topCorrectionOutcome } from '../lib/top-correction.mjs';
 
 const fixture = JSON.parse(
@@ -91,7 +92,7 @@ describe('bigram KenLM proxy calibration', () => {
     assert.ok(bigramKenlmScorer('with', 'so', null) > fixture.calibration.floorLog10);
   });
 
-  it('rescues the Tier-0 incident through the conditional margin policy', () => {
+  it('rescues Tier-0 inline and via retro after an inline pre-evaluation abort', () => {
     const incident = fixture.cases.find(testCase => testCase.tier === 0);
     const { previousWord, previousWord2 } = getContext(incident);
     const pool = [
@@ -154,5 +155,49 @@ describe('bigram KenLM proxy calibration', () => {
       trigramReady: true,
     });
     assert.strictEqual(controllerDecision.decision, 'correct');
+    assert.strictEqual(controllerDecision.correction, incident.intendedWord);
+
+    const commitContextSuffix = '€50 so wiyh ';
+    const inlineBuffer = new RecentWordBuffer();
+    inlineBuffer.append({
+      typedWord: incident.typedWord,
+      origin: 'typing',
+      commitContextSuffix,
+    });
+    inlineBuffer.recordInlineEvaluation({
+      typedWord: incident.typedWord,
+      commitContextSuffix,
+      decision: controllerDecision,
+      correctionApplied: true,
+    });
+    assert.strictEqual(inlineBuffer.candidates.length, 0);
+
+    const retroBuffer = new RecentWordBuffer();
+    retroBuffer.append({
+      typedWord: incident.typedWord,
+      origin: 'typing',
+      commitContextSuffix,
+    }, { inlineEvaluationScheduled: false });
+    const [retroCandidate] = retroBuffer.candidates;
+    assert.ok(retroCandidate, 'engine-not-ready inline abort leaves the word retro-eligible');
+
+    const retroCorrection = topCorrection({
+      pool,
+      currentWord: retroCandidate.typedWord,
+      lookupWord: retroCandidate.typedWord,
+      previousWord: null,
+      previousWord2: null,
+      trigramReady: false,
+    });
+    assert.strictEqual(retroCorrection?.text, incident.intendedWord);
+    const retroDecision = evaluate({
+      typedWord: retroCandidate.typedWord,
+      origin: retroCandidate.origin,
+      topCorrection: retroCorrection,
+      isLearned: false,
+      isMisspelled: true,
+    });
+    assert.strictEqual(retroDecision.decision, 'correct');
+    assert.strictEqual(retroDecision.correction, incident.intendedWord);
   });
 });

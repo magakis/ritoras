@@ -70,6 +70,9 @@ enum AutocorrectController {
         guard typedWord.count >= config.minWordLength,
               typedWord.count <= config.maxWordLength else { return .leaveAsIs }
 
+        // Numbers and symbols are user-entered literals, not autocorrect targets.
+        guard !containsNumberOrSymbol(typedWord) else { return .leaveAsIs }
+
         // Contraction candidates are deterministic — they bypass the isLearned,
         // isMisspelled, and threshold gates because the contraction table
         // represents a high-confidence mapping the user almost certainly wants
@@ -115,6 +118,20 @@ enum AutocorrectController {
         // Apply case preservation.
         let cased = preserveCase(of: typedWord, appliedTo: candidate.text, language: language)
         return .correct(typedWord: typedWord, correction: cased)
+    }
+
+    // MARK: - Candidacy
+
+    static func containsNumberOrSymbol(_ word: String) -> Bool {
+        word.unicodeScalars.contains { scalar in
+            switch scalar.properties.generalCategory {
+            case .decimalNumber, .letterNumber, .otherNumber,
+                 .mathSymbol, .currencySymbol, .modifierSymbol, .otherSymbol:
+                return true
+            default:
+                return false
+            }
+        }
     }
 
     // MARK: - Case Preservation
