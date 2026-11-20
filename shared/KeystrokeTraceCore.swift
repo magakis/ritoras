@@ -66,8 +66,12 @@ public enum KeystrokeTraceReasonCode: String, CaseIterable, Codable, Equatable, 
     case deferredApplyHostTargetGone = "deferred-apply-host-target-gone"
     /// The live text around the caret no longer matched the captured context.
     case deferredApplyLiveContextMismatch = "deferred-apply-live-context-mismatch"
+    /// The text and context at the retroactive deletion caret did not match.
+    case autocorrectApplyTargetMismatch = "autocorrect-apply-target-mismatch"
     /// A successful autocorrect application.
     case autocorrectApplied = "autocorrect-applied"
+    /// A retroactive correction was queued for a later guarded apply.
+    case autocorrectRetroQueued = "autocorrect-retro-queued"
     /// The host's textDidChange callback bumped the keyboard epoch.
     case hostTextDidChangeEpochBump = "host-text-did-change-epoch-bump"
     /// A host selection-change callback bumped the keyboard epoch.
@@ -184,6 +188,7 @@ public struct KeystrokeTraceSuggestionEvent: Codable, Equatable {
 /// Bounded operands attached to a skipped decision when the guard computed them.
 public struct KeystrokeTraceDecisionSkip: Codable, Equatable, Sendable {
     public let reasonCode: KeystrokeTraceReasonCode
+    public let path: KeystrokeTraceDecisionPath?
     public let candidate: String?
     public let fusedScore: Double?
     public let rawLMLogProb: Double?
@@ -191,19 +196,25 @@ public struct KeystrokeTraceDecisionSkip: Codable, Equatable, Sendable {
     public let typedLiteralLogProbMargin: Double?
     public let absoluteLogProbFloor: Double?
     public let checkedWord: String?
+    public let expectedWindow: String?
+    public let foundWindow: String?
 
     /// Creates a skip payload with short text operands and rounded scores.
     public init(
         reasonCode: KeystrokeTraceReasonCode,
+        path: KeystrokeTraceDecisionPath? = nil,
         candidate: String? = nil,
         fusedScore: Double? = nil,
         rawLMLogProb: Double? = nil,
         typedLiteralRawLMLogProb: Double? = nil,
         typedLiteralLogProbMargin: Double? = nil,
         absoluteLogProbFloor: Double? = nil,
-        checkedWord: String? = nil
+        checkedWord: String? = nil,
+        expectedWindow: String? = nil,
+        foundWindow: String? = nil
     ) {
         self.reasonCode = reasonCode
+        self.path = path
         self.candidate = candidate.map {
             String($0.prefix(KeystrokeTraceSchema.decisionTextCharacters))
         }
@@ -221,23 +232,88 @@ public struct KeystrokeTraceDecisionSkip: Codable, Equatable, Sendable {
         self.checkedWord = checkedWord.map {
             String($0.prefix(KeystrokeTraceSchema.decisionTextCharacters))
         }
+        self.expectedWindow = expectedWindow.map {
+            String($0.prefix(KeystrokeTraceSchema.decisionTextCharacters))
+        }
+        self.foundWindow = foundWindow.map {
+            String($0.prefix(KeystrokeTraceSchema.decisionTextCharacters))
+        }
     }
 }
 
-/// Apply decisions require complete before/after text and edit counts; skips carry their guard.
-public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
-    case apply(
+/// The inline or retroactive path that produced an autocorrect decision.
+public enum KeystrokeTraceDecisionPath: String, Codable, Equatable, Sendable {
+    case inline
+    case retro
+}
+
+/// Bounded words attached to a retroactive correction queue decision.
+public struct KeystrokeTraceDecisionQueued: Equatable, Sendable {
+    public let reasonCode: KeystrokeTraceReasonCode
+    public let checkedWord: String
+    public let candidate: String
+
+    /// Creates a queue decision with bounded checked-word and candidate operands.
+    public init(
+        reasonCode: KeystrokeTraceReasonCode = .autocorrectRetroQueued,
+        checkedWord: String,
+        candidate: String
+    ) {
+        self.reasonCode = reasonCode
+        self.checkedWord = String(
+            checkedWord.prefix(KeystrokeTraceSchema.decisionTextCharacters)
+        )
+        self.candidate = String(
+            candidate.prefix(KeystrokeTraceSchema.decisionTextCharacters)
+        )
+    }
+}
+
+/// Apply details with raw language-model operands rounded to trace precision.
+public struct KeystrokeTraceDecisionApply: Equatable, Sendable {
+    public let reasonCode: KeystrokeTraceReasonCode
+    public let path: KeystrokeTraceDecisionPath?
+    public let rawLMLogProb: Double?
+    public let typedLiteralRawLMLogProb: Double?
+    public let beforeText: String
+    public let afterText: String
+    public let deleteCount: Int
+    public let insertCount: Int
+
+    /// Creates an apply decision and rounds optional scores to three decimals.
+    public init(
         reasonCode: KeystrokeTraceReasonCode,
+        path: KeystrokeTraceDecisionPath? = nil,
+        rawLMLogProb: Double? = nil,
+        typedLiteralRawLMLogProb: Double? = nil,
         beforeText: String,
         afterText: String,
         deleteCount: Int,
         insertCount: Int
-    )
+    ) {
+        self.reasonCode = reasonCode
+        self.path = path
+        self.rawLMLogProb = rawLMLogProb.map { ($0 * 1_000).rounded() / 1_000 }
+        self.typedLiteralRawLMLogProb = typedLiteralRawLMLogProb.map {
+            ($0 * 1_000).rounded() / 1_000
+        }
+        self.beforeText = beforeText
+        self.afterText = afterText
+        self.deleteCount = deleteCount
+        self.insertCount = insertCount
+    }
+}
+
+/// Apply decisions carry edit details; skips and queued corrections carry their operands.
+public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
+    case apply(KeystrokeTraceDecisionApply)
+    case queued(KeystrokeTraceDecisionQueued)
     case skip(KeystrokeTraceDecisionSkip)
 
     private enum CodingKeys: String, CodingKey {
         case outcome
         case reasonCode
+        case path
         case beforeText
         case afterText
         case deleteCount
@@ -249,14 +325,17 @@ public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
         case typedLiteralLogProbMargin
         case absoluteLogProbFloor
         case checkedWord
+        case expectedWindow
+        case foundWindow
     }
 
     private enum Outcome: String, Codable {
         case apply
+        case queued
         case skip
     }
 
-    /// Decodes the explicit apply/skip representation while requiring apply details.
+    /// Decodes apply, queued, or skip fields while requiring each outcome's operands.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let outcome = try container.decode(Outcome.self, forKey: .outcome)
@@ -266,16 +345,35 @@ public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
         )
         switch outcome {
         case .apply:
-            self = .apply(
+            self = .apply(KeystrokeTraceDecisionApply(
                 reasonCode: reasonCode,
+                path: try container.decodeIfPresent(
+                    KeystrokeTraceDecisionPath.self,
+                    forKey: .path
+                ),
+                rawLMLogProb: try container.decodeIfPresent(Double.self, forKey: .rawLMLogProb),
+                typedLiteralRawLMLogProb: try container.decodeIfPresent(
+                    Double.self,
+                    forKey: .typedLiteralRawLMLogProb
+                ),
                 beforeText: try container.decode(String.self, forKey: .beforeText),
                 afterText: try container.decode(String.self, forKey: .afterText),
                 deleteCount: try container.decode(Int.self, forKey: .deleteCount),
                 insertCount: try container.decode(Int.self, forKey: .insertCount)
-            )
+            ))
+        case .queued:
+            self = .queued(KeystrokeTraceDecisionQueued(
+                reasonCode: reasonCode,
+                checkedWord: try container.decode(String.self, forKey: .checkedWord),
+                candidate: try container.decode(String.self, forKey: .candidate)
+            ))
         case .skip:
             self = .skip(KeystrokeTraceDecisionSkip(
                 reasonCode: reasonCode,
+                path: try container.decodeIfPresent(
+                    KeystrokeTraceDecisionPath.self,
+                    forKey: .path
+                ),
                 candidate: try container.decodeIfPresent(String.self, forKey: .candidate),
                 fusedScore: try container.decodeIfPresent(Double.self, forKey: .fusedScore),
                 rawLMLogProb: try container.decodeIfPresent(
@@ -294,25 +392,42 @@ public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
                     Double.self,
                     forKey: .absoluteLogProbFloor
                 ),
-                checkedWord: try container.decodeIfPresent(String.self, forKey: .checkedWord)
+                checkedWord: try container.decodeIfPresent(String.self, forKey: .checkedWord),
+                expectedWindow: try container.decodeIfPresent(
+                    String.self,
+                    forKey: .expectedWindow
+                ),
+                foundWindow: try container.decodeIfPresent(String.self, forKey: .foundWindow)
             ))
         }
     }
 
-    /// Encodes apply or skip fields without an ambiguous synthesized enum wrapper.
+    /// Encodes decision fields without an ambiguous synthesized enum wrapper.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case let .apply(reasonCode, beforeText, afterText, deleteCount, insertCount):
+        case let .apply(apply):
             try container.encode(Outcome.apply, forKey: .outcome)
-            try container.encode(reasonCode, forKey: .reasonCode)
-            try container.encode(beforeText, forKey: .beforeText)
-            try container.encode(afterText, forKey: .afterText)
-            try container.encode(deleteCount, forKey: .deleteCount)
-            try container.encode(insertCount, forKey: .insertCount)
+            try container.encode(apply.reasonCode, forKey: .reasonCode)
+            try container.encodeIfPresent(apply.path, forKey: .path)
+            try container.encodeIfPresent(apply.rawLMLogProb, forKey: .rawLMLogProb)
+            try container.encodeIfPresent(
+                apply.typedLiteralRawLMLogProb,
+                forKey: .typedLiteralRawLMLogProb
+            )
+            try container.encode(apply.beforeText, forKey: .beforeText)
+            try container.encode(apply.afterText, forKey: .afterText)
+            try container.encode(apply.deleteCount, forKey: .deleteCount)
+            try container.encode(apply.insertCount, forKey: .insertCount)
+        case let .queued(queued):
+            try container.encode(Outcome.queued, forKey: .outcome)
+            try container.encode(queued.reasonCode, forKey: .reasonCode)
+            try container.encode(queued.checkedWord, forKey: .checkedWord)
+            try container.encode(queued.candidate, forKey: .candidate)
         case let .skip(skip):
             try container.encode(Outcome.skip, forKey: .outcome)
             try container.encode(skip.reasonCode, forKey: .reasonCode)
+            try container.encodeIfPresent(skip.path, forKey: .path)
             try container.encodeIfPresent(skip.candidate, forKey: .candidate)
             try container.encodeIfPresent(skip.fusedScore, forKey: .fusedScore)
             try container.encodeIfPresent(skip.rawLMLogProb, forKey: .rawLMLogProb)
@@ -326,6 +441,8 @@ public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
             )
             try container.encodeIfPresent(skip.absoluteLogProbFloor, forKey: .absoluteLogProbFloor)
             try container.encodeIfPresent(skip.checkedWord, forKey: .checkedWord)
+            try container.encodeIfPresent(skip.expectedWindow, forKey: .expectedWindow)
+            try container.encodeIfPresent(skip.foundWindow, forKey: .foundWindow)
         }
     }
 }

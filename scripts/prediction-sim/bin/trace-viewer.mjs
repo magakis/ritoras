@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   completeTraceLines,
+  TRACE_DECISION_PATHS,
   TRACE_DECISION_TEXT_CHARACTERS,
   TRACE_LIVE_FILE_NAME,
   TRACE_REASON_CODES,
@@ -37,6 +38,7 @@ const META_ACTIONS = new Set([
   'sessionStarted',
   'sessionEnded',
 ]);
+const DECISION_PATHS = new Set(TRACE_DECISION_PATHS);
 const REASON_CODES = new Set(TRACE_REASON_CODES);
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 
@@ -85,6 +87,14 @@ function requireReasonCode(value, fieldName) {
   if (!REASON_CODES.has(value)) {
     throw new TypeError(`${fieldName} is not a recognized trace reason code`);
   }
+}
+
+function requireDecisionPath(payload) {
+  requireOptional(payload, 'path', (value, fieldName) => {
+    if (!DECISION_PATHS.has(value)) {
+      throw new TypeError(`${fieldName} must be inline or retro`);
+    }
+  });
 }
 
 function validateCandidate(candidate, index) {
@@ -143,16 +153,26 @@ function validateEvent(event) {
       return;
 
     case 'decision':
-      if (!['apply', 'skip'].includes(payload.outcome)) {
-        throw new TypeError('payload.outcome must be apply or skip');
+      if (!['apply', 'queued', 'skip'].includes(payload.outcome)) {
+        throw new TypeError('payload.outcome must be apply, queued, or skip');
       }
       requireReasonCode(payload.reasonCode, 'payload.reasonCode');
       if (payload.outcome === 'apply') {
+        requireDecisionPath(payload);
+        requireOptional(payload, 'rawLMLogProb', requireFiniteNumber);
+        requireOptional(payload, 'typedLiteralRawLMLogProb', requireFiniteNumber);
         requireString(payload.beforeText, 'payload.beforeText');
         requireString(payload.afterText, 'payload.afterText');
         requireInteger(payload.deleteCount, 'payload.deleteCount');
         requireInteger(payload.insertCount, 'payload.insertCount');
+      } else if (payload.outcome === 'queued') {
+        if (payload.reasonCode !== 'autocorrect-retro-queued') {
+          throw new TypeError('A queued decision requires autocorrect-retro-queued');
+        }
+        requireBoundedText(payload.candidate, 'payload.candidate');
+        requireBoundedText(payload.checkedWord, 'payload.checkedWord');
       } else {
+        requireDecisionPath(payload);
         requireOptional(payload, 'candidate', requireBoundedText);
         requireOptional(payload, 'fusedScore', requireFiniteNumber);
         requireOptional(payload, 'rawLMLogProb', requireFiniteNumber);
@@ -160,6 +180,8 @@ function validateEvent(event) {
         requireOptional(payload, 'typedLiteralLogProbMargin', requireFiniteNumber);
         requireOptional(payload, 'absoluteLogProbFloor', requireFiniteNumber);
         requireOptional(payload, 'checkedWord', requireBoundedText);
+        requireOptional(payload, 'expectedWindow', requireBoundedText);
+        requireOptional(payload, 'foundWindow', requireBoundedText);
       }
       return;
 
@@ -478,8 +500,13 @@ export function summarizeTrace({
   const decisions = records
     .filter(record => record.event.type === 'decision')
     .map(record => record.event.payload);
-  const appliedCount = decisions.filter(decision => decision.outcome === 'apply').length;
-  const skippedCount = decisions.length - appliedCount;
+  const correctionDecisions = decisions.filter(decision => (
+    decision.outcome === 'apply' || decision.outcome === 'skip'
+  ));
+  const appliedCount = correctionDecisions
+    .filter(decision => decision.outcome === 'apply').length;
+  const skippedCount = correctionDecisions.length - appliedCount;
+  const queuedCount = decisions.filter(decision => decision.outcome === 'queued').length;
   const skipReasons = {};
   for (const decision of decisions) {
     if (decision.outcome !== 'skip') continue;
@@ -502,8 +529,11 @@ export function summarizeTrace({
     autocorrect: {
       appliedCount,
       skippedCount,
-      decisionCount: decisions.length,
-      fireRate: decisions.length === 0 ? null : appliedCount / decisions.length,
+      queuedCount,
+      decisionCount: correctionDecisions.length,
+      fireRate: correctionDecisions.length === 0
+        ? null
+        : appliedCount / correctionDecisions.length,
     },
     skipReasons: Object.fromEntries(
       Object.entries(skipReasons).sort(([left], [right]) => left.localeCompare(right))
@@ -571,10 +601,19 @@ export function formatTimeline(records) {
     }
 
     if (event.type === 'decision' && event.payload.outcome === 'apply') {
-      lines.push(
-        `  apply: reason=${event.payload.reasonCode} `
-          + `deleteCount=${event.payload.deleteCount} insertCount=${event.payload.insertCount}`
+      const details = [`reason=${event.payload.reasonCode}`];
+      if (event.payload.path != null) details.push(`path=${event.payload.path}`);
+      if (event.payload.rawLMLogProb != null) {
+        details.push(`rawLMLogProb=${event.payload.rawLMLogProb}`);
+      }
+      if (event.payload.typedLiteralRawLMLogProb != null) {
+        details.push(`typedLiteralRawLMLogProb=${event.payload.typedLiteralRawLMLogProb}`);
+      }
+      details.push(
+        `deleteCount=${event.payload.deleteCount}`,
+        `insertCount=${event.payload.insertCount}`
       );
+      lines.push(`  apply: ${details.join(' ')}`);
       lines.push(`  beforeText: ${JSON.stringify(event.payload.beforeText)}`);
       lines.push(`  afterText: ${JSON.stringify(event.payload.afterText)}`);
       continue;
@@ -582,7 +621,16 @@ export function formatTimeline(records) {
 
     if (event.type === 'decision') {
       const payload = event.payload;
+      if (payload.outcome === 'queued') {
+        lines.push(
+          `  queued: reason=${payload.reasonCode} `
+            + `checkedWord=${JSON.stringify(payload.checkedWord)} `
+            + `candidate=${JSON.stringify(payload.candidate)}`
+        );
+        continue;
+      }
       const details = [`reason=${payload.reasonCode}`];
+      if (payload.path != null) details.push(`path=${payload.path}`);
       if (payload.candidate != null) {
         details.push(`candidate=${JSON.stringify(payload.candidate)}`);
       }
@@ -601,6 +649,12 @@ export function formatTimeline(records) {
       }
       if (payload.checkedWord != null) {
         details.push(`checkedWord=${JSON.stringify(payload.checkedWord)}`);
+      }
+      if (payload.expectedWindow != null) {
+        details.push(`expectedWindow=${JSON.stringify(payload.expectedWindow)}`);
+      }
+      if (payload.foundWindow != null) {
+        details.push(`foundWindow=${JSON.stringify(payload.foundWindow)}`);
       }
       lines.push(`  skip: ${details.join(' ')}`);
       continue;
@@ -631,7 +685,8 @@ export function formatSummary(summary) {
     `Autocorrect fire rate: ${summary.autocorrect.appliedCount}/`
       + `${summary.autocorrect.decisionCount} applied `
       + `(${formatPercent(summary.autocorrect.fireRate)}; `
-      + `${summary.autocorrect.appliedCount} applied, ${summary.autocorrect.skippedCount} skipped)`,
+      + `${summary.autocorrect.appliedCount} applied, ${summary.autocorrect.skippedCount} skipped, `
+      + `${summary.autocorrect.queuedCount} queued)`,
     'Skip reasons:',
   ];
 

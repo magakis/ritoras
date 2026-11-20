@@ -88,7 +88,9 @@ describe('keystroke trace core mirror', () => {
       'deferred-apply-keyboard-not-live',
       'deferred-apply-host-target-gone',
       'deferred-apply-live-context-mismatch',
+      'autocorrect-apply-target-mismatch',
       'autocorrect-applied',
+      'autocorrect-retro-queued',
       'host-text-did-change-epoch-bump',
       'host-selection-change-epoch-bump',
       'host-ring-cleared',
@@ -159,7 +161,7 @@ describe('keystroke trace core mirror', () => {
     });
   });
 
-  it('round-trips key, suggestion, apply, skip, state, and meta event payloads', () => {
+  it('round-trips key, suggestion, legacy and extended decisions, state, and meta', () => {
     const events = [
       makeKeyEvent({
         action: 'suggestionTap',
@@ -195,8 +197,26 @@ describe('keystroke trace core mirror', () => {
         insertCount: 5,
       }),
       makeDecisionEvent({
+        outcome: 'apply',
+        reasonCode: 'autocorrect-applied',
+        path: 'retro',
+        rawLMLogProb: -8.0006,
+        typedLiteralRawLMLogProb: -10.0004,
+        beforeText: 'I saw thier yesterday',
+        afterText: 'I saw their yesterday',
+        deleteCount: 5,
+        insertCount: 5,
+      }),
+      makeDecisionEvent({
+        outcome: 'queued',
+        reasonCode: 'autocorrect-retro-queued',
+        checkedWord: 'thier',
+        candidate: 'their',
+      }),
+      makeDecisionEvent({
         outcome: 'skip',
         reasonCode: 'autocorrect-language-model-floor',
+        path: 'retro',
         candidate: 'with',
         fusedScore: 1.0004,
         rawLMLogProb: -8.0006,
@@ -204,6 +224,14 @@ describe('keystroke trace core mirror', () => {
         typedLiteralLogProbMargin: 2.0004,
         absoluteLogProbFloor: -8.0004,
         checkedWord: 'wiyh',
+      }),
+      makeDecisionEvent({
+        outcome: 'skip',
+        reasonCode: 'autocorrect-apply-target-mismatch',
+        path: 'retro',
+        checkedWord: 'their',
+        expectedWindow: 'their',
+        foundWindow: 'their',
       }),
       makeStateEvent({
         action: 'epochBump',
@@ -237,6 +265,8 @@ describe('keystroke trace core mirror', () => {
   it('bounds skip words and rounds numeric operands before recording them', () => {
     const candidate = 'x'.repeat(TRACE_DECISION_TEXT_CHARACTERS + 1);
     const checkedWord = 'y'.repeat(TRACE_DECISION_TEXT_CHARACTERS + 1);
+    const expectedWindow = 'z'.repeat(TRACE_DECISION_TEXT_CHARACTERS + 1);
+    const foundWindow = 'w'.repeat(TRACE_DECISION_TEXT_CHARACTERS + 1);
     const event = makeDecisionEvent({
       outcome: 'skip',
       reasonCode: 'autocorrect-score-below-threshold',
@@ -247,15 +277,58 @@ describe('keystroke trace core mirror', () => {
       typedLiteralLogProbMargin: 2.00056,
       absoluteLogProbFloor: -8.00056,
       checkedWord,
+      expectedWindow,
+      foundWindow,
     });
 
     assert.strictEqual(event.payload.candidate.length, TRACE_DECISION_TEXT_CHARACTERS);
     assert.strictEqual(event.payload.checkedWord.length, TRACE_DECISION_TEXT_CHARACTERS);
+    assert.strictEqual(event.payload.expectedWindow.length, TRACE_DECISION_TEXT_CHARACTERS);
+    assert.strictEqual(event.payload.foundWindow.length, TRACE_DECISION_TEXT_CHARACTERS);
     assert.strictEqual(event.payload.fusedScore, 0.655);
     assert.strictEqual(event.payload.rawLMLogProb, -8.124);
     assert.strictEqual(event.payload.typedLiteralRawLMLogProb, -10.988);
     assert.strictEqual(event.payload.typedLiteralLogProbMargin, 2.001);
     assert.strictEqual(event.payload.absoluteLogProbFloor, -8.001);
+  });
+
+  it('bounds apply and queued operands and rounds apply raw scores', () => {
+    const longWord = 'x'.repeat(TRACE_DECISION_TEXT_CHARACTERS + 1);
+    const apply = makeDecisionEvent({
+      outcome: 'apply',
+      reasonCode: 'autocorrect-applied',
+      path: 'inline',
+      rawLMLogProb: -8.12356,
+      typedLiteralRawLMLogProb: -10.98765,
+      beforeText: 'wiyh',
+      afterText: 'with',
+      deleteCount: 4,
+      insertCount: 4,
+    });
+    const queued = makeDecisionEvent({
+      outcome: 'queued',
+      reasonCode: 'autocorrect-retro-queued',
+      candidate: longWord,
+      checkedWord: longWord,
+    });
+
+    assert.strictEqual(apply.payload.path, 'inline');
+    assert.strictEqual(apply.payload.rawLMLogProb, -8.124);
+    assert.strictEqual(apply.payload.typedLiteralRawLMLogProb, -10.988);
+    assert.strictEqual(queued.payload.candidate.length, TRACE_DECISION_TEXT_CHARACTERS);
+    assert.strictEqual(queued.payload.checkedWord.length, TRACE_DECISION_TEXT_CHARACTERS);
+    assert.throws(
+      () => makeDecisionEvent({
+        outcome: 'apply',
+        reasonCode: 'autocorrect-applied',
+        path: 'unexpected',
+        beforeText: '',
+        afterText: '',
+        deleteCount: 0,
+        insertCount: 0,
+      }),
+      /path must be inline or retro/
+    );
   });
 
   it('captures immediately without an enable gate and flushes encoded UTF-8 bytes', (testContext) => {

@@ -121,8 +121,26 @@ describe('offline keystroke trace viewer', () => {
         insertCount: 5,
       }),
       makeDecisionEvent({
+        outcome: 'apply',
+        reasonCode: 'autocorrect-applied',
+        path: 'inline',
+        rawLMLogProb: -8.1254,
+        typedLiteralRawLMLogProb: -10.0004,
+        beforeText: 'I saw wiyh yesterday',
+        afterText: 'I saw with yesterday',
+        deleteCount: 4,
+        insertCount: 4,
+      }),
+      makeDecisionEvent({
+        outcome: 'queued',
+        reasonCode: 'autocorrect-retro-queued',
+        checkedWord: 'wiyh',
+        candidate: 'with',
+      }),
+      makeDecisionEvent({
         outcome: 'skip',
         reasonCode: 'autocorrect-language-model-floor',
+        path: 'retro',
         candidate: 'with',
         fusedScore: 1,
         rawLMLogProb: -9.125,
@@ -130,6 +148,14 @@ describe('offline keystroke trace viewer', () => {
         typedLiteralLogProbMargin: 2,
         absoluteLogProbFloor: -8,
         checkedWord: 'wiyh',
+      }),
+      makeDecisionEvent({
+        outcome: 'skip',
+        reasonCode: 'autocorrect-apply-target-mismatch',
+        path: 'retro',
+        checkedWord: 'their',
+        expectedWindow: 'their',
+        foundWindow: 'their',
       }),
     ]);
 
@@ -141,14 +167,26 @@ describe('offline keystroke trace viewer', () => {
     assert.match(timeline, /tap after: " yesterday"/);
     assert.match(timeline, /beforeText: "I saw thier yesterday"/);
     assert.match(timeline, /afterText: "I saw their yesterday"/);
-    assert.match(
-      timeline,
-      /skip: reason=autocorrect-language-model-floor candidate="with" fusedScore=1 rawLMLogProb=-9\.125/
-    );
+    assert.ok(timeline.includes(
+      '  apply: reason=autocorrect-applied path=inline rawLMLogProb=-8.125 '
+        + 'typedLiteralRawLMLogProb=-10 deleteCount=4 insertCount=4'
+    ));
+    assert.ok(timeline.includes(
+      '  queued: reason=autocorrect-retro-queued checkedWord="wiyh" '
+        + 'candidate="with"'
+    ));
+    assert.ok(timeline.includes(
+      '  skip: reason=autocorrect-language-model-floor path=retro candidate="with" '
+        + 'fusedScore=1 rawLMLogProb=-9.125'
+    ));
     assert.match(
       timeline,
       /typedLiteralRawLMLogProb=-10 typedLiteralLogProbMargin=2 absoluteLogProbFloor=-8 checkedWord="wiyh"/
     );
+    assert.ok(timeline.includes(
+      '  skip: reason=autocorrect-apply-target-mismatch path=retro '
+        + 'checkedWord="their" expectedWindow="their" foundWindow="their"'
+    ));
   });
 
   it('summarizes autocorrect outcomes, skip reasons, and consecutive suggestion stability', (testContext) => {
@@ -168,6 +206,12 @@ describe('offline keystroke trace viewer', () => {
         reasonCode: 'autocorrect-score-below-threshold',
       }),
       makeDecisionEvent({
+        outcome: 'queued',
+        reasonCode: 'autocorrect-retro-queued',
+        checkedWord: 'thier',
+        candidate: 'their',
+      }),
+      makeDecisionEvent({
         outcome: 'skip',
         reasonCode: 'autocorrect-score-below-threshold',
       }),
@@ -183,6 +227,7 @@ describe('offline keystroke trace viewer', () => {
     assert.deepStrictEqual(summary.autocorrect, {
       appliedCount: 1,
       skippedCount: 2,
+      queuedCount: 1,
       decisionCount: 3,
       fireRate: 1 / 3,
     });
@@ -196,10 +241,60 @@ describe('offline keystroke trace viewer', () => {
       unchangedTopSuggestionCount: 1,
       stabilityRate: 0.5,
     });
-    assert.match(renderedSummary, /Autocorrect fire rate: 1\/3 applied \(33\.3%/);
+    assert.match(
+      renderedSummary,
+      /Autocorrect fire rate: 1\/3 applied \(33\.3%; 1 applied, 2 skipped, 1 queued\)/
+    );
     assert.match(renderedSummary, /autocorrect-score-below-threshold: 2/);
     assert.match(renderedSummary, /Suggestion stability: 50\.0% unchanged/);
     assert.match(renderedSummary, /Malformed lines skipped: 0/);
+  });
+
+  it('validates optional apply operands and bounded queue words', (testContext) => {
+    const directory = temporaryDirectory(testContext);
+    const tracePath = path.join(directory, 'trace.ndjson');
+    const invalidRecords = [
+      {
+        schemaVersion: 1,
+        timestamp,
+        event: {
+          type: 'decision',
+          payload: {
+            outcome: 'apply',
+            reasonCode: 'autocorrect-applied',
+            path: 'other',
+            beforeText: 'wiyh',
+            afterText: 'with',
+            deleteCount: 4,
+            insertCount: 4,
+          },
+        },
+      },
+      {
+        schemaVersion: 1,
+        timestamp,
+        event: {
+          type: 'decision',
+          payload: {
+            outcome: 'queued',
+            reasonCode: 'autocorrect-retro-queued',
+            checkedWord: 'wiyh',
+            candidate: 'x'.repeat(65),
+          },
+        },
+      },
+    ];
+    writeFileSync(
+      tracePath,
+      `${invalidRecords.map(record => JSON.stringify(record)).join('\n')}\n`
+    );
+
+    const analysis = analyzeTraceFiles([tracePath]);
+
+    assert.strictEqual(analysis.records.length, 0);
+    assert.strictEqual(analysis.malformedCount, 2);
+    assert.match(analysis.warnings[0], /path must be inline or retro/);
+    assert.match(analysis.warnings[1], /exceeds the decision text limit/);
   });
 
   it('distinguishes suggestion-tap partial deletion from the merged inserted context', (testContext) => {

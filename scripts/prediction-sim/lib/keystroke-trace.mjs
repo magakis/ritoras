@@ -6,6 +6,7 @@ import path from 'node:path';
 export const TRACE_SCHEMA_VERSION = 1;
 export const TRACE_CONTEXT_WINDOW_CHARACTERS = 128;
 export const TRACE_DECISION_TEXT_CHARACTERS = 64;
+export const TRACE_DECISION_PATHS = Object.freeze(['inline', 'retro']);
 export const TRACE_RING_CAPACITY_BYTES = 256 * 1024;
 export const TRACE_SEGMENT_CAPACITY_BYTES = 2 * 1024 * 1024;
 export const TRACE_TOTAL_DISK_CAPACITY_BYTES = 4 * 1024 * 1024;
@@ -36,7 +37,9 @@ export const TRACE_REASON_CODES = Object.freeze([
   'deferred-apply-keyboard-not-live',
   'deferred-apply-host-target-gone',
   'deferred-apply-live-context-mismatch',
+  'autocorrect-apply-target-mismatch',
   'autocorrect-applied',
+  'autocorrect-retro-queued',
   'host-text-did-change-epoch-bump',
   'host-selection-change-epoch-bump',
   'host-ring-cleared',
@@ -169,13 +172,18 @@ export function makeSuggestionEvent({
 }
 
 export function makeDecisionEvent(decision) {
-  if (!decision || !['apply', 'skip'].includes(decision.outcome)) {
-    throw new TypeError('A trace decision outcome must be apply or skip');
+  if (!decision || !['apply', 'queued', 'skip'].includes(decision.outcome)) {
+    throw new TypeError('A trace decision outcome must be apply, queued, or skip');
   }
   if (!TRACE_REASON_CODE_SET.has(decision.reasonCode)) {
     throw new TypeError(`Unknown trace reason code: ${decision.reasonCode}`);
   }
-  for (const field of ['candidate', 'checkedWord']) {
+  if (decision.outcome !== 'queued'
+      && decision.path != null
+      && !TRACE_DECISION_PATHS.includes(decision.path)) {
+    throw new TypeError('A trace decision path must be inline or retro');
+  }
+  for (const field of ['candidate', 'checkedWord', 'expectedWindow', 'foundWindow']) {
     if (decision[field] !== undefined && decision[field] !== null
         && typeof decision[field] !== 'string') {
       throw new TypeError(`A trace decision ${field} must be a string`);
@@ -206,13 +214,39 @@ export function makeDecisionEvent(decision) {
     }
     return {
       type: 'decision',
-      payload: {
+      payload: omitUndefinedFields({
         outcome: 'apply',
         reasonCode: decision.reasonCode,
+        path: decision.path ?? undefined,
+        rawLMLogProb: decision.rawLMLogProb == null
+          ? undefined
+          : roundTraceNumber(decision.rawLMLogProb),
+        typedLiteralRawLMLogProb: decision.typedLiteralRawLMLogProb == null
+          ? undefined
+          : roundTraceNumber(decision.typedLiteralRawLMLogProb),
         beforeText: decision.beforeText,
         afterText: decision.afterText,
         deleteCount: decision.deleteCount,
         insertCount: decision.insertCount,
+      }),
+    };
+  }
+  if (decision.outcome === 'queued') {
+    if (decision.reasonCode !== 'autocorrect-retro-queued') {
+      throw new TypeError('A queued decision requires autocorrect-retro-queued');
+    }
+    for (const field of ['candidate', 'checkedWord']) {
+      if (typeof decision[field] !== 'string') {
+        throw new TypeError(`A queued decision requires ${field}`);
+      }
+    }
+    return {
+      type: 'decision',
+      payload: {
+        outcome: 'queued',
+        reasonCode: decision.reasonCode,
+        candidate: boundedPrefix(decision.candidate, TRACE_DECISION_TEXT_CHARACTERS),
+        checkedWord: boundedPrefix(decision.checkedWord, TRACE_DECISION_TEXT_CHARACTERS),
       },
     };
   }
@@ -221,6 +255,7 @@ export function makeDecisionEvent(decision) {
     payload: omitUndefinedFields({
       outcome: 'skip',
       reasonCode: decision.reasonCode,
+      path: decision.path ?? undefined,
       candidate: decision.candidate == null
         ? undefined
         : boundedPrefix(decision.candidate, TRACE_DECISION_TEXT_CHARACTERS),
@@ -242,6 +277,12 @@ export function makeDecisionEvent(decision) {
       checkedWord: decision.checkedWord == null
         ? undefined
         : boundedPrefix(decision.checkedWord, TRACE_DECISION_TEXT_CHARACTERS),
+      expectedWindow: decision.expectedWindow == null
+        ? undefined
+        : boundedPrefix(decision.expectedWindow, TRACE_DECISION_TEXT_CHARACTERS),
+      foundWindow: decision.foundWindow == null
+        ? undefined
+        : boundedPrefix(decision.foundWindow, TRACE_DECISION_TEXT_CHARACTERS),
     }),
   };
 }
