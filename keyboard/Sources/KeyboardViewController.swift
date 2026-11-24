@@ -3278,6 +3278,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 config: config
             )
             let rawLMLogProb = topCorrectionOutcome.rawLMLogProb
+            let conditionalLMLogProb = topCorrectionOutcome.conditionalLMLogProb
             let typedLiteralRawLMLogProb = topCorrectionOutcome.typedLiteralRawLMLogProb
             FileLogger.shared.debug(.keyboard, "autocorrect compute",
                 payload: ["ms": Int(Date().timeIntervalSince(computeStart) * 1000)])
@@ -3293,6 +3294,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                     capturedDocId: capturedDocId,
                     decisionSkipReason: decisionSkipReason,
                     rawLMLogProb: rawLMLogProb,
+                    conditionalLMLogProb: conditionalLMLogProb,
                     typedLiteralRawLMLogProb: typedLiteralRawLMLogProb
                 )
             }
@@ -3430,6 +3432,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                 candidate: candidateForTrace?.text,
                 fusedScore: candidateForTrace?.score,
                 rawLMLogProb: outcome.rawLMLogProb,
+                conditionalLMLogProb: outcome.conditionalLMLogProb,
                 typedLiteralRawLMLogProb: outcome.typedLiteralRawLMLogProb,
                 typedLiteralLogProbMargin: outcome.typedLiteralLogProbMargin,
                 absoluteLogProbFloor: outcome.absoluteLogProbFloor,
@@ -3462,7 +3465,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
             return makeSkip(.autocorrectLanguageModelFloor)
         case .contractionMargin:
             return makeSkip(.autocorrectContractionMargin)
-        case let .candidate(candidate, _):
+        case let .candidate(candidate, _, _):
             guard candidate.text.lowercased() != typedWord.lowercased() else {
                 return makeSkip(.autocorrectSameWord)
             }
@@ -3518,6 +3521,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
         capturedDocId: UUID,
         decisionSkipReason: KeystrokeTraceDecisionSkip?,
         rawLMLogProb: Double?,
+        conditionalLMLogProb: Double?,
         typedLiteralRawLMLogProb: Double?
     ) {
         var correctionApplied = false
@@ -3623,6 +3627,7 @@ extension KeyboardViewController: KeyboardViewDelegate {
                     reasonCode: .autocorrectApplied,
                     path: .inline,
                     rawLMLogProb: rawLMLogProb,
+                    conditionalLMLogProb: conditionalLMLogProb,
                     typedLiteralRawLMLogProb: typedLiteralRawLMLogProb,
                     beforeText: liveContext,
                     afterText: afterText,

@@ -51,9 +51,13 @@ Requires Node ≥18 (uses the built-in `node:test` runner — no dependencies).
 
 The real `trigram_en_v1.klm` is a C-bridge binary that cannot run in Node. The
 fusion tests use a **bigram-count proxy** (zero dependencies): bigram log-probabilities
-derived from a public corpus, used as a stand-in for KenLM's trigram scores.
-It is calibrated for OOV-context floor behavior: the device trace establishes
-that the incident winner fell below the `-8.0` floor, but not its exact score.
+derived from a public corpus. The proxy already scores the candidate conditional
+on the previous word. The sweep supplies a zero context term so the simulator's
+sentence-minus-context derivation leaves those scores unchanged.
+
+The OOV-context calibration is a conservative stress case for the typed-literal
+rescue, not an estimate of the device's conditional score. The incident's
+combined score fell below the older `-8.0` floor.
 The default OOV penalty is 4.5 log10 decades; the explicit sensitivity range is
 4.4–5.5. Even the low end pushes the proxy's weakest add-one-smoothed OOV score
 below `-8.0`. In-vocabulary contexts keep the original add-one scale; only the
@@ -65,6 +69,31 @@ The proxy still does not model live KenLM backoff or in-vocabulary trigram
 effects, so it cannot reproduce every device candidate score. Its scores are
 for relative policy-sensitivity sweeps, not claims of exact `.klm` values.
 Final tuning is confirmed on-device via `ritoras-ios-debugging`.
+
+### Conditional-floor verification (2026-11-24)
+
+Measured with the conditional-floor change on top of `ace8811`, before the
+delivery commit. All figures match the pre-change baseline because the proxy
+already scored conditionally.
+
+- **Sweep** (`node scripts/prediction-sim/bin/sweep.mjs`): blend 0.5, fused 0.65,
+  unfused 0.70, floor -8.0; 401 typos, 299 legit words, 1,604 OOV-context pairs,
+  and one Tier-0 fixture. At all 12 calibration points: precision 86.4% (51/59),
+  legit-word false-positive rate 1.7% (5/299), recall 12.7% (51/401), outcome
+  delta 0.00, OOV-context recall 31.2%, and Tier-0 incident corrected (1/1).
+  The typed-literal margin of 2.0 was selected at 12/12 points.
+- **Ladder** (`node scripts/prediction-sim/bin/precision-recall.mjs` with
+  `--blendWeight 0.5 --fusedThreshold 0.65 --unfusedThreshold 0.70 --floor <F>`):
+
+| Floor | Precision | Recall | Legit-word false-positive rate |
+|---|---|---|---|
+| off | 86.4% (51/59) | 12.7% | 1.7% (5/299) |
+| -8.0 | 86.4% (51/59) | 12.7% | 1.7% (5/299) |
+| -7.75 | 86.4% (51/59) | 12.7% | 1.7% (5/299) |
+| -7.5 | 86.4% (51/59) | 12.7% | 1.7% (5/299) |
+| -7.25 | 86.2% (50/58) | 12.5% | 1.7% (5/299) |
+| -6.5 | 65.2% (15/23) | 3.7% | 1.7% (5/299) |
+| -5.0 | 36.4% (4/11) | 1.0% | 1.0% (3/299) |
 
 ## Keeping the port in sync
 

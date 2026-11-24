@@ -160,6 +160,7 @@ function validateEvent(event) {
       if (payload.outcome === 'apply') {
         requireDecisionPath(payload);
         requireOptional(payload, 'rawLMLogProb', requireFiniteNumber);
+        requireOptional(payload, 'conditionalLMLogProb', requireFiniteNumber);
         requireOptional(payload, 'typedLiteralRawLMLogProb', requireFiniteNumber);
         requireString(payload.beforeText, 'payload.beforeText');
         requireString(payload.afterText, 'payload.afterText');
@@ -176,6 +177,7 @@ function validateEvent(event) {
         requireOptional(payload, 'candidate', requireBoundedText);
         requireOptional(payload, 'fusedScore', requireFiniteNumber);
         requireOptional(payload, 'rawLMLogProb', requireFiniteNumber);
+        requireOptional(payload, 'conditionalLMLogProb', requireFiniteNumber);
         requireOptional(payload, 'typedLiteralRawLMLogProb', requireFiniteNumber);
         requireOptional(payload, 'typedLiteralLogProbMargin', requireFiniteNumber);
         requireOptional(payload, 'absoluteLogProbFloor', requireFiniteNumber);
@@ -567,6 +569,14 @@ function formatRecordedText(value) {
     : JSON.stringify(value);
 }
 
+function appendFloorOperand(details, payload) {
+  if (payload.conditionalLMLogProb != null) {
+    details.push(`conditionalLMLogProb=${payload.conditionalLMLogProb} (floor operand)`);
+  } else if (payload.rawLMLogProb != null) {
+    details.push('floor operand=rawLMLogProb (older rule: combined score)');
+  }
+}
+
 export function formatTimeline(records) {
   const lines = ['=== Keystroke Timeline ==='];
   for (const record of records) {
@@ -606,6 +616,7 @@ export function formatTimeline(records) {
       if (event.payload.rawLMLogProb != null) {
         details.push(`rawLMLogProb=${event.payload.rawLMLogProb}`);
       }
+      appendFloorOperand(details, event.payload);
       if (event.payload.typedLiteralRawLMLogProb != null) {
         details.push(`typedLiteralRawLMLogProb=${event.payload.typedLiteralRawLMLogProb}`);
       }
@@ -637,6 +648,9 @@ export function formatTimeline(records) {
       if (payload.fusedScore != null) details.push(`fusedScore=${payload.fusedScore}`);
       if (payload.rawLMLogProb != null) {
         details.push(`rawLMLogProb=${payload.rawLMLogProb}`);
+      }
+      if (payload.reasonCode === 'autocorrect-language-model-floor') {
+        appendFloorOperand(details, payload);
       }
       if (payload.typedLiteralRawLMLogProb != null) {
         details.push(`typedLiteralRawLMLogProb=${payload.typedLiteralRawLMLogProb}`);

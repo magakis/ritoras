@@ -14,15 +14,20 @@ final class PredictionEngine {
         case languageModelFloor(
             candidate: Suggestion,
             rawLMLogProb: Double,
+            conditionalLMLogProb: Double,
             typedLiteralRawLMLogProb: Double,
             typedLiteralLogProbMargin: Double,
             absoluteLogProbFloor: Double
         )
-        case contractionMargin(candidate: Suggestion, rawLMLogProb: Double?)
-        case candidate(candidate: Suggestion, rawLMLogProb: Double?)
+        case contractionMargin(
+            candidate: Suggestion,
+            rawLMLogProb: Double?,
+            conditionalLMLogProb: Double?
+        )
+        case candidate(candidate: Suggestion, rawLMLogProb: Double?, conditionalLMLogProb: Double?)
 
         var suggestion: Suggestion? {
-            guard case let .candidate(candidate, _) = self else { return nil }
+            guard case let .candidate(candidate, _, _) = self else { return nil }
             return candidate
         }
 
@@ -30,9 +35,9 @@ final class PredictionEngine {
             switch self {
             case .emptyInput, .poolEmptyAfterFilters:
                 return nil
-            case let .languageModelFloor(candidate, _, _, _, _),
-                 let .contractionMargin(candidate, _),
-                 let .candidate(candidate, _):
+            case let .languageModelFloor(candidate, _, _, _, _, _),
+                 let .contractionMargin(candidate, _, _),
+                 let .candidate(candidate, _, _):
                 return candidate
             }
         }
@@ -41,26 +46,37 @@ final class PredictionEngine {
             switch self {
             case .emptyInput, .poolEmptyAfterFilters:
                 return nil
-            case let .languageModelFloor(_, rawLMLogProb, _, _, _):
+            case let .languageModelFloor(_, rawLMLogProb, _, _, _, _):
                 return rawLMLogProb
-            case let .contractionMargin(_, rawLMLogProb),
-                 let .candidate(_, rawLMLogProb):
+            case let .contractionMargin(_, rawLMLogProb, _),
+                 let .candidate(_, rawLMLogProb, _):
                 return rawLMLogProb
             }
         }
 
+        var conditionalLMLogProb: Double? {
+            switch self {
+            case .emptyInput, .poolEmptyAfterFilters:
+                return nil
+            case let .languageModelFloor(_, _, value, _, _, _):
+                return value
+            case let .contractionMargin(_, _, value), let .candidate(_, _, value):
+                return value
+            }
+        }
+
         var typedLiteralRawLMLogProb: Double? {
-            guard case let .languageModelFloor(_, _, value, _, _) = self else { return nil }
+            guard case let .languageModelFloor(_, _, _, value, _, _) = self else { return nil }
             return value
         }
 
         var typedLiteralLogProbMargin: Double? {
-            guard case let .languageModelFloor(_, _, _, value, _) = self else { return nil }
+            guard case let .languageModelFloor(_, _, _, _, value, _) = self else { return nil }
             return value
         }
 
         var absoluteLogProbFloor: Double? {
-            guard case let .languageModelFloor(_, _, _, _, value) = self else { return nil }
+            guard case let .languageModelFloor(_, _, _, _, _, value) = self else { return nil }
             return value
         }
     }
@@ -288,21 +304,37 @@ final class PredictionEngine {
             return .poolEmptyAfterFilters
         }
         var rawLMLogProb: Double?
+        var conditionalLMLogProb: Double?
 
         // Keep the absolute floor for ordinary winners. Only a sub-floor winner
         // gets a lazy typed-literal comparison, matching the swept rescue policy.
-        if fusionIsActive(previousWord: previousWord),
+        if let previousWord, fusionIsActive(previousWord: previousWord),
            let trigramProvider = snapshotProviders()
             .compactMap({ $0 as? TrigramProvider })
             .first(where: { $0.isReady }) {
-            let logProb = trigramProvider.rawLogProb(
+            let sentenceLogProb = trigramProvider.rawLogProb(
                 for: winner.text,
                 previousWord: previousWord,
                 previousWord2: previousWord2
-            ) ?? -10.0
+            )
+            let logProb = sentenceLogProb ?? -10.0
             rawLMLogProb = logProb
+            // The context is the same sentence prefix. If either score is
+            // missing, keep the old operand rather than subtracting from a sentinel.
+            let floorOperand: Double
+            if let sentenceLogProb,
+               let contextLogProb = trigramProvider.rawLogProb(
+                   for: previousWord,
+                   previousWord: previousWord2,
+                   previousWord2: nil
+               ) {
+                floorOperand = sentenceLogProb - contextLogProb
+            } else {
+                floorOperand = logProb
+            }
+            conditionalLMLogProb = floorOperand
             let absoluteLogProbFloor = SharedConfig.Defaults.kenlmAutocorrectAbsoluteLogProbFloor
-            if logProb < absoluteLogProbFloor {
+            if floorOperand < absoluteLogProbFloor {
                 let typedLiteralLogProb = trigramProvider.rawLogProb(
                     for: currentWord,
                     previousWord: previousWord,
@@ -313,6 +345,7 @@ final class PredictionEngine {
                     return .languageModelFloor(
                         candidate: winner,
                         rawLMLogProb: logProb,
+                        conditionalLMLogProb: floorOperand,
                         typedLiteralRawLMLogProb: typedLiteralLogProb,
                         typedLiteralLogProbMargin: typedLiteralLogProbMargin,
                         absoluteLogProbFloor: absoluteLogProbFloor
@@ -331,7 +364,9 @@ final class PredictionEngine {
                   let trigramProvider = snapshotProviders()
                     .compactMap({ $0 as? TrigramProvider })
                     .first(where: { $0.isReady }) else {
-                return .contractionMargin(candidate: winner, rawLMLogProb: nil)
+                return .contractionMargin(
+                    candidate: winner, rawLMLogProb: nil, conditionalLMLogProb: nil
+                )
             }
             let contractionLogProb = trigramProvider.rawLogProb(
                 for: winner.text,
@@ -348,11 +383,16 @@ final class PredictionEngine {
                 < SharedConfig.Defaults.ambiguousContractionLogProbMargin {
                 return .contractionMargin(
                     candidate: winner,
-                    rawLMLogProb: contractionLogProb
+                    rawLMLogProb: contractionLogProb,
+                    conditionalLMLogProb: conditionalLMLogProb
                 )
             }
         }
-        return .candidate(candidate: winner, rawLMLogProb: rawLMLogProb)
+        return .candidate(
+            candidate: winner,
+            rawLMLogProb: rawLMLogProb,
+            conditionalLMLogProb: conditionalLMLogProb
+        )
     }
 
     // MARK: - Fusion Pool

@@ -192,6 +192,7 @@ public struct KeystrokeTraceDecisionSkip: Codable, Equatable, Sendable {
     public let candidate: String?
     public let fusedScore: Double?
     public let rawLMLogProb: Double?
+    public let conditionalLMLogProb: Double?
     public let typedLiteralRawLMLogProb: Double?
     public let typedLiteralLogProbMargin: Double?
     public let absoluteLogProbFloor: Double?
@@ -206,6 +207,7 @@ public struct KeystrokeTraceDecisionSkip: Codable, Equatable, Sendable {
         candidate: String? = nil,
         fusedScore: Double? = nil,
         rawLMLogProb: Double? = nil,
+        conditionalLMLogProb: Double? = nil,
         typedLiteralRawLMLogProb: Double? = nil,
         typedLiteralLogProbMargin: Double? = nil,
         absoluteLogProbFloor: Double? = nil,
@@ -220,6 +222,7 @@ public struct KeystrokeTraceDecisionSkip: Codable, Equatable, Sendable {
         }
         self.fusedScore = fusedScore.map { ($0 * 1_000).rounded() / 1_000 }
         self.rawLMLogProb = rawLMLogProb.map { ($0 * 1_000).rounded() / 1_000 }
+        self.conditionalLMLogProb = conditionalLMLogProb.map { ($0 * 1_000).rounded() / 1_000 }
         self.typedLiteralRawLMLogProb = typedLiteralRawLMLogProb.map {
             ($0 * 1_000).rounded() / 1_000
         }
@@ -274,6 +277,7 @@ public struct KeystrokeTraceDecisionApply: Equatable, Sendable {
     public let reasonCode: KeystrokeTraceReasonCode
     public let path: KeystrokeTraceDecisionPath?
     public let rawLMLogProb: Double?
+    public let conditionalLMLogProb: Double?
     public let typedLiteralRawLMLogProb: Double?
     public let beforeText: String
     public let afterText: String
@@ -285,6 +289,7 @@ public struct KeystrokeTraceDecisionApply: Equatable, Sendable {
         reasonCode: KeystrokeTraceReasonCode,
         path: KeystrokeTraceDecisionPath? = nil,
         rawLMLogProb: Double? = nil,
+        conditionalLMLogProb: Double? = nil,
         typedLiteralRawLMLogProb: Double? = nil,
         beforeText: String,
         afterText: String,
@@ -294,6 +299,7 @@ public struct KeystrokeTraceDecisionApply: Equatable, Sendable {
         self.reasonCode = reasonCode
         self.path = path
         self.rawLMLogProb = rawLMLogProb.map { ($0 * 1_000).rounded() / 1_000 }
+        self.conditionalLMLogProb = conditionalLMLogProb.map { ($0 * 1_000).rounded() / 1_000 }
         self.typedLiteralRawLMLogProb = typedLiteralRawLMLogProb.map {
             ($0 * 1_000).rounded() / 1_000
         }
@@ -321,6 +327,7 @@ public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
         case candidate
         case fusedScore
         case rawLMLogProb
+        case conditionalLMLogProb
         case typedLiteralRawLMLogProb
         case typedLiteralLogProbMargin
         case absoluteLogProbFloor
@@ -352,6 +359,10 @@ public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
                     forKey: .path
                 ),
                 rawLMLogProb: try container.decodeIfPresent(Double.self, forKey: .rawLMLogProb),
+                conditionalLMLogProb: try container.decodeIfPresent(
+                    Double.self,
+                    forKey: .conditionalLMLogProb
+                ),
                 typedLiteralRawLMLogProb: try container.decodeIfPresent(
                     Double.self,
                     forKey: .typedLiteralRawLMLogProb
@@ -379,6 +390,10 @@ public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
                 rawLMLogProb: try container.decodeIfPresent(
                     Double.self,
                     forKey: .rawLMLogProb
+                ),
+                conditionalLMLogProb: try container.decodeIfPresent(
+                    Double.self,
+                    forKey: .conditionalLMLogProb
                 ),
                 typedLiteralRawLMLogProb: try container.decodeIfPresent(
                     Double.self,
@@ -411,6 +426,7 @@ public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
             try container.encode(apply.reasonCode, forKey: .reasonCode)
             try container.encodeIfPresent(apply.path, forKey: .path)
             try container.encodeIfPresent(apply.rawLMLogProb, forKey: .rawLMLogProb)
+            try container.encodeIfPresent(apply.conditionalLMLogProb, forKey: .conditionalLMLogProb)
             try container.encodeIfPresent(
                 apply.typedLiteralRawLMLogProb,
                 forKey: .typedLiteralRawLMLogProb
@@ -431,6 +447,7 @@ public enum KeystrokeTraceDecisionEvent: Equatable, Codable {
             try container.encodeIfPresent(skip.candidate, forKey: .candidate)
             try container.encodeIfPresent(skip.fusedScore, forKey: .fusedScore)
             try container.encodeIfPresent(skip.rawLMLogProb, forKey: .rawLMLogProb)
+            try container.encodeIfPresent(skip.conditionalLMLogProb, forKey: .conditionalLMLogProb)
             try container.encodeIfPresent(
                 skip.typedLiteralRawLMLogProb,
                 forKey: .typedLiteralRawLMLogProb

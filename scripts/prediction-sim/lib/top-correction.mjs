@@ -16,6 +16,7 @@ import { normalizeForKenLM } from './kenlm-normalize.mjs';
  * @param {string|null|undefined} opts.previousWord - Previous word for KenLM context.
  * @param {string|null|undefined} opts.previousWord2 - Word before previous for KenLM context.
  * @param {function|null} opts.kenlmScorer - (candidate, prev, prev2) => log10 probability or null.
+ * @param {function} [opts.contextScorer] - (prev, prev2) => context-only sentence score or null.
  * @param {boolean} opts.trigramReady - Whether trigram/KenLM provider is ready.
  * @param {number} [opts.blendWeight=0.5] - KenLM blend weight.
  * @param {number} [opts.absoluteLogProbFloor=-8] - Absolute KenLM log-prob floor.
@@ -32,6 +33,7 @@ import { normalizeForKenLM } from './kenlm-normalize.mjs';
  * @param {number} [opts.ambiguousContractionMargin=1.0] - Minimum KenLM log-prob
  *   advantage the contraction must hold over the typed literal to auto-flip.
  * @returns {{cause:string,candidate:object|null,rawLMLogProb:number|null,
+ *   conditionalLMLogProb?:number,
  *   typedLiteralRawLMLogProb?:number,typedLiteralLogProbMargin?:number,
  *   absoluteLogProbFloor?:number}}
  */
@@ -42,6 +44,7 @@ export function topCorrectionOutcome({
   previousWord,
   previousWord2,
   kenlmScorer,
+  contextScorer,
   trigramReady,
   blendWeight = 0.5,
   absoluteLogProbFloor = -8.0,
@@ -89,19 +92,26 @@ export function topCorrectionOutcome({
 
   const winner = candidates.reduce((best, s) => s.score > best.score ? s : best);
   let rawLMLogProb = null;
+  let conditionalLMLogProb;
 
   // The selected policy preserves the absolute floor and evaluates the literal
   // margin only for a sub-floor winner.
   if (fusionIsActive({ previousWord, trigramReady }) && kenlmScorer) {
-    const logProb = kenlmScorer(
+    const sentenceLogProb = kenlmScorer(
       normalizeForKenLM(winner.text),
       prev,
       prev2
-    ) ?? -10.0;
+    );
+    const logProb = sentenceLogProb ?? -10.0;
     rawLMLogProb = logProb;
+    if (floorPolicy !== 'off') {
+      const contextLogProb = sentenceLogProb == null ? null : contextScorer?.(prev, prev2);
+      conditionalLMLogProb = contextLogProb == null ? logProb : logProb - contextLogProb;
+    }
     const floorRejection = floorPolicyRejection({
       floorPolicy,
       logProb,
+      floorOperand: conditionalLMLogProb,
       currentWord,
       previousWord,
       previousWord2,
@@ -119,6 +129,7 @@ export function topCorrectionOutcome({
         cause: 'languageModelFloor',
         candidate: winner,
         rawLMLogProb: logProb,
+        conditionalLMLogProb,
         ...floorRejection,
       };
     }
@@ -147,11 +158,15 @@ export function topCorrectionOutcome({
         cause: 'contractionMargin',
         candidate: winner,
         rawLMLogProb: contractionLogProb,
+        ...(conditionalLMLogProb === undefined ? {} : { conditionalLMLogProb }),
       };
     }
   }
 
-  return { cause: 'candidate', candidate: winner, rawLMLogProb };
+  return {
+    cause: 'candidate', candidate: winner, rawLMLogProb,
+    ...(conditionalLMLogProb === undefined ? {} : { conditionalLMLogProb }),
+  };
 }
 
 const FLOOR_POLICIES = new Set([
@@ -205,6 +220,7 @@ function validateFloorPolicyOptions({
 function floorPolicyRejection({
   floorPolicy,
   logProb,
+  floorOperand,
   currentWord,
   previousWord,
   previousWord2,
@@ -221,9 +237,9 @@ function floorPolicyRejection({
     return null;
   }
   if (floorPolicy === 'absolute') {
-    return logProb < absoluteLogProbFloor ? {} : null;
+    return floorOperand < absoluteLogProbFloor ? {} : null;
   }
-  if (!(logProb < absoluteLogProbFloor)) {
+  if (!(floorOperand < absoluteLogProbFloor)) {
     return null;
   }
   if (floorPolicy === 'oovAware') {
@@ -235,7 +251,7 @@ function floorPolicyRejection({
     const effectiveFloor = oovTokenCount > 0
       ? oovRelaxedLogProbFloor
       : absoluteLogProbFloor;
-    return logProb < effectiveFloor ? {} : null;
+    return floorOperand < effectiveFloor ? {} : null;
   }
   if (floorPolicy === 'contextAdjusted') {
     const { oovTokenCount, contextTokenCount } = countOovContextTokens({
@@ -246,7 +262,7 @@ function floorPolicyRejection({
     const oovFraction = contextTokenCount > 0 ? oovTokenCount / contextTokenCount : 0;
     const effectiveFloor = absoluteLogProbFloor
       - contextFloorRelaxationLog10 * oovFraction;
-    return logProb < effectiveFloor ? {} : null;
+    return floorOperand < effectiveFloor ? {} : null;
   }
   if (floorPolicy === 'typedLiteralMargin') {
     // Keep the old floor's accepted set; only a sub-floor winner can be rescued.

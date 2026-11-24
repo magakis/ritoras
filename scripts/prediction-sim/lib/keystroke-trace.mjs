@@ -192,6 +192,7 @@ export function makeDecisionEvent(decision) {
   for (const field of [
     'fusedScore',
     'rawLMLogProb',
+    'conditionalLMLogProb',
     'typedLiteralRawLMLogProb',
     'typedLiteralLogProbMargin',
     'absoluteLogProbFloor',
@@ -221,6 +222,9 @@ export function makeDecisionEvent(decision) {
         rawLMLogProb: decision.rawLMLogProb == null
           ? undefined
           : roundTraceNumber(decision.rawLMLogProb),
+        conditionalLMLogProb: decision.conditionalLMLogProb == null
+          ? undefined
+          : roundTraceNumber(decision.conditionalLMLogProb),
         typedLiteralRawLMLogProb: decision.typedLiteralRawLMLogProb == null
           ? undefined
           : roundTraceNumber(decision.typedLiteralRawLMLogProb),
@@ -265,6 +269,9 @@ export function makeDecisionEvent(decision) {
       rawLMLogProb: decision.rawLMLogProb == null
         ? undefined
         : roundTraceNumber(decision.rawLMLogProb),
+      conditionalLMLogProb: decision.conditionalLMLogProb == null
+        ? undefined
+        : roundTraceNumber(decision.conditionalLMLogProb),
       typedLiteralRawLMLogProb: decision.typedLiteralRawLMLogProb == null
         ? undefined
         : roundTraceNumber(decision.typedLiteralRawLMLogProb),

@@ -3,6 +3,76 @@ import { describe, it } from 'node:test';
 import { topCorrectionOutcome } from '../lib/top-correction.mjs';
 
 describe('topCorrectionOutcome', () => {
+  function incidentOutcome(overrides = {}) {
+    return topCorrectionOutcome({
+      pool: [{ text: 'current', score: 1, source: 'symspell' }],
+      currentWord: 'currebt',
+      previousWord: 'the', // The keyboard already applied thw → the.
+      previousWord2: 'was',
+      kenlmScorer: word => (word === 'current' ? -8.125 : -9.814),
+      trigramReady: true,
+      ...overrides,
+    });
+  }
+
+  it('accepts the device incident only after subtracting its context score', () => {
+    const old = incidentOutcome();
+    assert.equal(old.cause, 'languageModelFloor');
+    assert.equal(old.conditionalLMLogProb, old.rawLMLogProb);
+    assert.equal(old.typedLiteralRawLMLogProb, -9.814);
+    assert.deepEqual(incidentOutcome({ contextScorer: () => null }), old);
+
+    const corrected = incidentOutcome({
+      contextScorer: (prev, prev2) => {
+        assert.deepEqual([prev2, prev], ['was', 'the']);
+        return -2;
+      },
+    });
+    assert.equal(corrected.cause, 'candidate');
+    assert.equal(corrected.candidate.text, 'current');
+    assert.equal(corrected.rawLMLogProb, -8.125);
+    assert.equal(corrected.conditionalLMLogProb, -6.125);
+  });
+
+  it('keeps the rescue conditional and preserves old accepts with a one-word context', () => {
+    for (const [joint, typed, expected, literalCalls] of [
+      [-9, -10.75, 'languageModelFloor', 1],
+      [-9, -11, 'candidate', 1],
+      [-8, -8, 'candidate', 0],
+      [-7, -6, 'candidate', 0],
+    ]) {
+      let calls = 0;
+      const outcome = incidentOutcome({
+        previousWord2: undefined,
+        contextScorer: (prev, prev2) => {
+          assert.deepEqual([prev, prev2], ['the', undefined]);
+          return -0.5;
+        },
+        kenlmScorer: word => {
+          if (word === 'current') return joint;
+          calls++;
+          return typed;
+        },
+      });
+      assert.equal(outcome.cause, expected);
+      assert.equal(outcome.conditionalLMLogProb, joint + 0.5);
+      assert.equal(calls, literalCalls);
+      assert.equal(incidentOutcome({
+        kenlmScorer: word => (word === 'current' ? joint : typed),
+      }).cause, expected);
+    }
+  });
+
+  it('does not evaluate a floor without a preceding word or subtract from a missing score', () => {
+    const contextScorer = () => assert.fail('context score should not be requested');
+    const noContext = incidentOutcome({ previousWord: null, contextScorer });
+    assert.equal(noContext.cause, 'candidate');
+    assert.equal(noContext.conditionalLMLogProb, undefined);
+    const noJoint = incidentOutcome({ kenlmScorer: () => null, contextScorer });
+    assert.equal(noJoint.cause, 'languageModelFloor');
+    assert.equal(noJoint.conditionalLMLogProb, -10);
+  });
+
   it('classifies empty input before consulting the candidate pool', () => {
     const outcome = topCorrectionOutcome({
       pool: [],

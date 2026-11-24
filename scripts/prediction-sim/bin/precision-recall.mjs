@@ -92,6 +92,8 @@ function runOne(typedWord, previousWord, previousWord2, pool, blendWeight, absol
     previousWord,
     previousWord2,
     kenlmScorer: bigramKenlmScorer,
+    // Bigram scores are already conditional; there is no context term to remove.
+    contextScorer: () => 0,
     trigramReady: true,
     blendWeight,
     absoluteLogProbFloor,
@@ -116,7 +118,7 @@ function runOne(typedWord, previousWord, previousWord2, pool, blendWeight, absol
 
 function main() {
   const opts = parseArgs();
-  const floorLabel = !Number.isFinite(opts.floor) ? 'off' : opts.floor.toFixed(1);
+  const floorLabel = !Number.isFinite(opts.floor) ? 'off' : String(opts.floor);
 
   console.log('=== Precision / Recall / FPR ===');
   console.log(`  blendWeight:         ${opts.blendWeight}`);

@@ -59,6 +59,8 @@ function runOne(typedWord, previousWord, previousWord2, pool, policy, kenlmScore
     previousWord,
     previousWord2,
     kenlmScorer,
+    // The proxy already returns P(candidate | previousWord).
+    contextScorer: () => 0,
     trigramReady: true,
     blendWeight: SWEEP_CONFIG.blendWeight,
     absoluteLogProbFloor: CURRENT_FLOOR,

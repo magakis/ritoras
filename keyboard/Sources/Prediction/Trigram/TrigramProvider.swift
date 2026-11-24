@@ -334,13 +334,10 @@ final class TrigramProvider: SuggestionProvider {
         }
     }
 
-    /// Returns the raw log10 probability of `candidate` given the preceding
-    /// words. Useful for scoring arbitrary candidates (from SymSpell/Apple)
-    /// against the language model without going through the side index.
+    /// Returns the accumulated log10 sentence score for the preceding words
+    /// followed by `candidate`, without going through the side index.
     ///
-    /// Returns nil if the provider is not `.ready` or if the candidate is empty.
-    /// The returned value is a log10 probability (always negative, typically -2
-    /// to -8).
+    /// Returns nil if the provider is not `.ready` or has no model handle.
     func rawLogProb(for candidate: String,
                     previousWord: String?,
                     previousWord2: String?) -> Double? {

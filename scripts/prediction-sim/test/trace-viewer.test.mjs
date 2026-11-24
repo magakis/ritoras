@@ -115,6 +115,7 @@ describe('offline keystroke trace viewer', () => {
       makeDecisionEvent({
         outcome: 'apply',
         reasonCode: 'autocorrect-applied',
+        rawLMLogProb: -7.5,
         beforeText: 'I saw thier yesterday',
         afterText: 'I saw their yesterday',
         deleteCount: 5,
@@ -125,6 +126,7 @@ describe('offline keystroke trace viewer', () => {
         reasonCode: 'autocorrect-applied',
         path: 'inline',
         rawLMLogProb: -8.1254,
+        conditionalLMLogProb: -6.1254,
         typedLiteralRawLMLogProb: -10.0004,
         beforeText: 'I saw wiyh yesterday',
         afterText: 'I saw with yesterday',
@@ -136,6 +138,13 @@ describe('offline keystroke trace viewer', () => {
         reasonCode: 'autocorrect-retro-queued',
         checkedWord: 'wiyh',
         candidate: 'with',
+      }),
+      makeDecisionEvent({
+        outcome: 'skip',
+        reasonCode: 'autocorrect-language-model-floor',
+        path: 'inline',
+        rawLMLogProb: -10.125,
+        conditionalLMLogProb: -8.625,
       }),
       makeDecisionEvent({
         outcome: 'skip',
@@ -161,6 +170,9 @@ describe('offline keystroke trace viewer', () => {
 
     const analysis = analyzeTraceFiles([tracePath]);
     const timeline = formatTimeline(analysis.records);
+    const decisions = analysis.records.filter(record => record.event.type === 'decision');
+    assert.deepEqual(decisions.slice(0, 5).map(record => record.event.payload.conditionalLMLogProb),
+      [undefined, -6.125, undefined, -8.625, undefined]);
 
     assert.match(timeline, /caret-window: before="I saw thier" \| caret \| after=" yesterday"/);
     assert.match(timeline, /tap before: "I saw thier"/);
@@ -169,15 +181,18 @@ describe('offline keystroke trace viewer', () => {
     assert.match(timeline, /afterText: "I saw their yesterday"/);
     assert.ok(timeline.includes(
       '  apply: reason=autocorrect-applied path=inline rawLMLogProb=-8.125 '
+        + 'conditionalLMLogProb=-6.125 (floor operand) '
         + 'typedLiteralRawLMLogProb=-10 deleteCount=4 insertCount=4'
     ));
+    assert.match(timeline, /rawLMLogProb=-7\.5 floor operand=rawLMLogProb \(older rule: combined score\)/);
+    assert.match(timeline, /rawLMLogProb=-10\.125 conditionalLMLogProb=-8\.625 \(floor operand\)/);
     assert.ok(timeline.includes(
       '  queued: reason=autocorrect-retro-queued checkedWord="wiyh" '
         + 'candidate="with"'
     ));
     assert.ok(timeline.includes(
       '  skip: reason=autocorrect-language-model-floor path=retro candidate="with" '
-        + 'fusedScore=1 rawLMLogProb=-9.125'
+        + 'fusedScore=1 rawLMLogProb=-9.125 floor operand=rawLMLogProb (older rule: combined score)'
     ));
     assert.match(
       timeline,
